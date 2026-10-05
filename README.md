@@ -71,11 +71,15 @@ The process environment wins. Hydra then reads `~/.hydra/.env`. A `.env` in the 
 export OPENROUTER_API_KEY="sk-or-v1-..."
 export AI_GATEWAY_API_KEY="..."
 # VERCEL_AI_GATEWAY_TOKEN is accepted when AI_GATEWAY_API_KEY is empty.
+export CHEAPERINFERENCE_API_KEY="ci_live_..."
+export RUNPOD_API_KEY="rpa_..."
+export RUNPOD_ENDPOINT_ID="..." # or export RUNPOD_ENDPOINT_URL="..."
+export MODAL_ENDPOINT_URL="https://<app>.modal.run/v1"
 export CLOUDFLARE_API_TOKEN="..."
 export CLOUDFLARE_ACCOUNT_ID="..."
 ```
 
-OpenRouter is tried first. Vercel AI Gateway is next. A failure before any text is printed tries the next configured provider. After text has been printed, Hydra stops, reports that the stream was truncated, and exits 1.
+Frontier calls try OpenRouter, Vercel AI Gateway, CheaperInference, RunPod, and Modal. A failure before any text is printed tries the next configured provider. After text has been printed, Hydra stops, reports that the stream was truncated, and exits 1.
 
 `hydra free` uses Cloudflare Workers AI when both Cloudflare variables are set. Otherwise it uses the OpenRouter free model. One of those credentials is required. `hydra local` never calls a cloud provider.
 
@@ -159,6 +163,13 @@ More recipes are in [GUIDE.md](GUIDE.md). `hydra setup` prints the short form.
 | `AI_GATEWAY_API_KEY` | Vercel AI Gateway credential. |
 | `VERCEL_AI_GATEWAY_TOKEN` | Used when `AI_GATEWAY_API_KEY` is empty. |
 | `AI_GATEWAY_API_BASE` | Gateway origin. Default `https://ai-gateway.vercel.sh/v1`. |
+| `CHEAPERINFERENCE_API_KEY` | CheaperInference credential (discounted models, GLM series). |
+| `CHEAPERINFERENCE_API_BASE` | CheaperInference origin. Default `https://api.cheaperinference.com/v1`. |
+| `RUNPOD_API_KEY` | RunPod API key for serverless endpoints and pod inference. |
+| `RUNPOD_ENDPOINT_ID` | RunPod serverless endpoint id (e.g. vLLM worker). |
+| `RUNPOD_ENDPOINT_URL` | Custom OpenAI-compatible RunPod endpoint URL. |
+| `MODAL_ENDPOINT_URL` | Modal serverless OpenAI-compatible vLLM endpoint URL. |
+| `MODAL_API_KEY` | Optional bearer token for authenticated Modal deployments. |
 | `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` | Together these select Workers AI for `hydra free`. |
 | `OLLAMA_HOST`, `LLAMACPP_HOST`, `LOCAL_AI_BASE` | Used as given. Unset defaults probe `127.0.0.1` ports 11434, then 8080, then 8000. |
 | `HYDRA_FREE_MODEL` | OpenRouter free model. Default `qwen/qwen3.8-27b:free`. |

@@ -38,6 +38,9 @@ DEFAULT_LLAMACPP_ENDPOINT = os.environ.get("LLAMACPP_HOST", "http://127.0.0.1:80
 DEFAULT_EASYLM_ENDPOINT = os.environ.get("LOCAL_AI_BASE", "http://127.0.0.1:8000").rstrip("/")
 DEFAULT_LOCAL_MODEL = os.environ.get("HYDRA_LOCAL_MODEL", CATALOG["default_local_model"])
 
+DEFAULT_CHEAPERINFERENCE_BASE = "https://api.cheaperinference.com/v1"
+DEFAULT_RUNPOD_BASE_TEMPLATE = "https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
+
 SWARM_HEADS: Dict[str, Dict[str, str]] = {
     role: dict(spec) for role, spec in CATALOG["swarm"].items()
 }
@@ -52,8 +55,9 @@ _SENSITIVE_SUFFIXES = (
     "_BASE",
     "_URL",
     "_ENDPOINT",
+    "_ENDPOINT_ID",
 )
-_SENSITIVE_EXACT = {"CLOUDFLARE_ACCOUNT_ID"}
+_SENSITIVE_EXACT = {"CLOUDFLARE_ACCOUNT_ID", "RUNPOD_ENDPOINT_ID"}
 
 
 def _sensitive_env_key(key: str) -> bool:
@@ -61,6 +65,9 @@ def _sensitive_env_key(key: str) -> bool:
     if upper in _SENSITIVE_EXACT:
         return True
     return upper.endswith(_SENSITIVE_SUFFIXES)
+
+
+sensitive_env_key = _sensitive_env_key
 
 
 def _trust_cwd_env() -> bool:

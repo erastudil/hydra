@@ -63,3 +63,123 @@ test('opus 5.5 refuses temperature locally', () => {
     /rejects temperature/
   );
 });
+
+test('resolves glm and kolibri aliases correctly', () => {
+  const g53 = hydra.resolveRoute('glm 5.3');
+  assert.equal(g53.model, 'glm-5.3');
+  assert.equal(g53.effort, 'high');
+
+  const g53p = hydra.resolveRoute('glm 5.3 prime');
+  assert.equal(g53p.model, 'glm-5.3-prime');
+  assert.equal(g53p.effort, 'high');
+
+  assert.equal(hydra.resolveRoute('glm').model, 'glm-5.3');
+  assert.equal(hydra.resolveRoute('glm 5').model, 'glm-5.3');
+  assert.equal(hydra.resolveRoute('glm 4.7').model, 'glm-4.7');
+  assert.equal(hydra.resolveRoute('glm 4.7 flash').model, 'glm-4.7-flash');
+
+  const kolibri = hydra.resolveRoute('kolibri');
+  assert.equal(kolibri.model, 'Aleph-Alpha/Kolibri-1');
+});
+
+test('consumeAlias handles compound glm and single kolibri', () => {
+  const prime = hydra.consumeAlias(['glm', '5.3', 'prime', 'write', 'code']);
+  assert.equal(prime.alias, 'glm 5.3 prime');
+  assert.deepEqual(prime.rest, ['write', 'code']);
+
+  const flash = hydra.consumeAlias(['glm', '4.7', 'flash', 'quick']);
+  assert.equal(flash.alias, 'glm 4.7 flash');
+  assert.deepEqual(flash.rest, ['quick']);
+
+  const kol = hydra.consumeAlias(['kolibri', 'hello']);
+  assert.equal(kol.alias, 'kolibri');
+  assert.deepEqual(kol.rest, ['hello']);
+});
+
+test('cheaperinference strips vendor prefix', () => {
+  const url = 'https://api.cheaperinference.com/v1/chat/completions';
+  assert.equal(hydra.adaptModelForUrl(url, 'z-ai/glm-5.3'), 'glm-5.3');
+  assert.equal(hydra.adaptModelForUrl(url, 'anthropic/claude-opus-5.5'), 'claude-opus-5.5');
+  assert.equal(hydra.adaptModelForUrl(url, 'openai/gpt-6.1-sol'), 'gpt-6.1-sol');
+  assert.equal(hydra.adaptModelForUrl(url, 'Aleph-Alpha/Kolibri-1'), 'Kolibri-1');
+  assert.equal(hydra.adaptModelForUrl(url, 'glm-5.3'), 'glm-5.3');
+});
+
+test('cheaperinference provider builder', () => {
+  const origKey = process.env.CHEAPERINFERENCE_API_KEY;
+  const origBase = process.env.CHEAPERINFERENCE_API_BASE;
+  try {
+    delete process.env.CHEAPERINFERENCE_API_KEY;
+    assert.equal(hydra.getCheaperInferenceProvider(), null);
+
+    process.env.CHEAPERINFERENCE_API_KEY = 'ci-node-test';
+    const p = hydra.getCheaperInferenceProvider();
+    assert.equal(p.name, 'CheaperInference');
+    assert.equal(p.url, 'https://api.cheaperinference.com/v1/chat/completions');
+    assert.equal(p.headers.Authorization, 'Bearer ci-node-test');
+
+    process.env.CHEAPERINFERENCE_API_BASE = 'https://custom.cheaper.io/v1';
+    const custom = hydra.getCheaperInferenceProvider();
+    assert.equal(custom.url, 'https://custom.cheaper.io/v1/chat/completions');
+  } finally {
+    if (origKey !== undefined) process.env.CHEAPERINFERENCE_API_KEY = origKey;
+    else delete process.env.CHEAPERINFERENCE_API_KEY;
+    if (origBase !== undefined) process.env.CHEAPERINFERENCE_API_BASE = origBase;
+    else delete process.env.CHEAPERINFERENCE_API_BASE;
+  }
+});
+
+test('runpod provider builder', () => {
+  const origKey = process.env.RUNPOD_API_KEY;
+  const origUrl = process.env.RUNPOD_ENDPOINT_URL;
+  const origId = process.env.RUNPOD_ENDPOINT_ID;
+  try {
+    delete process.env.RUNPOD_API_KEY;
+    delete process.env.RUNPOD_ENDPOINT_URL;
+    delete process.env.RUNPOD_ENDPOINT_ID;
+    assert.equal(hydra.getRunPodProvider(), null);
+
+    process.env.RUNPOD_API_KEY = 'rp-key';
+    process.env.RUNPOD_ENDPOINT_ID = 'ep-xyz';
+    const p = hydra.getRunPodProvider();
+    assert.equal(p.name, 'RunPod');
+    assert.equal(p.url, 'https://api.runpod.ai/v2/ep-xyz/openai/v1/chat/completions');
+    assert.equal(p.headers.Authorization, 'Bearer rp-key');
+
+    process.env.RUNPOD_ENDPOINT_URL = 'https://custom.runpod.proxy/v1';
+    const custom = hydra.getRunPodProvider();
+    assert.equal(custom.url, 'https://custom.runpod.proxy/v1/chat/completions');
+  } finally {
+    if (origKey !== undefined) process.env.RUNPOD_API_KEY = origKey;
+    else delete process.env.RUNPOD_API_KEY;
+    if (origUrl !== undefined) process.env.RUNPOD_ENDPOINT_URL = origUrl;
+    else delete process.env.RUNPOD_ENDPOINT_URL;
+    if (origId !== undefined) process.env.RUNPOD_ENDPOINT_ID = origId;
+    else delete process.env.RUNPOD_ENDPOINT_ID;
+  }
+});
+
+test('modal provider builder', () => {
+  const origUrl = process.env.MODAL_ENDPOINT_URL;
+  const origKey = process.env.MODAL_API_KEY;
+  try {
+    delete process.env.MODAL_ENDPOINT_URL;
+    delete process.env.MODAL_API_KEY;
+    assert.equal(hydra.getModalProvider(), null);
+
+    process.env.MODAL_ENDPOINT_URL = 'https://workspace--app.modal.run';
+    const p = hydra.getModalProvider();
+    assert.equal(p.name, 'Modal');
+    assert.equal(p.url, 'https://workspace--app.modal.run/v1/chat/completions');
+    assert.equal(p.headers.Authorization, undefined);
+
+    process.env.MODAL_API_KEY = 'modal-secret';
+    const withKey = hydra.getModalProvider();
+    assert.equal(withKey.headers.Authorization, 'Bearer modal-secret');
+  } finally {
+    if (origUrl !== undefined) process.env.MODAL_ENDPOINT_URL = origUrl;
+    else delete process.env.MODAL_ENDPOINT_URL;
+    if (origKey !== undefined) process.env.MODAL_API_KEY = origKey;
+    else delete process.env.MODAL_API_KEY;
+  }
+});

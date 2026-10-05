@@ -97,6 +97,64 @@ def detect_local_endpoint() -> Tuple[str, str]:
     return chat_completions_url("http://127.0.0.1:11434"), "Ollama (unverified)"
 
 
+def get_cheaperinference_provider() -> Optional[Dict[str, Any]]:
+    """Return CheaperInference provider dict when credentials are present."""
+    key = clean_secret(os.environ.get("CHEAPERINFERENCE_API_KEY"))
+    if not key:
+        return None
+    base = os.environ.get("CHEAPERINFERENCE_API_BASE", "https://api.cheaperinference.com/v1").strip()
+    return {
+        "name": "CheaperInference",
+        "url": chat_completions_url(base),
+        "headers": {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+    }
+
+
+def get_runpod_provider() -> Optional[Dict[str, Any]]:
+    """Return RunPod provider dict when credentials/endpoints are present."""
+    key = clean_secret(os.environ.get("RUNPOD_API_KEY"))
+    endpoint_url = os.environ.get("RUNPOD_ENDPOINT_URL", "").strip()
+    endpoint_id = os.environ.get("RUNPOD_ENDPOINT_ID", "").strip()
+
+    if endpoint_url:
+        target_url = chat_completions_url(endpoint_url)
+    elif endpoint_id:
+        target_url = chat_completions_url(f"https://api.runpod.ai/v2/{endpoint_id}/openai/v1")
+    else:
+        return None
+
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    elif not endpoint_url:
+        return None
+
+    return {
+        "name": "RunPod",
+        "url": target_url,
+        "headers": headers,
+    }
+
+
+def get_modal_provider() -> Optional[Dict[str, Any]]:
+    """Return Modal provider dict when endpoint URL is present."""
+    endpoint_url = os.environ.get("MODAL_ENDPOINT_URL", "").strip()
+    if not endpoint_url:
+        return None
+    key = clean_secret(os.environ.get("MODAL_API_KEY"))
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return {
+        "name": "Modal",
+        "url": chat_completions_url(endpoint_url),
+        "headers": headers,
+    }
+
+
 def get_frontier_providers() -> List[Dict[str, Any]]:
     """Return configured frontier cloud providers. OpenRouter is tried first."""
     providers = []
@@ -125,6 +183,18 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
                 "Content-Type": "application/json",
             },
         })
+
+    cheaper = get_cheaperinference_provider()
+    if cheaper:
+        providers.append(cheaper)
+
+    runpod = get_runpod_provider()
+    if runpod:
+        providers.append(runpod)
+
+    modal = get_modal_provider()
+    if modal:
+        providers.append(modal)
 
     return providers
 
@@ -190,6 +260,9 @@ def adapt_model_for_url(url: str, model: str) -> str:
             return "qwen/" + model[len("alibaba/"):]
         if model.startswith("meta/") and not model.startswith("meta-llama/"):
             return "meta-llama/" + model[len("meta/"):]
+    elif "cheaperinference.com" in host or "cheaperinference" in host:
+        if "/" in model:
+            return model.split("/", 1)[1]
     return model
 
 
@@ -384,7 +457,7 @@ def complete(
     providers = get_frontier_providers()
     if not providers:
         raise CredentialsMissingError(
-            "No frontier credentials found. Export OPENROUTER_API_KEY or AI_GATEWAY_API_KEY."
+            "No frontier credentials found. Export OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or CHEAPERINFERENCE_API_KEY."
         )
     messages = [
         {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},

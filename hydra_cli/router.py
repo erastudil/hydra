@@ -147,7 +147,18 @@ Supported providers:
      export AI_GATEWAY_API_KEY="your-token"
      # VERCEL_AI_GATEWAY_TOKEN is accepted as an alias of the same key.
 
-  D. Local mode needs no cloud key:
+  D. CheaperInference (Discounted frontier & open-weight routing, GLM models):
+     export CHEAPERINFERENCE_API_KEY="ci_live_..."
+
+  E. RunPod (Serverless vLLM endpoints and GPU pods):
+     export RUNPOD_API_KEY="rpa_..."
+     export RUNPOD_ENDPOINT_ID="your-endpoint-id" # or export RUNPOD_ENDPOINT_URL="..."
+
+  F. Modal (Serverless vLLM / OpenAI endpoints):
+     export MODAL_ENDPOINT_URL="https://<app>.modal.run/v1"
+     export MODAL_API_KEY="your-key"
+
+  G. Local mode needs no cloud key:
      • hydra local "<prompt>"  -> Ollama (11434), llama.cpp (8080), or EasyLM (8000)
      • hydra free "<prompt>"   -> Cloudflare or OpenRouter free-tier models. A key is required.
 
@@ -406,7 +417,7 @@ def execute_summon(
     if not providers:
         raise CredentialsMissingError(
             f"No frontier credentials found to summon '{alias}' ({model_id}).\n"
-            "Export OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.\n"
+            "Export OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or CHEAPERINFERENCE_API_KEY.\n"
             "Free-tier cloud models: hydra free \"<prompt>\"\n"
             "This machine only:        hydra local \"<prompt>\""
         )

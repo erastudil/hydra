@@ -45,8 +45,8 @@ function gatewayKey() {
   return cleanSecret(process.env.AI_GATEWAY_API_KEY) || cleanSecret(process.env.VERCEL_AI_GATEWAY_TOKEN);
 }
 
-const SENSITIVE_SUFFIXES = ['_KEY', '_TOKEN', '_SECRET', '_PASSWORD', '_HOST', '_BASE', '_URL', '_ENDPOINT'];
-const SENSITIVE_EXACT = new Set(['CLOUDFLARE_ACCOUNT_ID']);
+const SENSITIVE_SUFFIXES = ['_KEY', '_TOKEN', '_SECRET', '_PASSWORD', '_HOST', '_BASE', '_URL', '_ENDPOINT', '_ENDPOINT_ID'];
+const SENSITIVE_EXACT = new Set(['CLOUDFLARE_ACCOUNT_ID', 'RUNPOD_ENDPOINT_ID']);
 
 function sensitiveEnvKey(key) {
   const upper = String(key || '').toUpperCase();
@@ -192,6 +192,10 @@ function adaptModelForUrl(endpointUrl, model) {
     if (model.startsWith('alibaba/')) return `qwen/${model.slice('alibaba/'.length)}`;
     if (model.startsWith('meta/') && !model.startsWith('meta-llama/')) {
       return `meta-llama/${model.slice('meta/'.length)}`;
+    }
+  } else if (host.includes('cheaperinference.com') || host.includes('cheaperinference')) {
+    if (model.includes('/')) {
+      return model.slice(model.indexOf('/') + 1);
     }
   }
   return model;
@@ -377,6 +381,63 @@ function streamRequest(endpointUrl, headers, payload, onChunk, timeoutMs) {
   });
 }
 
+function getCheaperInferenceProvider() {
+  const key = cleanSecret(process.env.CHEAPERINFERENCE_API_KEY);
+  if (!key) return null;
+  const base = process.env.CHEAPERINFERENCE_API_BASE || 'https://api.cheaperinference.com/v1';
+  return {
+    name: 'CheaperInference',
+    url: chatUrl(base),
+    headers: {
+      Authorization: `Bearer ${key}`,
+      'Content-Type': 'application/json',
+    },
+  };
+}
+
+function getRunPodProvider() {
+  const key = cleanSecret(process.env.RUNPOD_API_KEY);
+  const endpointUrl = (process.env.RUNPOD_ENDPOINT_URL || '').trim();
+  const endpointId = (process.env.RUNPOD_ENDPOINT_ID || '').trim();
+
+  let targetUrl = '';
+  if (endpointUrl) {
+    targetUrl = chatUrl(endpointUrl);
+  } else if (endpointId) {
+    targetUrl = chatUrl(`https://api.runpod.ai/v2/${endpointId}/openai/v1`);
+  } else {
+    return null;
+  }
+
+  const headers = { 'Content-Type': 'application/json' };
+  if (key) {
+    headers.Authorization = `Bearer ${key}`;
+  } else if (!endpointUrl) {
+    return null;
+  }
+
+  return {
+    name: 'RunPod',
+    url: targetUrl,
+    headers,
+  };
+}
+
+function getModalProvider() {
+  const endpointUrl = (process.env.MODAL_ENDPOINT_URL || '').trim();
+  if (!endpointUrl) return null;
+  const key = cleanSecret(process.env.MODAL_API_KEY);
+  const headers = { 'Content-Type': 'application/json' };
+  if (key) {
+    headers.Authorization = `Bearer ${key}`;
+  }
+  return {
+    name: 'Modal',
+    url: chatUrl(endpointUrl),
+    headers,
+  };
+}
+
 function getFrontierProviders() {
   const providers = [];
   const openRouterKey = cleanSecret(process.env.OPENROUTER_API_KEY);
@@ -400,6 +461,12 @@ function getFrontierProviders() {
       headers: { Authorization: `Bearer ${vercelKey}` },
     });
   }
+  const cheaper = getCheaperInferenceProvider();
+  if (cheaper) providers.push(cheaper);
+  const runpod = getRunPodProvider();
+  if (runpod) providers.push(runpod);
+  const modal = getModalProvider();
+  if (modal) providers.push(modal);
   return providers;
 }
 
@@ -511,7 +578,7 @@ function printHead(result) {
 async function runSwarm(task, selectedRoles, customModel, jsonMode, temperature) {
   const providers = getFrontierProviders();
   if (!providers.length) {
-    throw new Error('Multi-agent swarm requires OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.');
+    throw new Error('Multi-agent swarm requires OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or CHEAPERINFERENCE_API_KEY.');
   }
   const requested = selectedRoles || ['architect', 'coder', 'auditor'];
   const explicitSynth = requested.includes('synthesizer');
@@ -596,6 +663,10 @@ Keys, tokens, and host URLs in a project .env stay unloaded unless HYDRA_TRUST_C
   export AI_GATEWAY_API_KEY="your-token"
   # VERCEL_AI_GATEWAY_TOKEN is accepted as an alias.
   export OPENROUTER_API_KEY="sk-or-v1-..."
+  export CHEAPERINFERENCE_API_KEY="your-key"
+  export RUNPOD_API_KEY="..."
+  export RUNPOD_ENDPOINT_ID="..." # or RUNPOD_ENDPOINT_URL
+  export MODAL_ENDPOINT_URL="..."
   export CLOUDFLARE_API_TOKEN="..."
   export CLOUDFLARE_ACCOUNT_ID="..."
 
@@ -642,7 +713,7 @@ async function summon(options) {
   if (!providers.length) {
     throw new Error(
       `No frontier credentials found to summon '${options.alias}'.\n` +
-      'Export OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.\n' +
+      'Export OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or CHEAPERINFERENCE_API_KEY.\n' +
       'Free-tier cloud models: hydra free "<prompt>"\n' +
       'This machine only:        hydra local "<prompt>"'
     );
@@ -894,6 +965,11 @@ module.exports = {
   consumeAlias,
   adaptModelForUrl,
   buildPayload,
+  getFrontierProviders,
+  getCheaperInferenceProvider,
+  getRunPodProvider,
+  getModalProvider,
+  getFreeProvider,
 };
 
 if (require.main === module) {

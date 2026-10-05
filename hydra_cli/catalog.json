@@ -71,7 +71,14 @@
     "llama": {"model": "meta-llama/llama-3.3-70b-instruct"},
     "deepseek r1": {"model": "deepseek/deepseek-r1"},
     "deepseek": {"model": "deepseek/deepseek-chat"},
-    "deepseek-chat": {"model": "deepseek/deepseek-chat"}
+    "deepseek-chat": {"model": "deepseek/deepseek-chat"},
+    "glm 5.3 prime": {"model": "glm-5.3-prime", "effort": "high"},
+    "glm 5.3": {"model": "glm-5.3", "effort": "high"},
+    "glm 5": {"model": "glm-5.3"},
+    "glm": {"model": "glm-5.3"},
+    "glm 4.7 flash": {"model": "glm-4.7-flash"},
+    "glm 4.7": {"model": "glm-4.7"},
+    "kolibri": {"model": "Aleph-Alpha/Kolibri-1"}
   },
   "swarm": {
     "architect": {
