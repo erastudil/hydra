@@ -157,6 +157,33 @@ def get_free_provider() -> Tuple[Dict[str, Any], str]:
     )
 
 
+def adapt_model_for_url(url: str, model: str) -> str:
+    """Translate provider-specific namespaces based on destination gateway URL."""
+    u_lower = url.lower()
+    if "vercel" in u_lower:
+        if model.startswith("x-ai/"):
+            return model.replace("x-ai/", "spacexai/")
+        if model.startswith("meta-llama/"):
+            v_id = model.replace("meta-llama/", "meta/")
+            if v_id.endswith("-instruct"):
+                v_id = v_id[:-len("-instruct")]
+            return v_id
+        if model.startswith("qwen/"):
+            return model.replace("qwen/", "alibaba/")
+        if model == "openai/gpt-6.1-sol-pro":
+            return "openai/gpt-6.1-sol"
+        if model == "openai/gpt-6-luna-pro":
+            return "openai/gpt-6-luna"
+    elif "openrouter" in u_lower:
+        if model.startswith("spacexai/"):
+            return model.replace("spacexai/", "x-ai/")
+        if model.startswith("alibaba/"):
+            return model.replace("alibaba/", "qwen/")
+        if model.startswith("meta/"):
+            return model.replace("meta/", "meta-llama/")
+    return model
+
+
 def stream_chat_completion(
     url: str,
     headers: Dict[str, str],
@@ -169,8 +196,9 @@ def stream_chat_completion(
     """
     Send streaming chat completion request and yield text delta tokens via SSE.
     """
+    effective_model = adapt_model_for_url(url, model)
     payload: Dict[str, Any] = {
-        "model": model,
+        "model": effective_model,
         "messages": messages,
         "stream": True,
         "temperature": temperature,
@@ -229,8 +257,9 @@ def fetch_chat_completion(
     """
     Fetch complete chat completion response without streaming.
     """
+    effective_model = adapt_model_for_url(url, model)
     payload: Dict[str, Any] = {
-        "model": model,
+        "model": effective_model,
         "messages": messages,
         "stream": False,
         "temperature": temperature,

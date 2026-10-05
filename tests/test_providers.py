@@ -4,10 +4,29 @@ import pytest
 
 from hydra_cli.providers import (
     CredentialsMissingError,
+    adapt_model_for_url,
     detect_local_endpoint,
     get_free_provider,
     get_frontier_providers,
 )
+
+
+def test_adapt_model_for_url():
+    vercel_url = "https://ai-gateway.vercel.sh/v1/chat/completions"
+    openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
+
+    # Vercel conversions
+    assert adapt_model_for_url(vercel_url, "x-ai/grok-4.7") == "spacexai/grok-4.7"
+    assert adapt_model_for_url(vercel_url, "meta-llama/llama-3.3-70b-instruct") == "meta/llama-3.3-70b"
+    assert adapt_model_for_url(vercel_url, "meta-llama/llama-4-maverick") == "meta/llama-4-maverick"
+    assert adapt_model_for_url(vercel_url, "qwen/qwen3.8-27b") == "alibaba/qwen3.8-27b"
+    assert adapt_model_for_url(vercel_url, "openai/gpt-6.1-sol-pro") == "openai/gpt-6.1-sol"
+    assert adapt_model_for_url(vercel_url, "anthropic/claude-sonnet-5.5") == "anthropic/claude-sonnet-5.5"
+
+    # OpenRouter conversions
+    assert adapt_model_for_url(openrouter_url, "spacexai/grok-4.7") == "x-ai/grok-4.7"
+    assert adapt_model_for_url(openrouter_url, "alibaba/qwen3.8-27b") == "qwen/qwen3.8-27b"
+    assert adapt_model_for_url(openrouter_url, "anthropic/claude-sonnet-5.5") == "anthropic/claude-sonnet-5.5"
 
 
 def test_frontier_providers_openrouter(monkeypatch):

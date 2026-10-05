@@ -17,51 +17,79 @@ const DEFAULT_SYSTEM_PROMPT = process.env.HYDRA_SYSTEM_PROMPT ||
   'You are a world-class sovereign systems engineer. Speak concisely, rigorously, and without corporate filler or disclaimers.';
 
 const MODEL_MAP = {
+  // Anthropic Claude
   'opus 5.5': 'anthropic/claude-opus-5.5',
   'opus': 'anthropic/claude-opus-5.5',
-  'sonnet 5.5': 'anthropic/claude-5.5-sonnet',
-  'sonnet': 'anthropic/claude-5.5-sonnet',
+  'opus 5': 'anthropic/claude-opus-5',
+  'sonnet 5.5': 'anthropic/claude-sonnet-5.5',
+  'sonnet': 'anthropic/claude-sonnet-5.5',
+  'claude-5.5-sonnet': 'anthropic/claude-sonnet-5.5',
+  'claude-sonnet-5.5': 'anthropic/claude-sonnet-5.5',
   'sonnet 3.7': 'anthropic/claude-3.7-sonnet',
-  'haiku': 'anthropic/claude-3.5-haiku',
+  'haiku 4.5': 'anthropic/claude-haiku-4.5',
+  'haiku': 'anthropic/claude-haiku-4.5',
+  'fable 5.1': 'anthropic/claude-fable-5.1',
+  'fable': 'anthropic/claude-fable-5.1',
 
-  'sol 6.1': 'openai/gpt-6.1-sol-pro',
+  // OpenAI / Sol
+  'sol 6.1': 'openai/gpt-6.1-sol',
   'sol 6.1 pro': 'openai/gpt-6.1-sol-pro',
-  'sol': 'openai/gpt-6.1-sol-pro',
-  'gpt-6.1-sol': 'openai/gpt-6.1-sol-pro',
+  'sol': 'openai/gpt-6.1-sol',
+  'gpt-6.1-sol': 'openai/gpt-6.1-sol',
+  'luna': 'openai/gpt-6-luna',
+  'astra': 'openai/gpt-6-astra',
+  'gpt-5.5': 'openai/gpt-5.5',
+  'gpt-5': 'openai/gpt-5.5',
   'gpt-4o': 'openai/gpt-4o',
-  'o1': 'openai/o1',
+  'o3': 'openai/o3',
   'o3-mini': 'openai/o3-mini',
+  'o4-mini': 'openai/o4-mini',
+  'o4': 'openai/o4-mini',
+  'o1': 'openai/o1',
 
+  // Google Gemini & Gemma
+  'gemini 3.8': 'google/gemini-3.8-flash',
+  'gemini 3.7': 'google/gemini-3.7-flash',
+  'gemini 3.5': 'google/gemini-3.5-flash',
+  'gemini': 'google/gemini-3.8-flash',
+  'gemini-flash': 'google/gemini-3.8-flash',
   'gemini 2.5': 'google/gemini-2.5-pro',
-  'gemini 3.5': 'google/gemini-2.5-flash',
-  'gemini': 'google/gemini-2.5-flash',
-  'gemini-flash': 'google/gemini-2.5-flash',
   'gemini-pro': 'google/gemini-2.5-pro',
+  'gemma 4': 'google/gemma-4-26b-a4b-it',
 
+  // Alibaba / Qwen
+  'qwen 3.8': 'qwen/qwen3.8-27b',
+  'qwen': 'qwen/qwen3.8-27b',
+  'qwen-coder': 'alibaba/qwen3-coder',
+  'qwen coder': 'alibaba/qwen3-coder',
   'qwen 3b': 'qwen/qwen-2.5-3b-instruct',
   'qwen 3': 'qwen/qwen-2.5-coder-32b-instruct',
-  'qwen': 'qwen/qwen-2.5-coder-32b-instruct',
-  'qwen-coder': 'qwen/qwen-2.5-coder-32b-instruct',
 
-  'grok': 'x-ai/grok-2-1212',
+  // xAI / SpaceX AI Grok
+  'grok 4.7': 'x-ai/grok-4.7',
+  'grok 4.6': 'x-ai/grok-4.6',
+  'grok': 'x-ai/grok-4.7',
   'grok 2': 'x-ai/grok-2-1212',
-  'grok-beta': 'x-ai/grok-beta',
 
-  'llama': 'meta-llama/llama-3.3-70b-instruct',
+  // Meta Llama
+  'llama 4': 'meta-llama/llama-4-maverick',
+  'llama 4 maverick': 'meta-llama/llama-4-maverick',
+  'llama 4 scout': 'meta-llama/llama-4-scout',
   'llama 3.3': 'meta-llama/llama-3.3-70b-instruct',
-  'llama-70b': 'meta-llama/llama-3.3-70b-instruct',
+  'llama': 'meta-llama/llama-3.3-70b-instruct',
 
+  // DeepSeek
   'deepseek': 'deepseek/deepseek-chat',
   'deepseek r1': 'deepseek/deepseek-r1',
   'deepseek-chat': 'deepseek/deepseek-chat',
 };
 
 const FREE_MODELS = [
+  'qwen/qwen3.8-27b:free',
   'meta-llama/llama-3.3-70b-instruct:free',
-  'google/gemini-2.0-flash-exp:free',
+  'google/gemma-4-26b-a4b-it:free',
   'deepseek/deepseek-chat:free',
-  'qwen/qwen-2.5-coder-32b-instruct:free',
-  'mistralai/mistral-7b-instruct:free'
+  'nvidia/nemotron-3.5-lightning:free',
 ];
 
 const SWARM_HEADS = {
@@ -72,17 +100,17 @@ const SWARM_HEADS = {
   },
   coder: {
     title: 'Implementer',
-    model: 'anthropic/claude-5.5-sonnet',
+    model: 'anthropic/claude-sonnet-5.5',
     system: 'You are the Principal Software Engineer. Provide complete, executable, clean implementation code adhering strictly to zero-dependency principles and production standards.'
   },
   auditor: {
     title: 'Inspector',
-    model: 'openai/gpt-6.1-sol-pro',
+    model: 'openai/gpt-6.1-sol',
     system: 'You are the Security & Performance Inspector. Audit the proposed design and code for edge cases, resource leaks, security vulnerabilities, and verification gates.'
   },
   synthesizer: {
     title: 'Synthesizer',
-    model: 'google/gemini-2.5-pro',
+    model: 'google/gemini-3.8-flash',
     system: 'You are the Swarm Lead Synthesizer. Review all perspectives, resolve conflicting tradeoffs, and emit a final prioritized execution roadmap.'
   }
 };
@@ -209,11 +237,35 @@ function readStdin(timeoutMs = 40) {
   });
 }
 
+function adaptModelForUrl(endpointUrl, model) {
+  const urlLower = endpointUrl.toLowerCase();
+  if (urlLower.includes('vercel')) {
+    if (model.startsWith('x-ai/')) return model.replace('x-ai/', 'spacexai/');
+    if (model.startsWith('meta-llama/')) {
+      let vId = model.replace('meta-llama/', 'meta/');
+      if (vId.endsWith('-instruct')) vId = vId.slice(0, -'-instruct'.length);
+      return vId;
+    }
+    if (model.startsWith('qwen/')) return model.replace('qwen/', 'alibaba/');
+    if (model === 'openai/gpt-6.1-sol-pro') return 'openai/gpt-6.1-sol';
+    if (model === 'openai/gpt-6-luna-pro') return 'openai/gpt-6-luna';
+  } else if (urlLower.includes('openrouter')) {
+    if (model.startsWith('spacexai/')) return model.replace('spacexai/', 'x-ai/');
+    if (model.startsWith('alibaba/')) return model.replace('alibaba/', 'qwen/');
+    if (model.startsWith('meta/')) return model.replace('meta/', 'meta-llama/');
+  }
+  return model;
+}
+
 function streamRequest(endpointUrl, headers, payload, onChunk) {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(endpointUrl);
     const transport = parsedUrl.protocol === 'https:' ? https : http;
-    const bodyStr = JSON.stringify(payload);
+    const effectivePayload = {
+      ...payload,
+      model: adaptModelForUrl(endpointUrl, payload.model)
+    };
+    const bodyStr = JSON.stringify(effectivePayload);
 
     const req = transport.request(parsedUrl, {
       method: 'POST',
@@ -274,7 +326,12 @@ function fetchRequest(endpointUrl, headers, payload) {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(endpointUrl);
     const transport = parsedUrl.protocol === 'https:' ? https : http;
-    const bodyStr = JSON.stringify({ ...payload, stream: false });
+    const effectivePayload = {
+      ...payload,
+      model: adaptModelForUrl(endpointUrl, payload.model),
+      stream: false
+    };
+    const bodyStr = JSON.stringify(effectivePayload);
 
     const req = transport.request(parsedUrl, {
       method: 'POST',

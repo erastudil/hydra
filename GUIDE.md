@@ -189,9 +189,9 @@ hydra swarm "Architect a low-latency distributed event log"
 
 The swarm decomposes the goal and fires parallel threads:
 - 🏛️ **Architect** (`claude-opus-5.5`): State invariants, boundaries, failure modes.
-- ⚡ **Implementer** (`claude-5.5-sonnet`): Zero-dependency production-grade code.
-- 🛡️ **Inspector** (`gpt-6.1-sol-pro`): Security, race conditions, edge-case audit.
-- 🔮 **Synthesizer** (`gemini-2.5-pro`): Prioritized execution roadmap.
+- ⚡ **Implementer** (`claude-sonnet-5.5`): Zero-dependency production-grade code.
+- 🛡️ **Inspector** (`gpt-6.1-sol`): Security, race conditions, edge-case audit.
+- 🔮 **Synthesizer** (`gemini-3.8-flash`): Prioritized execution roadmap.
 
 ---
 
@@ -199,14 +199,16 @@ The swarm decomposes the goal and fires parallel threads:
 
 | Alias | Target Model ID | Role / Specialization |
 | :--- | :--- | :--- |
-| `sonnet 5.5` / `sonnet` | `anthropic/claude-5.5-sonnet` | Primary code synthesis & fast architectural reasoning |
+| `sonnet 5.5` / `sonnet` | `anthropic/claude-sonnet-5.5` | Primary code synthesis & surgical refactoring |
 | `opus 5.5` / `opus` | `anthropic/claude-opus-5.5` | Deep architectural invariants & system design |
-| `sol 6.1` / `sol` | `openai/gpt-6.1-sol-pro` | Security auditing, formal reasoning & edge cases |
-| `gemini 2.5` | `google/gemini-2.5-pro` | Synthesis, deep research, and long-context audit |
-| `gemini 3.5` / `gemini` | `google/gemini-2.5-flash` | High-throughput streaming and instant summaries |
-| `grok` | `x-ai/grok-2-1212` | Uncensored, real-time reasoning and engineering analysis |
+| `sol 6.1` / `sol` | `openai/gpt-6.1-sol` | Formal reasoning, invariant verification & security |
+| `gemini 3.8` / `gemini` | `google/gemini-3.8-flash` | High-throughput streaming, research & synthesis |
+| `gemini 2.5` | `google/gemini-2.5-pro` | Million-token long-context synthesis |
+| `grok 4.7` / `grok` | `x-ai/grok-4.7` | Uncensored technical audit & adversarial testing |
+| `llama 4` | `meta-llama/llama-4-maverick` | Next-gen open foundation frontier reasoning |
+| `qwen 3.8` / `qwen` | `qwen/qwen3.8-27b` | High-accuracy open reasoning & code generation |
 | `qwen 3b` | `qwen/qwen-2.5-3b-instruct` | Compact, low-footprint local reasoning |
-| `free` | `meta-llama/llama-3.3-70b-instruct:free` | Zero-cost public cloud inference |
+| `free` | `qwen/qwen3.8-27b:free` | Zero-cost public cloud inference |
 | `local` | `qwen2.5-coder:latest` | 100% offline local inference (Ollama/llama.cpp/EasyLM) |
 
 Run `hydra --list-models` or `hydra setup` in your terminal anytime to inspect active models and configurations.

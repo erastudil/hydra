@@ -10,9 +10,29 @@
       Sovereign Multi-Headed AI Shell
 ```
 
-When you query an AI model from the terminal, you often wrestle with bespoke API clients, non-standard flags, fragmented SDKs, or high latencies.
+> **Zero-dependency, multi-provider AI CLI utility.**
+> Connect your shell to frontier models, zero-cost cloud routers, local weights, or parallel multi-agent swarms. Pipes anywhere.
 
-Hydra routes your terminal prompt to the right engine instantly. One binary connects your shell to frontier models, zero-cost cloud routers, local weights running on your machine, or a parallel multi-agent swarm.
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.9+-brightgreen.svg)](pyproject.toml)
+[![Node](https://img.shields.io/badge/node-18+-success.svg)](package.json)
+[![Tests](https://img.shields.io/badge/tests-27%2F27%20passing-brightgreen.svg)](tests/)
+
+---
+
+## Why Hydra?
+
+Terminal AI utilities often suffer from high latency, bloated dependency trees, non-standard CLI flags, and provider lock-in.
+
+Hydra solves this with **zero external dependencies** and an intelligent multi-provider gateway:
+
+- **Unified Frontier Summoning**: Route prompts to Anthropic (Sonnet 5.5, Opus 5.5), OpenAI (Sol 6.1, Luna, GPT-5.5), Google (Gemini 3.8, Gemini 2.5), xAI (Grok 4.7), and Meta (Llama 4) with intuitive compound aliases.
+- **Dual Gateway Support**: Seamlessly authenticates against either **Vercel AI Gateway** or **OpenRouter**, automatically adapting model namespaces on the fly (e.g. `x-ai/` vs `spacexai/`, `meta-llama/` vs `meta/`, `qwen/` vs `alibaba/`).
+- **Free Forge**: `hydra free` cruises on zero-cost cloud tiers (Cloudflare Workers AI, OpenRouter free models) without burning metered API credits.
+- **Local Air-Gapped Inference**: `hydra local` auto-detects offline runtimes on your machine (Ollama, llama.cpp, or EasyLM WebGPU).
+- **Multi-Agent Swarm Fan-Out**: `hydra swarm` fans out your prompt across 4 parallel specialized heads (Architect, Implementer, Inspector, Synthesizer) concurrently.
+- **First-Class UNIX Pipes**: Seamlessly ingest standard input from `cat`, `git diff`, `grep`, or build logs into any model.
+- **Zero Runtime Dependencies**: Written purely with Python standard libraries (`urllib.request`, `concurrent.futures`) and Node.js standard libraries (`https`, `child_process`).
 
 ---
 
@@ -20,279 +40,315 @@ Hydra routes your terminal prompt to the right engine instantly. One binary conn
 
 Choose any of the three distribution channels.
 
-### 1. Standalone Installer
-
-**Linux & macOS:**
-```bash
-curl -fsSL https://raw.githubusercontent.com/erastudil/hydra/main/install.sh | bash
-```
-
-**Windows PowerShell:**
-```powershell
-irm https://raw.githubusercontent.com/erastudil/hydra/main/install.ps1 | iex
-```
-
-### 2. Python Package
+### 1. Python Package (`pip`)
 
 Install from source or PyPI:
 ```bash
 pip install hydra-ai-cli
 ```
-Or from a local repository checkout:
+
+Or install in editable mode from a local checkout:
 ```bash
-pip install .
+git clone https://github.com/erastudil/hydra.git
+cd hydra
+pip install -e .
 ```
 
-### 3. Node.js & npm
+### 2. Node.js / npm (`npx` or global)
 
-Install globally:
+Run instantly without installation via `npx`:
+```bash
+npx hydra-cli sonnet 5.5 "Explain lock-free ring buffers"
+```
+
+Or install globally:
 ```bash
 npm install -g hydra-agent-cli
 ```
-Or run directly without installation via `npx`:
+
+### 3. Standalone Installer (One-Liner)
+
+**Linux & macOS (curl / bash):**
 ```bash
-npx hydra-cli sonnet 5.5 "Explain memory ordering in Rust"
+curl -fsSL https://raw.githubusercontent.com/erastudil/hydra/main/install.sh | bash
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/erastudil/hydra/main/install.ps1 | iex
 ```
 
 ---
 
 ## Quickstart
 
-Set your preferred API key:
+### 1. Configure Credentials
+
+Hydra reads keys from your shell environment or a `.env` file in your current directory:
 
 ```bash
+# Option A: OpenRouter (Unified access to 200+ models + free tiers)
 export OPENROUTER_API_KEY="sk-or-v1-..."
-# or
+
+# Option B: Vercel AI Gateway (Managed enterprise gateway)
 export AI_GATEWAY_API_KEY="vercel_..."
+
+# Option C: Cloudflare Workers AI (Zero-cost edge tier)
+export CLOUDFLARE_API_TOKEN="..."
+export CLOUDFLARE_ACCOUNT_ID="..."
 ```
 
-Summon a frontier model:
+*(No credentials? You can still run `hydra free` on public endpoints or `hydra local` with Ollama/llama.cpp!)*
+
+### 2. Summon Frontier Models
+
 ```bash
-hydra opus 5.5 "Explain zero-cost abstractions"
+# Claude 5.5 Sonnet (Default coding & refactoring workhorse)
+hydra sonnet 5.5 "Implement an LRU cache in Rust with O(1) operations"
+
+# Claude 5.5 Opus (Deep architectural invariants)
+hydra opus 5.5 "Formalize Raft consensus invariants under network partition"
+
+# OpenAI GPT-6.1 Sol (Logic verification & security audit)
+hydra sol 6.1 "Audit this smart contract for reentrancy vulnerabilities"
+
+# Google Gemini 3.8 Flash (High-throughput streaming & synthesis)
+hydra gemini 3.8 "Synthesize this research paper into three core takeaways"
+
+# xAI Grok 4.7 (Uncensored technical review)
+hydra grok 4.7 "Find the architectural anti-patterns in this microservice diagram"
+
+# Meta Llama 4 Maverick (Next-gen open frontier)
+hydra llama 4 "Explain memory consistency models"
 ```
 
-Stream a zero-cost response without consuming credits:
+### 3. Cruise Free & Local
+
 ```bash
-hydra free "List the three invariants of Raft consensus"
+# Zero-cost cloud routing (uses Cloudflare Workers AI or OpenRouter free models)
+hydra free "Explain how TCP window scaling works"
+
+# Offline local inference (auto-detects Ollama on 11434, llama.cpp on 8080, EasyLM on 8000)
+hydra local "Write a Python script to parse JSON lines"
 ```
 
-Run completely offline against local weights:
-```bash
-hydra local "Write a lock-free ring buffer in C"
-```
+### 4. Fan Out Parallel Swarms
 
-Fan out a parallel swarm of specialized heads:
 ```bash
-hydra swarm "Design and implement a deterministic state machine"
+# Spawns Architect, Implementer, Inspector, and Synthesizer concurrently
+hydra swarm "Architect and implement an event-driven task queue with persistent WAL"
 ```
 
 ---
 
 ## Core Capabilities
 
-### 1. Direct Model Summoning
+### 1. UNIX Pipes & Shell Composition
 
-Hydra resolves intuitive compound aliases into provider model identifiers and streams the response token-by-token:
-
-```bash
-hydra opus 5.5 "Analyze this architecture"
-hydra sol 6.1 "Prove this logic invariant"
-hydra sonnet 5.5 "Refactor this module"
-hydra gemini 2.5 "Summarize this paper"
-hydra qwen 3b "Write an assembly routine"
-hydra grok "Trace edge cases"
-hydra llama "Explain vector clocks"
-```
-
-Pass custom system instructions or generation parameters:
-```bash
-hydra opus 5.5 "Design a protocol" --system "Be rigorous and mathematical." --temperature 0.2
-```
-
-### 2. UNIX Pipe Integration
-
-Hydra reads standard input automatically when piped from other commands:
+Hydra automatically reads standard input when piped from another command. Piped content is structured cleanly into context:
 
 ```bash
-# Analyze a source file
-cat engine.rs | hydra sonnet 5.5 "Identify data races"
+# Refactor staged git changes before committing
+git diff --staged | hydra sonnet 5.5 "Refactor for zero unnecessary heap allocations"
 
-# Review git changes before committing
-git diff | hydra sol 6.1 "Audit this patch for security flaws"
+# Diagnose crashing server logs
+journalctl -u nginx -n 50 | hydra opus 5.5 "Identify the failure root cause"
 
-# Explain system log errors
-journalctl -u nginx -n 50 | hydra opus 5.5 "Diagnose the 502 gateway error"
+# Review code files directly
+cat memory.rs | hydra sol 6.1 "Audit for potential data races and UB"
+
+# Capture clean output into environment variables
+SUMMARY=$(cat build.log | hydra free "Extract top 3 compilation errors" --no-stream)
 ```
 
-### 3. Zero-Cost Free Forge Routing
+### 2. Multi-Agent Swarm Fan-Out
 
-`hydra free` sends prompts to zero-cost cloud tiers without burning metered credits:
+Cut off one head, and three arise. `hydra swarm` fans out your task across 4 specialized parallel heads:
 
 ```bash
-hydra free "Explain how TCP flow control works"
+hydra swarm "Build a zero-allocation byte parser in C"
 ```
 
-Hydra checks Cloudflare Workers AI credentials first (`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`). If not configured, it routes to OpenRouter free models (`meta-llama/llama-3.3-70b-instruct:free`, `google/gemini-2.0-flash-exp:free`, `deepseek/deepseek-chat:free`).
+| Head | Model | Role |
+| :--- | :--- | :--- |
+| 🏛️ **Architect** | `anthropic/claude-opus-5.5` | Evaluates requirements, data flows, invariants, and failure modes. |
+| ⚡ **Implementer** | `anthropic/claude-sonnet-5.5` | Delivers production-grade, zero-dependency implementation code. |
+| 🛡️ **Inspector** | `openai/gpt-6.1-sol` | Audits edge cases, race conditions, memory leaks, and security flaws. |
+| 🔮 **Synthesizer** | `google/gemini-3.8-flash` | Unifies perspectives into a single prioritized execution roadmap. |
 
-### 4. Local Inference Routing
-
-`hydra local` connects to offline model runtimes on your hardware:
-
+Pass `--json` for machine-readable JSON output suitable for autonomous agent pipelines:
 ```bash
-hydra local "Generate a unit test for this struct"
+hydra swarm "Verify Paxos state transition correctness" --heads "architect,auditor" --json
 ```
 
-Hydra automatically detects running local runtimes in priority order:
-1. `LOCAL_AI_BASE` (custom local endpoint)
-2. Ollama (`http://localhost:11434/v1`)
-3. llama.cpp server (`http://localhost:8080/v1`)
-4. EasyLM WebGPU endpoint (`http://localhost:8000/v1`)
+### 3. Dual Gateway Auto-Adaptation
 
-### 5. Multi-Agent Swarm Fan-Out
+Hydra automatically translates model namespaces between **Vercel AI Gateway** and **OpenRouter**:
 
-Cut off one head, and three arise. `hydra swarm` fans out your task across parallel agent heads concurrently:
+| Family | Hydra Alias | Vercel Gateway ID | OpenRouter ID |
+| :--- | :--- | :--- | :--- |
+| **Claude Sonnet 5.5** | `sonnet 5.5`, `sonnet` | `anthropic/claude-sonnet-5.5` | `anthropic/claude-sonnet-5.5` |
+| **Claude Opus 5.5** | `opus 5.5`, `opus` | `anthropic/claude-opus-5.5` | `anthropic/claude-opus-5.5` |
+| **Claude Haiku 4.5** | `haiku 4.5`, `haiku` | `anthropic/claude-haiku-4.5` | `anthropic/claude-haiku-4.5` |
+| **Claude Fable 5.1** | `fable 5.1`, `fable` | `anthropic/claude-fable-5.1` | `anthropic/claude-fable-5.1` |
+| **GPT-6.1 Sol** | `sol 6.1`, `sol` | `openai/gpt-6.1-sol` | `openai/gpt-6.1-sol` |
+| **GPT-6 Luna** | `luna` | `openai/gpt-6-luna` | `openai/gpt-6-luna` |
+| **GPT-6 Astra** | `astra` | `openai/gpt-6-astra` | `openai/gpt-6-astra` |
+| **GPT-5.5** | `gpt-5.5`, `gpt-5` | `openai/gpt-5.5` | `openai/gpt-5.5` |
+| **OpenAI o3** | `o3` | `openai/o3` | `openai/o3` |
+| **Gemini 3.8 Flash** | `gemini 3.8`, `gemini` | `google/gemini-3.8-flash` | `google/gemini-3.8-flash` |
+| **Gemini 3.5 Flash** | `gemini 3.5` | `google/gemini-3.5-flash` | `google/gemini-3.5-flash` |
+| **Gemini 2.5 Pro** | `gemini 2.5` | `google/gemini-2.5-pro` | `google/gemini-2.5-pro` |
+| **Grok 4.7** | `grok 4.7`, `grok` | `spacexai/grok-4.7` | `x-ai/grok-4.7` |
+| **Llama 4 Maverick** | `llama 4`, `llama 4 maverick` | `meta/llama-4-maverick` | `meta-llama/llama-4-maverick` |
+| **Llama 3.3 70B** | `llama 3.3`, `llama` | `meta/llama-3.3-70b` | `meta-llama/llama-3.3-70b-instruct` |
+| **Qwen 3.8 27B** | `qwen 3.8`, `qwen` | `alibaba/qwen3.8-27b` | `qwen/qwen3.8-27b` |
+| **Qwen 3 Coder** | `qwen coder`, `qwen-coder` | `alibaba/qwen3-coder` | `qwen/qwen-2.5-coder-32b-instruct` |
+| **Qwen 3B Instruct** | `qwen 3b` | — | `qwen/qwen-2.5-3b-instruct` |
+| **DeepSeek V3** | `deepseek` | — | `deepseek/deepseek-chat` |
 
-```bash
-hydra swarm "Implement a transactional key-value store with WAL"
-```
-
-The default swarm spawns:
-- **Architect Head** (`anthropic/claude-opus-5.5`): Evaluates invariants, failure modes, and boundaries.
-- **Implementer Head** (`anthropic/claude-5.5-sonnet`): Produces working code with zero unnecessary dependencies.
-- **Inspector Head** (`openai/gpt-6.1-sol-pro`): Audits edge cases, race conditions, and attack vectors.
-- **Synthesizer Head** (`google/gemini-2.5-pro`): Resolves tradeoffs and unifies the roadmap.
-
-Customize active heads or output JSON:
-```bash
-hydra swarm "Verify Paxos correctness" --heads "architect,auditor" --json
-```
+*(You can also pass any unmapped raw model ID directly, e.g. `hydra mistralai/mistral-large "prompt"`).*
 
 ---
 
-## Supported Aliases
+## Application & Agent Integration
 
-| Alias | Target Model Identifier | Typical Use |
-|---|---|---|
-| `opus 5.5` / `opus` | `anthropic/claude-opus-5.5` | Deep reasoning and systems design |
-| `sol 6.1` / `sol` | `openai/gpt-6.1-sol-pro` | Formal logic and security audit |
-| `sonnet 5.5` / `sonnet` | `anthropic/claude-5.5-sonnet` | Code generation and surgical refactoring |
-| `sonnet 3.7` | `anthropic/claude-3.7-sonnet` | Legacy Claude 3.7 Sonnet |
-| `gemini 2.5` | `google/gemini-2.5-pro` | High context analysis and synthesis |
-| `gemini 3.5` / `gemini` | `google/gemini-2.5-flash` | Fast summarization and transformation |
-| `qwen 3b` | `qwen/qwen-2.5-3b-instruct` | Lightweight embedded tasks |
-| `qwen` | `qwen/qwen-2.5-coder-32b-instruct` | Open coding model |
-| `grok` / `grok 2` | `x-ai/grok-2-1212` | Technical review and adversarial analysis |
-| `llama` / `llama 3.3` | `meta-llama/llama-3.3-70b-instruct` | Open frontier reasoning |
-| `deepseek` | `deepseek/deepseek-chat` | General technical assistance |
-| `free` | Free Forge Tier | Zero-cost development |
-| `local` | Ollama / llama.cpp / EasyLM | Offline air-gapped development |
+Hydra is engineered to be embedded directly into scripts, backends, CI/CD pipelines, and autonomous agent systems.
 
-You can also pass any unmapped model ID directly (for example `hydra mistralai/mistral-large "prompt"`).
-
----
-
-## Configuration
-
-Configure credentials via environment variables:
-
-| Variable | Description |
-|---|---|
-| `OPENROUTER_API_KEY` | OpenRouter API authentication token |
-| `AI_GATEWAY_API_KEY` | Vercel AI Gateway authentication token |
-| `AI_GATEWAY_API_BASE` | Custom Vercel Gateway base URL (default: `https://ai-gateway.vercel.sh/v1`) |
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API token for Workers AI |
-| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account identifier |
-| `OLLAMA_HOST` | Ollama server host (default: `http://localhost:11434`) |
-| `LLAMACPP_HOST` | llama.cpp server host (default: `http://localhost:8080`) |
-| `LOCAL_AI_BASE` | Custom local inference base URL |
-| `HYDRA_SYSTEM_PROMPT` | Custom default system prompt |
-
----
-
-## Setup & Integration Guide
-
-Hydra is designed to be embedded into shell scripts, CI/CD pipelines, application backends, and autonomous multi-agent systems.
-
-For the complete integration reference, see [**`GUIDE.md`**](GUIDE.md).
-
-You can also view the setup instructions directly in your terminal at any time:
-
+For full setup documentation, see [**`GUIDE.md`**](GUIDE.md) or run:
 ```bash
 hydra setup
 # or
 hydra guide
 ```
 
-### Quick Integration Cheat Sheet
+### 1. Python Tool Integration (LangChain, AutoGen, CrewAI, Antigravity)
 
-#### 1. Shell Pipes & Developer Utilities
-```bash
-# Refactor code with Claude 5.5 Sonnet
-cat engine.rs | hydra sonnet 5.5 "Refactor for zero allocations"
+Zero external dependencies—call Hydra as an agent tool or standard subprocess:
 
-# Security audit git diff
-git diff --staged | hydra sol 6.1 "Audit for vulnerability and race conditions"
-
-# Diagnose crashing logs
-journalctl -u nginx -n 30 | hydra opus 5.5 "Identify failure root cause"
-```
-
-#### 2. Python Backend & Subprocess Integration
 ```python
 import subprocess
 
-def query_hydra(model: str, prompt: str, piped_input: str = "") -> str:
-    res = subprocess.run(
-        ["hydra", model, prompt, "--no-stream"],
+def summon_hydra(model_alias: str, prompt: str, piped_input: str = "") -> str:
+    """Invoke Hydra with deterministic output and zero external dependencies."""
+    proc = subprocess.run(
+        ["hydra", model_alias, prompt, "--no-stream"],
         input=piped_input,
         text=True,
         capture_output=True,
         check=True
     )
-    return res.stdout.strip()
+    return proc.stdout.strip()
 
-# Call inside any Python script:
-result = query_hydra("sonnet 5.5", "Write a binary search in Rust")
+# Example: Run code verification in an agent loop
+audit = summon_hydra(
+    model_alias="sol 6.1",
+    prompt="Verify mutex locking bounds and return invariant violations",
+    piped_input=open("ring_buffer.c").read()
+)
+print(audit)
 ```
 
-#### 3. Node.js & TypeScript Integration
-```javascript
-const { execFileSync } = require('child_process');
+Direct Python SDK import:
+```python
+from hydra_cli.providers import fetch_chat_completion, get_frontier_providers
+from hydra_cli.config import resolve_model
 
-function askHydra(model, prompt, input = "") {
+model_id = resolve_model("sonnet 5.5")
+response = fetch_chat_completion(
+    url=get_frontier_providers()[0]["url"],
+    headers=get_frontier_providers()[0]["headers"],
+    model=model_id,
+    messages=[{"role": "user", "content": "Explain memory barriers"}]
+)
+print(response)
+```
+
+### 2. Node.js & TypeScript Integration
+
+```typescript
+import { execFileSync } from 'child_process';
+
+export function callHydra(model: string, prompt: string, input: string = ''): string {
   return execFileSync('hydra', [model, prompt, '--no-stream'], {
     input,
-    encoding: 'utf-8'
+    encoding: 'utf-8',
+    env: process.env
   }).trim();
 }
 
-const answer = askHydra('sonnet 5.5', 'Explain async generators in TS');
+// Example usage:
+const code = callHydra('sonnet 5.5', 'Implement a debounce hook in React');
+console.log(code);
 ```
 
-#### 4. Autonomous Agent Swarms
-```bash
-# Fan out to 4 specialized parallel heads (Architect, Implementer, Inspector, Synthesizer)
-hydra swarm "Design and implement a lock-free ring buffer in C" --json
+### 3. Agent Function Calling Schema
+
+Add Hydra to your model's tool schema:
+
+```json
+{
+  "name": "summon_hydra",
+  "description": "Summon frontier models (Sonnet 5.5, Opus 5.5, Sol 6.1, Grok 4.7) or free/local offline models for code synthesis, architectural review, or invariant verification.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "model_alias": {
+        "type": "string",
+        "description": "Model alias (e.g. 'sonnet 5.5', 'opus 5.5', 'sol 6.1', 'gemini 3.8', 'grok 4.7', 'free', 'local')"
+      },
+      "prompt": {
+        "type": "string",
+        "description": "The exact prompt or instruction"
+      }
+    },
+    "required": ["model_alias", "prompt"]
+  }
+}
 ```
+
+---
+
+## Configuration Reference
+
+Configure credentials via environment variables or a `.env` file:
+
+| Environment Variable | Default | Description |
+| :--- | :--- | :--- |
+| `OPENROUTER_API_KEY` | *(None)* | OpenRouter API authentication key |
+| `AI_GATEWAY_API_KEY` | *(None)* | Vercel AI Gateway authentication key |
+| `AI_GATEWAY_API_BASE` | `https://ai-gateway.vercel.sh/v1` | Custom Vercel Gateway base URL |
+| `CLOUDFLARE_API_TOKEN` | *(None)* | Cloudflare API token for Workers AI |
+| `CLOUDFLARE_ACCOUNT_ID` | *(None)* | Cloudflare account identifier |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama local server URL |
+| `LLAMACPP_HOST` | `http://localhost:8080` | llama.cpp local server URL |
+| `LOCAL_AI_BASE` | `http://localhost:8000` | Custom local inference base URL (e.g. EasyLM WebGPU) |
+| `HYDRA_SYSTEM_PROMPT` | *(Built-in)* | Custom default system prompt |
+| `HYDRA_FREE_MODEL` | `qwen/qwen3.8-27b:free` | Default model for `hydra free` |
+| `HYDRA_LOCAL_MODEL` | `qwen2.5-coder:latest` | Default model for `hydra local` |
 
 ---
 
 ## Architecture
 
-Hydra relies on zero external runtime dependencies. The Python distribution uses standard library modules (`urllib.request`, `json`, `concurrent.futures`, `socket`). The Node.js distribution uses standard library packages (`https`, `http`, `net`, `process`).
+Hydra is architected for sovereign, zero-friction developer agility:
 
 ```text
                ┌──────────────────────────────────────────────┐
                │                  Hydra CLI                   │
+               │         (Python Standard / Node.js)          │
                └──────────────────────┬───────────────────────┘
                                       │
           ┌───────────────────────────┼───────────────────────────┐
           ▼                           ▼                           ▼
 ┌──────────────────┐        ┌──────────────────┐        ┌──────────────────┐
 │   Frontier Hub   │        │    Free Forge    │        │  Local Engines   │
-│  (OpenRouter /   │        │  (Cloudflare /   │        │ (Ollama /        │
-│   Vercel AI)     │        │   OR Free Tier)  │        │  llama.cpp)      │
+│  (Vercel Gateway │        │  (Cloudflare /   │        │ (Ollama /        │
+│  · OpenRouter)   │        │   OR Free Tier)  │        │  llama.cpp)      │
 └─────────┬────────┘        └─────────┬────────┘        └─────────┬────────┘
+          │                           │                           │
+          │             Auto-Namespace Translation                │
+          │      (x-ai/ ⇆ spacexai/, meta-llama/ ⇆ meta/)         │
           │                           │                           │
           └───────────────────────────┼───────────────────────────┘
                                       ▼
@@ -303,24 +359,30 @@ Hydra relies on zero external runtime dependencies. The Python distribution uses
                         └──────────────────────────┘
 ```
 
-Both implementations parse Server-Sent Events (SSE) chunks on the fly and write delta tokens directly to standard output.
+- **SSE Streaming**: Chunks are processed in flight with immediate standard output flushing.
+- **Provider Fallback**: If OpenRouter returns an error or rate limit, Hydra seamlessly falls back to Vercel AI Gateway (and vice versa).
+- **Graceful Port Probing**: Fast non-blocking socket checks (400ms timeout) determine whether local servers are listening before dispatching local prompts.
 
 ---
 
-## Development & Verification
+## Verification & Testing
+
+Hydra includes a comprehensive test suite covering argument parsing, model alias resolution, provider routing, streaming SSE chunks, and parallel swarm fan-out.
 
 Run the test suite:
 ```bash
 python -m pytest tests/
 ```
 
-Run CLI model registry inspection:
+Verify installed model aliases and endpoints:
 ```bash
-python bin/hydra --list-models
+hydra --list-models
 ```
 
 ---
 
-## License
+## Contributing & License
 
-[Apache-2.0](LICENSE) © 2026 erastudil
+Contributions are welcome! Submit PRs or open issues at [https://github.com/erastudil/hydra](https://github.com/erastudil/hydra).
+
+Distributed under the [Apache-2.0 License](LICENSE). © 2026 erastudil

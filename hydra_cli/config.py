@@ -11,45 +11,66 @@ DEFAULT_SYSTEM_PROMPT = os.environ.get(
 )
 
 MODEL_MAP: Dict[str, str] = {
-    # Anthropic
+    # Anthropic Claude
     "opus 5.5": "anthropic/claude-opus-5.5",
     "opus": "anthropic/claude-opus-5.5",
-    "sonnet 5.5": "anthropic/claude-5.5-sonnet",
-    "sonnet": "anthropic/claude-5.5-sonnet",
+    "opus 5": "anthropic/claude-opus-5",
+    "sonnet 5.5": "anthropic/claude-sonnet-5.5",
+    "sonnet": "anthropic/claude-sonnet-5.5",
+    "claude-5.5-sonnet": "anthropic/claude-sonnet-5.5",
+    "claude-sonnet-5.5": "anthropic/claude-sonnet-5.5",
     "sonnet 3.7": "anthropic/claude-3.7-sonnet",
-    "haiku": "anthropic/claude-3.5-haiku",
+    "haiku 4.5": "anthropic/claude-haiku-4.5",
+    "haiku": "anthropic/claude-haiku-4.5",
+    "fable 5.1": "anthropic/claude-fable-5.1",
+    "fable": "anthropic/claude-fable-5.1",
 
     # OpenAI / Sol
-    "sol 6.1": "openai/gpt-6.1-sol-pro",
+    "sol 6.1": "openai/gpt-6.1-sol",
     "sol 6.1 pro": "openai/gpt-6.1-sol-pro",
-    "sol": "openai/gpt-6.1-sol-pro",
-    "gpt-6.1-sol": "openai/gpt-6.1-sol-pro",
+    "sol": "openai/gpt-6.1-sol",
+    "gpt-6.1-sol": "openai/gpt-6.1-sol",
+    "luna": "openai/gpt-6-luna",
+    "astra": "openai/gpt-6-astra",
+    "gpt-5.5": "openai/gpt-5.5",
+    "gpt-5": "openai/gpt-5.5",
     "gpt-4o": "openai/gpt-4o",
-    "o1": "openai/o1",
+    "o3": "openai/o3",
     "o3-mini": "openai/o3-mini",
+    "o4-mini": "openai/o4-mini",
+    "o4": "openai/o4-mini",
+    "o1": "openai/o1",
 
-    # Google Gemini
+    # Google Gemini & Gemma
+    "gemini 3.8": "google/gemini-3.8-flash",
+    "gemini 3.7": "google/gemini-3.7-flash",
+    "gemini 3.5": "google/gemini-3.5-flash",
+    "gemini": "google/gemini-3.8-flash",
+    "gemini-flash": "google/gemini-3.8-flash",
     "gemini 2.5": "google/gemini-2.5-pro",
-    "gemini 3.5": "google/gemini-2.5-flash",
-    "gemini": "google/gemini-2.5-flash",
-    "gemini-flash": "google/gemini-2.5-flash",
     "gemini-pro": "google/gemini-2.5-pro",
+    "gemma 4": "google/gemma-4-26b-a4b-it",
 
-    # Qwen
+    # Alibaba / Qwen
+    "qwen 3.8": "qwen/qwen3.8-27b",
+    "qwen": "qwen/qwen3.8-27b",
+    "qwen-coder": "alibaba/qwen3-coder",
+    "qwen coder": "alibaba/qwen3-coder",
     "qwen 3b": "qwen/qwen-2.5-3b-instruct",
     "qwen 3": "qwen/qwen-2.5-coder-32b-instruct",
-    "qwen": "qwen/qwen-2.5-coder-32b-instruct",
-    "qwen-coder": "qwen/qwen-2.5-coder-32b-instruct",
 
-    # xAI Grok
-    "grok": "x-ai/grok-2-1212",
+    # xAI / SpaceX AI Grok
+    "grok 4.7": "x-ai/grok-4.7",
+    "grok 4.6": "x-ai/grok-4.6",
+    "grok": "x-ai/grok-4.7",
     "grok 2": "x-ai/grok-2-1212",
-    "grok-beta": "x-ai/grok-beta",
 
     # Meta Llama
-    "llama": "meta-llama/llama-3.3-70b-instruct",
+    "llama 4": "meta-llama/llama-4-maverick",
+    "llama 4 maverick": "meta-llama/llama-4-maverick",
+    "llama 4 scout": "meta-llama/llama-4-scout",
     "llama 3.3": "meta-llama/llama-3.3-70b-instruct",
-    "llama-70b": "meta-llama/llama-3.3-70b-instruct",
+    "llama": "meta-llama/llama-3.3-70b-instruct",
 
     # DeepSeek
     "deepseek": "deepseek/deepseek-chat",
@@ -59,14 +80,14 @@ MODEL_MAP: Dict[str, str] = {
 
 # Free tier models on OpenRouter or Cloudflare Workers AI
 FREE_MODELS: List[str] = [
+    "qwen/qwen3.8-27b:free",
     "meta-llama/llama-3.3-70b-instruct:free",
-    "google/gemini-2.0-flash-exp:free",
+    "google/gemma-4-26b-a4b-it:free",
     "deepseek/deepseek-chat:free",
-    "qwen/qwen-2.5-coder-32b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
+    "nvidia/nemotron-3.5-lightning:free",
 ]
 
-DEFAULT_FREE_MODEL = os.environ.get("HYDRA_FREE_MODEL", "meta-llama/llama-3.3-70b-instruct:free")
+DEFAULT_FREE_MODEL = os.environ.get("HYDRA_FREE_MODEL", "qwen/qwen3.8-27b:free")
 DEFAULT_CLOUDFLARE_MODEL = os.environ.get("HYDRA_CLOUDFLARE_MODEL", "@cf/meta/llama-3.3-70b-instruct")
 
 # Local inference endpoints
@@ -84,17 +105,17 @@ SWARM_HEADS: Dict[str, Dict[str, str]] = {
     },
     "coder": {
         "title": "Implementer",
-        "model": "anthropic/claude-5.5-sonnet",
+        "model": "anthropic/claude-sonnet-5.5",
         "system": "You are the Principal Software Engineer. Provide complete, executable, clean implementation code adhering strictly to zero-dependency principles and production standards.",
     },
     "auditor": {
         "title": "Inspector",
-        "model": "openai/gpt-6.1-sol-pro",
+        "model": "openai/gpt-6.1-sol",
         "system": "You are the Security & Performance Inspector. Audit the proposed design and code for edge cases, resource leaks, security vulnerabilities, and verification gates.",
     },
     "synthesizer": {
         "title": "Synthesizer",
-        "model": "google/gemini-2.5-pro",
+        "model": "google/gemini-3.8-flash",
         "system": "You are the Swarm Lead Synthesizer. Review all perspectives, resolve conflicting tradeoffs, and emit a final prioritized execution roadmap.",
     },
 }
