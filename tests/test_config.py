@@ -11,8 +11,9 @@ from hydra_cli.config import (
 def test_resolve_standard_aliases():
     assert resolve_model("opus 5.5") == "anthropic/claude-opus-5.5"
     assert resolve_model("opus") == "anthropic/claude-opus-5.5"
+    assert resolve_model("sonnet 5.5") == "anthropic/claude-5.5-sonnet"
+    assert resolve_model("sonnet") == "anthropic/claude-5.5-sonnet"
     assert resolve_model("sonnet 3.7") == "anthropic/claude-3.7-sonnet"
-    assert resolve_model("sonnet") == "anthropic/claude-3.7-sonnet"
     assert resolve_model("sol 6.1") == "openai/gpt-6.1-sol-pro"
     assert resolve_model("sol") == "openai/gpt-6.1-sol-pro"
     assert resolve_model("gemini 2.5") == "google/gemini-2.5-pro"
@@ -30,6 +31,7 @@ def test_resolve_raw_model_fallback():
 def test_is_compound_alias():
     assert is_compound_alias("opus", "5.5") is True
     assert is_compound_alias("sol", "6.1") is True
+    assert is_compound_alias("sonnet", "5.5") is True
     assert is_compound_alias("sonnet", "3.7") is True
     assert is_compound_alias("gemini", "2.5") is True
     assert is_compound_alias("gemini", "3.5") is True

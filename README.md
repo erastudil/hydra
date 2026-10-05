@@ -51,7 +51,7 @@ npm install -g hydra-agent-cli
 ```
 Or run directly without installation via `npx`:
 ```bash
-npx hydra-cli sonnet 3.7 "Explain memory ordering in Rust"
+npx hydra-cli sonnet 5.5 "Explain memory ordering in Rust"
 ```
 
 ---
@@ -97,7 +97,7 @@ Hydra resolves intuitive compound aliases into provider model identifiers and st
 ```bash
 hydra opus 5.5 "Analyze this architecture"
 hydra sol 6.1 "Prove this logic invariant"
-hydra sonnet 3.7 "Refactor this module"
+hydra sonnet 5.5 "Refactor this module"
 hydra gemini 2.5 "Summarize this paper"
 hydra qwen 3b "Write an assembly routine"
 hydra grok "Trace edge cases"
@@ -115,7 +115,7 @@ Hydra reads standard input automatically when piped from other commands:
 
 ```bash
 # Analyze a source file
-cat engine.rs | hydra sonnet 3.7 "Identify data races"
+cat engine.rs | hydra sonnet 5.5 "Identify data races"
 
 # Review git changes before committing
 git diff | hydra sol 6.1 "Audit this patch for security flaws"
@@ -158,7 +158,7 @@ hydra swarm "Implement a transactional key-value store with WAL"
 
 The default swarm spawns:
 - **Architect Head** (`anthropic/claude-opus-5.5`): Evaluates invariants, failure modes, and boundaries.
-- **Implementer Head** (`anthropic/claude-3.7-sonnet`): Produces working code with zero unnecessary dependencies.
+- **Implementer Head** (`anthropic/claude-5.5-sonnet`): Produces working code with zero unnecessary dependencies.
 - **Inspector Head** (`openai/gpt-6.1-sol-pro`): Audits edge cases, race conditions, and attack vectors.
 - **Synthesizer Head** (`google/gemini-2.5-pro`): Resolves tradeoffs and unifies the roadmap.
 
@@ -173,15 +173,16 @@ hydra swarm "Verify Paxos correctness" --heads "architect,auditor" --json
 
 | Alias | Target Model Identifier | Typical Use |
 |---|---|---|
-| `opus 5.5` | `anthropic/claude-opus-5.5` | Deep reasoning and systems design |
-| `sol 6.1` | `openai/gpt-6.1-sol-pro` | Formal logic and security audit |
-| `sonnet 3.7` | `anthropic/claude-3.7-sonnet` | Code generation and refactoring |
+| `opus 5.5` / `opus` | `anthropic/claude-opus-5.5` | Deep reasoning and systems design |
+| `sol 6.1` / `sol` | `openai/gpt-6.1-sol-pro` | Formal logic and security audit |
+| `sonnet 5.5` / `sonnet` | `anthropic/claude-5.5-sonnet` | Code generation and surgical refactoring |
+| `sonnet 3.7` | `anthropic/claude-3.7-sonnet` | Legacy Claude 3.7 Sonnet |
 | `gemini 2.5` | `google/gemini-2.5-pro` | High context analysis and synthesis |
-| `gemini 3.5` | `google/gemini-2.5-flash` | Fast summarization and transformation |
+| `gemini 3.5` / `gemini` | `google/gemini-2.5-flash` | Fast summarization and transformation |
 | `qwen 3b` | `qwen/qwen-2.5-3b-instruct` | Lightweight embedded tasks |
 | `qwen` | `qwen/qwen-2.5-coder-32b-instruct` | Open coding model |
-| `grok` | `x-ai/grok-2-1212` | Uncensored technical review |
-| `llama` | `meta-llama/llama-3.3-70b-instruct` | Open frontier reasoning |
+| `grok` / `grok 2` | `x-ai/grok-2-1212` | Technical review and adversarial analysis |
+| `llama` / `llama 3.3` | `meta-llama/llama-3.3-70b-instruct` | Open frontier reasoning |
 | `deepseek` | `deepseek/deepseek-chat` | General technical assistance |
 | `free` | Free Forge Tier | Zero-cost development |
 | `local` | Ollama / llama.cpp / EasyLM | Offline air-gapped development |
@@ -205,6 +206,74 @@ Configure credentials via environment variables:
 | `LLAMACPP_HOST` | llama.cpp server host (default: `http://localhost:8080`) |
 | `LOCAL_AI_BASE` | Custom local inference base URL |
 | `HYDRA_SYSTEM_PROMPT` | Custom default system prompt |
+
+---
+
+## Setup & Integration Guide
+
+Hydra is designed to be embedded into shell scripts, CI/CD pipelines, application backends, and autonomous multi-agent systems.
+
+For the complete integration reference, see [**`GUIDE.md`**](GUIDE.md).
+
+You can also view the setup instructions directly in your terminal at any time:
+
+```bash
+hydra setup
+# or
+hydra guide
+```
+
+### Quick Integration Cheat Sheet
+
+#### 1. Shell Pipes & Developer Utilities
+```bash
+# Refactor code with Claude 5.5 Sonnet
+cat engine.rs | hydra sonnet 5.5 "Refactor for zero allocations"
+
+# Security audit git diff
+git diff --staged | hydra sol 6.1 "Audit for vulnerability and race conditions"
+
+# Diagnose crashing logs
+journalctl -u nginx -n 30 | hydra opus 5.5 "Identify failure root cause"
+```
+
+#### 2. Python Backend & Subprocess Integration
+```python
+import subprocess
+
+def query_hydra(model: str, prompt: str, piped_input: str = "") -> str:
+    res = subprocess.run(
+        ["hydra", model, prompt, "--no-stream"],
+        input=piped_input,
+        text=True,
+        capture_output=True,
+        check=True
+    )
+    return res.stdout.strip()
+
+# Call inside any Python script:
+result = query_hydra("sonnet 5.5", "Write a binary search in Rust")
+```
+
+#### 3. Node.js & TypeScript Integration
+```javascript
+const { execFileSync } = require('child_process');
+
+function askHydra(model, prompt, input = "") {
+  return execFileSync('hydra', [model, prompt, '--no-stream'], {
+    input,
+    encoding: 'utf-8'
+  }).trim();
+}
+
+const answer = askHydra('sonnet 5.5', 'Explain async generators in TS');
+```
+
+#### 4. Autonomous Agent Swarms
+```bash
+# Fan out to 4 specialized parallel heads (Architect, Implementer, Inspector, Synthesizer)
+hydra swarm "Design and implement a lock-free ring buffer in C" --json
+```
 
 ---
 

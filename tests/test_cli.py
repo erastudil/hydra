@@ -18,6 +18,13 @@ def test_version_flags():
     assert route_command(["-v"]) == 0
 
 
+def test_setup_flags():
+    assert route_command(["setup"]) == 0
+    assert route_command(["guide"]) == 0
+    assert route_command(["--setup"]) == 0
+    assert route_command(["--guide"]) == 0
+
+
 def test_list_models():
     assert route_command(["--list-models"]) == 0
 

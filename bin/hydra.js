@@ -19,8 +19,9 @@ const DEFAULT_SYSTEM_PROMPT = process.env.HYDRA_SYSTEM_PROMPT ||
 const MODEL_MAP = {
   'opus 5.5': 'anthropic/claude-opus-5.5',
   'opus': 'anthropic/claude-opus-5.5',
+  'sonnet 5.5': 'anthropic/claude-5.5-sonnet',
+  'sonnet': 'anthropic/claude-5.5-sonnet',
   'sonnet 3.7': 'anthropic/claude-3.7-sonnet',
-  'sonnet': 'anthropic/claude-3.7-sonnet',
   'haiku': 'anthropic/claude-3.5-haiku',
 
   'sol 6.1': 'openai/gpt-6.1-sol-pro',
@@ -71,7 +72,7 @@ const SWARM_HEADS = {
   },
   coder: {
     title: 'Implementer',
-    model: 'anthropic/claude-3.7-sonnet',
+    model: 'anthropic/claude-5.5-sonnet',
     system: 'You are the Principal Software Engineer. Provide complete, executable, clean implementation code adhering strictly to zero-dependency principles and production standards.'
   },
   auditor: {
@@ -100,10 +101,11 @@ USAGE:
     hydra free "<prompt>"                # Zero-cost Free Forge routing
     hydra local "<prompt>"               # Offline local inference (Ollama/llama.cpp/EasyLM)
     hydra swarm "<task>"                 # Multi-agent swarm fan-out (Architect, Coder, Auditor)
+    hydra setup                          # Interactive setup & app/agent integration guide
     cat file.txt | hydra <alias>         # Interactive pipe input
 
 POPULAR ALIASES:
-    opus 5.5, sol 6.1, sonnet 3.7, gemini 2.5, gemini 3.5, qwen 3b, grok, llama
+    opus 5.5, sol 6.1, sonnet 5.5, gemini 2.5, gemini 3.5, qwen 3b, grok, llama
 
 OPTIONS:
     --system <prompt>       Custom system prompt
@@ -114,6 +116,7 @@ OPTIONS:
     --json                  Output raw JSON
     --heads <roles>         Comma-separated swarm heads (e.g. architect,coder,auditor)
     --list-models           List all registered aliases and providers
+    --guide, --setup        Show setup & application/agent integration guide
     -v, --version           Display version
     -h, --help              Show this help message
 `;
@@ -462,13 +465,93 @@ async function runSwarm(task, selectedRoles = ['architect', 'coder', 'auditor'],
   }
 }
 
+function printSetupGuide() {
+  console.log(`
+================================================================================
+  HYDRA SETUP & INTEGRATION GUIDE · v${VERSION} (Node.js)
+================================================================================
+
+1. QUICK SETUP & CREDENTIALS
+--------------------------------------------------------------------------------
+Hydra resolves API keys from your environment or a local .env file.
+Supported providers:
+
+  A. Cloudflare Workers AI (Zero cost or your existing paid plan):
+     export CLOUDFLARE_API_TOKEN="your-token"
+     export CLOUDFLARE_ACCOUNT_ID="your-account-id"
+
+  B. OpenRouter (Access to 200+ models with unified billing or free tiers):
+     export OPENROUTER_API_KEY="sk-or-v1-..."
+
+  C. Vercel AI Gateway (Automated multi-provider edge routing):
+     export VERCEL_AI_GATEWAY_TOKEN="your-token"
+
+  D. Zero-Configuration Modes (NO KEYS REQUIRED):
+     • hydra free "<prompt>"   -> Routes to free public endpoints
+     • hydra local "<prompt>"  -> Routes to local Ollama (11434), llama.cpp (8080), or EasyLM (8000)
+
+2. SHELL SCRIPTS & UNIX PIPES
+--------------------------------------------------------------------------------
+Pipe outputs directly from your shell into any model:
+
+  # Review recent git diff with Sonnet 5.5
+  git diff | hydra sonnet 5.5 "Audit for security issues and edge cases"
+
+  # Process log files without streaming into a variable
+  SUMMARY=$(cat /var/log/syslog | hydra free "Extract top 3 error clusters" --no-stream)
+
+  # Check compilation errors with Sol 6.1
+  cargo check 2>&1 | hydra sol 6.1 "Suggest exact minimal diff to fix errors"
+
+3. INTEGRATING INTO NODE.JS / TYPESCRIPT APPLICATIONS
+--------------------------------------------------------------------------------
+Run via global CLI or npx with zero npm install:
+
+  import { execSync } from 'child_process';
+
+  function callHydra(alias, prompt) {
+    return execSync(\`npx hydra-cli "\${alias}" "\${prompt.replace(/"/g, '\\\\"')}" --no-stream\`, {
+      encoding: 'utf-8',
+      env: process.env
+    }).trim();
+  }
+
+  const analysis = callHydra('sonnet 5.5', 'Analyze this payload');
+
+4. INTEGRATING INTO AUTONOMOUS AGENTS (TOOL PATTERN)
+--------------------------------------------------------------------------------
+Agents can invoke Hydra as a zero-dependency external tool:
+
+  const toolDefinition = {
+    name: "summon_model",
+    description: "Query frontier models (Sonnet 5.5, Opus 5.5, Sol 6.1, Grok) or free/local models",
+    parameters: {
+      model_alias: "sonnet 5.5 | opus 5.5 | sol 6.1 | grok | free | local",
+      prompt: "The detailed instruction or analysis request"
+    }
+  };
+
+5. MULTI-AGENT SWARMS
+--------------------------------------------------------------------------------
+Spawn 4 parallel specialized model heads (Architect, Implementer, Auditor, Synthesizer):
+
+  hydra swarm "Architect a low-latency tick-by-tick orderbook"
+
+Custom heads:
+  hydra swarm "Design consensus loop" --heads architect,auditor
+
+Docs & Source: https://github.com/erastudil/hydra
+================================================================================
+`);
+}
+
 async function main() {
   const pipedInput = await readStdin();
   const rawArgs = process.argv.slice(2);
 
   if (!rawArgs.length) {
     if (pipedInput) {
-      rawArgs.push('sonnet 3.7');
+      rawArgs.push('sonnet 5.5');
     } else {
       console.log(HELP_BANNER);
       process.exit(0);
@@ -482,6 +565,11 @@ async function main() {
 
   if (rawArgs[0] === '-v' || rawArgs[0] === '--version' || rawArgs[0] === 'version') {
     console.log(`hydra ${VERSION}`);
+    process.exit(0);
+  }
+
+  if (rawArgs[0] === 'setup' || rawArgs[0] === 'guide' || rawArgs[0] === '--setup' || rawArgs[0] === '--guide') {
+    printSetupGuide();
     process.exit(0);
   }
 

@@ -14,8 +14,9 @@ MODEL_MAP: Dict[str, str] = {
     # Anthropic
     "opus 5.5": "anthropic/claude-opus-5.5",
     "opus": "anthropic/claude-opus-5.5",
+    "sonnet 5.5": "anthropic/claude-5.5-sonnet",
+    "sonnet": "anthropic/claude-5.5-sonnet",
     "sonnet 3.7": "anthropic/claude-3.7-sonnet",
-    "sonnet": "anthropic/claude-3.7-sonnet",
     "haiku": "anthropic/claude-3.5-haiku",
 
     # OpenAI / Sol
@@ -83,7 +84,7 @@ SWARM_HEADS: Dict[str, Dict[str, str]] = {
     },
     "coder": {
         "title": "Implementer",
-        "model": "anthropic/claude-3.7-sonnet",
+        "model": "anthropic/claude-5.5-sonnet",
         "system": "You are the Principal Software Engineer. Provide complete, executable, clean implementation code adhering strictly to zero-dependency principles and production standards.",
     },
     "auditor": {
