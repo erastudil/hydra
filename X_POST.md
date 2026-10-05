@@ -1,70 +1,42 @@
-# Hydra Announcement — X (Twitter) Launch Post
+# Hydra Launch Post — X (Twitter)
 
-## Post Draft (Single / Hook Tweet)
-
-Terminal AI tools shouldn't require 400MB node_modules or 12 different bespoke SDKs.
-
-Introducing Hydra 🐉 — the sovereign multi-headed AI shell utility.
-
-One command. Zero dependencies.
-
-• Frontier models (Opus 5.5, Sol 6.1, Sonnet 3.7, Gemini 2.5)
-• Zero-cost Free Forge routing
-• Offline local inference (Ollama / llama.cpp)
-• Multi-agent parallel swarm fan-out
-• Pure UNIX pipes
-
-```bash
-# Direct model summoning
-hydra opus 5.5 "Explain zero-cost abstractions"
-
-# Zero-cost cloud routing
-hydra free "List Raft invariants"
-
-# Fully offline local weights
-hydra local "Write a lock-free queue in C"
-
-# Parallel multi-agent swarm
-hydra swarm "Architect a high-throughput event pipeline"
-
-# Pipe anything from your terminal
-git diff | hydra sol 6.1 "Audit this patch for security flaws"
-```
-
-Install in 3 seconds:
-`curl -fsSL https://raw.githubusercontent.com/erastudil/hydra/main/install.sh | bash`
-
-Or Windows:
-`irm https://raw.githubusercontent.com/erastudil/hydra/main/install.ps1 | iex`
-
-Or Python: `pip install hydra-ai-cli`
-Or Node: `npx hydra-cli opus 5.5 "..."`
-
-Open-source on GitHub:
-👉 https://github.com/erastudil/hydra
+Strict 280-character single-tweet rules applied (zero "Show more" expander required).
 
 ---
 
-## Thread / Follow-up Details
+## Primary Post (Pip Install — Recommended)
 
-### Tweet 2: The Multi-Agent Swarm
-Cut off one head, and three arise.
-`hydra swarm "<task>"` spawns concurrent worker heads:
-🏛️ Architect (Opus 5.5): Invariants, state boundaries, failure modes
-⚡ Implementer (Sonnet 3.7): Production-grade, zero-dependency code
-🛡️ Inspector (Sol 6.1): Security auditing, race conditions, edge cases
-🔮 Synthesizer (Gemini 2.5): Unified execution roadmap
+**Character Count**: 272 characters raw (261 Twitter-weighted).
 
-All running in parallel threads, streaming results directly to your shell.
+```
+Hydra: simple AI shell utility.
+Summon Opus 5.5, Sol 6.1, Sonnet 3.7 & Grok. Drop in Cloudflare keys to use what you pay for, route OpenRouter/Vercel, or cruise on free endpoints & local. Zero bloat, pure pipes.
 
-### Tweet 3: Zero-Cost & Offline Fallback
-Running on an airplane or air-gapped server?
-`hydra local` automatically probes your local ports for Ollama, llama.cpp, or EasyLM WebGPU.
-Want free cloud compute?
-`hydra free` routes to Cloudflare Workers AI or OpenRouter free tiers.
+pip install hydra-ai-cli
+https://github.com/erastudil/hydra
+```
 
-### Tweet 4: Zero Dependencies
-Pure Python standard library. Pure Node standard library.
-No heavy dependencies to download. No telemetry. Apache-2.0.
+---
 
-Star and fork: https://github.com/erastudil/hydra
+## Alternative Post (Direct Curl Install)
+
+**Character Count**: 260 characters raw (249 Twitter-weighted).
+
+```
+Hydra: AI shell utility.
+Run Opus 5.5, Sol 6.1, Sonnet 3.7 & Grok. Drop in Cloudflare keys, route OpenRouter/Vercel, or cruise free & local.
+
+curl -fsSL https://raw.githubusercontent.com/erastudil/hydra/main/install.sh | bash
+https://github.com/erastudil/hydra
+```
+
+---
+
+## Feature & Constraint Breakdown
+
+1. **Latest Frontier Models**: Opus 5.5, Sol 6.1, Sonnet 3.7, Grok.
+2. **Provider Flex**: OpenRouter, Vercel AI Gateway, Cloudflare Workers AI.
+3. **Bring Your Own Keys / Tiering**: Drop in Cloudflare account tokens to use existing quotas, buy credits on OpenRouter, or route 100% free.
+4. **Offline / Local**: Probes local Ollama / llama.cpp / EasyLM WebGPU.
+5. **No Bloat**: Pure Python / Node standard library, zero runtime dependencies, non-blocking UNIX pipe integration.
+6. **280 Char Discipline**: Fits completely on mobile feeds without an expansion click.
