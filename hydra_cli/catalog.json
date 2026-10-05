@@ -1,5 +1,5 @@
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "no_temperature_models": [
     "anthropic/claude-opus-5.5",
     "anthropic/claude-opus-5.5-fast"
@@ -15,6 +15,8 @@
     "nvidia/nemotron-3.5-lightning:free"
   ],
   "aliases": {
+    "hermes": {"model": "anthropic/claude-opus-5.5", "effort": "high"},
+    "pi": {"model": "qwen/qwen-2.5-coder-32b-instruct"},
     "opus 5.5 high": {"model": "anthropic/claude-opus-5.5", "effort": "high"},
     "opus 5.5 max": {"model": "anthropic/claude-opus-5.5", "effort": "max"},
     "opus 5.5 fast": {"model": "anthropic/claude-opus-5.5-fast"},

@@ -152,6 +152,61 @@ The architect, coder, and auditor run together. The synthesizer runs after their
 | `llama 4` | `meta-llama/llama-4-maverick` | |
 | `qwen coder` | `alibaba/qwen3-coder` | |
 
-On a Vercel hostname, Hydra rewrites `x-ai/` to `spacexai/`, `meta-llama/` to `meta/` and strips a trailing `-instruct`, and `qwen/` to `alibaba/`. On `openrouter.ai` it rewrites those three prefixes the other way. Any other id is sent unchanged.
+## Sovereign Gateway (`hydra serve`)
+
+`hydra serve` starts a local standard-library HTTP server that exposes an OpenAI-compatible `/v1/chat/completions` and `/v1/models` endpoint:
+
+```bash
+hydra serve --port 7777 --host 127.0.0.1
+```
+
+Configure external agents (like Hermes or Pi) to route through Hydra:
+
+```bash
+export OPENAI_BASE_URL="http://127.0.0.1:7777/v1"
+export OPENAI_API_KEY="sovereign-hydra"
+```
+
+Hydra resolves aliases in requested `model` headers, balances and falls back across configured frontier providers, and passes through tools and function calls transparently.
+
+## MCP Tool Integration & Autonomous Agent Loop
+
+Hydra includes a zero-dependency Model Context Protocol (MCP) client communicating via JSON-RPC 2.0 over standard I/O pipes.
+
+```bash
+# Autonomous ReAct agent with all active MCP tools
+hydra agent "Inspect the latest commits and run the unit tests"
+
+# Tool-augmented single alias summoning
+hydra sonnet 5.5 --mcp "Search workspace.db for user records"
+
+# Manage MCP community servers
+hydra mcp list
+hydra mcp test filesystem
+hydra mcp config
+hydra mcp init --force
+```
+
+Configuration is read from `~/.hydra/mcp_servers.json` or `./.hydra/mcp_servers.json`. Standard community servers include `filesystem`, `fetch`, `sqlite`, `git`, `github`, `brave-search`, `postgres`, `memory`, and `puppeteer`.
+
+## External Agent Delegation (Hermes & Pi)
+
+In `hydra swarm`, specialist heads can delegate execution directly to local external agent binaries:
+
+```bash
+# Delegate architect to hermes and coder to pi
+hydra swarm "Refactor router and verify tests" --heads architect:hermes,coder:pi,auditor
+```
+
+When `:hermes` or `:pi` is specified, Hydra executes `hermes -z "<prompt>"` or `pi -z "<prompt>"`. If the external runner is not installed, Hydra falls back to the configured model route.
+
+## Terminal Green Banner (`hydra banner`)
+
+Display the sovereign 7-headed Hydra ASCII art in retro terminal green:
+
+```bash
+hydra banner
+```
 
 Source: https://github.com/erastudil/hydra
+

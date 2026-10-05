@@ -1,20 +1,52 @@
 # Hydra
 
 ```text
-  ___ ___            .___
- /   |   \___.__.  __| _/___________
-/    ~    <   |  | / __ |\_  __ \__  \
+            [1]        [2]        [3]        [4]        [5]        [6]        [7]
+           HERMES       PI      ARCHITECT  SOVEREIGN   CODER     AUDITOR   SYNTHESIS
+          (\___/)    (\___/)    (\___/)    <(\___/)>   (\___/)    (\___/)    (\___/)
+          /0   0\    /o   o\    /^   ^\    { 0   0 }   /^   ^\    /o   o\    /0   0\
+         ( ==Y== )  ( ==v== )  ( ==w== )  (  ==X==  ) ( ==w== )  ( ==v== )  ( ==Y== )
+          )     (    )     (    )     (   / )     ( \  )     (    )     (    )     (
+         /       \  /       \  /       \ ( /       \ )/       \  /       \  /       \
+        /   | |   \/   | |   \/   | |   \ V   | |   V /   | |   \/   | |   \/   | |   \
+       |    | |        | |        | |    |    | |   |   | |        | |        | |    |
+       \    \ \       / /        / /     |    | |   |    \ \        \ \       / /    /
+        \    \ \_____/ /        / /      \    | |   /     \ \________\ \_____/ /    /
+         \    \_______/        / /        \___/ \__/       \_______/  \_______/    /
+          \                   / /          |       |        \                     /
+           '.               .' /           |  VII  |         \                  .'
+             '.           .'  /            |       |          \               .'
+               '---------'   /             /_______\           \   '---------'
+                            /             /         \           \
+                           (             /   HYDRA   \           )
+                            '._________.'|   CORE    |'._________.'
+                                         \           /
+                                          '---------'
+
+  ___ ___            .___              
+ /   |   \___.__.  __| _/___________   
+/    ~    <   |  | / __ |\_  __ \__  \  
 \    Y    /\___  |/ /_/ | |  | \// __ \_
  \___|_  / / ____|\____ | |__|  (____  /
-       \/  \/          \/            \/
-      Sovereign Multi-Headed AI Shell
+       \/  \/          \/            \/ 
+      Sovereign Multi-Headed AI Shell · v1.2.0
 ```
 
-Hydra is a command line tool that sends one prompt to a frontier model, a free cloud model, a local model server, or a small swarm. The Python package and the Node package share one alias catalog and use only the standard libraries of their runtimes.
+Hydra is a sovereign multi-headed command-line AI engine and model router. It dispatches single prompts, autonomous agentic loops, and multi-agent swarms across frontier models, free cloud tiers, local inference backends, and public Model Context Protocol (MCP) servers.
+
+The Python package and the Node package share one alias catalog and operate with **zero external dependencies**, strictly utilizing runtime standard libraries.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-brightgreen.svg)](pyproject.toml)
 [![Node](https://img.shields.io/badge/node-18+-success.svg)](package.json)
+
+## New in v1.2.0
+
+- **Autonomous ReAct Agent Loop (`hydra agent`)**: Multi-turn tool execution loop grounded in real-time environment actions.
+- **Model Context Protocol (MCP) Client (`hydra mcp`)**: Zero-dependency stdio JSON-RPC 2.0 client supporting Filesystem, Fetch, SQLite, Git, GitHub, Brave Search, PostgreSQL, and Memory.
+- **Sovereign OpenAI Gateway Server (`hydra serve`)**: Host an OpenAI-compatible local endpoint (`http://127.0.0.1:7777/v1`) for external agents like Hermes and Pi with transparent alias resolution and tool passthrough.
+- **External Agent Runners (Hermes & Pi)**: Swarm heads can delegate execution directly to `hermes` and `pi` CLI binaries (`--heads architect:hermes,coder:pi,auditor`).
+- **Phosphor Green 7-Headed Hydra ASCII Banner (`hydra banner`)**: Retro terminal green rendering of the sovereign 7-headed Hydra.
 
 ## Install
 
@@ -26,121 +58,118 @@ From the Git repository:
 pip install "git+https://github.com/erastudil/hydra.git"
 ```
 
-From the v1.1.0 GitHub release:
+From release archives:
 
 ```bash
-pip install https://github.com/erastudil/hydra/releases/download/v1.1.0/hydra_ai_cli-1.1.0-py3-none-any.whl
-npm install -g https://github.com/erastudil/hydra/releases/download/v1.1.0/hydra-agent-cli-1.1.0.tgz
+pip install https://github.com/erastudil/hydra/releases/download/v1.2.0/hydra_ai_cli-1.2.0-py3-none-any.whl
+npm install -g https://github.com/erastudil/hydra/releases/download/v1.2.0/hydra-agent-cli-1.2.0.tgz
 ```
 
-The release page also carries the source archive and `SHA256SUMS`.
-
-A checkout you can edit:
-
-```bash
-git clone https://github.com/erastudil/hydra.git
-cd hydra
-pip install -e .
-```
-
-Linux and macOS download the Python package tree into `~/.hydra` and put a `hydra` shim on `~/.local/bin`:
+Direct POSIX / Windows curl/irm installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/erastudil/hydra/main/install.sh | bash
 ```
 
-Windows does the same under `%USERPROFILE%\.hydra\bin`:
-
 ```powershell
 irm https://raw.githubusercontent.com/erastudil/hydra/main/install.ps1 | iex
 ```
 
-The shim runs the vendored Python package when `python3` or `python` is present, and otherwise runs `bin/hydra.js`. The installer stops when neither runtime exists.
-
-`npx` needs the release tarball, because the public name `hydra-cli` belongs to a different package:
+## Quick Start & Usage
 
 ```bash
-npx --package https://github.com/erastudil/hydra/releases/download/v1.1.0/hydra-agent-cli-1.1.0.tgz hydra sonnet 5.5 "Explain a ring buffer"
+# Frontier model summoning
+hydra sonnet 5.5 "Explain cache coherence"
+hydra opus 5.5 high "Verify distributed state machine safety"
+hydra sol 6.1 pro "Perform security audit on auth token verification"
+
+# Autonomous ReAct agent with MCP tools
+hydra agent "Read pyproject.toml and list the entry points"
+hydra sonnet 5.5 --mcp "Search repository for sqlite queries and summarize"
+
+# Public MCP server management
+hydra mcp list                      # List registered MCP tools
+hydra mcp test filesystem           # Test connection to filesystem MCP server
+hydra mcp config                    # View active ~/.hydra/mcp_servers.json
+
+# Sovereign Gateway for Hermes, Pi, and external tools
+hydra serve --port 7777             # Serves /v1/models and /v1/chat/completions
+
+# Multi-agent swarm (with optional Hermes/Pi runner delegation)
+hydra swarm "Architect and test a zero-copy ring buffer"
+hydra swarm "Refactor parser" --heads architect:hermes,coder:pi,auditor
+
+# Free Forge & Offline Local Inference
+hydra free "Summarize this diff"     # Zero-cost Cloudflare / OpenRouter free models
+hydra local "Generate unit test"     # Offline Ollama / llama.cpp / EasyLM
+
+# Display terminal green 7-headed Hydra
+hydra banner
 ```
 
-## Keys
+## Model Context Protocol (MCP) Integration
 
-The process environment wins. Hydra then reads `~/.hydra/.env`. A `.env` in the working directory may set ordinary settings such as `HYDRA_FREE_MODEL`. Keys, tokens, and host URLs in that project file stay unloaded until you set `HYDRA_TRUST_CWD_ENV=1`.
+Hydra v1.2.0 integrates community Model Context Protocol (MCP) servers using a native Python standard library JSON-RPC 2.0 stdio client.
 
-```bash
-export OPENROUTER_API_KEY="sk-or-v1-..."
-export AI_GATEWAY_API_KEY="..."
-# VERCEL_AI_GATEWAY_TOKEN is accepted when AI_GATEWAY_API_KEY is empty.
-export CHEAPERINFERENCE_API_KEY="ci_live_..."
-export RUNPOD_API_KEY="rpa_..."
-export RUNPOD_ENDPOINT_ID="..." # or export RUNPOD_ENDPOINT_URL="..."
-export MODAL_ENDPOINT_URL="https://<app>.modal.run/v1"
-export CLOUDFLARE_API_TOKEN="..."
-export CLOUDFLARE_ACCOUNT_ID="..."
-```
+Registered servers in `~/.hydra/mcp_servers.json` (or `./.hydra/mcp_servers.json`):
 
-Frontier calls try OpenRouter, Vercel AI Gateway, CheaperInference, RunPod, and Modal. A failure before any text is printed tries the next configured provider. After text has been printed, Hydra stops, reports that the stream was truncated, and exits 1.
-
-`hydra free` uses Cloudflare Workers AI when both Cloudflare variables are set. Otherwise it uses the OpenRouter free model. One of those credentials is required. `hydra local` never calls a cloud provider.
-
-## Prompts
-
-```bash
-hydra sonnet 5.5 "Implement an LRU cache in Rust"
-hydra opus 5.5 high "State the Raft invariants"
-hydra sol 6.1 pro "Audit this function for races"
-hydra llama 4 scout "Explain memory ordering"
-hydra free "Explain TCP window scaling"
-hydra local "Write a JSONL parser"
-```
-
-`opus 5.5 high` selects `anthropic/claude-opus-5.5` and sets reasoning effort to `high`. `sol 6.1 pro` selects `openai/gpt-6.1-sol`, sets effort to `high`, and sets reasoning mode to `pro`. Those are request fields. They are not separate model ids.
-
-A `--` after the alias keeps the following words in the prompt:
-
-```bash
-hydra opus 5.5 -- high ground rules
-```
-
-Temperature is left off the request unless you pass `--temperature`. `anthropic/claude-opus-5.5` and `anthropic/claude-opus-5.5-fast` reject that field, and Hydra refuses the flag before the request.
-
-A pipe is the prompt when you pass no prompt words. A lone `-` reads the pipe and keeps the other words as the instruction. A prompt that is already present leaves stdin unread, so a parent process that never closes stdin does not stall.
-
-```bash
-git diff | hydra sonnet 5.5
-git diff | hydra sonnet 5.5 - "Audit for security issues"
-```
-
-`hydra --list-models` prints the catalog. An id that is not an alias is sent through as written. On a Vercel host, `x-ai/` becomes `spacexai/`, `meta-llama/` becomes `meta/` with a trailing `-instruct` removed, and `qwen/` becomes `alibaba/`. On OpenRouter those three rewrites run in reverse.
-
-The quiet period on a socket is 180 seconds, or 600 seconds when effort is `high`, `xhigh`, or `max`, or when a reasoning mode is set.
-
-## Swarm
-
-`hydra swarm` runs the architect, coder, and auditor at the same time. The synthesizer runs once, after at least two of those heads return text. `--heads architect,auditor` still ends with that one synthesis when a specialist succeeds. `--json` prints every head, including the synthesizer, and each object has `status` of `ok` or `failed`. A failed head or a failed synthesis exits 1.
-
-| Head | Model | Request |
+| Server | Command / Transport | Capabilities |
 | --- | --- | --- |
-| Architect | `anthropic/claude-opus-5.5` | effort `high` |
-| Coder | `anthropic/claude-sonnet-5.5` | |
-| Auditor | `openai/gpt-6.1-sol` | effort `high`, mode `pro` |
-| Synthesizer | `google/gemini-3.8-flash` | runs after the specialists |
+| `filesystem` | `npx -y @modelcontextprotocol/server-filesystem` | Read, write, list files and directories |
+| `fetch` | `npx -y @modelcontextprotocol/server-fetch` | HTTP retrieval and web markdown extraction |
+| `sqlite` | `uvx mcp-server-sqlite --db-path ./workspace.db` | Schema inspection and SQL queries |
+| `git` | `uvx mcp-server-git` | Git status, diff, log, and commits |
+| `github` | `npx -y @modelcontextprotocol/server-github` | Issues, PRs, and repository management |
+| `brave-search` | `npx -y @modelcontextprotocol/server-brave-search` | Live web search via Brave Search API |
+| `memory` | `npx -y @modelcontextprotocol/server-memory` | Knowledge graph entity persistence |
+| `postgres` | `npx -y @modelcontextprotocol/server-postgres` | PostgreSQL connection and query execution |
+| `puppeteer` | `npx -y @modelcontextprotocol/server-puppeteer` | Headless browser automation and screenshots |
 
-`--model` replaces the catalog model for every head and drops the catalog effort and mode.
+Environment variables in configuration (`${VAR_NAME}`) are automatically expanded from `~/.hydra/.env` and the process environment.
+
+## Sovereign Gateway Server (`hydra serve`)
+
+`hydra serve` starts a zero-dependency HTTP server on `127.0.0.1:7777` providing an OpenAI-compatible `/v1/chat/completions` and `/v1/models` endpoint.
+
+This allows external coding agents such as **Hermes** and **Pi** to point directly to Hydra:
+
+```bash
+# In Hermes or another OpenAI-compatible agent
+export OPENAI_BASE_URL="http://127.0.0.1:7777/v1"
+export OPENAI_API_KEY="sovereign-hydra"
+```
+
+Hydra automatically resolves aliases (`opus 5.5`, `qwen coder`, `sol 6.1 pro`), handles provider failover, and passes through tools and function calls transparently.
+
+## The Swarm Heads
+
+`hydra swarm` runs specialist heads in parallel. The synthesizer runs after specialist outputs exist:
+
+| Head | Model / Runner | Mandate |
+| --- | --- | --- |
+| **Hermes / Architect** | `hermes-agent` / `anthropic/claude-opus-5.5` | Invariant modeling, system architecture |
+| **Pi / Coder** | `pi-coder` / `anthropic/claude-sonnet-5.5` | Production implementation, unit testing |
+| **Auditor** | `openai/gpt-6.1-sol` (mode: `pro`) | Static security audit, edge cases, invariants |
+| **Synthesizer** | `google/gemini-3.8-flash` | Synthesizes verified blueprint and roadmap |
 
 ## Call it from code
 
 Python:
 
 ```python
-from hydra_cli import complete
+from hydra_cli import complete, run_agent_loop, McpRegistry
 
+# Direct prompt completion
 print(complete("sonnet 5.5", "Explain memory barriers"))
+
+# Autonomous tool-augmented agent
+registry = McpRegistry()
+result = run_agent_loop("sonnet 5.5", "Analyze repository structure", registry=registry)
+registry.shutdown()
+print(result)
 ```
 
-`complete(alias, prompt, system_prompt=None)` returns the assistant string. It loads `~/.hydra/.env`, resolves the alias, and tries each configured frontier provider.
-
-Node, with stdin closed so the child cannot wait on the parent:
+Node.js:
 
 ```javascript
 const { execFileSync } = require('node:child_process');
@@ -153,28 +182,22 @@ function callHydra(alias, prompt) {
 }
 ```
 
-More recipes are in [GUIDE.md](GUIDE.md). `hydra setup` prints the short form.
+## Settings & Credentials
 
-## Settings
+Credentials live in `~/.hydra/.env` or system environment:
 
 | Variable | Role |
 | --- | --- |
-| `OPENROUTER_API_KEY` | OpenRouter credential. Frontier calls try this first. |
-| `AI_GATEWAY_API_KEY` | Vercel AI Gateway credential. |
-| `VERCEL_AI_GATEWAY_TOKEN` | Used when `AI_GATEWAY_API_KEY` is empty. |
-| `AI_GATEWAY_API_BASE` | Gateway origin. Default `https://ai-gateway.vercel.sh/v1`. |
-| `CHEAPERINFERENCE_API_KEY` | CheaperInference credential (discounted models, GLM series). |
-| `CHEAPERINFERENCE_API_BASE` | CheaperInference origin. Default `https://api.cheaperinference.com/v1`. |
-| `RUNPOD_API_KEY` | RunPod API key for serverless endpoints and pod inference. |
-| `RUNPOD_ENDPOINT_ID` | RunPod serverless endpoint id (e.g. vLLM worker). |
-| `RUNPOD_ENDPOINT_URL` | Custom OpenAI-compatible RunPod endpoint URL. |
-| `MODAL_ENDPOINT_URL` | Modal serverless OpenAI-compatible vLLM endpoint URL. |
-| `MODAL_API_KEY` | Optional bearer token for authenticated Modal deployments. |
-| `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` | Together these select Workers AI for `hydra free`. |
-| `OLLAMA_HOST`, `LLAMACPP_HOST`, `LOCAL_AI_BASE` | Used as given. Unset defaults probe `127.0.0.1` ports 11434, then 8080, then 8000. |
-| `HYDRA_FREE_MODEL` | OpenRouter free model. Default `qwen/qwen3.8-27b:free`. |
-| `HYDRA_LOCAL_MODEL` | Local model name. Default `qwen2.5-coder:latest`. |
-| `HYDRA_TRUST_CWD_ENV` | Set to `1` to load secrets and host URLs from the working directory `.env`. |
+| `OPENROUTER_API_KEY` | OpenRouter API key. Frontier calls try this first. |
+| `AI_GATEWAY_API_KEY` | Vercel AI Gateway API key. |
+| `VERCEL_AI_GATEWAY_TOKEN` | Fallback token for Vercel AI Gateway. |
+| `CHEAPERINFERENCE_API_KEY` | CheaperInference key for high-throughput GLM/Kolibri models. |
+| `RUNPOD_API_KEY` | RunPod API key for serverless endpoints and pod workers. |
+| `MODAL_ENDPOINT_URL` | Modal vLLM endpoint URL for private open-weights deployments. |
+| `CLOUDFLARE_API_TOKEN` & `CLOUDFLARE_ACCOUNT_ID` | Workers AI credentials for `hydra free`. |
+| `OLLAMA_HOST`, `LLAMACPP_HOST`, `LOCAL_AI_BASE` | Local inference engine host endpoints. |
+| `GITHUB_TOKEN` | Token for GitHub MCP server integration. |
+| `BRAVE_API_KEY` | Key for Brave Search MCP server integration. |
 
 ## Tests
 

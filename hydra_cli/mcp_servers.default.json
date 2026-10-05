@@ -1,0 +1,56 @@
+{
+  "$schema": "https://hydra.sovereign/schemas/mcp-v1.json",
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "description": "Local file system operations (read, write, list, search)"
+    },
+    "fetch": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"],
+      "description": "Web content fetching and markdown conversion"
+    },
+    "sqlite": {
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "./workspace.db"],
+      "description": "Local SQLite database inspection and SQL execution"
+    },
+    "git": {
+      "command": "uvx",
+      "args": ["mcp-server-git"],
+      "description": "Git repository operations (status, diff, log, commit)"
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "description": "GitHub API integration (issues, PRs, repositories)"
+    },
+    "brave-search": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {
+        "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+      },
+      "description": "Real-time web search via Brave Search API"
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "${DATABASE_URL}"],
+      "description": "PostgreSQL database queries and schema inspection"
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "description": "Knowledge graph memory persistence across agent sessions"
+    },
+    "puppeteer": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+      "description": "Headless browser automation, web scraping, and screenshots"
+    }
+  }
+}

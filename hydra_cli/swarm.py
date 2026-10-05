@@ -62,11 +62,32 @@ def run_single_head(
     timeout: int = 180,
     wrap_task: bool = True,
 ) -> SwarmResult:
-    """Run one head, trying each provider until one returns text."""
+    """Run one head, trying external agent runners first if configured, then each provider."""
     start_time = time.time()
     title = head_config.get("title", role.capitalize())
     model = resolve_model(head_config.get("model", "anthropic/claude-sonnet-5.5"))
     system_prompt = head_config.get("system", "You are an autonomous engineering agent.")
+
+    runner = head_config.get("runner")
+    if runner == "hermes":
+        try:
+            from hydra_cli.agent_runners import run_hermes
+            content = run_hermes(task, timeout=timeout)
+            if content:
+                duration = time.time() - start_time
+                return SwarmResult(role=role, title=title, model="hermes-agent", content=content, duration_sec=duration)
+        except Exception:
+            pass
+    elif runner == "pi":
+        try:
+            from hydra_cli.agent_runners import run_pi
+            content = run_pi(task, timeout=timeout)
+            if content:
+                duration = time.time() - start_time
+                return SwarmResult(role=role, title=title, model="pi-coder", content=content, duration_sec=duration)
+        except Exception:
+            pass
+
     user_content = task
     if wrap_task:
         user_content = (
@@ -121,11 +142,24 @@ def _print_head(result: SwarmResult) -> None:
 
 
 def _head_config(role: str, custom_model: Optional[str]) -> Dict[str, str]:
-    cfg = SWARM_HEADS.get(role, {
+    runner = None
+    clean_role = role
+    if ":" in role:
+        base_role, runner = role.split(":", 1)
+        clean_role = base_role.strip().lower()
+        runner = runner.strip().lower()
+    elif role.lower() in ("hermes", "pi"):
+        runner = role.lower()
+        clean_role = role.lower()
+
+    cfg = SWARM_HEADS.get(clean_role, {
         "title": role.capitalize(),
         "model": "anthropic/claude-sonnet-5.5",
-        "system": f"You are a specialized agent for {role}. Address the task with high technical precision.",
+        "system": f"You are a specialized agent for {clean_role}. Address the task with high technical precision.",
     }).copy()
+    if runner:
+        cfg["runner"] = runner
+        cfg["title"] = f"{cfg.get('title', clean_role.capitalize())} ({runner})"
     if custom_model:
         cfg["model"] = custom_model
         cfg.pop("effort", None)

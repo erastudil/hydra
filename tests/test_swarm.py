@@ -49,3 +49,23 @@ def test_execute_swarm_parallel_heads(mock_fetch, mock_providers):
         assert result.to_dict()["status"] == "ok"
     synthesis_messages = mock_fetch.call_args.kwargs["messages"]
     assert "Specialized head analysis completed." in synthesis_messages[1]["content"]
+
+
+@patch("hydra_cli.agent_runners.run_hermes")
+def test_run_single_head_with_hermes_runner(mock_run_hermes):
+    mock_run_hermes.return_value = "Hermes one-shot architectural output."
+    cfg = {"title": "Architect (hermes)", "runner": "hermes"}
+    res = run_single_head("architect:hermes", cfg, "Build distributed queue", provider=[])
+    assert res.role == "architect:hermes"
+    assert res.model == "hermes-agent"
+    assert res.content == "Hermes one-shot architectural output."
+    assert res.error is None
+    mock_run_hermes.assert_called_once_with("Build distributed queue", timeout=180)
+
+
+def test_head_config_runner_parsing():
+    from hydra_cli.swarm import _head_config
+    cfg = _head_config("coder:pi", None)
+    assert cfg.get("runner") == "pi"
+    assert "pi" in cfg.get("title", "").lower()
+

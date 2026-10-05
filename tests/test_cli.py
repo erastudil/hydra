@@ -127,3 +127,31 @@ def test_flags_parsing(mock_summon):
     assert kwargs["temperature"] == 0.2
     assert kwargs["max_tokens"] == 1000
     assert kwargs["stream"] is False
+
+
+def test_banner_command():
+    assert route_command(["banner"]) == 0
+    assert route_command(["--banner"]) == 0
+
+
+def test_mcp_list_and_config_commands():
+    assert route_command(["mcp", "list"]) == 0
+    assert route_command(["mcp", "config"]) == 0
+
+
+@patch("hydra_cli.router.execute_agent_mode")
+def test_agent_command_routing(mock_agent):
+    mock_agent.return_value = 0
+    assert route_command(["agent", "build a test"]) == 0
+    mock_agent.assert_called_once()
+    assert mock_agent.call_args.kwargs["prompt"] == "build a test"
+
+
+@patch("hydra_cli.router.execute_agent_mode")
+def test_mcp_flag_routing(mock_agent):
+    mock_agent.return_value = 0
+    assert route_command(["opus", "5.5", "read file", "--mcp"]) == 0
+    mock_agent.assert_called_once()
+    assert mock_agent.call_args.kwargs["alias"] == "opus 5.5"
+    assert mock_agent.call_args.kwargs["prompt"] == "read file"
+

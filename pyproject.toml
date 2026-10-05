@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hydra-ai-cli"
-version = "1.1.0"
+version = "1.2.0"
 description = "Sovereign multi-headed AI summoning CLI. Direct frontier models, zero-cost Free Forge routing, local inference, and multi-agent swarm fan-out."
 readme = "README.md"
 authors = [

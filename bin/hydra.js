@@ -611,7 +611,35 @@ async function runSwarm(task, selectedRoles, customModel, jsonMode, temperature)
   return results.some((result) => result.error) ? 1 : 0;
 }
 
-const HELP_BANNER = `
+const GREEN_PHOSPHOR = process.stdout.isTTY && !process.env.NO_COLOR ? '\x1b[38;5;46m' : '';
+const GREEN_MID = process.stdout.isTTY && !process.env.NO_COLOR ? '\x1b[38;5;40m' : '';
+const COLOR_RESET = process.stdout.isTTY && !process.env.NO_COLOR ? '\x1b[0m' : '';
+
+const HYDRA_7_HEADS_ART = `
+            [1]        [2]        [3]        [4]        [5]        [6]        [7]
+           HERMES       PI      ARCHITECT  SOVEREIGN   CODER     AUDITOR   SYNTHESIS
+          (\\___/)    (\\___/)    (\\___/)    <(\\___/)>   (\\___/)    (\\___/)    (\\___/)
+          /0   0\\    /o   o\\    /^   ^\\    { 0   0 }   /^   ^\\    /o   o\\    /0   0\\
+         ( ==Y== )  ( ==v== )  ( ==w== )  (  ==X==  ) ( ==w== )  ( ==v== )  ( ==Y== )
+          )     (    )     (    )     (   / )     ( \\  )     (    )     (    )     (
+         /       \\  /       \\  /       \\ ( /       \\ )/       \\  /       \\  /       \\
+        /   | |   \\/   | |   \\/   | |   \\ V   | |   V /   | |   \\/   | |   \\/   | |   \\
+       |    | |        | |        | |    |    | |   |   | |        | |        | |    |
+       \\    \\ \\       / /        / /     |    | |   |    \\ \\        \\ \\       / /    /
+        \\    \\ \\_____/ /        / /      \\    | |   /     \\ \\________\\ \\_____/ /    /
+         \\    \\_______/        / /        \\___/ \\__/       \\_______/  \\_______/    /
+          \\                   / /          |       |        \\                     /
+           '.               .' /           |  VII  |         \\                  .'
+             '.           .'  /            |       |          \\               .'
+               '---------'   /             /_______\\           \\   '---------'
+                            /             /         \\           \\
+                           (             /   HYDRA   \\           )
+                            '._________.'|   CORE    |'._________.'
+                                         \\           /
+                                          '---------'
+`;
+
+const HELP_BANNER = `${GREEN_MID}${HYDRA_7_HEADS_ART}${COLOR_RESET}
   ___ ___            .___
  /   |   \\___.__.  __| _/___________
 /    ~    <   |  | / __ |\\_  __ \\__  \\
@@ -621,17 +649,22 @@ const HELP_BANNER = `
       Sovereign Multi-Headed AI Shell · v${VERSION} (Node.js)
 
 USAGE:
-    hydra <model-alias> "<prompt>"
-    hydra free "<prompt>"
-    hydra local "<prompt>"
-    hydra swarm "<task>"
-    hydra setup
-    cat file.txt | hydra <alias>
+    hydra <model-alias> "<prompt>"       # Direct frontier model summoning
+    hydra free "<prompt>"                # Zero-cost Free Forge routing
+    hydra local "<prompt>"               # Offline local inference (Ollama/llama.cpp/EasyLM)
+    hydra swarm "<task>"                 # Multi-agent swarm fan-out (Architect, Coder, Auditor)
+    hydra agent "<prompt>"               # Autonomous ReAct agent with MCP tools
+    hydra <alias> --mcp "<prompt>"       # Tool-augmented execution loop
+    hydra serve [--port 7777]            # Sovereign OpenAI Gateway for Hermes and Pi
+    hydra mcp list                       # List configured community MCP servers & tools
+    hydra banner                         # Display 7-headed Sovereign Hydra in terminal green
+    hydra setup                          # Interactive setup & app/agent integration guide
+    cat file.txt | hydra <alias>         # The pipe is the prompt
     cat file.txt | hydra <alias> - "instruction"
-    hydra <alias> -- <prompt>
+    hydra <alias> -- <prompt>            # Keep prompt words that match an alias
 
 POPULAR ALIASES:
-    opus 5.5 high, sol 6.1 pro, sonnet 5.5, gemini 3.8, grok 4.7, llama 4 scout
+    opus 5.5 high, sol 6.1 pro, sonnet 5.5, gemini 3.8, grok 4.7, llama 4 scout, hermes, pi
 
 OPTIONS:
     --system <prompt>       Custom system prompt
@@ -642,6 +675,7 @@ OPTIONS:
     --max-tokens <int>      Maximum generation tokens
     --no-stream             Disable real-time SSE streaming
     --json                  Output raw JSON
+    --mcp                   Enable Model Context Protocol (MCP) tools
     --heads <roles>         Comma-separated swarm heads
     --list-models           List registered aliases
     -v, --version           Display version
@@ -779,6 +813,10 @@ async function main() {
   }
   if (early === '-v' || early === '--version' || early === 'version') {
     console.log(`hydra ${VERSION}`);
+    return 0;
+  }
+  if (early === 'banner' || early === '--banner') {
+    console.log(`${GREEN_PHOSPHOR}${HYDRA_7_HEADS_ART}${COLOR_RESET}\n  ___ ___            .___\n /   |   \\___.__.  __| _/___________\n/    ~    <   |  | / __ |\\_  __ \\__  \\\n\\    Y    /\\___  |/ /_/ | |  | \\// __ \\_\n \\___|_  / / ____|\\____ | |__|  (____  /\n       \\/  \\/          \\/            \\/\n      Sovereign Multi-Headed AI Shell · v${VERSION} (Node.js)\n`);
     return 0;
   }
   if (early === 'setup' || early === 'guide' || early === '--setup' || early === '--guide') {

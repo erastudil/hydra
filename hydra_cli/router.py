@@ -32,6 +32,28 @@ from hydra_cli.providers import (
 from hydra_cli.swarm import execute_swarm
 
 HELP_BANNER = f"""
+            [1]        [2]        [3]        [4]        [5]        [6]        [7]
+           HERMES       PI      ARCHITECT  SOVEREIGN   CODER     AUDITOR   SYNTHESIS
+          (\\___/)    (\\___/)    (\\___/)    <(\\___/)>   (\\___/)    (\\___/)    (\\___/)
+          /0   0\\    /o   o\\    /^   ^\\    {{ 0   0 }}   /^   ^\\    /o   o\\    /0   0\\
+         ( ==Y== )  ( ==v== )  ( ==w== )  (  ==X==  ) ( ==w== )  ( ==v== )  ( ==Y== )
+          )     (    )     (    )     (   / )     ( \\  )     (    )     (    )     (
+         /       \\  /       \\  /       \\ ( /       \\ )/       \\  /       \\  /       \\
+        /   | |   \\/   | |   \\/   | |   \\ V   | |   V /   | |   \\/   | |   \\/   | |   \\
+       |    | |        | |        | |    |    | |   |   | |        | |        | |    |
+       \\    \\ \\       / /        / /     |    | |   |    \\ \\        \\ \\       / /    /
+        \\    \\ \\_____/ /        / /      \\    | |   /     \\ \\________\\ \\_____/ /    /
+         \\    \\_______/        / /        \\___/ \\__/       \\_______/  \\_______/    /
+          \\                   / /          |       |        \\                     /
+           '.               .' /           |  VII  |         \\                  .'
+             '.           .'  /            |       |          \\               .'
+               '---------'   /             /_______\\           \\   '---------'
+                            /             /         \\           \\
+                           (             /   HYDRA   \\           )
+                            '._________.'|   CORE    |'._________.'
+                                         \\           /
+                                          '---------'
+
   ___ ___            .___              
  /   |   \\___.__.  __| _/___________   
 /    ~    <   |  | / __ |\\_  __ \\__  \\  
@@ -45,13 +67,18 @@ USAGE:
     hydra free "<prompt>"                # Zero-cost Free Forge routing
     hydra local "<prompt>"               # Offline local inference (Ollama/llama.cpp/EasyLM)
     hydra swarm "<task>"                 # Multi-agent swarm fan-out (Architect, Coder, Auditor)
+    hydra agent "<prompt>"               # Autonomous ReAct agent with MCP tools
+    hydra <alias> --mcp "<prompt>"       # Tool-augmented execution loop
+    hydra serve [--port 7777]            # Sovereign OpenAI Gateway for Hermes and Pi
+    hydra mcp list                       # List configured community MCP servers & tools
+    hydra banner                         # Display 7-headed Sovereign Hydra in terminal green
     hydra setup                          # Interactive setup & app/agent integration guide
     cat file.txt | hydra <alias>         # The pipe is the prompt
     cat file.txt | hydra <alias> - "do"  # Pipe plus an instruction
     hydra <alias> -- <prompt>            # Keep prompt words that match an alias
 
 POPULAR ALIASES:
-    opus 5.5 high, sol 6.1 pro, sonnet 5.5, gemini 3.8, grok 4.7, llama 4 scout
+    opus 5.5 high, sol 6.1 pro, sonnet 5.5, gemini 3.8, grok 4.7, llama 4 scout, hermes, pi
 
 OPTIONS:
     --system <prompt>       Custom system prompt
@@ -62,7 +89,8 @@ OPTIONS:
     --max-tokens <int>      Maximum generation tokens
     --no-stream             Disable real-time SSE streaming
     --json                  Output raw JSON
-    --heads <roles>         Comma-separated swarm heads (e.g. architect,coder,auditor)
+    --mcp                   Enable Model Context Protocol (MCP) tools
+    --heads <roles>         Comma-separated swarm heads (e.g. architect:hermes,coder:pi,auditor)
     --list-models           List all registered aliases and providers
     --guide, --setup        Show setup and integration guide
     -v, --version           Display version
@@ -246,10 +274,18 @@ def route_command(argv: List[str]) -> int:
     load_dotenv()
 
     if argv and argv[0] in ("-h", "--help", "help"):
-        print(HELP_BANNER)
+        from hydra_cli.ui import GREEN_MID, RESET, supports_color
+        if supports_color():
+            print(f"{GREEN_MID}{HELP_BANNER}{RESET}")
+        else:
+            print(HELP_BANNER)
         return 0
     if argv and argv[0] in ("-v", "--version", "version"):
         print(f"hydra {__version__}")
+        return 0
+    if argv and argv[0] in ("banner", "--banner"):
+        from hydra_cli.ui import print_banner
+        print_banner(detailed=True, version=__version__)
         return 0
     if argv and argv[0] in ("setup", "guide", "--setup", "--guide"):
         print_setup_guide()
@@ -257,12 +293,38 @@ def route_command(argv: List[str]) -> int:
     if argv and argv[0] in ("--list-models", "list-models", "models"):
         print_registered_models()
         return 0
+    if argv and argv[0] in ("mcp", "--mcp") and len(argv) > 1 and argv[1] in ("list", "test", "init", "default", "config"):
+        return execute_mcp_command(argv[1:])
+    if argv and argv[0] in ("serve", "--serve"):
+        host = "127.0.0.1"
+        port = 7777
+        idx = 1
+        while idx < len(argv):
+            if argv[idx] == "--host" and idx + 1 < len(argv):
+                host = argv[idx + 1]
+                idx += 2
+            elif argv[idx] == "--port" and idx + 1 < len(argv):
+                try:
+                    port = int(argv[idx + 1])
+                except ValueError:
+                    sys.stderr.write(f"[ERROR] --port expects an integer, got {argv[idx + 1]!r}.\n")
+                    return 1
+                idx += 2
+            else:
+                idx += 1
+        from hydra_cli.serve import run_server
+        run_server(host=host, port=port)
+        return 0
 
     if not argv:
         piped_input = read_stdin_if_piped()
         if piped_input:
             return execute_summon("sonnet 5.5", piped_input, system_prompt=DEFAULT_SYSTEM_PROMPT)
-        print(HELP_BANNER)
+        from hydra_cli.ui import GREEN_MID, RESET, supports_color
+        if supports_color():
+            print(f"{GREEN_MID}{HELP_BANNER}{RESET}")
+        else:
+            print(HELP_BANNER)
         return 0
 
     command_or_alias, remaining = consume_alias(list(argv))
@@ -276,6 +338,7 @@ def route_command(argv: List[str]) -> int:
     max_tokens = None
     stream = True
     json_mode = False
+    mcp_mode = False
     swarm_heads = None
 
     idx = 0
@@ -316,6 +379,9 @@ def route_command(argv: List[str]) -> int:
             json_mode = True
             stream = False
             idx += 1
+        elif arg == "--mcp":
+            mcp_mode = True
+            idx += 1
         else:
             prompt_tokens.append(arg)
             idx += 1
@@ -330,7 +396,16 @@ def route_command(argv: List[str]) -> int:
     cmd_lower = command_or_alias.lower().strip()
 
     try:
-        if cmd_lower == "free":
+        if cmd_lower in ("agent", "mcp") or mcp_mode:
+            target_alias = command_or_alias if cmd_lower not in ("agent", "mcp") else (model_override or "sonnet 5.5")
+            return execute_agent_mode(
+                alias=target_alias,
+                prompt=effective_prompt,
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        elif cmd_lower == "free":
             return execute_free(
                 prompt=effective_prompt,
                 system_prompt=system_prompt,
@@ -603,3 +678,109 @@ def execute_swarm_mode(
     if any(result.error for result in results):
         return 1
     return 0
+
+
+def execute_agent_mode(
+    alias: str,
+    prompt: str,
+    system_prompt: str,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> int:
+    """Execute autonomous agent loop with discovered MCP tools."""
+    from hydra_cli.agent import run_agent_loop
+    from hydra_cli.mcp_registry import McpRegistry
+    reg = McpRegistry(auto_load=True)
+    try:
+        ans = run_agent_loop(
+            alias=alias,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            registry=reg,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        print(ans)
+        return 0
+    finally:
+        reg.shutdown()
+
+
+def execute_mcp_command(args: List[str]) -> int:
+    """Handle hydra mcp subcommands: list, test, config, init."""
+    from hydra_cli.mcp_registry import McpRegistry, DEFAULT_PACKAGE_CONFIG, get_default_home_config
+    from hydra_cli.ui import GREEN_BOLD, GREEN_BRIGHT, RESET, supports_color
+
+    subcmd = args[0] if args else "list"
+
+    if subcmd == "list":
+        reg = McpRegistry(auto_load=True)
+        servers = reg._server_configs
+        if not servers:
+            print(f"No MCP servers registered in {reg.config_path or 'configuration'}.")
+            return 0
+        c_bold = GREEN_BOLD if supports_color() else ""
+        c_tool = GREEN_BRIGHT if supports_color() else ""
+        c_reset = RESET if supports_color() else ""
+        print(f"\n{c_bold}--- Registered MCP Servers ({len(servers)}) ---{c_reset}")
+        for name, cfg in sorted(servers.items()):
+            cmd = cfg.get("command") or cfg.get("url", "")
+            args_str = " ".join(cfg.get("args", []))
+            desc = cfg.get("description", "")
+            desc_str = f" - {desc}" if desc else ""
+            print(f"  * {c_tool}{name:<14}{c_reset} : {cmd} {args_str}{desc_str}")
+        print()
+        return 0
+
+    if subcmd == "config":
+        reg = McpRegistry(auto_load=False)
+        cfg_path = reg.discover_config_path()
+        print(f"Active MCP configuration: {cfg_path}")
+        if os.path.isfile(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                print(f.read())
+        else:
+            print("(Config file not found. Run `hydra mcp init` to create it from default community template)")
+        return 0
+
+    if subcmd in ("init", "default"):
+        home_cfg = get_default_home_config()
+        if os.path.isfile(home_cfg) and "--force" not in args:
+            print(f"Config already exists at {home_cfg}. Use --force to overwrite.")
+            return 0
+        if os.path.isfile(DEFAULT_PACKAGE_CONFIG):
+            import shutil
+            os.makedirs(os.path.dirname(home_cfg), exist_ok=True)
+            shutil.copyfile(DEFAULT_PACKAGE_CONFIG, home_cfg)
+            print(f"Initialized default community MCP servers configuration at {home_cfg}")
+            return 0
+        else:
+            sys.stderr.write(f"[ERROR] Default template not found at {DEFAULT_PACKAGE_CONFIG}\n")
+            return 1
+
+    if subcmd == "test":
+        if len(args) < 2:
+            sys.stderr.write("Usage: hydra mcp test <server_name>\n")
+            return 1
+        target_name = args[1]
+        reg = McpRegistry(auto_load=True)
+        if target_name not in reg._server_configs:
+            sys.stderr.write(f"[ERROR] MCP server '{target_name}' not configured.\n")
+            return 1
+        print(f"Testing MCP server '{target_name}'...")
+        try:
+            client = reg.get_client(target_name)
+            tools = client.list_tools()
+            print(f"[OK] Server '{target_name}' initialized successfully. {len(tools)} tools discovered:")
+            for t in tools:
+                print(f"  - {t.get('name')}: {t.get('description', '')}")
+            reg.shutdown()
+            return 0
+        except Exception as e:
+            sys.stderr.write(f"[ERROR] Failed testing server '{target_name}': {e}\n")
+            reg.shutdown()
+            return 1
+
+    sys.stderr.write(f"Unknown mcp command: '{subcmd}'. Available: list, test, config, init\n")
+    return 1
+
