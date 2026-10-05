@@ -4,18 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hydra-ai-cli"
-version = "1.0.0"
+version = "1.1.0"
 description = "Sovereign multi-headed AI summoning CLI. Direct frontier models, zero-cost Free Forge routing, local inference, and multi-agent swarm fan-out."
 readme = "README.md"
 authors = [
   { name = "erastudil" }
 ]
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: Apache Software License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.8",
@@ -39,3 +39,9 @@ hydra = "hydra_cli.cli:main"
 Homepage = "https://github.com/erastudil/hydra"
 Repository = "https://github.com/erastudil/hydra"
 "Bug Tracker" = "https://github.com/erastudil/hydra/issues"
+
+[tool.setuptools.packages.find]
+include = ["hydra_cli*"]
+
+[tool.setuptools.package-data]
+hydra_cli = ["catalog.json"]

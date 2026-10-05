@@ -1,41 +1,55 @@
 """
 Provider integrations and streaming transport for Hydra CLI.
-Supports OpenRouter, Vercel AI Gateway, Cloudflare Workers AI, and Local Inference (Ollama/llama.cpp/EasyLM).
+Supports OpenRouter, Vercel AI Gateway, Cloudflare Workers AI, and local inference.
 """
 
 import json
 import os
 import socket
-import sys
-import time
 import urllib.error
 import urllib.request
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from hydra_cli.config import (
     DEFAULT_CLOUDFLARE_MODEL,
-    DEFAULT_EASYLM_ENDPOINT,
     DEFAULT_FREE_MODEL,
-    DEFAULT_LLAMACPP_ENDPOINT,
-    DEFAULT_LOCAL_MODEL,
-    DEFAULT_OLLAMA_ENDPOINT,
     DEFAULT_SYSTEM_PROMPT,
-    FREE_MODELS,
+    load_dotenv,
+    model_rejects_temperature,
+    resolve_route,
 )
 
 
 class ProviderError(Exception):
     """Base exception for provider invocation failures."""
-    pass
 
 
 class CredentialsMissingError(ProviderError):
     """Raised when required credentials are missing."""
-    pass
+
+
+class UsageError(ProviderError):
+    """Raised when the request is invalid before any provider is called."""
+
+
+def clean_secret(value: Optional[str]) -> str:
+    """Strip a credential and reject values that could break a header."""
+    text = (value or "").strip()
+    if any(char in text for char in "\r\n"):
+        return ""
+    return text
+
+
+def gateway_api_key() -> str:
+    """Prefer AI_GATEWAY_API_KEY. Accept the older documented name as an alias."""
+    return clean_secret(os.environ.get("AI_GATEWAY_API_KEY")) or clean_secret(
+        os.environ.get("VERCEL_AI_GATEWAY_TOKEN")
+    )
 
 
 def is_port_open(host: str, port: int, timeout: float = 0.4) -> bool:
-    """Check if a TCP port is open locally with a fast timeout."""
+    """Check if a TCP port is open with a fast timeout."""
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
@@ -46,48 +60,48 @@ def is_port_open(host: str, port: int, timeout: float = 0.4) -> bool:
         return False
 
 
+def chat_completions_url(base: str) -> str:
+    """Normalize a server origin to an OpenAI-compatible chat completions URL."""
+    root = base.strip().rstrip("/")
+    if root.endswith("/chat/completions"):
+        return root
+    if not root.endswith("/v1"):
+        root = f"{root}/v1"
+    return f"{root}/chat/completions"
+
+
 def detect_local_endpoint() -> Tuple[str, str]:
     """
-    Detect an active local inference endpoint and return (endpoint_url, provider_name).
-    Checks LOCAL_AI_BASE first, then Ollama (11434), llama.cpp (8080), EasyLM (8000).
+    Return (endpoint_url, provider_name).
+    An explicit host variable is used as given. Ports are probed only for unset defaults.
     """
-    custom_base = os.environ.get("LOCAL_AI_BASE")
+    custom_base = os.environ.get("LOCAL_AI_BASE", "").strip()
     if custom_base:
-        base = custom_base.rstrip("/")
-        if not base.endswith("/v1"):
-            base = f"{base}/v1"
-        return f"{base}/chat/completions", "Custom Local AI"
+        return chat_completions_url(custom_base), "Custom Local AI"
 
-    # Ollama on 11434
-    ollama_host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-    port = 11434
-    try:
-        if ":" in ollama_host.split("//")[-1]:
-            port = int(ollama_host.split(":")[-1].split("/")[0])
-    except Exception:
-        port = 11434
+    ollama_host = os.environ.get("OLLAMA_HOST", "").strip()
+    if ollama_host:
+        return chat_completions_url(ollama_host), "Ollama"
+    if is_port_open("127.0.0.1", 11434):
+        return chat_completions_url("http://127.0.0.1:11434"), "Ollama"
 
-    if is_port_open("127.0.0.1", port):
-        return f"{ollama_host}/v1/chat/completions", "Ollama"
-
-    # llama.cpp on 8080
-    llamacpp_host = os.environ.get("LLAMACPP_HOST", "http://localhost:8080").rstrip("/")
+    llama_host = os.environ.get("LLAMACPP_HOST", "").strip()
+    if llama_host:
+        return chat_completions_url(llama_host), "llama.cpp"
     if is_port_open("127.0.0.1", 8080):
-        return f"{llamacpp_host}/v1/chat/completions", "llama.cpp"
+        return chat_completions_url("http://127.0.0.1:8080"), "llama.cpp"
 
-    # EasyLM / WebGPU local server on 8000
     if is_port_open("127.0.0.1", 8000):
-        return f"{DEFAULT_EASYLM_ENDPOINT}/v1/chat/completions", "EasyLM"
+        return chat_completions_url("http://127.0.0.1:8000"), "EasyLM"
 
-    # Fallback default: Ollama
-    return f"{DEFAULT_OLLAMA_ENDPOINT}/v1/chat/completions", "Ollama (unverified)"
+    return chat_completions_url("http://127.0.0.1:11434"), "Ollama (unverified)"
 
 
 def get_frontier_providers() -> List[Dict[str, Any]]:
-    """Return configured frontier cloud providers in order of priority."""
+    """Return configured frontier cloud providers. OpenRouter is tried first."""
     providers = []
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    vercel_key = os.environ.get("AI_GATEWAY_API_KEY", "").strip()
+    openrouter_key = clean_secret(os.environ.get("OPENROUTER_API_KEY"))
+    vercel_key = gateway_api_key()
 
     if openrouter_key:
         providers.append({
@@ -117,13 +131,12 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
 
 def get_free_provider() -> Tuple[Dict[str, Any], str]:
     """
-    Resolve provider and model for Free Forge zero-cost routing.
-    Priority:
-    1. Cloudflare Workers AI if CLOUDFLARE_API_TOKEN & CLOUDFLARE_ACCOUNT_ID exist.
-    2. OpenRouter with free-tier model (uses OPENROUTER_API_KEY if present, or OpenRouter free route).
+    Resolve provider and model for Free Forge.
+    Cloudflare Workers AI wins when both Cloudflare variables are set.
+    Otherwise OpenRouter's free-tier model is used. A key is required either way.
     """
-    cf_token = os.environ.get("CLOUDFLARE_API_TOKEN", "").strip()
-    cf_account = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "").strip()
+    cf_token = clean_secret(os.environ.get("CLOUDFLARE_API_TOKEN"))
+    cf_account = clean_secret(os.environ.get("CLOUDFLARE_ACCOUNT_ID"))
 
     if cf_token and cf_account:
         return {
@@ -135,7 +148,7 @@ def get_free_provider() -> Tuple[Dict[str, Any], str]:
             },
         }, DEFAULT_CLOUDFLARE_MODEL
 
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    openrouter_key = clean_secret(os.environ.get("OPENROUTER_API_KEY"))
     if openrouter_key:
         return {
             "name": "OpenRouter Free Forge",
@@ -148,40 +161,108 @@ def get_free_provider() -> Tuple[Dict[str, Any], str]:
             },
         }, DEFAULT_FREE_MODEL
 
-    # If neither credential is set, suggest setting one or falling back to local
     raise CredentialsMissingError(
         "Free Forge requires either:\n"
-        "  - CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (for Cloudflare Workers AI zero-cost tier), or\n"
-        "  - OPENROUTER_API_KEY (for OpenRouter free models like Llama-3.3-70B:free)\n"
-        "To run with zero external keys completely offline, use: hydra local \"<prompt>\""
+        "  - CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, or\n"
+        "  - OPENROUTER_API_KEY\n"
+        "For a machine with no cloud key, use: hydra local \"<prompt>\""
     )
 
 
 def adapt_model_for_url(url: str, model: str) -> str:
-    """Translate provider-specific namespaces based on destination gateway URL."""
-    u_lower = url.lower()
-    if "vercel" in u_lower:
+    """Translate provider namespaces. Unknown ids pass through unchanged."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or url).lower()
+    if host.endswith("vercel.sh") or ".vercel." in host:
         if model.startswith("x-ai/"):
-            return model.replace("x-ai/", "spacexai/")
+            return "spacexai/" + model[len("x-ai/"):]
         if model.startswith("meta-llama/"):
-            v_id = model.replace("meta-llama/", "meta/")
-            if v_id.endswith("-instruct"):
-                v_id = v_id[:-len("-instruct")]
-            return v_id
+            rewritten = "meta/" + model[len("meta-llama/"):]
+            if rewritten.endswith("-instruct"):
+                rewritten = rewritten[: -len("-instruct")]
+            return rewritten
         if model.startswith("qwen/"):
-            return model.replace("qwen/", "alibaba/")
-        if model == "openai/gpt-6.1-sol-pro":
-            return "openai/gpt-6.1-sol"
-        if model == "openai/gpt-6-luna-pro":
-            return "openai/gpt-6-luna"
-    elif "openrouter" in u_lower:
+            return "alibaba/" + model[len("qwen/"):]
+    elif "openrouter.ai" in host:
         if model.startswith("spacexai/"):
-            return model.replace("spacexai/", "x-ai/")
+            return "x-ai/" + model[len("spacexai/"):]
         if model.startswith("alibaba/"):
-            return model.replace("alibaba/", "qwen/")
-        if model.startswith("meta/"):
-            return model.replace("meta/", "meta-llama/")
+            return "qwen/" + model[len("alibaba/"):]
+        if model.startswith("meta/") and not model.startswith("meta-llama/"):
+            return "meta-llama/" + model[len("meta/"):]
     return model
+
+
+_LONG_EFFORTS = {"high", "xhigh", "max"}
+
+
+def completion_timeout(reasoning: Optional[Dict[str, str]], explicit: Optional[int] = None) -> int:
+    """Idle wait in seconds. High effort and pro mode get a longer quiet period."""
+    if explicit is not None:
+        return explicit
+    if not reasoning:
+        return 180
+    effort = str(reasoning.get("effort") or "").lower()
+    if reasoning.get("mode") or effort in _LONG_EFFORTS:
+        return 600
+    return 180
+
+
+def ensure_temperature(model: str, temperature: Optional[float]) -> None:
+    """Refuse a temperature the catalog says this model will reject."""
+    if temperature is not None and model_rejects_temperature(model):
+        raise UsageError(f"{model} rejects temperature. Omit --temperature.")
+
+
+def reasoning_fields(effort: Optional[str] = None, reasoning_mode: Optional[str] = None) -> Optional[Dict[str, str]]:
+    """Build the gateway reasoning object. Empty means the field stays off the request."""
+    reasoning: Dict[str, str] = {}
+    if effort:
+        reasoning["effort"] = effort
+    if reasoning_mode:
+        reasoning["mode"] = reasoning_mode
+    return reasoning or None
+
+
+def _build_payload(
+    model: str,
+    messages: List[Dict[str, str]],
+    stream: bool,
+    temperature: Optional[float],
+    max_tokens: Optional[int],
+    reasoning: Optional[Dict[str, str]],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
+    if reasoning:
+        payload["reasoning"] = reasoning
+    return payload
+
+
+def _error_message(body: str, fallback: str) -> str:
+    try:
+        parsed = json.loads(body)
+        return parsed.get("error", {}).get("message", body) or fallback
+    except Exception:
+        return body or fallback
+
+
+def _raise_if_provider_error(chunk: Dict[str, Any]) -> None:
+    error = chunk.get("error")
+    if not error:
+        return
+    if isinstance(error, dict):
+        message = error.get("message") or json.dumps(error)
+    else:
+        message = str(error)
+    raise ProviderError(message)
 
 
 def stream_chat_completion(
@@ -189,60 +270,58 @@ def stream_chat_completion(
     headers: Dict[str, str],
     model: str,
     messages: List[Dict[str, str]],
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
-    timeout: int = 120,
+    timeout: Optional[int] = None,
+    reasoning: Optional[Dict[str, str]] = None,
 ) -> Generator[str, None, None]:
-    """
-    Send streaming chat completion request and yield text delta tokens via SSE.
-    """
+    """Send a streaming chat completion and yield text deltas."""
+    ensure_temperature(model, temperature)
     effective_model = adapt_model_for_url(url, model)
-    payload: Dict[str, Any] = {
-        "model": effective_model,
-        "messages": messages,
-        "stream": True,
-        "temperature": temperature,
-    }
-    if max_tokens:
-        payload["max_tokens"] = max_tokens
-
+    payload = _build_payload(effective_model, messages, True, temperature, max_tokens, reasoning)
     data_bytes = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, headers=headers, data=data_bytes, method="POST")
+    wait = completion_timeout(reasoning, timeout)
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=wait) as resp:
+            saw_done = False
             for raw_line in resp:
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if not line or line.startswith(":"):
                     continue
                 if line == "data: [DONE]":
+                    saw_done = True
                     break
-                if line.startswith("data: "):
-                    raw_json = line[6:].strip()
-                    try:
-                        chunk = json.loads(raw_json)
-                        choices = chunk.get("choices", [])
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta", {})
-                        content = delta.get("content", "")
-                        if content:
-                            yield content
-                    except json.JSONDecodeError:
-                        continue
-    except urllib.error.HTTPError as e:
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    chunk = json.loads(line[6:].strip())
+                except json.JSONDecodeError:
+                    continue
+                _raise_if_provider_error(chunk)
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                content = delta.get("content") or ""
+                if content:
+                    yield content
+            if not saw_done:
+                raise ProviderError(f"Stream from {url} ended before data: [DONE]")
+    except ProviderError:
+        raise
+    except urllib.error.HTTPError as exc:
         error_body = ""
         try:
-            error_body = e.read().decode("utf-8", errors="replace")
-            parsed_err = json.loads(error_body)
-            msg = parsed_err.get("error", {}).get("message", error_body)
+            error_body = exc.read().decode("utf-8", errors="replace")
         except Exception:
-            msg = error_body or str(e)
-        raise ProviderError(f"HTTP {e.code} error from {url}: {msg}") from e
-    except urllib.error.URLError as e:
-        raise ProviderError(f"Connection failed to {url}: {e.reason}") from e
-    except Exception as e:
-        raise ProviderError(f"Streaming error: {e}") from e
+            error_body = ""
+        raise ProviderError(f"HTTP {exc.code} error from {url}: {_error_message(error_body, str(exc))}") from exc
+    except urllib.error.URLError as exc:
+        raise ProviderError(f"Connection failed to {url}: {exc.reason}") from exc
+    except Exception as exc:
+        raise ProviderError(f"Streaming error: {exc}") from exc
 
 
 def fetch_chat_completion(
@@ -250,42 +329,84 @@ def fetch_chat_completion(
     headers: Dict[str, str],
     model: str,
     messages: List[Dict[str, str]],
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
-    timeout: int = 120,
+    timeout: Optional[int] = None,
+    reasoning: Optional[Dict[str, str]] = None,
 ) -> str:
-    """
-    Fetch complete chat completion response without streaming.
-    """
+    """Fetch one complete chat completion."""
+    ensure_temperature(model, temperature)
     effective_model = adapt_model_for_url(url, model)
-    payload: Dict[str, Any] = {
-        "model": effective_model,
-        "messages": messages,
-        "stream": False,
-        "temperature": temperature,
-    }
-    if max_tokens:
-        payload["max_tokens"] = max_tokens
-
+    payload = _build_payload(effective_model, messages, False, temperature, max_tokens, reasoning)
     data_bytes = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, headers=headers, data=data_bytes, method="POST")
+    wait = completion_timeout(reasoning, timeout)
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=wait) as resp:
             raw_body = resp.read().decode("utf-8", errors="replace")
             res_json = json.loads(raw_body)
-            choices = res_json.get("choices", [])
-            if choices:
-                return choices[0].get("message", {}).get("content", "")
-            return ""
-    except urllib.error.HTTPError as e:
+            _raise_if_provider_error(res_json)
+            choices = res_json.get("choices") or []
+            if not choices:
+                raise ProviderError(f"Empty completion from {url}")
+            content = choices[0].get("message", {}).get("content")
+            if not isinstance(content, str) or not content:
+                raise ProviderError(f"Empty completion from {url}")
+            return content
+    except ProviderError:
+        raise
+    except urllib.error.HTTPError as exc:
         error_body = ""
         try:
-            error_body = e.read().decode("utf-8", errors="replace")
-            parsed_err = json.loads(error_body)
-            msg = parsed_err.get("error", {}).get("message", error_body)
+            error_body = exc.read().decode("utf-8", errors="replace")
         except Exception:
-            msg = error_body or str(e)
-        raise ProviderError(f"HTTP {e.code} error from {url}: {msg}") from e
-    except Exception as e:
-        raise ProviderError(f"Request failed: {e}") from e
+            error_body = ""
+        raise ProviderError(f"HTTP {exc.code} error from {url}: {_error_message(error_body, str(exc))}") from exc
+    except urllib.error.URLError as exc:
+        raise ProviderError(f"Connection failed to {url}: {exc.reason}") from exc
+    except Exception as exc:
+        if isinstance(exc, ProviderError):
+            raise
+        raise ProviderError(f"Request failed: {exc}") from exc
+
+
+def complete(
+    alias: str,
+    prompt: str,
+    system_prompt: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> str:
+    """Summon one alias and return the assistant text. Tries each configured provider."""
+    load_dotenv()
+    route = resolve_route(alias)
+    providers = get_frontier_providers()
+    if not providers:
+        raise CredentialsMissingError(
+            "No frontier credentials found. Export OPENROUTER_API_KEY or AI_GATEWAY_API_KEY."
+        )
+    messages = [
+        {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
+        {"role": "user", "content": prompt},
+    ]
+    reasoning = reasoning_fields(route.get("effort"), route.get("reasoning_mode"))
+    ensure_temperature(route["model"], temperature)
+    last_error: Optional[Exception] = None
+    for provider in providers:
+        try:
+            return fetch_chat_completion(
+                url=provider["url"],
+                headers=provider["headers"],
+                model=route["model"],
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                reasoning=reasoning,
+            )
+        except UsageError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise ProviderError(f"All configured providers failed for '{route['model']}'. Last error: {last_error}")

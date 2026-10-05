@@ -1,13 +1,13 @@
 {
   "name": "hydra-agent-cli",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Sovereign multi-headed AI summoning CLI. Direct frontier models, zero-cost Free Forge routing, local inference, and multi-agent swarm fan-out.",
   "main": "bin/hydra.js",
   "bin": {
     "hydra": "bin/hydra.js"
   },
   "scripts": {
-    "test": "node bin/hydra.js --version"
+    "test": "node --test tests/catalog.test.js"
   },
   "keywords": [
     "ai",
@@ -35,6 +35,7 @@
   },
   "files": [
     "bin/hydra.js",
+    "hydra_cli/catalog.json",
     "README.md",
     "LICENSE"
   ]

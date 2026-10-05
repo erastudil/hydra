@@ -1,0 +1,101 @@
+{
+  "version": "1.1.0",
+  "no_temperature_models": [
+    "anthropic/claude-opus-5.5",
+    "anthropic/claude-opus-5.5-fast"
+  ],
+  "default_free_model": "qwen/qwen3.8-27b:free",
+  "default_cloudflare_model": "@cf/meta/llama-3.3-70b-instruct",
+  "default_local_model": "qwen2.5-coder:latest",
+  "free_models": [
+    "qwen/qwen3.8-27b:free",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "google/gemma-4-26b-a4b-it:free",
+    "deepseek/deepseek-chat:free",
+    "nvidia/nemotron-3.5-lightning:free"
+  ],
+  "aliases": {
+    "opus 5.5 high": {"model": "anthropic/claude-opus-5.5", "effort": "high"},
+    "opus 5.5 max": {"model": "anthropic/claude-opus-5.5", "effort": "max"},
+    "opus 5.5 fast": {"model": "anthropic/claude-opus-5.5-fast"},
+    "opus 5.5": {"model": "anthropic/claude-opus-5.5"},
+    "opus": {"model": "anthropic/claude-opus-5.5"},
+    "opus 5": {"model": "anthropic/claude-opus-5"},
+    "sonnet 5.5": {"model": "anthropic/claude-sonnet-5.5"},
+    "sonnet": {"model": "anthropic/claude-sonnet-5.5"},
+    "claude-5.5-sonnet": {"model": "anthropic/claude-sonnet-5.5"},
+    "claude-sonnet-5.5": {"model": "anthropic/claude-sonnet-5.5"},
+    "sonnet 3.7": {"model": "anthropic/claude-3.7-sonnet"},
+    "haiku 4.5": {"model": "anthropic/claude-haiku-4.5"},
+    "haiku": {"model": "anthropic/claude-haiku-4.5"},
+    "fable 5.1": {"model": "anthropic/claude-fable-5.1"},
+    "fable": {"model": "anthropic/claude-fable-5.1"},
+    "sol 6.1 pro": {"model": "openai/gpt-6.1-sol", "effort": "high", "reasoning_mode": "pro"},
+    "sol 6.1 high": {"model": "openai/gpt-6.1-sol", "effort": "high"},
+    "sol 6.1 fast": {"model": "openai/gpt-6.1-sol-fast"},
+    "sol 6.1": {"model": "openai/gpt-6.1-sol"},
+    "sol": {"model": "openai/gpt-6.1-sol"},
+    "gpt-6.1-sol": {"model": "openai/gpt-6.1-sol"},
+    "luna": {"model": "openai/gpt-6-luna"},
+    "astra": {"model": "openai/gpt-6-astra"},
+    "gpt-5.5": {"model": "openai/gpt-5.5"},
+    "gpt-5": {"model": "openai/gpt-5.5"},
+    "gpt-4o": {"model": "openai/gpt-4o"},
+    "o3": {"model": "openai/o3"},
+    "o3-mini": {"model": "openai/o3-mini"},
+    "o4-mini": {"model": "openai/o4-mini"},
+    "o4": {"model": "openai/o4-mini"},
+    "o1": {"model": "openai/o1"},
+    "gemini 3.8": {"model": "google/gemini-3.8-flash"},
+    "gemini 3.7": {"model": "google/gemini-3.7-flash"},
+    "gemini 3.5": {"model": "google/gemini-3.5-flash"},
+    "gemini": {"model": "google/gemini-3.8-flash"},
+    "gemini-flash": {"model": "google/gemini-3.8-flash"},
+    "gemini 2.5": {"model": "google/gemini-2.5-pro"},
+    "gemini-pro": {"model": "google/gemini-2.5-pro"},
+    "gemma 4": {"model": "google/gemma-4-26b-a4b-it"},
+    "qwen 3.8": {"model": "qwen/qwen3.8-27b"},
+    "qwen": {"model": "qwen/qwen3.8-27b"},
+    "qwen-coder": {"model": "alibaba/qwen3-coder"},
+    "qwen coder": {"model": "alibaba/qwen3-coder"},
+    "qwen 3b": {"model": "qwen/qwen-2.5-3b-instruct"},
+    "qwen 3": {"model": "qwen/qwen-2.5-coder-32b-instruct"},
+    "grok 4.7": {"model": "x-ai/grok-4.7"},
+    "grok 4.6": {"model": "x-ai/grok-4.6"},
+    "grok": {"model": "x-ai/grok-4.7"},
+    "grok 2": {"model": "x-ai/grok-2-1212"},
+    "llama 4 maverick": {"model": "meta-llama/llama-4-maverick"},
+    "llama 4 scout": {"model": "meta-llama/llama-4-scout"},
+    "llama 4": {"model": "meta-llama/llama-4-maverick"},
+    "llama 3.3": {"model": "meta-llama/llama-3.3-70b-instruct"},
+    "llama": {"model": "meta-llama/llama-3.3-70b-instruct"},
+    "deepseek r1": {"model": "deepseek/deepseek-r1"},
+    "deepseek": {"model": "deepseek/deepseek-chat"},
+    "deepseek-chat": {"model": "deepseek/deepseek-chat"}
+  },
+  "swarm": {
+    "architect": {
+      "title": "Architect",
+      "model": "anthropic/claude-opus-5.5",
+      "effort": "high",
+      "system": "You are the Lead Systems Architect. Analyze the requirements, state invariants, data flows, and architectural failure modes. Produce a minimal, robust architecture design."
+    },
+    "coder": {
+      "title": "Implementer",
+      "model": "anthropic/claude-sonnet-5.5",
+      "system": "You are the Principal Software Engineer. Provide complete, executable, clean implementation code adhering strictly to zero-dependency principles and production standards."
+    },
+    "auditor": {
+      "title": "Inspector",
+      "model": "openai/gpt-6.1-sol",
+      "effort": "high",
+      "reasoning_mode": "pro",
+      "system": "You are the Security & Performance Inspector. Audit the proposed design and code for edge cases, resource leaks, security vulnerabilities, and verification gates."
+    },
+    "synthesizer": {
+      "title": "Synthesizer",
+      "model": "google/gemini-3.8-flash",
+      "system": "You are the Swarm Lead Synthesizer. Review all perspectives, resolve conflicting tradeoffs, and emit a final prioritized execution roadmap."
+    }
+  }
+}

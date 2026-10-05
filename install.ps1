@@ -1,88 +1,83 @@
-# ==============================================================================
-# Hydra Installer for Windows PowerShell
-# Usage: irm https://raw.githubusercontent.com/erastudil/hydra/main/install.ps1 | iex
-# ==============================================================================
+# Hydra installer for Windows PowerShell.
+# irm https://raw.githubusercontent.com/erastudil/hydra/main/install.ps1 | iex
 
 $ErrorActionPreference = 'Stop'
 
-Write-Host "
-  ___ ___            .___              
- /   |   \___.__.  __| _/___________   
-/    ~    <   |  | / __ |\_  __ \__  \  
-\    Y    /\___  |/ /_/ | |  | \// __ \_
- \___|_  / / ____|\____ | |__|  (____  /
-       \/  \/          \/            \/ 
-      Sovereign Multi-Headed AI Shell
-" -ForegroundColor Cyan
-
-$InstallDir = Join-Path $HOME ".hydra\bin"
-if (-not (Test-Path $InstallDir)) {
-    New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+$python = Get-Command python -ErrorAction SilentlyContinue
+$node = Get-Command node -ErrorAction SilentlyContinue
+if (-not $python -and -not $node) {
+    Write-Error '[ERROR] Hydra needs Python 3 or Node.js 18+.'
+    exit 1
 }
 
-$RepoRaw = "https://raw.githubusercontent.com/erastudil/hydra/main"
-$TargetJs = Join-Path $InstallDir "hydra.js"
-$TargetPy = Join-Path $InstallDir "hydra"
-$TargetCmd = Join-Path $InstallDir "hydra.cmd"
-$TargetPs1 = Join-Path $InstallDir "hydra.ps1"
+$Root = Join-Path $HOME '.hydra'
+$Bin = Join-Path $Root 'bin'
+$Repo = 'https://raw.githubusercontent.com/erastudil/hydra/main'
+$Files = @(
+    'bin/hydra',
+    'bin/hydra.js',
+    'hydra_cli/__init__.py',
+    'hydra_cli/catalog.json',
+    'hydra_cli/cli.py',
+    'hydra_cli/config.py',
+    'hydra_cli/providers.py',
+    'hydra_cli/router.py',
+    'hydra_cli/swarm.py'
+)
 
-Write-Host "==> Downloading latest Hydra release..." -ForegroundColor Yellow
-Invoke-WebRequest -Uri "$RepoRaw/bin/hydra.js" -OutFile $TargetJs
-Invoke-WebRequest -Uri "$RepoRaw/bin/hydra" -OutFile $TargetPy
+Write-Host "==> Installing Hydra into $Root"
+foreach ($rel in $Files) {
+    $dest = Join-Path $Root ($rel -replace '/', '\')
+    $parent = Split-Path $dest -Parent
+    if (-not (Test-Path $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+    Invoke-WebRequest -Uri "$Repo/$rel" -OutFile $dest
+}
 
-# Create Windows CMD shim
-$CmdContent = @"
+$CmdContent = @'
 @echo off
-where node >nul 2>nul
-if %ERRORLEVEL% equ 0 (
-    node "%~dp0hydra.js" %*
-    exit /b %ERRORLEVEL%
-)
+setlocal EnableExtensions
 where python >nul 2>nul
-if %ERRORLEVEL% equ 0 (
-    python "%~dp0hydra" %*
-    exit /b %ERRORLEVEL%
-)
-echo [ERROR] Neither Node.js nor Python 3 was found on PATH.
+if errorlevel 1 goto try_node
+python "%~dp0hydra" %*
+exit /b %ERRORLEVEL%
+:try_node
+where node >nul 2>nul
+if errorlevel 1 goto missing
+node "%~dp0hydra.js" %*
+exit /b %ERRORLEVEL%
+:missing
+echo [ERROR] Hydra needs Python 3 or Node.js 18+.
 exit /b 1
-"@
-Set-Content -Path $TargetCmd -Value $CmdContent -Encoding ASCII
+'@
+Set-Content -Path (Join-Path $Bin 'hydra.cmd') -Value $CmdContent -Encoding ASCII
 
-# Create PowerShell script shim
-$PsShimContent = @"
-`$node = Get-Command node -ErrorAction SilentlyContinue
-if (`$node) {
-    & node "`$PSScriptRoot\hydra.js" `$args
-    exit `$LASTEXITCODE
+$PsShim = @'
+$python = Get-Command python -ErrorAction SilentlyContinue
+if ($python) {
+    & python "$PSScriptRoot\hydra" @args
+    exit $LASTEXITCODE
 }
-`$py = Get-Command python -ErrorAction SilentlyContinue
-if (`$py) {
-    & python "`$PSScriptRoot\hydra" `$args
-    exit `$LASTEXITCODE
+$node = Get-Command node -ErrorAction SilentlyContinue
+if ($node) {
+    & node "$PSScriptRoot\hydra.js" @args
+    exit $LASTEXITCODE
 }
-Write-Error "[ERROR] Neither Node.js nor Python 3 was found on PATH."
+Write-Error '[ERROR] Hydra needs Python 3 or Node.js 18+.'
 exit 1
-"@
-Set-Content -Path $TargetPs1 -Value $PsShimContent -Encoding UTF8
+'@
+Set-Content -Path (Join-Path $Bin 'hydra.ps1') -Value $PsShim -Encoding UTF8
 
-# Ensure user PATH includes $InstallDir
-$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($UserPath -notlike "*$InstallDir*") {
-    Write-Host "==> Adding $InstallDir to User PATH..." -ForegroundColor Yellow
-    $NewPath = "$UserPath;$InstallDir"
-    [Environment]::SetEnvironmentVariable("Path", $NewPath, "User")
-    $env:Path = "$env:Path;$InstallDir"
+$UserPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ($UserPath -notlike "*$Bin*") {
+    Write-Host "==> Adding $Bin to User PATH"
+    $NewPath = if ([string]::IsNullOrEmpty($UserPath)) { $Bin } else { "$UserPath;$Bin" }
+    [Environment]::SetEnvironmentVariable('Path', $NewPath, 'User')
+    $env:Path = "$env:Path;$Bin"
 }
 
-Write-Host "`n==> Hydra successfully installed to $InstallDir!" -ForegroundColor Green
-Write-Host @"
-
-Quickstart:
-  `$env:OPENROUTER_API_KEY="your_api_key_here"
-  hydra opus 5.5 "Explain zero-cost abstractions"
-  hydra free "Explain consensus algorithms"
-  hydra local "Write a fast LRU cache in Go"
-  hydra swarm "Architect a high-throughput event pipeline"
-
-Note: If 'hydra' is not recognized immediately in existing shells, restart your terminal.
-"@ -ForegroundColor Cyan
+Write-Host "==> Hydra is installed."
+Write-Host "    $Bin"
+Write-Host "    Put keys in $Root\.env or the environment, then open a new terminal."
+Write-Host "    hydra setup"

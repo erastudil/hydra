@@ -1,9 +1,14 @@
 import pytest
+import os
+
 from hydra_cli.config import (
     MODEL_MAP,
     FREE_MODELS,
     SWARM_HEADS,
+    consume_alias,
+    load_dotenv,
     resolve_model,
+    resolve_route,
     is_compound_alias,
 )
 
@@ -62,3 +67,55 @@ def test_swarm_heads_defaults():
     assert "coder" in SWARM_HEADS
     assert "auditor" in SWARM_HEADS
     assert "synthesizer" in SWARM_HEADS
+    assert SWARM_HEADS["architect"]["effort"] == "high"
+    assert SWARM_HEADS["auditor"]["reasoning_mode"] == "pro"
+
+
+def test_reasoning_aliases():
+    opus = resolve_route("opus 5.5 high")
+    assert opus["model"] == "anthropic/claude-opus-5.5"
+    assert opus["effort"] == "high"
+    sol = resolve_route("sol 6.1 pro")
+    assert sol["model"] == "openai/gpt-6.1-sol"
+    assert sol["effort"] == "high"
+    assert sol["reasoning_mode"] == "pro"
+    assert resolve_model("llama 4 scout") == "meta-llama/llama-4-scout"
+    assert resolve_model("sol 6.1 fast") == "openai/gpt-6.1-sol-fast"
+
+
+def test_consume_alias_longest_and_separator():
+    alias, rest = consume_alias(["sol", "6.1", "pro", "and", "con"])
+    assert alias == "sol 6.1 pro"
+    assert rest == ["and", "con"]
+    alias, rest = consume_alias(["opus", "5.5", "--", "high", "ground"])
+    assert alias == "opus 5.5"
+    assert rest == ["high", "ground"]
+    alias, rest = consume_alias(["llama", "4", "scout", "summarize"])
+    assert alias == "llama 4 scout"
+    assert rest == ["summarize"]
+
+
+def test_project_env_skips_secrets(monkeypatch, tmp_path):
+    env = os.environ.copy()
+    env.pop("OPENROUTER_API_KEY", None)
+    env.pop("HYDRA_FREE_MODEL", None)
+    env.pop("OLLAMA_HOST", None)
+    env.pop("HYDRA_TRUST_CWD_ENV", None)
+    monkeypatch.setattr(os, "environ", env)
+    monkeypatch.chdir(tmp_path)
+    home = tmp_path / "home"
+    (home / ".hydra").mkdir(parents=True)
+    (home / ".hydra" / ".env").write_text('OPENROUTER_API_KEY=from-home\n', encoding="utf-8")
+    (tmp_path / ".env").write_text(
+        "OPENROUTER_API_KEY=from-cwd\nHYDRA_FREE_MODEL=demo-free\nOLLAMA_HOST=http://evil\n",
+        encoding="utf-8",
+    )
+    original_expanduser = os.path.expanduser
+    monkeypatch.setattr(
+        "os.path.expanduser",
+        lambda path, _orig=original_expanduser: str(home) if path == "~" else _orig(path),
+    )
+    load_dotenv()
+    assert os.environ["OPENROUTER_API_KEY"] == "from-home"
+    assert os.environ["HYDRA_FREE_MODEL"] == "demo-free"
+    assert "OLLAMA_HOST" not in os.environ

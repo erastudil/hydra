@@ -43,9 +43,9 @@ def test_execute_swarm_parallel_heads(mock_fetch, mock_providers):
         json_output=True,
     )
 
-    assert len(results) == 2
-    roles = {r.role for r in results}
-    assert "architect" in roles
-    assert "coder" in roles
-    for r in results:
-        assert r.content == "Specialized head analysis completed."
+    assert [result.role for result in results] == ["architect", "coder", "synthesizer"]
+    for result in results:
+        assert result.content == "Specialized head analysis completed."
+        assert result.to_dict()["status"] == "ok"
+    synthesis_messages = mock_fetch.call_args.kwargs["messages"]
+    assert "Specialized head analysis completed." in synthesis_messages[1]["content"]

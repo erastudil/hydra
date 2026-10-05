@@ -3,13 +3,15 @@ from setuptools import setup, find_packages
 
 setup(
     name="hydra-ai-cli",
-    version="1.0.0",
+    version="1.1.0",
     description="Sovereign multi-headed AI summoning CLI.",
     long_description=open("README.md", encoding="utf-8").read() if __import__("os").path.exists("README.md") else "",
     long_description_content_type="text/markdown",
     author="erastudil",
     url="https://github.com/erastudil/hydra",
-    packages=find_packages(),
+    packages=find_packages(include=["hydra_cli", "hydra_cli.*"]),
+    package_data={"hydra_cli": ["catalog.json"]},
+    include_package_data=True,
     python_requires=">=3.8",
     install_requires=[],
     entry_points={

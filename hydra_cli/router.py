@@ -13,16 +13,20 @@ from hydra_cli.config import (
     DEFAULT_SYSTEM_PROMPT,
     FREE_MODELS,
     MODEL_MAP,
-    is_compound_alias,
-    resolve_model,
+    consume_alias,
+    load_dotenv,
+    resolve_route,
 )
 from hydra_cli.providers import (
     CredentialsMissingError,
     ProviderError,
+    UsageError,
     detect_local_endpoint,
+    ensure_temperature,
     fetch_chat_completion,
     get_free_provider,
     get_frontier_providers,
+    reasoning_fields,
     stream_chat_completion,
 )
 from hydra_cli.swarm import execute_swarm
@@ -42,55 +46,54 @@ USAGE:
     hydra local "<prompt>"               # Offline local inference (Ollama/llama.cpp/EasyLM)
     hydra swarm "<task>"                 # Multi-agent swarm fan-out (Architect, Coder, Auditor)
     hydra setup                          # Interactive setup & app/agent integration guide
-    cat file.txt | hydra <alias>         # Interactive pipe input
+    cat file.txt | hydra <alias>         # The pipe is the prompt
+    cat file.txt | hydra <alias> - "do"  # Pipe plus an instruction
+    hydra <alias> -- <prompt>            # Keep prompt words that match an alias
 
 POPULAR ALIASES:
-    opus 5.5, sol 6.1, sonnet 5.5, gemini 2.5, gemini 3.5, qwen 3b, grok, llama
+    opus 5.5 high, sol 6.1 pro, sonnet 5.5, gemini 3.8, grok 4.7, llama 4 scout
 
 OPTIONS:
     --system <prompt>       Custom system prompt
     --model <id>            Explicit model override
-    --temperature <float>   Sampling temperature (default: 0.7)
+    --effort <level>        Reasoning effort (low, medium, high, xhigh, max)
+    --reasoning-mode <mode> Reasoning mode, such as pro
+    --temperature <float>   Sampling temperature. Omitted unless you set it.
     --max-tokens <int>      Maximum generation tokens
     --no-stream             Disable real-time SSE streaming
     --json                  Output raw JSON
     --heads <roles>         Comma-separated swarm heads (e.g. architect,coder,auditor)
     --list-models           List all registered aliases and providers
-    --guide, --setup        Show setup & application/agent integration guide
+    --guide, --setup        Show setup and integration guide
     -v, --version           Display version
     -h, --help              Show this help message
 """
 
 
 def read_stdin_if_piped() -> Optional[str]:
-    """Read piped input from stdin if present without blocking."""
+    """Read piped or redirected stdin through EOF. A terminal is left alone."""
     try:
-        if sys.stdin.isatty():
+        if sys.stdin is None or sys.stdin.isatty():
             return None
-
-        # Windows non-blocking check
-        if sys.platform == "win32":
-            try:
-                import ctypes
-                import msvcrt
-                handle = msvcrt.get_osfhandle(sys.stdin.fileno())
-                avail = ctypes.c_ulong()
-                if ctypes.windll.kernel32.PeekNamedPipe(handle, None, 0, None, ctypes.byref(avail), None) and avail.value > 0:
-                    content = sys.stdin.read().strip()
-                    return content if content else None
-                return None
-            except Exception:
-                return None
-
-        # Unix / Linux / macOS non-blocking check
-        import select
-        r, _, _ = select.select([sys.stdin], [], [], 0.0)
-        if r:
-            content = sys.stdin.read().strip()
-            return content if content else None
+        content = sys.stdin.read()
     except Exception:
-        pass
-    return None
+        return None
+    if not content:
+        return None
+    content = content.strip()
+    return content or None
+
+
+def compose_prompt(prompt_tokens: List[str]) -> str:
+    """Build the prompt. Stdin is read only when the prompt is missing or contains '-'."""
+    wants_stdin = (not prompt_tokens) or ("-" in prompt_tokens)
+    piped = read_stdin_if_piped() if wants_stdin else None
+    if "-" in prompt_tokens:
+        instruction = " ".join(token for token in prompt_tokens if token != "-").strip()
+        return format_combined_prompt(instruction, piped)
+    if not prompt_tokens:
+        return piped or ""
+    return " ".join(prompt_tokens).strip()
 
 
 def format_combined_prompt(user_prompt: str, piped_input: Optional[str]) -> str:
@@ -128,7 +131,9 @@ def print_setup_guide():
 
 1. QUICK SETUP & CREDENTIALS
 --------------------------------------------------------------------------------
-Hydra resolves API keys from your environment or a local .env file.
+Hydra reads the process environment first, then ~/.hydra/.env.
+A project .env may set ordinary settings such as HYDRA_FREE_MODEL.
+Keys, tokens, and host URLs in a project .env stay unloaded unless HYDRA_TRUST_CWD_ENV=1.
 Supported providers:
 
   A. Cloudflare Workers AI (Zero cost or your existing paid plan):
@@ -138,40 +143,33 @@ Supported providers:
   B. OpenRouter (Access to 200+ models with unified billing or free tiers):
      export OPENROUTER_API_KEY="sk-or-v1-..."
 
-  C. Vercel AI Gateway (Automated multi-provider edge routing):
-     export VERCEL_AI_GATEWAY_TOKEN="your-token"
+  C. Vercel AI Gateway:
+     export AI_GATEWAY_API_KEY="your-token"
+     # VERCEL_AI_GATEWAY_TOKEN is accepted as an alias of the same key.
 
-  D. Zero-Configuration Modes (NO KEYS REQUIRED):
-     • hydra free "<prompt>"   -> Routes to free public endpoints
-     • hydra local "<prompt>"  -> Routes to local Ollama (11434), llama.cpp (8080), or EasyLM (8000)
+  D. Local mode needs no cloud key:
+     • hydra local "<prompt>"  -> Ollama (11434), llama.cpp (8080), or EasyLM (8000)
+     • hydra free "<prompt>"   -> Cloudflare or OpenRouter free-tier models. A key is required.
 
 2. SHELL SCRIPTS & UNIX PIPES
 --------------------------------------------------------------------------------
 Pipe outputs directly from your shell into any model:
 
   # Review recent git diff with Sonnet 5.5
-  git diff | hydra sonnet 5.5 "Audit for security issues and edge cases"
+  git diff | hydra sonnet 5.5 - "Audit for security issues and edge cases"
 
-  # Process log files without streaming into a variable
-  SUMMARY=$(cat /var/log/syslog | hydra free "Extract top 3 error clusters" --no-stream)
+  # The pipe alone is the prompt
+  cat build.log | hydra free --no-stream
 
-  # Check compilation errors with Sol 6.1
-  cargo check 2>&1 | hydra sol 6.1 "Suggest exact minimal diff to fix errors"
+  # Words after -- stay in the prompt, even when they look like an alias
+  hydra opus 5.5 -- high ground rules
 
 3. INTEGRATING INTO PYTHON APPLICATIONS & AGENTS
 --------------------------------------------------------------------------------
-A. Direct Import (Zero External Dependencies):
-   from hydra_cli.providers import fetch_chat_completion, get_frontier_providers
-   from hydra_cli.config import resolve_model
+A. Direct Import:
+   from hydra_cli import complete
 
-   model_id = resolve_model("sonnet 5.5")
-   res = fetch_chat_completion(
-       model=model_id,
-       prompt="Analyze memory ordering in lock-free rings",
-       system_prompt="Speak in Progen Iron syntax.",
-       providers=get_frontier_providers()
-   )
-   print(res.text)
+   print(complete("sonnet 5.5", "Analyze memory ordering in lock-free rings"))
 
 B. Subprocess / Agent Tool Pattern (LangChain, AutoGen, CrewAI, Antigravity):
    import subprocess
@@ -192,12 +190,12 @@ B. Subprocess / Agent Tool Pattern (LangChain, AutoGen, CrewAI, Antigravity):
 --------------------------------------------------------------------------------
 Run via global CLI or npx with zero npm install:
 
-  import {{ execSync }} from 'child_process';
+  import {{ execFileSync }} from 'node:child_process';
 
-  function callHydra(alias: string, prompt: string): string {{
-    return execSync(`npx hydra-cli "${{alias}}" "${{prompt.replace(/"/g, '\\\\"')}}" --no-stream`, {{
+  function callHydra(alias, prompt) {{
+    return execFileSync('hydra', [alias, prompt, '--no-stream'], {{
       encoding: 'utf-8',
-      env: process.env
+      stdio: ['ignore', 'pipe', 'pipe'],
     }}).trim();
   }}
 
@@ -205,7 +203,7 @@ Run via global CLI or npx with zero npm install:
 
 5. MULTI-AGENT SWARMS
 --------------------------------------------------------------------------------
-Spawn 4 parallel specialized model heads (Architect, Implementer, Auditor, Synthesizer):
+Spawn specialist heads in parallel, then one synthesizer after they finish:
 
   hydra swarm "Architect a low-latency tick-by-tick orderbook"
 
@@ -218,6 +216,15 @@ Docs & Source: https://github.com/erastudil/hydra
     print(guide)
 
 
+def _parse_number(flag: str, raw: str, integer: bool) -> Tuple[Optional[float], Optional[str]]:
+    try:
+        value = int(raw) if integer else float(raw)
+    except ValueError:
+        kind = "integer" if integer else "number"
+        return None, f"[ERROR] {flag} expects a {kind}, got {raw!r}.\n"
+    return value, None
+
+
 def route_command(argv: List[str]) -> int:
     """Parse command line arguments and execute the intended action."""
     if hasattr(sys.stdout, "reconfigure"):
@@ -225,47 +232,36 @@ def route_command(argv: List[str]) -> int:
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-    piped_input = read_stdin_if_piped()
+    load_dotenv()
 
-    if not argv:
-        if piped_input:
-            # Default to sonnet 5.5 or free if only piped input is provided
-            alias = "sonnet 5.5"
-            prompt = piped_input
-            return execute_summon(alias, prompt, system_prompt=DEFAULT_SYSTEM_PROMPT)
+    if argv and argv[0] in ("-h", "--help", "help"):
         print(HELP_BANNER)
         return 0
-
-    if argv[0] in ("-h", "--help", "help"):
-        print(HELP_BANNER)
-        return 0
-
-    if argv[0] in ("-v", "--version", "version"):
+    if argv and argv[0] in ("-v", "--version", "version"):
         print(f"hydra {__version__}")
         return 0
-
-    if argv[0] in ("setup", "guide", "--setup", "--guide"):
+    if argv and argv[0] in ("setup", "guide", "--setup", "--guide"):
         print_setup_guide()
         return 0
-
-    if argv[0] in ("--list-models", "list-models", "models"):
+    if argv and argv[0] in ("--list-models", "list-models", "models"):
         print_registered_models()
         return 0
 
-    # Extract command/alias and potential prompt
-    remaining = argv.copy()
-    command_or_alias = remaining.pop(0)
+    if not argv:
+        piped_input = read_stdin_if_piped()
+        if piped_input:
+            return execute_summon("sonnet 5.5", piped_input, system_prompt=DEFAULT_SYSTEM_PROMPT)
+        print(HELP_BANNER)
+        return 0
 
-    # Check for compound alias like 'opus 5.5', 'sol 6.1', 'gemini 2.5', 'qwen 3b'
-    if remaining and is_compound_alias(command_or_alias, remaining[0]):
-        second_token = remaining.pop(0)
-        command_or_alias = f"{command_or_alias} {second_token}"
+    command_or_alias, remaining = consume_alias(list(argv))
 
-    # Extract flags vs prompt
     prompt_tokens = []
     system_prompt = DEFAULT_SYSTEM_PROMPT
     model_override = None
-    temperature = 0.7
+    effort_override = None
+    reasoning_mode_override = None
+    temperature = None
     max_tokens = None
     stream = True
     json_mode = False
@@ -280,17 +276,24 @@ def route_command(argv: List[str]) -> int:
         elif arg == "--model" and idx + 1 < len(remaining):
             model_override = remaining[idx + 1]
             idx += 2
+        elif arg == "--effort" and idx + 1 < len(remaining):
+            effort_override = remaining[idx + 1].strip().lower()
+            idx += 2
+        elif arg == "--reasoning-mode" and idx + 1 < len(remaining):
+            reasoning_mode_override = remaining[idx + 1].strip().lower()
+            idx += 2
         elif arg == "--temperature" and idx + 1 < len(remaining):
-            try:
-                temperature = float(remaining[idx + 1])
-            except ValueError:
-                pass
+            temperature, err = _parse_number("--temperature", remaining[idx + 1], False)
+            if err:
+                sys.stderr.write(err)
+                return 1
             idx += 2
         elif arg == "--max-tokens" and idx + 1 < len(remaining):
-            try:
-                max_tokens = int(remaining[idx + 1])
-            except ValueError:
-                pass
+            parsed, err = _parse_number("--max-tokens", remaining[idx + 1], True)
+            if err:
+                sys.stderr.write(err)
+                return 1
+            max_tokens = int(parsed)
             idx += 2
         elif arg == "--heads" and idx + 1 < len(remaining):
             swarm_heads = [h.strip() for h in remaining[idx + 1].split(",") if h.strip()]
@@ -306,8 +309,7 @@ def route_command(argv: List[str]) -> int:
             prompt_tokens.append(arg)
             idx += 1
 
-    user_prompt = " ".join(prompt_tokens).strip()
-    effective_prompt = format_combined_prompt(user_prompt, piped_input)
+    effective_prompt = compose_prompt(prompt_tokens)
 
     if not effective_prompt:
         sys.stderr.write(f"[ERROR] No prompt or piped input provided for '{command_or_alias}'.\n")
@@ -356,7 +358,12 @@ def route_command(argv: List[str]) -> int:
                 max_tokens=max_tokens,
                 stream=stream,
                 json_mode=json_mode,
+                effort=effort_override,
+                reasoning_mode=reasoning_mode_override,
             )
+    except UsageError as usage:
+        sys.stderr.write(f"\n[ERROR] {usage}\n")
+        return 1
     except CredentialsMissingError as cme:
         sys.stderr.write(f"\n[CREDENTIALS ERROR]\n{cme}\n")
         return 1
@@ -376,21 +383,32 @@ def execute_summon(
     prompt: str,
     system_prompt: str,
     model_override: Optional[str] = None,
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     stream: bool = True,
     json_mode: bool = False,
+    effort: Optional[str] = None,
+    reasoning_mode: Optional[str] = None,
 ) -> int:
-    """Summon a frontier model via OpenRouter or Vercel AI Gateway with fallback."""
-    model_id = model_override or resolve_model(alias)
+    """Summon a frontier model. A later provider is tried only before any text is printed."""
+    route = resolve_route(alias)
+    model_id = model_override or route["model"]
+    if model_override:
+        route_effort = effort
+        route_mode = reasoning_mode
+    else:
+        route_effort = effort if effort is not None else route.get("effort")
+        route_mode = reasoning_mode if reasoning_mode is not None else route.get("reasoning_mode")
+    reasoning = reasoning_fields(route_effort, route_mode)
+    ensure_temperature(model_id, temperature)
     providers = get_frontier_providers()
 
     if not providers:
         raise CredentialsMissingError(
             f"No frontier credentials found to summon '{alias}' ({model_id}).\n"
-            "Please export OPENROUTER_API_KEY or AI_GATEWAY_API_KEY in your environment,\n"
-            "or run zero-cost inference via: hydra free \"<prompt>\"\n"
-            "or local inference via:        hydra local \"<prompt>\""
+            "Export OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.\n"
+            "Free-tier cloud models: hydra free \"<prompt>\"\n"
+            "This machine only:        hydra local \"<prompt>\""
         )
 
     messages = [
@@ -400,6 +418,7 @@ def execute_summon(
 
     last_error = None
     for provider in providers:
+        emitted = False
         try:
             if stream and not json_mode:
                 for token in stream_chat_completion(
@@ -409,29 +428,42 @@ def execute_summon(
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    reasoning=reasoning,
                 ):
+                    emitted = True
                     sys.stdout.write(token)
                     sys.stdout.flush()
                 sys.stdout.write("\n")
                 return 0
+            resp = fetch_chat_completion(
+                url=provider["url"],
+                headers=provider["headers"],
+                model=model_id,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                reasoning=reasoning,
+            )
+            if json_mode:
+                import json
+                print(json.dumps({
+                    "model": model_id,
+                    "provider": provider["name"],
+                    "effort": route_effort,
+                    "reasoning_mode": route_mode,
+                    "content": resp,
+                }, indent=2))
             else:
-                resp = fetch_chat_completion(
-                    url=provider["url"],
-                    headers=provider["headers"],
-                    model=model_id,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-                if json_mode:
-                    import json
-                    print(json.dumps({"model": model_id, "provider": provider["name"], "content": resp}, indent=2))
-                else:
-                    print(resp)
-                return 0
-        except Exception as e:
-            last_error = e
-            # Try next provider if available
+                print(resp)
+            return 0
+        except UsageError:
+            raise
+        except Exception as exc:
+            if emitted:
+                raise ProviderError(
+                    f"Stream from {provider['name']} truncated after output started: {exc}"
+                ) from exc
+            last_error = exc
             continue
 
     if last_error:
@@ -443,7 +475,7 @@ def execute_free(
     prompt: str,
     system_prompt: str,
     model_override: Optional[str] = None,
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     stream: bool = True,
     json_mode: bool = False,
@@ -490,7 +522,7 @@ def execute_local(
     prompt: str,
     system_prompt: str,
     model_override: Optional[str] = None,
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     stream: bool = True,
     json_mode: bool = False,
@@ -544,12 +576,12 @@ def execute_swarm_mode(
     task: str,
     heads: Optional[List[str]] = None,
     custom_model: Optional[str] = None,
-    temperature: float = 0.7,
+    temperature: Optional[float] = None,
     json_output: bool = False,
     stream_output: bool = True,
 ) -> int:
-    """Dispatch parallel multi-agent swarm."""
-    execute_swarm(
+    """Dispatch the swarm. A failed head or a failed synthesis exits nonzero."""
+    results = execute_swarm(
         task=task,
         heads=heads,
         custom_model=custom_model,
@@ -557,4 +589,6 @@ def execute_swarm_mode(
         json_output=json_output,
         stream_output=stream_output,
     )
+    if any(result.error for result in results):
+        return 1
     return 0

@@ -20,7 +20,7 @@ def test_adapt_model_for_url():
     assert adapt_model_for_url(vercel_url, "meta-llama/llama-3.3-70b-instruct") == "meta/llama-3.3-70b"
     assert adapt_model_for_url(vercel_url, "meta-llama/llama-4-maverick") == "meta/llama-4-maverick"
     assert adapt_model_for_url(vercel_url, "qwen/qwen3.8-27b") == "alibaba/qwen3.8-27b"
-    assert adapt_model_for_url(vercel_url, "openai/gpt-6.1-sol-pro") == "openai/gpt-6.1-sol"
+    assert adapt_model_for_url(vercel_url, "openai/gpt-6.1-sol-pro") == "openai/gpt-6.1-sol-pro"
     assert adapt_model_for_url(vercel_url, "anthropic/claude-sonnet-5.5") == "anthropic/claude-sonnet-5.5"
 
     # OpenRouter conversions
@@ -32,6 +32,7 @@ def test_adapt_model_for_url():
 def test_frontier_providers_openrouter(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
     monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("VERCEL_AI_GATEWAY_TOKEN", raising=False)
     providers = get_frontier_providers()
     assert len(providers) == 1
     assert providers[0]["name"] == "OpenRouter"
@@ -40,6 +41,7 @@ def test_frontier_providers_openrouter(monkeypatch):
 
 def test_frontier_providers_vercel(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("VERCEL_AI_GATEWAY_TOKEN", raising=False)
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "vercel-test-key")
     providers = get_frontier_providers()
     assert len(providers) == 1
@@ -49,6 +51,7 @@ def test_frontier_providers_vercel(monkeypatch):
 
 def test_frontier_providers_priority(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-v1-test")
+    monkeypatch.delenv("VERCEL_AI_GATEWAY_TOKEN", raising=False)
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "vercel-test-key")
     providers = get_frontier_providers()
     assert len(providers) == 2
@@ -84,6 +87,8 @@ def test_free_provider_missing_credentials(monkeypatch):
 
 def test_detect_local_endpoint_custom_base(monkeypatch):
     monkeypatch.setenv("LOCAL_AI_BASE", "http://127.0.0.1:9090")
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.delenv("LLAMACPP_HOST", raising=False)
     url, name = detect_local_endpoint()
     assert "9090/v1/chat/completions" in url
     assert name == "Custom Local AI"
@@ -92,6 +97,8 @@ def test_detect_local_endpoint_custom_base(monkeypatch):
 @patch("hydra_cli.providers.is_port_open")
 def test_detect_local_endpoint_ollama(mock_port, monkeypatch):
     monkeypatch.delenv("LOCAL_AI_BASE", raising=False)
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.delenv("LLAMACPP_HOST", raising=False)
     # Return true for 11434, false for others
     def side_effect(host, port, timeout=0.4):
         return port == 11434

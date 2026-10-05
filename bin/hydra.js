@@ -1,368 +1,377 @@
 #!/usr/bin/env node
 
 /**
- * Hydra · Sovereign Multi-Headed AI Shell (Node / npm runtime)
- * Zero external dependencies. Fast, streaming, multi-provider, multi-head CLI.
+ * Hydra · Sovereign Multi-Headed AI Shell (Node runtime)
+ * Zero external dependencies. Model aliases come from hydra_cli/catalog.json.
  */
 
+const fs = require('fs');
 const http = require('http');
 const https = require('https');
 const net = require('net');
-const process = require('process');
-const readline = require('readline');
+const os = require('os');
+const path = require('path');
+const { URL } = require('url');
 
-const VERSION = '1.0.0';
+function loadCatalog() {
+  const candidates = [
+    path.join(__dirname, '..', 'hydra_cli', 'catalog.json'),
+    path.join(__dirname, 'catalog.json'),
+  ];
+  for (const file of candidates) {
+    if (fs.existsSync(file)) {
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
+    }
+  }
+  throw new Error('Hydra catalog.json was not found next to this installation.');
+}
+
+const CATALOG = loadCatalog();
+const VERSION = CATALOG.version || '1.1.0';
+const MODEL_MAP = Object.fromEntries(
+  Object.entries(CATALOG.aliases).map(([alias, spec]) => [alias, spec.model])
+);
 
 const DEFAULT_SYSTEM_PROMPT = process.env.HYDRA_SYSTEM_PROMPT ||
   'You are a world-class sovereign systems engineer. Speak concisely, rigorously, and without corporate filler or disclaimers.';
 
-const MODEL_MAP = {
-  // Anthropic Claude
-  'opus 5.5': 'anthropic/claude-opus-5.5',
-  'opus': 'anthropic/claude-opus-5.5',
-  'opus 5': 'anthropic/claude-opus-5',
-  'sonnet 5.5': 'anthropic/claude-sonnet-5.5',
-  'sonnet': 'anthropic/claude-sonnet-5.5',
-  'claude-5.5-sonnet': 'anthropic/claude-sonnet-5.5',
-  'claude-sonnet-5.5': 'anthropic/claude-sonnet-5.5',
-  'sonnet 3.7': 'anthropic/claude-3.7-sonnet',
-  'haiku 4.5': 'anthropic/claude-haiku-4.5',
-  'haiku': 'anthropic/claude-haiku-4.5',
-  'fable 5.1': 'anthropic/claude-fable-5.1',
-  'fable': 'anthropic/claude-fable-5.1',
-
-  // OpenAI / Sol
-  'sol 6.1': 'openai/gpt-6.1-sol',
-  'sol 6.1 pro': 'openai/gpt-6.1-sol-pro',
-  'sol': 'openai/gpt-6.1-sol',
-  'gpt-6.1-sol': 'openai/gpt-6.1-sol',
-  'luna': 'openai/gpt-6-luna',
-  'astra': 'openai/gpt-6-astra',
-  'gpt-5.5': 'openai/gpt-5.5',
-  'gpt-5': 'openai/gpt-5.5',
-  'gpt-4o': 'openai/gpt-4o',
-  'o3': 'openai/o3',
-  'o3-mini': 'openai/o3-mini',
-  'o4-mini': 'openai/o4-mini',
-  'o4': 'openai/o4-mini',
-  'o1': 'openai/o1',
-
-  // Google Gemini & Gemma
-  'gemini 3.8': 'google/gemini-3.8-flash',
-  'gemini 3.7': 'google/gemini-3.7-flash',
-  'gemini 3.5': 'google/gemini-3.5-flash',
-  'gemini': 'google/gemini-3.8-flash',
-  'gemini-flash': 'google/gemini-3.8-flash',
-  'gemini 2.5': 'google/gemini-2.5-pro',
-  'gemini-pro': 'google/gemini-2.5-pro',
-  'gemma 4': 'google/gemma-4-26b-a4b-it',
-
-  // Alibaba / Qwen
-  'qwen 3.8': 'qwen/qwen3.8-27b',
-  'qwen': 'qwen/qwen3.8-27b',
-  'qwen-coder': 'alibaba/qwen3-coder',
-  'qwen coder': 'alibaba/qwen3-coder',
-  'qwen 3b': 'qwen/qwen-2.5-3b-instruct',
-  'qwen 3': 'qwen/qwen-2.5-coder-32b-instruct',
-
-  // xAI / SpaceX AI Grok
-  'grok 4.7': 'x-ai/grok-4.7',
-  'grok 4.6': 'x-ai/grok-4.6',
-  'grok': 'x-ai/grok-4.7',
-  'grok 2': 'x-ai/grok-2-1212',
-
-  // Meta Llama
-  'llama 4': 'meta-llama/llama-4-maverick',
-  'llama 4 maverick': 'meta-llama/llama-4-maverick',
-  'llama 4 scout': 'meta-llama/llama-4-scout',
-  'llama 3.3': 'meta-llama/llama-3.3-70b-instruct',
-  'llama': 'meta-llama/llama-3.3-70b-instruct',
-
-  // DeepSeek
-  'deepseek': 'deepseek/deepseek-chat',
-  'deepseek r1': 'deepseek/deepseek-r1',
-  'deepseek-chat': 'deepseek/deepseek-chat',
-};
-
-const FREE_MODELS = [
-  'qwen/qwen3.8-27b:free',
-  'meta-llama/llama-3.3-70b-instruct:free',
-  'google/gemma-4-26b-a4b-it:free',
-  'deepseek/deepseek-chat:free',
-  'nvidia/nemotron-3.5-lightning:free',
-];
-
-const SWARM_HEADS = {
-  architect: {
-    title: 'Architect',
-    model: 'anthropic/claude-opus-5.5',
-    system: 'You are the Lead Systems Architect. Analyze the requirements, state invariants, data flows, and architectural failure modes. Produce a minimal, robust architecture design.'
-  },
-  coder: {
-    title: 'Implementer',
-    model: 'anthropic/claude-sonnet-5.5',
-    system: 'You are the Principal Software Engineer. Provide complete, executable, clean implementation code adhering strictly to zero-dependency principles and production standards.'
-  },
-  auditor: {
-    title: 'Inspector',
-    model: 'openai/gpt-6.1-sol',
-    system: 'You are the Security & Performance Inspector. Audit the proposed design and code for edge cases, resource leaks, security vulnerabilities, and verification gates.'
-  },
-  synthesizer: {
-    title: 'Synthesizer',
-    model: 'google/gemini-3.8-flash',
-    system: 'You are the Swarm Lead Synthesizer. Review all perspectives, resolve conflicting tradeoffs, and emit a final prioritized execution roadmap.'
-  }
-};
-
-const HELP_BANNER = `
-  ___ ___            .___              
- /   |   \\___.__.  __| _/___________   
-/    ~    <   |  | / __ |\\_  __ \\__  \\  
-\\    Y    /\\___  |/ /_/ | |  | \\// __ \\_
- \\___|_  / / ____|\\____ | |__|  (____  /
-       \\/  \\/          \\/            \\/ 
-      Sovereign Multi-Headed AI Shell · v${VERSION} (Node.js)
-
-USAGE:
-    hydra <model-alias> "<prompt>"       # Direct frontier model summoning
-    hydra free "<prompt>"                # Zero-cost Free Forge routing
-    hydra local "<prompt>"               # Offline local inference (Ollama/llama.cpp/EasyLM)
-    hydra swarm "<task>"                 # Multi-agent swarm fan-out (Architect, Coder, Auditor)
-    hydra setup                          # Interactive setup & app/agent integration guide
-    cat file.txt | hydra <alias>         # Interactive pipe input
-
-POPULAR ALIASES:
-    opus 5.5, sol 6.1, sonnet 5.5, gemini 2.5, gemini 3.5, qwen 3b, grok, llama
-
-OPTIONS:
-    --system <prompt>       Custom system prompt
-    --model <id>            Explicit model override
-    --temperature <float>   Sampling temperature (default: 0.7)
-    --max-tokens <int>      Maximum generation tokens
-    --no-stream             Disable real-time SSE streaming
-    --json                  Output raw JSON
-    --heads <roles>         Comma-separated swarm heads (e.g. architect,coder,auditor)
-    --list-models           List all registered aliases and providers
-    --guide, --setup        Show setup & application/agent integration guide
-    -v, --version           Display version
-    -h, --help              Show this help message
-`;
-
-function resolveModel(alias) {
-  const clean = alias.trim().toLowerCase();
-  return MODEL_MAP[clean] || alias;
+function cleanSecret(value) {
+  const text = String(value || '').trim();
+  if (text.includes('\n') || text.includes('\r')) return '';
+  return text;
 }
 
-function isCompoundAlias(arg1, arg2) {
-  const candidate = `${arg1} ${arg2}`.trim().toLowerCase();
-  return Boolean(MODEL_MAP[candidate]);
+function gatewayKey() {
+  return cleanSecret(process.env.AI_GATEWAY_API_KEY) || cleanSecret(process.env.VERCEL_AI_GATEWAY_TOKEN);
+}
+
+const SENSITIVE_SUFFIXES = ['_KEY', '_TOKEN', '_SECRET', '_PASSWORD', '_HOST', '_BASE', '_URL', '_ENDPOINT'];
+const SENSITIVE_EXACT = new Set(['CLOUDFLARE_ACCOUNT_ID']);
+
+function sensitiveEnvKey(key) {
+  const upper = String(key || '').toUpperCase();
+  if (SENSITIVE_EXACT.has(upper)) return true;
+  return SENSITIVE_SUFFIXES.some((suffix) => upper.endsWith(suffix));
+}
+
+function trustCwdEnv() {
+  return ['1', 'true', 'yes'].includes(String(process.env.HYDRA_TRUST_CWD_ENV || '').trim().toLowerCase());
+}
+
+function applyEnvFile(file, trusted) {
+  if (!fs.existsSync(file)) return;
+  let raw = '';
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (_) {
+    return;
+  }
+  for (let line of raw.split(/\r?\n/)) {
+    line = line.trim();
+    if (!line || line.startsWith('#') || !line.includes('=')) continue;
+    if (line.startsWith('export ')) line = line.slice('export '.length);
+    const eq = line.indexOf('=');
+    const key = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    if (value.length >= 2 && (value[0] === '"' || value[0] === "'") && value[0] === value[value.length - 1]) {
+      value = value.slice(1, -1);
+    }
+    if (!key || process.env[key] !== undefined) continue;
+    if (value.includes('\n') || value.includes('\r')) continue;
+    if (!trusted && sensitiveEnvKey(key)) continue;
+    process.env[key] = value;
+  }
+}
+
+function loadDotenv() {
+  applyEnvFile(path.join(os.homedir(), '.hydra', '.env'), true);
+  applyEnvFile(path.join(process.cwd(), '.env'), trustCwdEnv());
+}
+
+function resolveRoute(alias) {
+  const clean = String(alias || '').trim().toLowerCase();
+  const spec = CATALOG.aliases[clean];
+  if (!spec) return { model: alias, effort: null, reasoningMode: null };
+  return {
+    model: spec.model,
+    effort: spec.effort || null,
+    reasoningMode: spec.reasoning_mode || null,
+  };
+}
+
+function consumeAlias(tokens) {
+  if (!tokens.length) return { alias: '', rest: [] };
+  const stop = tokens.indexOf('--');
+  const window = stop === -1 ? tokens : tokens.slice(0, stop);
+  const tail = stop === -1 ? [] : tokens.slice(stop + 1);
+  const upper = Math.min(4, window.length);
+  for (let count = upper; count >= 1; count -= 1) {
+    const chunk = window.slice(0, count);
+    if (chunk.some((part) => part.startsWith('-'))) continue;
+    const candidate = chunk.join(' ').trim().toLowerCase();
+    if (MODEL_MAP[candidate]) return { alias: candidate, rest: window.slice(count).concat(tail) };
+  }
+  if (window.length) return { alias: window[0], rest: window.slice(1).concat(tail) };
+  return { alias: '', rest: tail };
 }
 
 function checkPortOpen(host, port, timeoutMs = 400) {
   return new Promise((resolve) => {
     const socket = new net.Socket();
-    let isConnected = false;
+    let settled = false;
+    const finish = (open) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(open);
+    };
     socket.setTimeout(timeoutMs);
-    socket.once('connect', () => {
-      isConnected = true;
-      socket.destroy();
-      resolve(true);
-    });
-    socket.once('timeout', () => {
-      socket.destroy();
-      resolve(false);
-    });
-    socket.once('error', () => {
-      socket.destroy();
-      resolve(false);
-    });
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
     socket.connect(port, host);
   });
 }
 
-async function detectLocalEndpoint() {
-  if (process.env.LOCAL_AI_BASE) {
-    let base = process.env.LOCAL_AI_BASE.replace(/\/+$/, '');
-    if (!base.endsWith('/v1')) base += '/v1';
-    return { url: `${base}/chat/completions`, name: 'Custom Local AI' };
-  }
-
-  const ollamaHost = (process.env.OLLAMA_HOST || 'http://localhost:11434').replace(/\/+$/, '');
-  let ollamaPort = 11434;
-  try {
-    const parsed = new URL(ollamaHost);
-    if (parsed.port) ollamaPort = parseInt(parsed.port, 10);
-  } catch (_) {}
-
-  if (await checkPortOpen('127.0.0.1', ollamaPort)) {
-    return { url: `${ollamaHost}/v1/chat/completions`, name: 'Ollama' };
-  }
-
-  const llamaHost = (process.env.LLAMACPP_HOST || 'http://localhost:8080').replace(/\/+$/, '');
-  if (await checkPortOpen('127.0.0.1', 8080)) {
-    return { url: `${llamaHost}/v1/chat/completions`, name: 'llama.cpp' };
-  }
-
-  if (await checkPortOpen('127.0.0.1', 8000)) {
-    return { url: 'http://localhost:8000/v1/chat/completions', name: 'EasyLM' };
-  }
-
-  return { url: `${ollamaHost}/v1/chat/completions`, name: 'Ollama (unverified)' };
+function chatUrl(base) {
+  let root = String(base || '').trim().replace(/\/+$/, '');
+  if (root.endsWith('/chat/completions')) return root;
+  if (!root.endsWith('/v1')) root += '/v1';
+  return `${root}/chat/completions`;
 }
 
-function readStdin(timeoutMs = 40) {
+async function detectLocalEndpoint() {
+  if (process.env.LOCAL_AI_BASE && process.env.LOCAL_AI_BASE.trim()) {
+    return { url: chatUrl(process.env.LOCAL_AI_BASE), name: 'Custom Local AI' };
+  }
+  if (process.env.OLLAMA_HOST && process.env.OLLAMA_HOST.trim()) {
+    return { url: chatUrl(process.env.OLLAMA_HOST), name: 'Ollama' };
+  }
+  if (await checkPortOpen('127.0.0.1', 11434)) {
+    return { url: chatUrl('http://127.0.0.1:11434'), name: 'Ollama' };
+  }
+  if (process.env.LLAMACPP_HOST && process.env.LLAMACPP_HOST.trim()) {
+    return { url: chatUrl(process.env.LLAMACPP_HOST), name: 'llama.cpp' };
+  }
+  if (await checkPortOpen('127.0.0.1', 8080)) {
+    return { url: chatUrl('http://127.0.0.1:8080'), name: 'llama.cpp' };
+  }
+  if (await checkPortOpen('127.0.0.1', 8000)) {
+    return { url: chatUrl('http://127.0.0.1:8000'), name: 'EasyLM' };
+  }
+  return { url: chatUrl('http://127.0.0.1:11434'), name: 'Ollama (unverified)' };
+}
+
+function readStdin() {
   return new Promise((resolve) => {
-    if (process.stdin.isTTY) {
-      return resolve('');
-    }
-    let data = '';
-    let timer = null;
-    function finish() {
-      if (timer) clearTimeout(timer);
-      try {
-        process.stdin.removeAllListeners('data');
-        process.stdin.removeAllListeners('end');
-      } catch (_) {}
-      resolve(data.trim());
-    }
-    timer = setTimeout(finish, timeoutMs);
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (chunk) => {
-      data += chunk;
-      if (timer) clearTimeout(timer);
-      timer = setTimeout(finish, timeoutMs);
-    });
-    process.stdin.on('end', finish);
+    if (process.stdin.isTTY) return resolve('');
+    const chunks = [];
+    process.stdin.on('data', (chunk) => chunks.push(chunk));
+    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8').trim()));
+    process.stdin.on('error', () => resolve(''));
   });
 }
 
 function adaptModelForUrl(endpointUrl, model) {
-  const urlLower = endpointUrl.toLowerCase();
-  if (urlLower.includes('vercel')) {
-    if (model.startsWith('x-ai/')) return model.replace('x-ai/', 'spacexai/');
+  let host = '';
+  try {
+    host = new URL(endpointUrl).hostname.toLowerCase();
+  } catch (_) {
+    host = String(endpointUrl || '').toLowerCase();
+  }
+  if (host.endsWith('vercel.sh') || host.includes('.vercel.')) {
+    if (model.startsWith('x-ai/')) return `spacexai/${model.slice('x-ai/'.length)}`;
     if (model.startsWith('meta-llama/')) {
-      let vId = model.replace('meta-llama/', 'meta/');
-      if (vId.endsWith('-instruct')) vId = vId.slice(0, -'-instruct'.length);
-      return vId;
+      let rewritten = `meta/${model.slice('meta-llama/'.length)}`;
+      if (rewritten.endsWith('-instruct')) rewritten = rewritten.slice(0, -'-instruct'.length);
+      return rewritten;
     }
-    if (model.startsWith('qwen/')) return model.replace('qwen/', 'alibaba/');
-    if (model === 'openai/gpt-6.1-sol-pro') return 'openai/gpt-6.1-sol';
-    if (model === 'openai/gpt-6-luna-pro') return 'openai/gpt-6-luna';
-  } else if (urlLower.includes('openrouter')) {
-    if (model.startsWith('spacexai/')) return model.replace('spacexai/', 'x-ai/');
-    if (model.startsWith('alibaba/')) return model.replace('alibaba/', 'qwen/');
-    if (model.startsWith('meta/')) return model.replace('meta/', 'meta-llama/');
+    if (model.startsWith('qwen/')) return `alibaba/${model.slice('qwen/'.length)}`;
+  } else if (host === 'openrouter.ai' || host.endsWith('.openrouter.ai')) {
+    if (model.startsWith('spacexai/')) return `x-ai/${model.slice('spacexai/'.length)}`;
+    if (model.startsWith('alibaba/')) return `qwen/${model.slice('alibaba/'.length)}`;
+    if (model.startsWith('meta/') && !model.startsWith('meta-llama/')) {
+      return `meta-llama/${model.slice('meta/'.length)}`;
+    }
   }
   return model;
 }
 
-function streamRequest(endpointUrl, headers, payload, onChunk) {
-  return new Promise((resolve, reject) => {
-    const parsedUrl = new URL(endpointUrl);
-    const transport = parsedUrl.protocol === 'https:' ? https : http;
-    const effectivePayload = {
-      ...payload,
-      model: adaptModelForUrl(endpointUrl, payload.model)
-    };
-    const bodyStr = JSON.stringify(effectivePayload);
-
-    const req = transport.request(parsedUrl, {
-      method: 'POST',
-      headers: {
-        ...headers,
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(bodyStr)
-      }
-    }, (res) => {
-      if (res.statusCode < 200 || res.statusCode >= 300) {
-        let errData = '';
-        res.on('data', (d) => { errData += d; });
-        res.on('end', () => {
-          let msg = errData;
-          try {
-            const parsed = JSON.parse(errData);
-            if (parsed.error && parsed.error.message) msg = parsed.error.message;
-          } catch (_) {}
-          reject(new Error(`HTTP ${res.statusCode}: ${msg}`));
-        });
-        return;
-      }
-
-      let buffer = '';
-      res.on('data', (chunk) => {
-        buffer += chunk.toString('utf8');
-        const lines = buffer.split('\n');
-        buffer = lines.pop(); // keep last incomplete line
-
-        for (const rawLine of lines) {
-          const line = rawLine.trim();
-          if (!line || line.startsWith(':')) continue;
-          if (line === 'data: [DONE]') {
-            return;
-          }
-          if (line.startsWith('data: ')) {
-            try {
-              const parsed = JSON.parse(line.slice(6));
-              const delta = parsed.choices?.[0]?.delta?.content || '';
-              if (delta) onChunk(delta);
-            } catch (_) {}
-          }
-        }
-      });
-
-      res.on('end', () => {
-        resolve();
-      });
-    });
-
-    req.on('error', (err) => reject(err));
-    req.write(bodyStr);
-    req.end();
-  });
+function rejectsTemperature(model) {
+  return (CATALOG.no_temperature_models || []).includes(model);
 }
 
-function fetchRequest(endpointUrl, headers, payload) {
+function ensureTemperature(model, temperature) {
+  if (temperature === null || temperature === undefined) return;
+  if (rejectsTemperature(model)) {
+    const error = new Error(`${model} rejects temperature. Omit --temperature.`);
+    error.usage = true;
+    throw error;
+  }
+}
+
+function completionTimeoutMs(effort, reasoningMode) {
+  const longEffort = new Set(['high', 'xhigh', 'max']);
+  if (reasoningMode || longEffort.has(String(effort || '').toLowerCase())) return 600000;
+  return 180000;
+}
+
+function buildPayload(options) {
+  ensureTemperature(options.model, options.temperature);
+  const payload = {
+    model: adaptModelForUrl(options.endpointUrl, options.model),
+    messages: options.messages,
+    stream: Boolean(options.stream),
+  };
+  if (options.temperature !== null && options.temperature !== undefined) {
+    payload.temperature = options.temperature;
+  }
+  if (Number.isInteger(options.maxTokens) && options.maxTokens > 0) payload.max_tokens = options.maxTokens;
+  const reasoning = {};
+  if (options.effort) reasoning.effort = options.effort;
+  if (options.reasoningMode) reasoning.mode = options.reasoningMode;
+  if (Object.keys(reasoning).length) payload.reasoning = reasoning;
+  return payload;
+}
+
+function requestJson(endpointUrl, headers, payload, timeoutMs) {
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(endpointUrl);
     const transport = parsedUrl.protocol === 'https:' ? https : http;
-    const effectivePayload = {
-      ...payload,
-      model: adaptModelForUrl(endpointUrl, payload.model),
-      stream: false
-    };
-    const bodyStr = JSON.stringify(effectivePayload);
-
+    const bodyStr = JSON.stringify(payload);
     const req = transport.request(parsedUrl, {
       method: 'POST',
       headers: {
         ...headers,
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(bodyStr)
-      }
+        'Content-Length': Buffer.byteLength(bodyStr),
+      },
     }, (res) => {
+      res.setEncoding('utf8');
       let data = '';
-      res.on('data', (c) => { data += c; });
+      let settled = false;
+      const fail = (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('error', (error) => fail(error));
+      res.on('aborted', () => fail(new Error('response aborted')));
       res.on('end', () => {
+        if (settled) return;
+        settled = true;
         if (res.statusCode < 200 || res.statusCode >= 300) {
           let msg = data;
           try {
             const parsed = JSON.parse(data);
             if (parsed.error && parsed.error.message) msg = parsed.error.message;
           } catch (_) {}
-          return reject(new Error(`HTTP ${res.statusCode}: ${msg}`));
+          reject(new Error(`HTTP ${res.statusCode}: ${msg}`));
+          return;
         }
         try {
           const parsed = JSON.parse(data);
-          const content = parsed.choices?.[0]?.message?.content || '';
+          if (parsed.error) {
+            reject(new Error(parsed.error.message || JSON.stringify(parsed.error)));
+            return;
+          }
+          const content = parsed.choices && parsed.choices[0] && parsed.choices[0].message
+            ? parsed.choices[0].message.content
+            : '';
+          if (!content) {
+            reject(new Error('empty completion'));
+            return;
+          }
           resolve(content);
-        } catch (e) {
-          reject(new Error(`Invalid JSON response: ${e.message}`));
+        } catch (error) {
+          reject(new Error(`Invalid JSON response: ${error.message}`));
         }
       });
     });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`Idle timeout after ${timeoutMs} ms`)));
+    req.on('error', (error) => reject(error));
+    req.write(bodyStr);
+    req.end();
+  });
+}
 
-    req.on('error', (err) => reject(err));
+function streamRequest(endpointUrl, headers, payload, onChunk, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const parsedUrl = new URL(endpointUrl);
+    const transport = parsedUrl.protocol === 'https:' ? https : http;
+    const bodyStr = JSON.stringify(payload);
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+    const req = transport.request(parsedUrl, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(bodyStr),
+      },
+    }, (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        res.setEncoding('utf8');
+        let errData = '';
+        res.on('data', (chunk) => { errData += chunk; });
+        res.on('end', () => {
+          let msg = errData;
+          try {
+            const parsed = JSON.parse(errData);
+            if (parsed.error && parsed.error.message) msg = parsed.error.message;
+          } catch (_) {}
+          fail(new Error(`HTTP ${res.statusCode}: ${msg}`));
+        });
+        return;
+      }
+      res.setEncoding('utf8');
+      let buffer = '';
+      let sawDone = false;
+      res.on('data', (chunk) => {
+        buffer += chunk;
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line || line.startsWith(':')) continue;
+          if (line === 'data: [DONE]') {
+            sawDone = true;
+            return;
+          }
+          if (!line.startsWith('data: ')) continue;
+          try {
+            const parsed = JSON.parse(line.slice(6));
+            if (parsed.error) {
+              fail(new Error(parsed.error.message || JSON.stringify(parsed.error)));
+              req.destroy();
+              return;
+            }
+            const delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta
+              ? parsed.choices[0].delta.content || ''
+              : '';
+            if (delta) onChunk(delta);
+          } catch (_) {}
+        }
+      });
+      res.on('error', (error) => fail(error));
+      res.on('aborted', () => fail(new Error('response aborted')));
+      res.on('end', () => {
+        if (settled) return;
+        if (!sawDone) {
+          fail(new Error('stream ended before data: [DONE]'));
+          return;
+        }
+        settled = true;
+        resolve();
+      });
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`Idle timeout after ${timeoutMs} ms`)));
+    req.on('error', (error) => fail(error));
     req.write(bodyStr);
     req.end();
   });
@@ -370,157 +379,207 @@ function fetchRequest(endpointUrl, headers, payload) {
 
 function getFrontierProviders() {
   const providers = [];
-  const openRouterKey = (process.env.OPENROUTER_API_KEY || '').trim();
-  const vercelKey = (process.env.AI_GATEWAY_API_KEY || '').trim();
-
+  const openRouterKey = cleanSecret(process.env.OPENROUTER_API_KEY);
+  const vercelKey = gatewayKey();
   if (openRouterKey) {
     providers.push({
       name: 'OpenRouter',
       url: 'https://openrouter.ai/api/v1/chat/completions',
       headers: {
-        'Authorization': `Bearer ${openRouterKey}`,
+        Authorization: `Bearer ${openRouterKey}`,
         'HTTP-Referer': 'https://github.com/erastudil/hydra',
-        'X-Title': 'Hydra Shell Utility'
-      }
+        'X-Title': 'Hydra Shell Utility',
+      },
     });
   }
-
   if (vercelKey) {
     const base = (process.env.AI_GATEWAY_API_BASE || 'https://ai-gateway.vercel.sh/v1').replace(/\/+$/, '');
     providers.push({
       name: 'Vercel AI Gateway',
       url: `${base}/chat/completions`,
-      headers: {
-        'Authorization': `Bearer ${vercelKey}`
-      }
+      headers: { Authorization: `Bearer ${vercelKey}` },
     });
   }
-
   return providers;
 }
 
 function getFreeProvider() {
-  const cfToken = (process.env.CLOUDFLARE_API_TOKEN || '').trim();
-  const cfAccount = (process.env.CLOUDFLARE_ACCOUNT_ID || '').trim();
-
+  const cfToken = cleanSecret(process.env.CLOUDFLARE_API_TOKEN);
+  const cfAccount = cleanSecret(process.env.CLOUDFLARE_ACCOUNT_ID);
   if (cfToken && cfAccount) {
     return {
       provider: {
         name: 'Cloudflare Workers AI',
         url: `https://api.cloudflare.com/client/v4/accounts/${cfAccount}/ai/v1/chat/completions`,
-        headers: {
-          'Authorization': `Bearer ${cfToken}`
-        }
+        headers: { Authorization: `Bearer ${cfToken}` },
       },
-      model: process.env.HYDRA_CLOUDFLARE_MODEL || '@cf/meta/llama-3.3-70b-instruct'
+      model: process.env.HYDRA_CLOUDFLARE_MODEL || CATALOG.default_cloudflare_model,
     };
   }
-
-  const openRouterKey = (process.env.OPENROUTER_API_KEY || '').trim();
+  const openRouterKey = cleanSecret(process.env.OPENROUTER_API_KEY);
   if (openRouterKey) {
     return {
       provider: {
         name: 'OpenRouter Free Forge',
         url: 'https://openrouter.ai/api/v1/chat/completions',
         headers: {
-          'Authorization': `Bearer ${openRouterKey}`,
+          Authorization: `Bearer ${openRouterKey}`,
           'HTTP-Referer': 'https://github.com/erastudil/hydra',
-          'X-Title': 'Hydra Free Forge'
-        }
+          'X-Title': 'Hydra Free Forge',
+        },
       },
-      model: process.env.HYDRA_FREE_MODEL || 'meta-llama/llama-3.3-70b-instruct:free'
+      model: process.env.HYDRA_FREE_MODEL || CATALOG.default_free_model,
     };
   }
-
   throw new Error(
     'Free Forge requires either:\n' +
     '  - CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, or\n' +
     '  - OPENROUTER_API_KEY\n' +
-    'For local zero-key offline execution: hydra local "<prompt>"'
+    'For local execution with no cloud key: hydra local "<prompt>"'
   );
 }
 
-async function runSwarm(task, selectedRoles = ['architect', 'coder', 'auditor'], customModel = null, jsonMode = false, stream = true) {
+function headConfig(role, customModel) {
+  const head = CATALOG.swarm[role] || {
+    title: role.toUpperCase(),
+    model: 'anthropic/claude-sonnet-5.5',
+    system: `You are a specialized agent for ${role}.`,
+  };
+  const cfg = { ...head };
+  if (customModel) {
+    cfg.model = customModel;
+    delete cfg.effort;
+    delete cfg.reasoning_mode;
+  }
+  return cfg;
+}
+
+async function runHead(role, task, providers, customModel, temperature, wrapTask) {
+  const head = headConfig(role, customModel);
+  const started = Date.now();
+  const userContent = wrapTask
+    ? `Task: ${task}\n\nExecute your specialized mandate with rigorous, production-grade output.`
+    : task;
+  let lastError = null;
+  for (const provider of providers) {
+    try {
+      const content = await requestJson(provider.url, provider.headers, buildPayload({
+        endpointUrl: provider.url,
+        model: head.model,
+        messages: [
+          { role: 'system', content: head.system },
+          { role: 'user', content: userContent },
+        ],
+        stream: false,
+        temperature,
+        effort: head.effort || null,
+        reasoningMode: head.reasoning_mode || null,
+      }), completionTimeoutMs(head.effort, head.reasoning_mode));
+      return {
+        role,
+        title: head.title,
+        model: head.model,
+        durationSec: Number(((Date.now() - started) / 1000).toFixed(1)),
+        content,
+        error: null,
+        status: 'ok',
+      };
+    } catch (error) {
+      if (error.usage) throw error;
+      lastError = error;
+    }
+  }
+  return {
+    role,
+    title: head.title,
+    model: head.model,
+    durationSec: Number(((Date.now() - started) / 1000).toFixed(1)),
+    content: '',
+    error: lastError ? lastError.message : 'No provider available',
+    status: 'failed',
+  };
+}
+
+function printHead(result) {
+  const border = '='.repeat(64);
+  process.stdout.write(`\n${border}\n`);
+  process.stdout.write(`[HEAD: ${String(result.title).toUpperCase()}] · ${result.model} (${result.durationSec}s)\n`);
+  process.stdout.write(`${border}\n\n`);
+  process.stdout.write(result.error ? `[ERROR]: ${result.error}\n` : `${result.content}\n`);
+}
+
+async function runSwarm(task, selectedRoles, customModel, jsonMode, temperature) {
   const providers = getFrontierProviders();
   if (!providers.length) {
     throw new Error('Multi-agent swarm requires OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.');
   }
-  const provider = providers[0];
-
+  const requested = selectedRoles || ['architect', 'coder', 'auditor'];
+  const explicitSynth = requested.includes('synthesizer');
+  let workerRoles = requested.filter((role) => role !== 'synthesizer');
+  if (!workerRoles.length) workerRoles = ['architect', 'coder', 'auditor'];
   if (!jsonMode) {
-    process.stderr.write(`\n[HYDRA SWARM] Fanning out ${selectedRoles.length} autonomous heads in parallel...\n`);
+    process.stderr.write(`\n[HYDRA SWARM] Fanning out ${workerRoles.length} specialist heads in parallel...\n`);
   }
-
-  const results = await Promise.all(selectedRoles.map(async (role) => {
-    const head = SWARM_HEADS[role] || {
-      title: role.toUpperCase(),
-      model: 'anthropic/claude-3.7-sonnet',
-      system: `You are a specialized agent for ${role}.`
-    };
-    const model = customModel || head.model;
-    const start = Date.now();
-    try {
-      const content = await fetchRequest(provider.url, provider.headers, {
-        model,
-        messages: [
-          { role: 'system', content: head.system },
-          { role: 'user', content: `Task: ${task}\n\nExecute your specialized mandate with rigorous, production-grade output.` }
-        ]
-      });
-      const durationSec = ((Date.now() - start) / 1000).toFixed(1);
-      return { role, title: head.title, model, durationSec, content, error: null };
-    } catch (e) {
-      const durationSec = ((Date.now() - start) / 1000).toFixed(1);
-      return { role, title: head.title, model, durationSec, content: '', error: e.message };
+  const finished = await Promise.all(workerRoles.map((role) => (
+    runHead(role, task, providers, customModel, temperature, true)
+  )));
+  const byRole = Object.fromEntries(finished.map((result) => [result.role, result]));
+  const results = workerRoles.map((role) => byRole[role]);
+  if (!jsonMode) results.forEach(printHead);
+  const successes = results.filter((result) => !result.error);
+  if (successes.length && (explicitSynth || successes.length >= 2)) {
+    if (!jsonMode) {
+      process.stderr.write('\n[HYDRA SWARM] Dispatching Synthesizer head to unify conclusions...\n');
     }
-  }));
-
-  if (!jsonMode) {
-    for (const res of results) {
-      const border = '='.repeat(64);
-      process.stdout.write(`\n${border}\n`);
-      process.stdout.write(`[HEAD: ${res.title.toUpperCase()}] · ${res.model} (${res.durationSec}s)\n`);
-      process.stdout.write(`${border}\n\n`);
-      if (res.error) {
-        process.stdout.write(`[ERROR]: ${res.error}\n`);
-      } else {
-        process.stdout.write(`${res.content}\n`);
-      }
+    let synthPrompt = `Original Task: ${task}\n\nBelow are the findings from the autonomous heads:\n\n`;
+    for (const result of successes) {
+      synthPrompt += `--- ${result.title} (${result.model}) ---\n${result.content}\n\n`;
     }
-
-    if (results.filter(r => !r.error).length >= 2) {
-      process.stderr.write(`\n[HYDRA SWARM] Dispatching Synthesizer head to unify conclusions...\n`);
-      const synthHead = SWARM_HEADS.synthesizer;
-      const synthModel = customModel || synthHead.model;
-      let synthPrompt = `Original Task: ${task}\n\nHead Findings:\n\n`;
-      for (const r of results) {
-        if (!r.error) synthPrompt += `--- ${r.title} (${r.model}) ---\n${r.content}\n\n`;
-      }
-      synthPrompt += `Consolidate these findings into a unified, decisive action roadmap. Resolve any contradictions and provide the final engineering consensus.`;
-
-      const start = Date.now();
-      try {
-        const synthContent = await fetchRequest(provider.url, provider.headers, {
-          model: synthModel,
-          messages: [
-            { role: 'system', content: synthHead.system },
-            { role: 'user', content: synthPrompt }
-          ]
-        });
-        const durationSec = ((Date.now() - start) / 1000).toFixed(1);
-        const border = '='.repeat(64);
-        process.stdout.write(`\n${border}\n`);
-        process.stdout.write(`🔮 [HEAD: FINAL SYNTHESIS] · ${synthModel} (${durationSec}s)\n`);
-        process.stdout.write(`${border}\n\n`);
-        process.stdout.write(`${synthContent}\n`);
-      } catch (e) {
-        process.stdout.write(`\n[SYNTHESIZER ERROR]: ${e.message}\n`);
-      }
-    }
-  } else {
-    process.stdout.write(JSON.stringify(results, null, 2) + '\n');
+    synthPrompt += 'Consolidate these findings into a unified, decisive action roadmap. Resolve any contradictions and provide the final engineering consensus.';
+    const synth = await runHead('synthesizer', synthPrompt, providers, customModel, temperature, false);
+    results.push(synth);
+    if (!jsonMode) printHead(synth);
   }
+  if (jsonMode) process.stdout.write(`${JSON.stringify(results, null, 2)}\n`);
+  return results.some((result) => result.error) ? 1 : 0;
 }
+
+const HELP_BANNER = `
+  ___ ___            .___
+ /   |   \\___.__.  __| _/___________
+/    ~    <   |  | / __ |\\_  __ \\__  \\
+\\    Y    /\\___  |/ /_/ | |  | \\// __ \\_
+ \\___|_  / / ____|\\____ | |__|  (____  /
+       \\/  \\/          \\/            \\/
+      Sovereign Multi-Headed AI Shell · v${VERSION} (Node.js)
+
+USAGE:
+    hydra <model-alias> "<prompt>"
+    hydra free "<prompt>"
+    hydra local "<prompt>"
+    hydra swarm "<task>"
+    hydra setup
+    cat file.txt | hydra <alias>
+    cat file.txt | hydra <alias> - "instruction"
+    hydra <alias> -- <prompt>
+
+POPULAR ALIASES:
+    opus 5.5 high, sol 6.1 pro, sonnet 5.5, gemini 3.8, grok 4.7, llama 4 scout
+
+OPTIONS:
+    --system <prompt>       Custom system prompt
+    --model <id>            Explicit model override
+    --effort <level>        Reasoning effort
+    --reasoning-mode <mode> Reasoning mode, such as pro
+    --temperature <float>   Sampling temperature. Omitted unless you set it.
+    --max-tokens <int>      Maximum generation tokens
+    --no-stream             Disable real-time SSE streaming
+    --json                  Output raw JSON
+    --heads <roles>         Comma-separated swarm heads
+    --list-models           List registered aliases
+    -v, --version           Display version
+    -h, --help              Show this help message
+`;
 
 function printSetupGuide() {
   console.log(`
@@ -528,135 +587,190 @@ function printSetupGuide() {
   HYDRA SETUP & INTEGRATION GUIDE · v${VERSION} (Node.js)
 ================================================================================
 
-1. QUICK SETUP & CREDENTIALS
+1. CREDENTIALS
 --------------------------------------------------------------------------------
-Hydra resolves API keys from your environment or a local .env file.
-Supported providers:
+Hydra reads the process environment, then ~/.hydra/.env.
+A project .env may set ordinary settings such as HYDRA_FREE_MODEL.
+Keys, tokens, and host URLs in a project .env stay unloaded unless HYDRA_TRUST_CWD_ENV=1.
 
-  A. Cloudflare Workers AI (Zero cost or your existing paid plan):
-     export CLOUDFLARE_API_TOKEN="your-token"
-     export CLOUDFLARE_ACCOUNT_ID="your-account-id"
+  export AI_GATEWAY_API_KEY="your-token"
+  # VERCEL_AI_GATEWAY_TOKEN is accepted as an alias.
+  export OPENROUTER_API_KEY="sk-or-v1-..."
+  export CLOUDFLARE_API_TOKEN="..."
+  export CLOUDFLARE_ACCOUNT_ID="..."
 
-  B. OpenRouter (Access to 200+ models with unified billing or free tiers):
-     export OPENROUTER_API_KEY="sk-or-v1-..."
+hydra free needs Cloudflare or OpenRouter. hydra local needs no cloud key.
 
-  C. Vercel AI Gateway (Automated multi-provider edge routing):
-     export VERCEL_AI_GATEWAY_TOKEN="your-token"
-
-  D. Zero-Configuration Modes (NO KEYS REQUIRED):
-     • hydra free "<prompt>"   -> Routes to free public endpoints
-     • hydra local "<prompt>"  -> Routes to local Ollama (11434), llama.cpp (8080), or EasyLM (8000)
-
-2. SHELL SCRIPTS & UNIX PIPES
+2. NODE INTEGRATION
 --------------------------------------------------------------------------------
-Pipe outputs directly from your shell into any model:
-
-  # Review recent git diff with Sonnet 5.5
-  git diff | hydra sonnet 5.5 "Audit for security issues and edge cases"
-
-  # Process log files without streaming into a variable
-  SUMMARY=$(cat /var/log/syslog | hydra free "Extract top 3 error clusters" --no-stream)
-
-  # Check compilation errors with Sol 6.1
-  cargo check 2>&1 | hydra sol 6.1 "Suggest exact minimal diff to fix errors"
-
-3. INTEGRATING INTO NODE.JS / TYPESCRIPT APPLICATIONS
---------------------------------------------------------------------------------
-Run via global CLI or npx with zero npm install:
-
-  import { execSync } from 'child_process';
+  import { execFileSync } from 'node:child_process';
 
   function callHydra(alias, prompt) {
-    return execSync(\`npx hydra-cli "\${alias}" "\${prompt.replace(/"/g, '\\\\"')}" --no-stream\`, {
+    return execFileSync('hydra', [alias, prompt, '--no-stream'], {
       encoding: 'utf-8',
-      env: process.env
+      stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
   }
 
-  const analysis = callHydra('sonnet 5.5', 'Analyze this payload');
-
-4. INTEGRATING INTO AUTONOMOUS AGENTS (TOOL PATTERN)
+3. SWARM
 --------------------------------------------------------------------------------
-Agents can invoke Hydra as a zero-dependency external tool:
+Specialists run in parallel. One synthesizer runs after their text exists.
 
-  const toolDefinition = {
-    name: "summon_model",
-    description: "Query frontier models (Sonnet 5.5, Opus 5.5, Sol 6.1, Grok) or free/local models",
-    parameters: {
-      model_alias: "sonnet 5.5 | opus 5.5 | sol 6.1 | grok | free | local",
-      prompt: "The detailed instruction or analysis request"
-    }
-  };
-
-5. MULTI-AGENT SWARMS
---------------------------------------------------------------------------------
-Spawn 4 parallel specialized model heads (Architect, Implementer, Auditor, Synthesizer):
-
-  hydra swarm "Architect a low-latency tick-by-tick orderbook"
-
-Custom heads:
-  hydra swarm "Design consensus loop" --heads architect,auditor
+  hydra swarm "Architect a low-latency order book"
+  hydra swarm "Design the consensus loop" --heads architect,auditor
 
 Docs & Source: https://github.com/erastudil/hydra
 ================================================================================
 `);
 }
 
-async function main() {
-  const pipedInput = await readStdin();
-  const rawArgs = process.argv.slice(2);
+function printModels() {
+  console.log(`\n--- Hydra Registered Models & Aliases (v${VERSION}) ---`);
+  for (const alias of Object.keys(MODEL_MAP).sort()) {
+    const route = resolveRoute(alias);
+    const extra = [
+      route.effort ? `effort=${route.effort}` : '',
+      route.reasoningMode ? `mode=${route.reasoningMode}` : '',
+    ].filter(Boolean).join(' ');
+    console.log(`  ${alias.padEnd(20)} -> ${route.model}${extra ? ` (${extra})` : ''}`);
+  }
+  console.log('');
+}
 
-  if (!rawArgs.length) {
-    if (pipedInput) {
-      rawArgs.push('sonnet 5.5');
-    } else {
-      console.log(HELP_BANNER);
-      process.exit(0);
+async function summon(options) {
+  const providers = getFrontierProviders();
+  if (!providers.length) {
+    throw new Error(
+      `No frontier credentials found to summon '${options.alias}'.\n` +
+      'Export OPENROUTER_API_KEY or AI_GATEWAY_API_KEY.\n' +
+      'Free-tier cloud models: hydra free "<prompt>"\n' +
+      'This machine only:        hydra local "<prompt>"'
+    );
+  }
+  let lastErr = null;
+  for (const provider of providers) {
+    let emitted = false;
+    try {
+      const payload = buildPayload({
+        endpointUrl: provider.url,
+        model: options.model,
+        messages: options.messages,
+        stream: options.stream && !options.jsonMode,
+        temperature: options.temperature,
+        maxTokens: options.maxTokens,
+        effort: options.effort,
+        reasoningMode: options.reasoningMode,
+      });
+      if (options.stream && !options.jsonMode) {
+        await streamRequest(provider.url, provider.headers, payload, (chunk) => {
+          emitted = true;
+          process.stdout.write(chunk);
+        }, completionTimeoutMs(options.effort, options.reasoningMode));
+        process.stdout.write('\n');
+        return 0;
+      }
+      const text = await requestJson(
+        provider.url,
+        provider.headers,
+        payload,
+        completionTimeoutMs(options.effort, options.reasoningMode)
+      );
+      if (options.jsonMode) {
+        console.log(JSON.stringify({
+          model: options.model,
+          provider: provider.name,
+          effort: options.effort,
+          reasoning_mode: options.reasoningMode,
+          content: text,
+        }, null, 2));
+      } else {
+        console.log(text);
+      }
+      return 0;
+    } catch (error) {
+      if (error.usage) throw error;
+      if (emitted) {
+        throw new Error(`Stream from ${provider.name} truncated after output started: ${error.message}`);
+      }
+      lastErr = error;
     }
   }
+  throw new Error(`All providers failed for '${options.model}'. Last error: ${lastErr && lastErr.message}`);
+}
 
-  if (rawArgs[0] === '-h' || rawArgs[0] === '--help' || rawArgs[0] === 'help') {
+async function main() {
+  loadDotenv();
+  let rawArgs = process.argv.slice(2);
+  const early = rawArgs[0];
+  if (early === '-h' || early === '--help' || early === 'help') {
     console.log(HELP_BANNER);
-    process.exit(0);
+    return 0;
   }
-
-  if (rawArgs[0] === '-v' || rawArgs[0] === '--version' || rawArgs[0] === 'version') {
+  if (early === '-v' || early === '--version' || early === 'version') {
     console.log(`hydra ${VERSION}`);
-    process.exit(0);
+    return 0;
   }
-
-  if (rawArgs[0] === 'setup' || rawArgs[0] === 'guide' || rawArgs[0] === '--setup' || rawArgs[0] === '--guide') {
+  if (early === 'setup' || early === 'guide' || early === '--setup' || early === '--guide') {
     printSetupGuide();
-    process.exit(0);
+    return 0;
+  }
+  if (early === '--list-models' || early === 'list-models' || early === 'models') {
+    printModels();
+    return 0;
   }
 
-  let commandOrAlias = rawArgs.shift();
-
-  if (rawArgs.length && isCompoundAlias(commandOrAlias, rawArgs[0])) {
-    commandOrAlias = `${commandOrAlias} ${rawArgs.shift()}`;
+  let earlyPrompt = null;
+  if (!rawArgs.length) {
+    const piped = await readStdin();
+    if (!piped) {
+      console.log(HELP_BANNER);
+      return 0;
+    }
+    rawArgs = ['sonnet 5.5'];
+    earlyPrompt = piped;
   }
 
+  const consumed = consumeAlias(rawArgs);
   let systemPrompt = DEFAULT_SYSTEM_PROMPT;
   let modelOverride = null;
-  let temperature = 0.7;
+  let effortFlag = null;
+  let modeFlag = null;
+  let temperature = null;
   let maxTokens = null;
   let stream = true;
   let jsonMode = false;
   let swarmHeads = null;
   const promptTokens = [];
+  const rest = consumed.rest;
 
-  for (let i = 0; i < rawArgs.length; i++) {
-    const arg = rawArgs[i];
-    if (arg === '--system' && i + 1 < rawArgs.length) {
-      systemPrompt = rawArgs[++i];
-    } else if (arg === '--model' && i + 1 < rawArgs.length) {
-      modelOverride = rawArgs[++i];
-    } else if (arg === '--temperature' && i + 1 < rawArgs.length) {
-      temperature = parseFloat(rawArgs[++i]) || 0.7;
-    } else if (arg === '--max-tokens' && i + 1 < rawArgs.length) {
-      maxTokens = parseInt(rawArgs[++i], 10) || null;
-    } else if (arg === '--heads' && i + 1 < rawArgs.length) {
-      swarmHeads = rawArgs[++i].split(',').map(s => s.trim()).filter(Boolean);
+  for (let i = 0; i < rest.length; i += 1) {
+    const arg = rest[i];
+    if (arg === '--system' && i + 1 < rest.length) {
+      systemPrompt = rest[++i];
+    } else if (arg === '--model' && i + 1 < rest.length) {
+      modelOverride = rest[++i];
+    } else if (arg === '--effort' && i + 1 < rest.length) {
+      effortFlag = rest[++i].trim().toLowerCase();
+    } else if (arg === '--reasoning-mode' && i + 1 < rest.length) {
+      modeFlag = rest[++i].trim().toLowerCase();
+    } else if (arg === '--temperature' && i + 1 < rest.length) {
+      const raw = rest[++i];
+      const value = Number(raw);
+      if (!Number.isFinite(value)) {
+        process.stderr.write(`[ERROR] --temperature expects a number, got '${raw}'.\n`);
+        return 1;
+      }
+      temperature = value;
+    } else if (arg === '--max-tokens' && i + 1 < rest.length) {
+      const raw = rest[++i];
+      const value = Number(raw);
+      if (!Number.isInteger(value)) {
+        process.stderr.write(`[ERROR] --max-tokens expects an integer, got '${raw}'.\n`);
+        return 1;
+      }
+      maxTokens = value;
+    } else if (arg === '--heads' && i + 1 < rest.length) {
+      swarmHeads = rest[++i].split(',').map((item) => item.trim()).filter(Boolean);
     } else if (arg === '--no-stream') {
       stream = false;
     } else if (arg === '--json') {
@@ -667,133 +781,127 @@ async function main() {
     }
   }
 
-  let prompt = promptTokens.join(' ').trim();
-  if (pipedInput) {
-    prompt = prompt ? `[Piped Input]:\n${pipedInput}\n\n[Instruction]:\n${prompt}` : pipedInput;
-  }
-
-  if (!prompt) {
-    process.stderr.write(`[ERROR] No prompt or piped input provided for '${commandOrAlias}'.\n`);
-    process.exit(1);
-  }
-
-  const cmd = commandOrAlias.toLowerCase().trim();
-
-  try {
-    if (cmd === 'swarm') {
-      await runSwarm(prompt, swarmHeads || ['architect', 'coder', 'auditor'], modelOverride, jsonMode, stream);
-      process.exit(0);
-    } else if (cmd === 'free') {
-      const { provider, model } = getFreeProvider();
-      const targetModel = modelOverride || model;
-      const payload = {
-        model: targetModel,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: prompt }
-        ],
-        stream,
-        temperature
-      };
-      if (maxTokens) payload.max_tokens = maxTokens;
-
-      if (stream && !jsonMode) {
-        await streamRequest(provider.url, provider.headers, payload, (chunk) => {
-          process.stdout.write(chunk);
-        });
-        process.stdout.write('\n');
+  let prompt = '';
+  if (earlyPrompt !== null) {
+    prompt = earlyPrompt;
+  } else if (promptTokens.includes('-') || promptTokens.length === 0) {
+    const piped = await readStdin();
+    if (promptTokens.includes('-')) {
+      const instruction = promptTokens.filter((token) => token !== '-').join(' ').trim();
+      if (piped && instruction) {
+        prompt = `[Piped Input]:\n${piped}\n\n[Instruction]:\n${instruction}`;
       } else {
-        const text = await fetchRequest(provider.url, provider.headers, payload);
-        if (jsonMode) {
-          console.log(JSON.stringify({ model: targetModel, provider: provider.name, content: text }, null, 2));
-        } else {
-          console.log(text);
-        }
+        prompt = piped || instruction;
       }
-      process.exit(0);
-    } else if (cmd === 'local') {
-      const local = await detectLocalEndpoint();
-      const targetModel = modelOverride || process.env.HYDRA_LOCAL_MODEL || 'qwen2.5-coder:latest';
-      const payload = {
-        model: targetModel,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: prompt }
-        ],
-        stream,
-        temperature
-      };
-      if (maxTokens) payload.max_tokens = maxTokens;
-
-      if (stream && !jsonMode) {
-        await streamRequest(local.url, { 'Content-Type': 'application/json' }, payload, (chunk) => {
-          process.stdout.write(chunk);
-        });
-        process.stdout.write('\n');
-      } else {
-        const text = await fetchRequest(local.url, { 'Content-Type': 'application/json' }, payload);
-        if (jsonMode) {
-          console.log(JSON.stringify({ model: targetModel, provider: local.name, endpoint: local.url, content: text }, null, 2));
-        } else {
-          console.log(text);
-        }
-      }
-      process.exit(0);
     } else {
-      // Direct frontier summoning
-      const providers = getFrontierProviders();
-      if (!providers.length) {
-        throw new Error(
-          `No frontier credentials found to summon '${commandOrAlias}'.\n` +
-          'Please export OPENROUTER_API_KEY or AI_GATEWAY_API_KEY in your environment,\n' +
-          'or run zero-cost inference via: hydra free "<prompt>"\n' +
-          'or local inference via:        hydra local "<prompt>"'
-        );
-      }
-
-      const modelId = modelOverride || resolveModel(commandOrAlias);
-      const payload = {
-        model: modelId,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: prompt }
-        ],
-        stream,
-        temperature
-      };
-      if (maxTokens) payload.max_tokens = maxTokens;
-
-      let lastErr = null;
-      for (const provider of providers) {
-        try {
-          if (stream && !jsonMode) {
-            await streamRequest(provider.url, provider.headers, payload, (chunk) => {
-              process.stdout.write(chunk);
-            });
-            process.stdout.write('\n');
-            process.exit(0);
-          } else {
-            const text = await fetchRequest(provider.url, provider.headers, payload);
-            if (jsonMode) {
-              console.log(JSON.stringify({ model: modelId, provider: provider.name, content: text }, null, 2));
-            } else {
-              console.log(text);
-            }
-            process.exit(0);
-          }
-        } catch (e) {
-          lastErr = e;
-        }
-      }
-      throw new Error(`All providers failed for '${modelId}'. Last error: ${lastErr?.message}`);
+      prompt = piped;
     }
-  } catch (err) {
-    process.stderr.write(`\n[HYDRA ERROR] ${err.message}\n`);
-    process.exit(1);
+  } else {
+    prompt = promptTokens.join(' ').trim();
   }
+  if (!prompt) {
+    process.stderr.write(`[ERROR] No prompt or piped input provided for '${consumed.alias}'.\n`);
+    return 1;
+  }
+
+  const cmd = consumed.alias.toLowerCase().trim();
+  if (cmd === 'swarm') {
+    return runSwarm(prompt, swarmHeads, modelOverride, jsonMode, temperature);
+  }
+  if (cmd === 'free') {
+    const { provider, model } = getFreeProvider();
+    const targetModel = modelOverride || model;
+    const payload = buildPayload({
+      endpointUrl: provider.url,
+      model: targetModel,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: prompt },
+      ],
+      stream: stream && !jsonMode,
+      temperature,
+      maxTokens,
+    });
+    if (stream && !jsonMode) {
+      await streamRequest(provider.url, provider.headers, payload, (chunk) => {
+        process.stdout.write(chunk);
+      }, 180000);
+      process.stdout.write('\n');
+    } else {
+      const text = await requestJson(provider.url, provider.headers, payload, 180000);
+      if (jsonMode) {
+        console.log(JSON.stringify({ model: targetModel, provider: provider.name, content: text }, null, 2));
+      } else {
+        console.log(text);
+      }
+    }
+    return 0;
+  }
+  if (cmd === 'local') {
+    const local = await detectLocalEndpoint();
+    const targetModel = modelOverride || process.env.HYDRA_LOCAL_MODEL || CATALOG.default_local_model;
+    const payload = buildPayload({
+      endpointUrl: local.url,
+      model: targetModel,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: prompt },
+      ],
+      stream: stream && !jsonMode,
+      temperature,
+      maxTokens,
+    });
+    if (stream && !jsonMode) {
+      await streamRequest(local.url, local.headers || { 'Content-Type': 'application/json' }, payload, (chunk) => {
+        process.stdout.write(chunk);
+      }, 180000);
+      process.stdout.write('\n');
+    } else {
+      const text = await requestJson(local.url, { 'Content-Type': 'application/json' }, payload, 180000);
+      if (jsonMode) {
+        console.log(JSON.stringify({ model: targetModel, provider: local.name, endpoint: local.url, content: text }, null, 2));
+      } else {
+        console.log(text);
+      }
+    }
+    return 0;
+  }
+
+  const route = resolveRoute(consumed.alias);
+  const model = modelOverride || route.model;
+  const effort = modelOverride ? effortFlag : (effortFlag || route.effort);
+  const reasoningMode = modelOverride ? modeFlag : (modeFlag || route.reasoningMode);
+  return summon({
+    alias: consumed.alias,
+    model,
+    effort,
+    reasoningMode,
+    temperature,
+    maxTokens,
+    stream,
+    jsonMode,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: prompt },
+    ],
+  });
 }
 
-main().catch((err) => {
-  process.stderr.write(`\n[FATAL ERROR] ${err.message}\n`);
-  process.exit(1);
-});
+module.exports = {
+  CATALOG,
+  VERSION,
+  resolveRoute,
+  consumeAlias,
+  adaptModelForUrl,
+  buildPayload,
+};
+
+if (require.main === module) {
+  main().then((code) => {
+    process.exit(code || 0);
+  }).catch((error) => {
+    const label = error.usage ? '[ERROR]' : '[HYDRA ERROR]';
+    process.stderr.write(`\n${label} ${error.message}\n`);
+    process.exit(1);
+  });
+}
