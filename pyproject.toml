@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hydra-ai-cli"
+version = "1.0.0"
+description = "Sovereign multi-headed AI summoning CLI. Direct frontier models, zero-cost Free Forge routing, local inference, and multi-agent swarm fan-out."
+readme = "README.md"
+authors = [
+  { name = "erastudil" }
+]
+license = { text = "Apache-2.0" }
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: Utilities",
+]
+keywords = ["ai", "cli", "openrouter", "vercel", "swarm", "agents", "ollama", "llm"]
+requires-python = ">=3.8"
+dependencies = []
+
+[project.scripts]
+hydra = "hydra_cli.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/erastudil/hydra"
+Repository = "https://github.com/erastudil/hydra"
+"Bug Tracker" = "https://github.com/erastudil/hydra/issues"

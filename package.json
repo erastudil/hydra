@@ -1,0 +1,41 @@
+{
+  "name": "hydra-agent-cli",
+  "version": "1.0.0",
+  "description": "Sovereign multi-headed AI summoning CLI. Direct frontier models, zero-cost Free Forge routing, local inference, and multi-agent swarm fan-out.",
+  "main": "bin/hydra.js",
+  "bin": {
+    "hydra": "bin/hydra.js"
+  },
+  "scripts": {
+    "test": "node bin/hydra.js --version"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "openrouter",
+    "vercel",
+    "swarm",
+    "agents",
+    "ollama",
+    "llm",
+    "sovereign"
+  ],
+  "author": "erastudil",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/erastudil/hydra.git"
+  },
+  "bugs": {
+    "url": "https://github.com/erastudil/hydra/issues"
+  },
+  "homepage": "https://github.com/erastudil/hydra#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "bin/hydra.js",
+    "README.md",
+    "LICENSE"
+  ]
+}
