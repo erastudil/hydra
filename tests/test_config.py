@@ -181,3 +181,26 @@ def test_sensitive_env_keys():
     assert sensitive_env_key("CLOUDFLARE_ACCOUNT_ID") is True
     assert sensitive_env_key("HYDRA_FREE_MODEL") is False
     assert sensitive_env_key("HYDRA_SYSTEM_PROMPT") is False
+
+
+def test_build_cached_system_prompt():
+    from hydra_cli.config import (
+        DEFAULT_SYSTEM_PROMPT,
+        IMMUTABLE_AGENT_INVARIANTS,
+        build_cached_system_prompt,
+    )
+    header = IMMUTABLE_AGENT_INVARIANTS.strip()
+
+    # None defaults to header + DEFAULT_SYSTEM_PROMPT
+    p1 = build_cached_system_prompt(None)
+    assert p1.startswith(header)
+    assert DEFAULT_SYSTEM_PROMPT.strip() in p1
+
+    # Custom prompt is appended after header
+    p2 = build_cached_system_prompt("Be extremely concise.")
+    assert p2.startswith(header)
+    assert "Be extremely concise." in p2
+
+    # Already containing header does not duplicate
+    p3 = build_cached_system_prompt(p2)
+    assert p3.count(header) == 1

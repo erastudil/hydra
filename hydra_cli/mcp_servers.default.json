@@ -3,27 +3,48 @@
   "mcpServers": {
     "filesystem": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "."
+      ],
       "description": "Local file system operations (read, write, list, search)"
     },
     "fetch": {
       "command": "uvx",
-      "args": ["mcp-server-fetch"],
+      "args": [
+        "mcp-server-fetch"
+      ],
       "description": "Web content fetching and markdown conversion"
     },
     "sqlite": {
       "command": "uvx",
-      "args": ["--with", "mcp<2", "mcp-server-sqlite", "--db-path", "${HYDRA_HOME}/workspace.db"],
+      "args": [
+        "--with",
+        "mcp<2",
+        "mcp-server-sqlite",
+        "--db-path",
+        "${HYDRA_HOME}/workspace.db"
+      ],
       "description": "SQLite database inspection and SQL execution (database kept in ~/.hydra). Archived upstream; pinned to mcp<2, which it needs."
     },
     "git": {
       "command": "uvx",
-      "args": ["mcp-server-git"],
+      "args": [
+        "mcp-server-git"
+      ],
       "description": "Git repository operations (status, diff, log, commit)"
     },
     "github": {
       "command": "docker",
-      "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"],
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ghcr.io/github/github-mcp-server"
+      ],
       "env": {
         "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
       },
@@ -31,7 +52,10 @@
     },
     "brave-search": {
       "command": "npx",
-      "args": ["-y", "@brave/brave-search-mcp-server"],
+      "args": [
+        "-y",
+        "@brave/brave-search-mcp-server"
+      ],
       "env": {
         "BRAVE_API_KEY": "${BRAVE_API_KEY}"
       },
@@ -39,7 +63,10 @@
     },
     "memory": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
       "env": {
         "MEMORY_FILE_PATH": "${HYDRA_HOME}/memory.jsonl"
       },
@@ -47,8 +74,20 @@
     },
     "playwright": {
       "command": "npx",
-      "args": ["-y", "@playwright/mcp@latest", "--headless"],
+      "args": [
+        "-y",
+        "@playwright/mcp@latest",
+        "--headless"
+      ],
       "description": "Headless browser automation, web scraping, and screenshots"
+    },
+    "snowgate-mcp": {
+      "command": "node",
+      "args": [
+        "/server.js",
+        "--stdio"
+      ],
+      "description": "Snowgate sovereign MCP server: forum read/post across categories, hydra inference, and CAD"
     }
   }
 }

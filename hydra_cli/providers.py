@@ -9,7 +9,9 @@ import re
 import socket
 import urllib.error
 import urllib.request
-from typing import Any, Dict, Generator, List, Optional, Tuple
+import random
+import time
+from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from hydra_cli.config import (
@@ -17,6 +19,7 @@ from hydra_cli.config import (
     DEFAULT_FREE_MODEL,
     DEFAULT_HF_BASE,
     DEFAULT_HF_MODEL,
+    DEFAULT_LOCAL_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     FREE_MODELS,
     PROVIDER_KEY_NAMES,
@@ -146,6 +149,146 @@ def detect_local_endpoint() -> Tuple[str, str]:
     return chat_completions_url("http://127.0.0.1:11434"), "Ollama (unverified)"
 
 
+# ===========================================================================
+# Health-Based Dynamic Routing & Circuit Breaker Engine (WO-05)
+# ===========================================================================
+
+class ProviderHealthTracker:
+    """Health-based dynamic model routing and circuit breaker engine (WO-05).
+
+    Tracks provider health status, error rates, consecutive failures, and HTTP 429 rate limits.
+    Enforces exponential backoff and circuit breaker state transitions.
+    """
+
+    def __init__(
+        self,
+        failure_threshold: int = 3,
+        cooldown_seconds: float = 30.0,
+        backoff_factor: float = 2.0,
+        max_cooldown: float = 300.0,
+    ):
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self.backoff_factor = backoff_factor
+        self.max_cooldown = max_cooldown
+        self._stats: Dict[str, Dict[str, Any]] = {}
+
+    def _get_key(self, target: Any) -> str:
+        if isinstance(target, dict):
+            return str(target.get("id") or describe_endpoint(target.get("url", "")))
+        if isinstance(target, str):
+            return describe_endpoint(target) if "://" in target else target
+        return str(target)
+
+    def _entry(self, key: str) -> Dict[str, Any]:
+        if key not in self._stats:
+            self._stats[key] = {
+                "status": "healthy",
+                "consecutive_failures": 0,
+                "consecutive_successes": 0,
+                "total_requests": 0,
+                "total_failures": 0,
+                "total_429s": 0,
+                "last_failure_time": 0.0,
+                "last_success_time": 0.0,
+                "last_error": None,
+                "circuit_open_until": 0.0,
+                "current_cooldown": self.cooldown_seconds,
+            }
+        return self._stats[key]
+
+    def record_success(self, target: Any) -> None:
+        key = self._get_key(target)
+        entry = self._entry(key)
+        entry["total_requests"] += 1
+        entry["consecutive_successes"] += 1
+        entry["consecutive_failures"] = 0
+        entry["last_success_time"] = time.time()
+        entry["circuit_open_until"] = 0.0
+        entry["current_cooldown"] = self.cooldown_seconds
+        entry["status"] = "healthy"
+
+    def record_failure(self, target: Any, error: Optional[Any] = None, is_429: bool = False) -> None:
+        key = self._get_key(target)
+        entry = self._entry(key)
+        entry["total_requests"] += 1
+        entry["total_failures"] += 1
+        entry["consecutive_failures"] += 1
+        entry["consecutive_successes"] = 0
+        entry["last_failure_time"] = time.time()
+        entry["last_error"] = str(error) if error else "Unknown error"
+
+        if is_429:
+            entry["total_429s"] += 1
+
+        if is_429 or entry["consecutive_failures"] >= self.failure_threshold:
+            entry["status"] = "unhealthy"
+            entry["circuit_open_until"] = time.time() + entry["current_cooldown"]
+            entry["current_cooldown"] = min(entry["current_cooldown"] * self.backoff_factor, self.max_cooldown)
+        else:
+            entry["status"] = "degraded"
+
+    def is_healthy(self, target: Any) -> bool:
+        key = self._get_key(target)
+        entry = self._entry(key)
+        if entry["circuit_open_until"] > 0:
+            if time.time() >= entry["circuit_open_until"]:
+                entry["status"] = "degraded"
+                entry["circuit_open_until"] = 0.0
+                return True
+            return False
+        return True
+
+    def get_health_status(self, target: Any) -> str:
+        key = self._get_key(target)
+        if not self.is_healthy(key):
+            return "unhealthy"
+        return self._entry(key)["status"]
+
+    def get_stats(self, target: Optional[Any] = None) -> Any:
+        if target is not None:
+            return dict(self._entry(self._get_key(target)))
+        return {k: dict(v) for k, v in self._stats.items()}
+
+    def rank_providers(self, providers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Dynamically prioritize healthy providers over degraded and unhealthy providers.
+
+        Preserves original catalog preference order within each health tier.
+        """
+        def _tier(p: Dict[str, Any]) -> int:
+            status = self.get_health_status(p)
+            if status == "healthy":
+                return 0
+            if status == "degraded":
+                return 1
+            return 2
+
+        return sorted(providers, key=_tier)
+
+    def reset(self) -> None:
+        self._stats.clear()
+
+
+GLOBAL_HEALTH_TRACKER = ProviderHealthTracker()
+
+
+def get_provider_health(target: Optional[Any] = None) -> Any:
+    return GLOBAL_HEALTH_TRACKER.get_stats(target)
+
+
+def reset_provider_health() -> None:
+    GLOBAL_HEALTH_TRACKER.reset()
+
+
+def record_provider_success(target: Any) -> None:
+    GLOBAL_HEALTH_TRACKER.record_success(target)
+
+
+def record_provider_failure(target: Any, error: Optional[Any] = None, is_429: bool = False) -> None:
+    GLOBAL_HEALTH_TRACKER.record_failure(target, error=error, is_429=is_429)
+
+
+
 def get_cheaperinference_provider() -> Optional[Dict[str, Any]]:
     """Return CheaperInference provider dict when credentials are present."""
     key = clean_secret(os.environ.get("CHEAPERINFERENCE_API_KEY"))
@@ -233,6 +376,7 @@ def get_huggingface_provider() -> Optional[Dict[str, Any]]:
         headers["Authorization"] = f"Bearer {token}"
 
     return {
+        "id": "huggingface",
         "name": "Hugging Face Inference",
         "url": target_url,
         "headers": headers,
@@ -301,24 +445,33 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
     return providers
 
 
-def providers_for_model(model: str, providers: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+def providers_for_model(
+    model: str,
+    providers: Optional[List[Dict[str, Any]]] = None,
+    health_aware: bool = True,
+) -> List[Dict[str, Any]]:
     """Configured providers that may serve this model, in fallback order.
 
     The catalog's model_providers map limits a model to the providers that carry it
     (for example a Vercel-only alias). Other models may use every configured provider.
+    When health_aware is True, healthy providers are dynamically prioritized ahead of
+    degraded or tripped circuit-breaker providers (WO-05).
     """
     configured = get_frontier_providers() if providers is None else list(providers)
     allowed = model_providers(model)
     if not allowed:
-        return configured
-    rank = {pid: index for index, pid in enumerate(allowed)}
-    usable = [p for p in configured if p.get("id") in rank]
-    usable.sort(key=lambda p: rank[p["id"]])
-    if configured and not usable:
-        names = ", ".join(PROVIDER_KEY_NAMES.get(pid, pid) for pid in allowed)
-        raise CredentialsMissingError(
-            f"{model} is only served by: {', '.join(allowed)}. Set {names} to use it."
-        )
+        usable = configured
+    else:
+        rank = {pid: index for index, pid in enumerate(allowed)}
+        usable = [p for p in configured if p.get("id") in rank]
+        usable.sort(key=lambda p: rank[p["id"]])
+        if configured and not usable:
+            names = ", ".join(PROVIDER_KEY_NAMES.get(pid, pid) for pid in allowed)
+            raise CredentialsMissingError(
+                f"{model} is only served by: {', '.join(allowed)}. Set {names} to use it."
+            )
+    if health_aware:
+        return GLOBAL_HEALTH_TRACKER.rank_providers(usable)
     return usable
 
 
@@ -521,49 +674,77 @@ def stream_chat_completion(
     max_tokens: Optional[int] = None,
     timeout: Optional[int] = None,
     reasoning: Optional[Dict[str, str]] = None,
+    max_retries: Optional[int] = None,
+    backoff_base: Optional[float] = None,
 ) -> Generator[str, None, None]:
-    """Send a streaming chat completion and yield text deltas."""
+    """Send a streaming chat completion with health tracking and 429 exponential backoff."""
     ensure_temperature(model, temperature)
     effective_model = adapt_model_for_url(url, model)
     payload = _build_payload(effective_model, messages, True, temperature, max_tokens, reasoning)
     data_bytes = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, headers=headers, data=data_bytes, method="POST")
     wait = completion_timeout(reasoning, timeout)
+    where = describe_endpoint(url)
 
-    try:
-        with urllib.request.urlopen(req, timeout=wait) as resp:
-            saw_done = False
-            for raw_line in resp:
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line or line.startswith(":"):
-                    continue
-                if line == "data: [DONE]":
-                    saw_done = True
-                    break
-                if not line.startswith("data: "):
-                    continue
-                try:
-                    chunk = json.loads(line[6:].strip())
-                except json.JSONDecodeError:
-                    continue
-                _raise_if_provider_error(chunk)
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or {}
-                content = delta.get("content") or ""
-                if content:
-                    yield content
-            if not saw_done:
-                raise ProviderError(f"Stream from {describe_endpoint(url)} ended before data: [DONE]")
-    except ProviderError:
-        raise
-    except urllib.error.HTTPError as exc:
-        raise _http_error(url, exc) from exc
-    except urllib.error.URLError as exc:
-        raise ProviderError(redact(f"Connection failed to {describe_endpoint(url)}: {exc.reason}")) from exc
-    except Exception as exc:
-        raise ProviderError(redact(f"Streaming error from {describe_endpoint(url)}: {exc}")) from exc
+    retries = int(os.environ.get("HYDRA_MAX_RETRIES", "3")) if max_retries is None else max_retries
+    base_wait = float(os.environ.get("HYDRA_BACKOFF_BASE", "0.5")) if backoff_base is None else backoff_base
+
+    for attempt in range(retries + 1):
+        saw_token = False
+        try:
+            with urllib.request.urlopen(req, timeout=wait) as resp:
+                saw_done = False
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if not line or line.startswith(":"):
+                        continue
+                    if line == "data: [DONE]":
+                        saw_done = True
+                        break
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        chunk = json.loads(line[6:].strip())
+                    except json.JSONDecodeError:
+                        continue
+                    _raise_if_provider_error(chunk)
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    content = delta.get("content") or ""
+                    if content:
+                        saw_token = True
+                        yield content
+                if not saw_done:
+                    raise ProviderError(f"Stream from {where} ended before data: [DONE]")
+                record_provider_success(url)
+                return
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < retries and not saw_token:
+                record_provider_failure(url, exc, is_429=True)
+                retry_after_str = exc.headers.get("Retry-After") if exc.headers else None
+                backoff = None
+                if retry_after_str:
+                    try:
+                        backoff = min(float(retry_after_str), 10.0)
+                    except ValueError:
+                        pass
+                if backoff is None:
+                    backoff = min(8.0, base_wait * (2 ** attempt)) + random.uniform(0.05, 0.15)
+                time.sleep(backoff)
+                continue
+            record_provider_failure(url, exc, is_429=(exc.code == 429))
+            raise _http_error(url, exc) from exc
+        except ProviderError as exc:
+            record_provider_failure(url, exc)
+            raise
+        except urllib.error.URLError as exc:
+            record_provider_failure(url, exc)
+            raise ProviderError(redact(f"Connection failed to {where}: {exc.reason}")) from exc
+        except Exception as exc:
+            record_provider_failure(url, exc)
+            raise ProviderError(redact(f"Streaming error from {where}: {exc}")) from exc
 
 
 def fetch_chat_completion(
@@ -576,8 +757,10 @@ def fetch_chat_completion(
     timeout: Optional[int] = None,
     reasoning: Optional[Dict[str, str]] = None,
     return_meta: bool = False,
+    max_retries: Optional[int] = None,
+    backoff_base: Optional[float] = None,
 ) -> Any:
-    """Fetch one complete chat completion.
+    """Fetch one complete chat completion with health tracking and 429 exponential backoff.
 
     Returns the assistant text. With return_meta=True returns a dict with the text,
     the model id the provider reports, the upstream provider if given, and usage.
@@ -590,39 +773,144 @@ def fetch_chat_completion(
     wait = completion_timeout(reasoning, timeout)
     where = describe_endpoint(url)
 
+    retries = int(os.environ.get("HYDRA_MAX_RETRIES", "3")) if max_retries is None else max_retries
+    base_wait = float(os.environ.get("HYDRA_BACKOFF_BASE", "0.5")) if backoff_base is None else backoff_base
+
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=wait) as resp:
+                raw_body = resp.read().decode("utf-8", errors="replace")
+                res_json = json.loads(raw_body)
+                _raise_if_provider_error(res_json)
+                choices = res_json.get("choices") or []
+                if not choices:
+                    raise ProviderError(f"Empty completion from {where}")
+                content = choices[0].get("message", {}).get("content")
+                if not isinstance(content, str) or not content:
+                    if choices[0].get("finish_reason") == "length":
+                        raise ProviderError(
+                            f"Empty completion from {where}: the token limit ran out before any answer text "
+                            "(finish_reason=length). Raise --max-tokens."
+                        )
+                    raise ProviderError(f"Empty completion from {where}")
+                record_provider_success(url)
+                if return_meta:
+                    upstream = res_json.get("provider")
+                    return {
+                        "content": content,
+                        "model": res_json.get("model") or effective_model,
+                        "upstream": upstream if isinstance(upstream, str) else None,
+                        "usage": res_json.get("usage") if isinstance(res_json.get("usage"), dict) else None,
+                    }
+                return content
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 and attempt < retries:
+                record_provider_failure(url, exc, is_429=True)
+                retry_after_str = exc.headers.get("Retry-After") if exc.headers else None
+                backoff = None
+                if retry_after_str:
+                    try:
+                        backoff = min(float(retry_after_str), 10.0)
+                    except ValueError:
+                        pass
+                if backoff is None:
+                    backoff = min(8.0, base_wait * (2 ** attempt)) + random.uniform(0.05, 0.15)
+                time.sleep(backoff)
+                continue
+            record_provider_failure(url, exc, is_429=(exc.code == 429))
+            raise _http_error(url, exc) from exc
+        except ProviderError as exc:
+            record_provider_failure(url, exc)
+            raise
+        except urllib.error.URLError as exc:
+            record_provider_failure(url, exc)
+            raise ProviderError(redact(f"Connection failed to {where}: {exc.reason}")) from exc
+        except Exception as exc:
+            record_provider_failure(url, exc)
+            raise ProviderError(redact(f"Request to {where} failed: {exc}")) from exc
+
+
+# ===========================================================================
+# Dynamic Fallback Routing Cascade (WO-05)
+# ===========================================================================
+
+def fallback_cascade(
+    prompt: str,
+    system_prompt: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    frontier_error: Optional[Exception] = None,
+    on_tier_transition: Optional[Callable[[str, str], None]] = None,
+) -> str:
+    """Execute universal fallback cascade across inference tiers (WO-05):
+    Frontier -> Cloudflare Workers AI -> OpenRouter Free Forge -> Local/Ollama.
+    """
+    sys_prompt = system_prompt or DEFAULT_SYSTEM_PROMPT
+    messages = [
+        {"role": "system", "content": sys_prompt},
+        {"role": "user", "content": prompt},
+    ]
+    tier_errors: List[str] = []
+    if frontier_error:
+        tier_errors.append(f"Frontier: {frontier_error}")
+
+    # Tier 2: Cloudflare Workers AI
+    cf = _cloudflare_provider()
+    if cf:
+        if on_tier_transition:
+            on_tier_transition("cloudflare", DEFAULT_CLOUDFLARE_MODEL)
+        try:
+            return fetch_chat_completion(
+                url=cf["url"],
+                headers=cf["headers"],
+                model=DEFAULT_CLOUDFLARE_MODEL,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            tier_errors.append(f"Cloudflare ({DEFAULT_CLOUDFLARE_MODEL}): {exc}")
+
+    # Tier 3: OpenRouter Free Forge
+    or_free = _openrouter_free_provider()
+    if or_free:
+        models = [DEFAULT_FREE_MODEL] + [m for m in FREE_MODELS if m != DEFAULT_FREE_MODEL]
+        for m in models:
+            if on_tier_transition:
+                on_tier_transition("openrouter-free", m)
+            try:
+                return fetch_chat_completion(
+                    url=or_free["url"],
+                    headers=or_free["headers"],
+                    model=m,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            except Exception as exc:
+                tier_errors.append(f"OpenRouter ({m}): {exc}")
+                continue
+
+    # Tier 4: Local / Ollama
     try:
-        with urllib.request.urlopen(req, timeout=wait) as resp:
-            raw_body = resp.read().decode("utf-8", errors="replace")
-            res_json = json.loads(raw_body)
-            _raise_if_provider_error(res_json)
-            choices = res_json.get("choices") or []
-            if not choices:
-                raise ProviderError(f"Empty completion from {where}")
-            content = choices[0].get("message", {}).get("content")
-            if not isinstance(content, str) or not content:
-                if choices[0].get("finish_reason") == "length":
-                    raise ProviderError(
-                        f"Empty completion from {where}: the token limit ran out before any answer text "
-                        "(finish_reason=length). Raise --max-tokens."
-                    )
-                raise ProviderError(f"Empty completion from {where}")
-            if return_meta:
-                upstream = res_json.get("provider")
-                return {
-                    "content": content,
-                    "model": res_json.get("model") or effective_model,
-                    "upstream": upstream if isinstance(upstream, str) else None,
-                    "usage": res_json.get("usage") if isinstance(res_json.get("usage"), dict) else None,
-                }
-            return content
-    except ProviderError:
-        raise
-    except urllib.error.HTTPError as exc:
-        raise _http_error(url, exc) from exc
-    except urllib.error.URLError as exc:
-        raise ProviderError(redact(f"Connection failed to {where}: {exc.reason}")) from exc
+        local_url, local_name = detect_local_endpoint()
+        if on_tier_transition:
+            on_tier_transition(local_name, DEFAULT_LOCAL_MODEL)
+        return fetch_chat_completion(
+            url=local_url,
+            headers={"Content-Type": "application/json"},
+            model=DEFAULT_LOCAL_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
     except Exception as exc:
-        raise ProviderError(redact(f"Request to {where} failed: {exc}")) from exc
+        tier_errors.append(f"Local ({DEFAULT_LOCAL_MODEL}): {exc}")
+
+    summary = "; ".join(tier_errors)
+    raise ProviderError(
+        redact(f"All fallback cascade tiers failed (Frontier -> Cloudflare -> OpenRouter -> Local). Errors: {summary}")
+    )
 
 
 def complete(
@@ -631,21 +919,50 @@ def complete(
     system_prompt: Optional[str] = None,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
+    fallback_cascade_enabled: bool = True,
 ) -> str:
-    """Summon one alias and return the assistant text. Tries each configured provider."""
+    """Summon one alias and return the assistant text. Tries each configured provider.
+    On persistent provider failures, automatically cascades across tiers:
+    Frontier -> Cloudflare -> OpenRouter -> Local (WO-05).
+    """
     load_dotenv()
     route = resolve_route(alias)
-    providers = providers_for_model(route["model"])
-    if not providers:
-        raise CredentialsMissingError(
-            "No frontier credentials found. Export OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or CHEAPERINFERENCE_API_KEY."
-        )
     messages = [
         {"role": "system", "content": system_prompt or DEFAULT_SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
     ]
     reasoning = reasoning_fields(route.get("effort"), route.get("reasoning_mode"))
     ensure_temperature(route["model"], temperature)
+
+    cascade_active = fallback_cascade_enabled and os.environ.get("HYDRA_NO_FALLBACK", "").strip() != "1"
+
+    providers = []
+    try:
+        providers = providers_for_model(route["model"])
+    except CredentialsMissingError as cme:
+        if not cascade_active:
+            raise
+        return fallback_cascade(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            frontier_error=cme,
+        )
+
+    if not providers:
+        if not cascade_active:
+            raise CredentialsMissingError(
+                "No frontier credentials found. Export OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or CHEAPERINFERENCE_API_KEY."
+            )
+        return fallback_cascade(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            frontier_error=ProviderError("No frontier credentials configured"),
+        )
+
     last_error: Optional[Exception] = None
     for provider in providers:
         try:
@@ -663,4 +980,14 @@ def complete(
         except Exception as exc:
             last_error = exc
             continue
+
+    if cascade_active:
+        return fallback_cascade(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            frontier_error=last_error,
+        )
+
     raise ProviderError(redact(f"All configured providers failed for '{route['model']}'. Last error: {last_error}"))

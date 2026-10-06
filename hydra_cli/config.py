@@ -28,6 +28,35 @@ DEFAULT_SYSTEM_PROMPT = os.environ.get(
     "You are a world-class sovereign systems engineer. Speak concisely, rigorously, and without corporate filler or disclaimers.",
 )
 
+IMMUTABLE_AGENT_INVARIANTS = os.environ.get(
+    "HYDRA_IMMUTABLE_INVARIANTS",
+    (
+        "=== SYSTEM INVARIANTS (IMMUTABLE CACHE ZONE) ===\n"
+        "1. Identity: Sovereign multi-headed AI engine and model router.\n"
+        "2. Epistemology: Empirical verification over speculation. Exit code 0 is passing; unverified assertions carry zero truth value.\n"
+        "3. Discipline: Direct predication, zero corporate filler, zero sycophancy, zero disclaimer theater.\n"
+        "4. Security: Strict credential isolation, fail closed on ambiguous or destructive commands.\n"
+        "================================================"
+    ),
+)
+
+
+def build_cached_system_prompt(custom_prompt: Optional[str] = None) -> str:
+    """Construct system prompt with immutable invariants isolated at the head.
+
+    Isolating immutable invariants in the prefix maximizes provider prompt cache hits
+    across Anthropic, Gemini, and OpenAI (WO-04).
+    """
+    header = IMMUTABLE_AGENT_INVARIANTS.strip()
+    if not custom_prompt:
+        return f"{header}\n\n{DEFAULT_SYSTEM_PROMPT.strip()}"
+    custom_clean = custom_prompt.strip()
+    if custom_clean == DEFAULT_SYSTEM_PROMPT.strip():
+        return f"{header}\n\n{DEFAULT_SYSTEM_PROMPT.strip()}"
+    if header in custom_clean:
+        return custom_clean
+    return f"{header}\n\n{custom_clean}"
+
 MODEL_MAP: Dict[str, str] = {
     alias: spec["model"] for alias, spec in CATALOG["aliases"].items()
 }

@@ -3,17 +3,21 @@ Command line dispatch, argument parsing, pipe handling, and routing for Hydra CL
 """
 
 import argparse
+import json
 import os
 import sys
 from typing import List, Optional, Tuple
 
 from hydra_cli import __version__
 from hydra_cli.config import (
+    DEFAULT_CLOUDFLARE_MODEL,
+    DEFAULT_FREE_MODEL,
     DEFAULT_HF_MODEL,
     DEFAULT_LOCAL_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     FREE_MODELS,
     MODEL_MAP,
+    build_cached_system_prompt,
     consume_alias,
     load_dotenv,
     resolve_route,
@@ -22,6 +26,8 @@ from hydra_cli.providers import (
     CredentialsMissingError,
     ProviderError,
     UsageError,
+    _cloudflare_provider,
+    _openrouter_free_provider,
     detect_local_endpoint,
     ensure_temperature,
     fetch_chat_completion,
@@ -78,6 +84,9 @@ USAGE:
     hydra <alias> --mcp "<prompt>"       # Tool-augmented execution loop
     hydra serve [--port 7777]            # Sovereign OpenAI Gateway for Hermes and Pi
     hydra mcp list                       # List configured community MCP servers & tools
+    hydra sandbox run "<cmd>"            # Isolated zero-trust command execution
+    hydra voice benchmark                # Sub-500ms real-time voice latency budget trace
+    hydra voice stream                   # Chunked streaming TTS & early audio playback
     hydra banner                         # Display 7-headed Sovereign Hydra in terminal green
     hydra setup                          # Interactive setup & app/agent integration guide
     cat file.txt | hydra <alias>         # The pipe is the prompt
@@ -310,6 +319,11 @@ def route_command(argv: List[str]) -> int:
         return 0
     if argv and argv[0] in ("mcp", "--mcp") and len(argv) > 1 and argv[1] in ("list", "test", "init", "default", "config"):
         return execute_mcp_command(argv[1:])
+    if argv and argv[0] in ("sandbox", "--sandbox"):
+        return execute_sandbox_command(argv[1:])
+    if argv and argv[0] in ('voice', '--voice'):
+        from hydra_cli.voice import execute_voice_command
+        return execute_voice_command(argv[1:])
     if argv and argv[0] in ("serve", "--serve"):
         host = "127.0.0.1"
         port = 7777
@@ -354,7 +368,13 @@ def route_command(argv: List[str]) -> int:
     stream = True
     json_mode = False
     mcp_mode = False
+    session_id = None
     swarm_heads = None
+    fallback_cascade_enabled = True
+    speculative_mode = False
+    spec_k = 4
+    draft_model_override = None
+    target_model_override = None
 
     idx = 0
     while idx < len(remaining):
@@ -390,6 +410,9 @@ def route_command(argv: List[str]) -> int:
         elif arg == "--no-stream":
             stream = False
             idx += 1
+        elif arg == "--no-fallback":
+            fallback_cascade_enabled = False
+            idx += 1
         elif arg == "--json":
             json_mode = True
             stream = False
@@ -397,6 +420,25 @@ def route_command(argv: List[str]) -> int:
         elif arg == "--mcp":
             mcp_mode = True
             idx += 1
+        elif arg in ("--session", "--session-id") and idx + 1 < len(remaining):
+            session_id = remaining[idx + 1]
+            idx += 2
+        elif arg in ("--speculative", "--spec"):
+            speculative_mode = True
+            idx += 1
+        elif arg in ("--draft", "--draft-model") and idx + 1 < len(remaining):
+            draft_model_override = remaining[idx + 1]
+            idx += 2
+        elif arg in ("--target", "--target-model") and idx + 1 < len(remaining):
+            target_model_override = remaining[idx + 1]
+            idx += 2
+        elif arg in ("--k", "--spec-k") and idx + 1 < len(remaining):
+            try:
+                spec_k = int(remaining[idx + 1])
+            except ValueError:
+                sys.stderr.write(f"[ERROR] --k expects an integer, got {remaining[idx + 1]!r}.\n")
+                return 1
+            idx += 2
         else:
             prompt_tokens.append(arg)
             idx += 1
@@ -419,6 +461,7 @@ def route_command(argv: List[str]) -> int:
                 system_prompt=system_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                session_id=session_id,
             )
         elif cmd_lower == "free":
             return execute_free(
@@ -450,6 +493,22 @@ def route_command(argv: List[str]) -> int:
                 stream=stream,
                 json_mode=json_mode,
             )
+        elif cmd_lower in ("speculative", "spec") or speculative_mode:
+            resolved_target = target_model_override or (
+                command_or_alias if cmd_lower not in ("speculative", "spec") else model_override
+            )
+            return execute_speculative_mode(
+                prompt=effective_prompt,
+                target_model=resolved_target,
+                draft_model=draft_model_override,
+                k=spec_k,
+                system_prompt=system_prompt,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+            )
+        elif cmd_lower == "voice":
+            from hydra_cli.voice import execute_voice_command
+            return execute_voice_command(remaining)
         elif cmd_lower == "swarm":
             return execute_swarm_mode(
                 task=effective_prompt,
@@ -472,6 +531,7 @@ def route_command(argv: List[str]) -> int:
                 json_mode=json_mode,
                 effort=effort_override,
                 reasoning_mode=reasoning_mode_override,
+                fallback_cascade=fallback_cascade_enabled,
             )
     except UsageError as usage:
         sys.stderr.write(f"\n[ERROR] {redact(usage)}\n")
@@ -501,8 +561,13 @@ def execute_summon(
     json_mode: bool = False,
     effort: Optional[str] = None,
     reasoning_mode: Optional[str] = None,
+    fallback_cascade: bool = True,
 ) -> int:
-    """Summon a frontier model. A later provider is tried only before any text is printed."""
+    """Summon a frontier model.
+    Tries each configured provider in health-prioritized order.
+    On persistent provider failures, automatically cascades through:
+    Cloudflare Workers AI -> OpenRouter Free Forge -> Local/Ollama (WO-05).
+    """
     route = resolve_route(alias)
     model_id = model_override or route["model"]
     if model_override:
@@ -513,9 +578,17 @@ def execute_summon(
         route_mode = reasoning_mode if reasoning_mode is not None else route.get("reasoning_mode")
     reasoning = reasoning_fields(route_effort, route_mode)
     ensure_temperature(model_id, temperature)
-    providers = providers_for_model(model_id)
 
-    if not providers:
+    cascade_enabled = fallback_cascade and os.environ.get("HYDRA_NO_FALLBACK", "").strip() != "1"
+
+    providers = []
+    try:
+        providers = providers_for_model(model_id)
+    except CredentialsMissingError:
+        if not cascade_enabled:
+            raise
+
+    if not providers and not cascade_enabled:
         raise CredentialsMissingError(
             f"No frontier credentials found to summon '{alias}' ({model_id}).\n"
             "Export OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or CHEAPERINFERENCE_API_KEY.\n"
@@ -524,7 +597,7 @@ def execute_summon(
         )
 
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": build_cached_system_prompt(system_prompt)},
         {"role": "user", "content": prompt},
     ]
 
@@ -578,6 +651,158 @@ def execute_summon(
             last_error = exc
             continue
 
+    if cascade_enabled:
+        # Automatic fallback routing cascade: Frontier -> Cloudflare -> OpenRouter -> Local/Ollama (WO-05)
+        cascade_errors = []
+        if last_error:
+            cascade_errors.append(f"Frontier ({model_id}): {last_error}")
+        elif not providers:
+            cascade_errors.append(f"Frontier ({model_id}): no credentials configured")
+
+        # Tier 2: Cloudflare Workers AI
+        cf = _cloudflare_provider()
+        if cf:
+            sys.stderr.write(
+                f"[HYDRA CASCADE] Frontier unavailable ({redact(last_error or 'no credentials')}). "
+                f"Falling back to Cloudflare Workers AI ({DEFAULT_CLOUDFLARE_MODEL})...\n"
+            )
+            sys.stderr.flush()
+            emitted = False
+            try:
+                if stream and not json_mode:
+                    for token in stream_chat_completion(
+                        url=cf["url"],
+                        headers=cf["headers"],
+                        model=DEFAULT_CLOUDFLARE_MODEL,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    ):
+                        emitted = True
+                        sys.stdout.write(token)
+                        sys.stdout.flush()
+                    sys.stdout.write("\n")
+                    return 0
+                resp = fetch_chat_completion(
+                    url=cf["url"],
+                    headers=cf["headers"],
+                    model=DEFAULT_CLOUDFLARE_MODEL,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                if json_mode:
+                    import json
+                    print(json.dumps({"model": DEFAULT_CLOUDFLARE_MODEL, "provider": cf["name"], "content": resp}, indent=2))
+                else:
+                    print(resp)
+                return 0
+            except UsageError:
+                raise
+            except Exception as exc:
+                if emitted:
+                    raise ProviderError(f"Stream from Cloudflare truncated after output started: {exc}") from exc
+                cascade_errors.append(f"Cloudflare: {exc}")
+
+        # Tier 3: OpenRouter Free Forge
+        or_free = _openrouter_free_provider()
+        if or_free:
+            free_models = [DEFAULT_FREE_MODEL] + [m for m in FREE_MODELS if m != DEFAULT_FREE_MODEL]
+            for fm in free_models:
+                sys.stderr.write(
+                    f"[HYDRA CASCADE] Falling back to OpenRouter Free Forge ({fm})...\n"
+                )
+                sys.stderr.flush()
+                emitted = False
+                try:
+                    if stream and not json_mode:
+                        for token in stream_chat_completion(
+                            url=or_free["url"],
+                            headers=or_free["headers"],
+                            model=fm,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                        ):
+                            emitted = True
+                            sys.stdout.write(token)
+                            sys.stdout.flush()
+                        sys.stdout.write("\n")
+                        return 0
+                    resp = fetch_chat_completion(
+                        url=or_free["url"],
+                        headers=or_free["headers"],
+                        model=fm,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                    if json_mode:
+                        import json
+                        print(json.dumps({"model": fm, "provider": or_free["name"], "content": resp}, indent=2))
+                    else:
+                        print(resp)
+                    return 0
+                except UsageError:
+                    raise
+                except Exception as exc:
+                    if emitted:
+                        raise ProviderError(f"Stream from OpenRouter truncated after output started: {exc}") from exc
+                    cascade_errors.append(f"OpenRouter ({fm}): {exc}")
+
+        # Tier 4: Local / Ollama
+        try:
+            local_url, local_name = detect_local_endpoint()
+            sys.stderr.write(
+                f"[HYDRA CASCADE] Cloud tiers unavailable. Falling back to local offline inference ({local_name})...\n"
+            )
+            sys.stderr.flush()
+            emitted = False
+            try:
+                if stream and not json_mode:
+                    for token in stream_chat_completion(
+                        url=local_url,
+                        headers={"Content-Type": "application/json"},
+                        model=DEFAULT_LOCAL_MODEL,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    ):
+                        emitted = True
+                        sys.stdout.write(token)
+                        sys.stdout.flush()
+                    sys.stdout.write("\n")
+                    return 0
+                resp = fetch_chat_completion(
+                    url=local_url,
+                    headers={"Content-Type": "application/json"},
+                    model=DEFAULT_LOCAL_MODEL,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                if json_mode:
+                    import json
+                    print(json.dumps({"model": DEFAULT_LOCAL_MODEL, "provider": local_name, "content": resp}, indent=2))
+                else:
+                    print(resp)
+                return 0
+            except UsageError:
+                raise
+            except Exception as exc:
+                if emitted:
+                    raise ProviderError(f"Stream from {local_name} truncated after output started: {exc}") from exc
+                cascade_errors.append(f"Local ({local_name}): {exc}")
+        except Exception as exc:
+            cascade_errors.append(f"Local endpoint detection: {exc}")
+
+        raise ProviderError(
+            redact(
+                f"All fallback cascade tiers failed (Frontier -> Cloudflare -> OpenRouter -> Local). "
+                f"Errors: {'; '.join(cascade_errors)}"
+            )
+        )
+
     if last_error:
         raise ProviderError(redact(f"All configured providers failed for '{model_id}'. Last error: {last_error}"))
     return 1
@@ -599,7 +824,7 @@ def execute_free(
     candidates = get_free_candidates(model_override)
 
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": build_cached_system_prompt(system_prompt)},
         {"role": "user", "content": prompt},
     ]
 
@@ -668,7 +893,7 @@ def execute_hf(
     model_id = model_override or default_model
 
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": build_cached_system_prompt(system_prompt)},
         {"role": "user", "content": prompt},
     ]
 
@@ -716,7 +941,7 @@ def execute_local(
     headers = {"Content-Type": "application/json"}
 
     messages = [
-        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": build_cached_system_prompt(system_prompt)},
         {"role": "user", "content": prompt},
     ]
 
@@ -785,6 +1010,7 @@ def execute_agent_mode(
     system_prompt: str,
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
+    session_id: Optional[str] = None,
 ) -> int:
     """Execute autonomous agent loop with discovered MCP tools."""
     from hydra_cli.agent import run_agent_loop
@@ -809,11 +1035,59 @@ def execute_agent_mode(
             registry=reg,
             temperature=temperature,
             max_tokens=max_tokens,
+            session_id=session_id,
         )
         print(ans)
         return 0
     finally:
         reg.shutdown()
+
+
+def execute_speculative_mode(
+    prompt: str,
+    target_model: Optional[str] = None,
+    draft_model: Optional[str] = None,
+    k: int = 4,
+    system_prompt: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    json_mode: bool = False,
+) -> int:
+    """Execute speculative decoding with fast draft model and target verifier (WO-02)."""
+    from hydra_cli.speculative import SpeculativeEngine
+    from hydra_cli.ui import GREEN_BRIGHT, GREEN_MID, RESET, supports_color
+
+    engine = SpeculativeEngine(
+        draft_model=draft_model,
+        target_model=target_model,
+        k=k,
+    )
+    result = engine.generate(
+        prompt=prompt,
+        system_prompt=system_prompt,
+        max_tokens=max_tokens or 64,
+        k=k,
+    )
+
+    if json_mode:
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0
+
+    color_on = supports_color()
+    head_color = GREEN_BRIGHT if color_on else ""
+    info_color = GREEN_MID if color_on else ""
+    reset = RESET if color_on else ""
+
+    print(
+        f"{head_color}[HYDRA SPECULATIVE]{reset} "
+        f"{info_color}(Draft: {result.draft_model or 'auto'} | Target: {result.target_model or 'auto'} | K={result.k}){reset}"
+    )
+    print(result.text)
+    print(
+        f"{info_color}[Telemetry: Acceptance={result.accepted_count}/{result.total_draft_tokens} "
+        f"({round(result.acceptance_rate * 100, 1)}%) | Target Calls={result.target_calls} "
+        f"| Fallback={result.fallback_used} | Latency={result.duration_sec}s]{reset}"
+    )
+    return 0
 
 
 def execute_mcp_command(args: List[str]) -> int:
@@ -894,3 +1168,56 @@ def execute_mcp_command(args: List[str]) -> int:
     sys.stderr.write(f"Unknown mcp command: '{subcmd}'. Available: list, test, config, init\n")
     return 1
 
+
+def execute_sandbox_command(args: List[str]) -> int:
+    """Execute command inside zero-trust sandbox (WO-08)."""
+    from hydra_cli.sandbox import SandboxConfig, SandboxRunner
+    if not args:
+        sys.stderr.write("USAGE: hydra sandbox <command> or hydra sandbox run <command>\n")
+        return 1
+
+    cmd_tokens = list(args)
+    if cmd_tokens and cmd_tokens[0] == "run":
+        cmd_tokens = cmd_tokens[1:]
+
+    timeout = 30.0
+    allow_network = False
+    clean_tokens = []
+    idx = 0
+    while idx < len(cmd_tokens):
+        t = cmd_tokens[idx]
+        if t == "--timeout" and idx + 1 < len(cmd_tokens):
+            try:
+                timeout = float(cmd_tokens[idx + 1])
+            except ValueError:
+                pass
+            idx += 2
+        elif t == "--allow-network":
+            allow_network = True
+            idx += 1
+        else:
+            clean_tokens.append(t)
+            idx += 1
+
+    command = " ".join(clean_tokens).strip()
+    if not command:
+        sys.stderr.write("[ERROR] No command specified for sandbox execution.\n")
+        return 1
+
+    config = SandboxConfig(timeout_seconds=timeout, allow_network=allow_network)
+    runner = SandboxRunner(config=config)
+    res = runner.run_command(command)
+    if res.stdout:
+        sys.stdout.write(res.stdout)
+        if not res.stdout.endswith("\n"):
+            sys.stdout.write("\n")
+        sys.stdout.flush()
+    if res.stderr:
+        sys.stderr.write(res.stderr)
+        if not res.stderr.endswith("\n"):
+            sys.stderr.write("\n")
+        sys.stderr.flush()
+    if res.violation:
+        sys.stderr.write(f"[SANDBOX BLOCKED] {res.violation}\n")
+        sys.stderr.flush()
+    return res.exit_code
