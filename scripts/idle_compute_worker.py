@@ -1,11 +1,11 @@
 ﻿#!/usr/bin/env python
 """Hydra Opportunistic Idle Compute Worker runner.
 
-Dispatches idle compute tasks across:
-1. Alice EMap sense decomposition repair and audit batches
-2. Snowgate Forum discussion turns across 9 interest categories
-3. EasyLM synthetic distillation sample generation and validation
-4. Tankbench golden set continuous verification
+Weighted Priority Scheduling:
+1. Alice EMap sense decomposition repair (40% Weight)
+2. EasyLM synthetic distillation (40% Weight)
+3. Snowgate Forum RSS chatter (10% Weight)
+4. Tankbench golden verification & Progen invariant fuzzing (10% Weight)
 """
 
 from __future__ import annotations
@@ -23,9 +23,11 @@ from tankbench.idle_worker import run_worker_cli
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         prog="idle_compute_worker",
-        description="Run opportunistic idle compute tasks across rotating sovereign ecosystem sectors.",
+        description="Run opportunistic idle compute tasks across weighted sovereign ecosystem sectors.",
     )
-    parser.add_argument("--cycles", type=int, default=4, help="Number of work cycles to run (default: 4)")
+    parser.add_argument("--cycles", type=int, default=10, help="Number of work cycles to run (default: 10)")
+    parser.add_argument("--continuous", action="store_true", help="Run persistently in background until priority interrupt")
+    parser.add_argument("--interval", type=float, default=0.005, help="Sleep interval in seconds between cycles (default: 0.005)")
     parser.add_argument("--dry-run", action="store_true", help="Simulate idle execution without state mutations")
     parser.add_argument("--json", action="store_true", help="Output raw JSON execution trace")
     args = parser.parse_args()
@@ -35,5 +37,7 @@ if __name__ == "__main__":
             max_cycles=args.cycles,
             dry_run=args.dry_run,
             as_json=args.json,
+            sample_interval_s=args.interval,
+            continuous=args.continuous,
         )
     )
