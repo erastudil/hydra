@@ -4,6 +4,9 @@ Terminal UI, 7-Headed Hydra ASCII Art, and Green Phosphor Styling.
 
 import os
 import sys
+from typing import Optional
+
+from hydra_cli._version import __version__
 
 # ANSI Escape Codes for Phosphor Terminal Green
 GREEN_BRIGHT = "\033[38;5;46m"
@@ -20,7 +23,6 @@ HYDRA_LOGO_ASCII = r"""
 \    Y    /\___  |/ /_/ | |  | \// __ \_
  \___|_  / / ____|\____ | |__|  (____  /
        \/  \/          \/            \/ 
-      Sovereign Multi-Headed AI Shell
 """
 
 HYDRA_7_HEADS_DETAILED = r"""
@@ -83,8 +85,9 @@ def colorize(text: str, color_code: str = GREEN_BRIGHT) -> str:
     return f"{color_code}{text}{RESET}"
 
 
-def get_terminal_banner(detailed: bool = True, version: str = "1.2.0") -> str:
+def get_terminal_banner(detailed: bool = True, version: Optional[str] = None) -> str:
     """Construct the complete 7-headed Hydra banner with green terminal styling."""
+    version = version or __version__
     art = HYDRA_7_HEADS_DETAILED if detailed else HYDRA_7_HEADS_MONSTER
     header = HYDRA_LOGO_ASCII.rstrip()
     tagline = f"       Sovereign Multi-Headed AI Shell · v{version}"
@@ -98,6 +101,6 @@ def get_terminal_banner(detailed: bool = True, version: str = "1.2.0") -> str:
         return f"{art}\n{header}\n{tagline}\n"
 
 
-def print_banner(detailed: bool = True, version: str = "1.2.0") -> None:
+def print_banner(detailed: bool = True, version: Optional[str] = None) -> None:
     """Print the 7-headed Hydra banner to stdout."""
     print(get_terminal_banner(detailed=detailed, version=version))

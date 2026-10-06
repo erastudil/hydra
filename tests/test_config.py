@@ -18,7 +18,6 @@ def test_resolve_standard_aliases():
     assert resolve_model("opus") == "anthropic/claude-opus-5.5"
     assert resolve_model("sonnet 5.5") == "anthropic/claude-sonnet-5.5"
     assert resolve_model("sonnet") == "anthropic/claude-sonnet-5.5"
-    assert resolve_model("sonnet 3.7") == "anthropic/claude-3.7-sonnet"
     assert resolve_model("haiku 4.5") == "anthropic/claude-haiku-4.5"
     assert resolve_model("fable 5.1") == "anthropic/claude-fable-5.1"
     assert resolve_model("sol 6.1") == "openai/gpt-6.1-sol"
@@ -28,7 +27,6 @@ def test_resolve_standard_aliases():
     assert resolve_model("gemini 3.5") == "google/gemini-3.5-flash"
     assert resolve_model("gemini 2.5") == "google/gemini-2.5-pro"
     assert resolve_model("qwen 3.8") == "qwen/qwen3.8-27b"
-    assert resolve_model("qwen 3b") == "qwen/qwen-2.5-3b-instruct"
     assert resolve_model("grok 4.7") == "x-ai/grok-4.7"
     assert resolve_model("grok") == "x-ai/grok-4.7"
     assert resolve_model("llama 4") == "meta-llama/llama-4-maverick"
@@ -39,7 +37,6 @@ def test_resolve_standard_aliases():
     assert resolve_model("glm 5") == "glm-5.3"
     assert resolve_model("glm 4.7") == "glm-4.7"
     assert resolve_model("glm 4.7 flash") == "glm-4.7-flash"
-    assert resolve_model("kolibri") == "Aleph-Alpha/Kolibri-1"
 
 
 def test_resolve_raw_model_fallback():
@@ -51,14 +48,12 @@ def test_is_compound_alias():
     assert is_compound_alias("opus", "5.5") is True
     assert is_compound_alias("sol", "6.1") is True
     assert is_compound_alias("sonnet", "5.5") is True
-    assert is_compound_alias("sonnet", "3.7") is True
     assert is_compound_alias("haiku", "4.5") is True
     assert is_compound_alias("fable", "5.1") is True
     assert is_compound_alias("gemini", "3.8") is True
     assert is_compound_alias("gemini", "2.5") is True
     assert is_compound_alias("gemini", "3.5") is True
     assert is_compound_alias("qwen", "3.8") is True
-    assert is_compound_alias("qwen", "3b") is True
     assert is_compound_alias("grok", "4.7") is True
     assert is_compound_alias("llama", "4") is True
     assert is_compound_alias("glm", "5.3") is True
@@ -69,7 +64,24 @@ def test_is_compound_alias():
 
 def test_free_models_exist():
     assert len(FREE_MODELS) > 0
-    assert any("llama-3.3-70b-instruct:free" in m for m in FREE_MODELS)
+    assert all(m.endswith(":free") for m in FREE_MODELS)
+    assert "google/gemma-4-26b-a4b-it:free" in FREE_MODELS
+
+
+def test_removed_dead_aliases():
+    # These model ids exist on neither OpenRouter nor the Vercel AI Gateway.
+    for alias in ("sonnet 3.7", "grok 2", "qwen 3b", "kolibri"):
+        assert alias not in MODEL_MAP
+    assert "Aleph-Alpha/Kolibri-1" not in MODEL_MAP.values()
+
+
+def test_single_provider_models_are_marked():
+    assert resolve_route("opus 5.5 fast")["providers"] == ["vercel"]
+    assert resolve_route("sol 6.1 fast")["providers"] == ["vercel"]
+    assert resolve_route("glm")["providers"] == ["cheaperinference"]
+    assert resolve_route("sonnet 5.5")["providers"] == []
+    # Raw model ids pick up the same limits.
+    assert resolve_route("openai/gpt-6.1-sol-fast")["providers"] == ["vercel"]
 
 
 def test_swarm_heads_defaults():
@@ -95,9 +107,6 @@ def test_reasoning_aliases():
     glm_prime = resolve_route("glm 5.3 prime")
     assert glm_prime["model"] == "glm-5.3-prime"
     assert glm_prime["effort"] == "high"
-    kolibri = resolve_route("kolibri")
-    assert kolibri["model"] == "Aleph-Alpha/Kolibri-1"
-    assert kolibri["effort"] is None
     assert resolve_model("llama 4 scout") == "meta-llama/llama-4-scout"
     assert resolve_model("sol 6.1 fast") == "openai/gpt-6.1-sol-fast"
 
@@ -118,8 +127,8 @@ def test_consume_alias_longest_and_separator():
     alias, rest = consume_alias(["glm", "4.7", "flash", "run"])
     assert alias == "glm 4.7 flash"
     assert rest == ["run"]
-    alias, rest = consume_alias(["kolibri", "translate"])
-    assert alias == "kolibri"
+    alias, rest = consume_alias(["glm", "translate"])
+    assert alias == "glm"
     assert rest == ["translate"]
 
 

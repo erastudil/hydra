@@ -6,10 +6,67 @@ and background daemon thread for stderr to prevent pipe deadlocks.
 
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, Iterable, List, Optional
+
+from hydra_cli._version import __version__
+
+# Variables a server process gets from the parent. Everything else, API keys
+# included, stays out unless the server's config names it in "env" or "env_passthrough".
+BASE_ENV_KEYS = (
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE",
+    "TZ", "TMPDIR", "TEMP", "TMP", "PWD",
+    "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE",
+    "NVM_DIR", "NVM_BIN", "NODE_PATH", "npm_config_cache", "npm_config_prefix",
+    "NPM_CONFIG_CACHE", "NPM_CONFIG_PREFIX", "UV_CACHE_DIR", "UV_TOOL_DIR", "UV_PYTHON_INSTALL_DIR",
+    "VIRTUAL_ENV",
+    # Windows
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT", "USERPROFILE", "USERNAME",
+    "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "PROGRAMFILES", "PROGRAMFILES(X86)",
+    "COMMONPROGRAMFILES", "HOMEDRIVE", "HOMEPATH", "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
+)
+
+DEFAULT_RPC_TIMEOUT = 60.0
+# The first npx/uvx launch may download the package, so the handshake gets longer.
+DEFAULT_INIT_TIMEOUT = 120.0
+
+
+def minimal_env(
+    extra: Optional[Dict[str, str]] = None,
+    passthrough: Optional[Iterable[str]] = None,
+    source: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Environment for an MCP server: base system variables, named passthrough, then explicit extras."""
+    parent = os.environ if source is None else source
+    keys = set(BASE_ENV_KEYS)
+    if sys.platform == "win32":
+        upper = {k.upper(): k for k in parent}
+        env = {upper[k.upper()]: parent[upper[k.upper()]] for k in keys if k.upper() in upper}
+    else:
+        env = {k: parent[k] for k in keys if k in parent}
+    for name in passthrough or ():
+        if name in parent:
+            env[name] = parent[name]
+    for key, value in (extra or {}).items():
+        if value is None:
+            continue
+        env[str(key)] = str(value)
+    return env
+
+
+def _env_timeout(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    try:
+        value = float(raw) if raw else default
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def should_use_shell(command: str, platform: Optional[str] = None) -> bool:
@@ -44,11 +101,22 @@ class McpSubprocessClient:
         args: Optional[List[str]] = None,
         env: Optional[Dict[str, str]] = None,
         cwd: Optional[str] = None,
+        env_passthrough: Optional[Iterable[str]] = None,
+        timeout: Optional[float] = None,
+        init_timeout: Optional[float] = None,
     ):
         self.command = command
         self.args: List[str] = list(args) if args else []
         self.env = env
         self.cwd = cwd
+        self.env_passthrough: List[str] = list(env_passthrough or [])
+        self.timeout = float(timeout) if timeout else _env_timeout("HYDRA_MCP_TIMEOUT", DEFAULT_RPC_TIMEOUT)
+        self.init_timeout = (
+            float(init_timeout) if init_timeout
+            else max(self.timeout, _env_timeout("HYDRA_MCP_INIT_TIMEOUT", DEFAULT_INIT_TIMEOUT))
+        )
+        self._stdout_queue: "queue.Queue[Optional[str]]" = queue.Queue()
+        self._stdout_reader_for: Any = None
 
         self._process: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
@@ -85,6 +153,32 @@ class McpSubprocessClient:
         except Exception:
             pass
 
+    def _drain_stdout(self, stream: Any, sink: "queue.Queue[Optional[str]]") -> None:
+        """Background reader so a silent server cannot block the caller past its timeout."""
+        try:
+            while True:
+                line = stream.readline()
+                if not line:
+                    break
+                sink.put(line)
+        except Exception:
+            pass
+        finally:
+            sink.put(None)
+
+    def _ensure_stdout_reader(self) -> None:
+        proc = self._process
+        if proc is None or proc.stdout is None or self._stdout_reader_for is proc:
+            return
+        self._stdout_reader_for = proc
+        self._stdout_queue = queue.Queue()
+        thread = threading.Thread(target=self._drain_stdout, args=(proc.stdout, self._stdout_queue), daemon=True)
+        thread.start()
+
+    def build_env(self) -> Dict[str, str]:
+        """The environment the server process receives."""
+        return minimal_env(extra=self.env, passthrough=self.env_passthrough)
+
     def start(self) -> None:
         """Start subprocess, initiate background stderr reader, and perform MCP handshake."""
         with self._lock:
@@ -94,9 +188,7 @@ class McpSubprocessClient:
             use_shell = should_use_shell(self.command)
             cmd = [self.command] + self.args
 
-            full_env = os.environ.copy()
-            if self.env:
-                full_env.update(self.env)
+            full_env = self.build_env()
 
             self._process = subprocess.Popen(
                 cmd,
@@ -114,9 +206,14 @@ class McpSubprocessClient:
 
             self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
             self._stderr_thread.start()
+            self._ensure_stdout_reader()
 
         # Handshake outside lock so _send_rpc can acquire lock
-        self._initialize()
+        try:
+            self._initialize()
+        except Exception:
+            self.close()
+            raise
 
     def _send_notification(self, method: str, params: Optional[Dict[str, Any]] = None) -> None:
         """Send a JSON-RPC 2.0 notification (no response expected)."""
@@ -132,11 +229,12 @@ class McpSubprocessClient:
             self._process.stdin.write(msg)
             self._process.stdin.flush()
 
-    def _send_rpc(self, method: str, params: Optional[Dict[str, Any]] = None) -> Any:
+    def _send_rpc(self, method: str, params: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None) -> Any:
         """
-        Send a JSON-RPC 2.0 request and wait synchronously for the matching response.
+        Send a JSON-RPC 2.0 request and wait for the matching response, at most `timeout` seconds.
         Thread-safe under self._lock.
         """
+        wait = float(timeout) if timeout else self.timeout
         with self._lock:
             if self._process is None or self._process.stdin is None or self._process.stdout is None:
                 raise RuntimeError("MCP client process is not running. Call start() first.")
@@ -150,12 +248,21 @@ class McpSubprocessClient:
                 "params": params if params is not None else {},
             }
             msg = json.dumps(payload) + "\n"
+            self._ensure_stdout_reader()
             self._process.stdin.write(msg)
             self._process.stdin.flush()
 
+            deadline = time.monotonic() + wait
             while True:
-                line = self._process.stdout.readline()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"MCP server did not answer '{method}' within {wait:g}s")
+                try:
+                    line = self._stdout_queue.get(timeout=remaining)
+                except queue.Empty:
+                    raise TimeoutError(f"MCP server did not answer '{method}' within {wait:g}s")
                 if not line:
+                    self._stdout_queue.put(None)  # keep EOF visible to later calls
                     exit_code = self._process.poll() if self._process else None
                     tail = "\n".join(self._stderr_lines[-5:]) if self._stderr_lines else ""
                     raise RuntimeError(
@@ -192,10 +299,10 @@ class McpSubprocessClient:
             "capabilities": {},
             "clientInfo": {
                 "name": "hydra",
-                "version": "1.1.0",
+                "version": __version__,
             },
         }
-        result = self._send_rpc("initialize", params)
+        result = self._send_rpc("initialize", params, timeout=self.init_timeout)
         if isinstance(result, dict):
             self.server_info = result.get("serverInfo", {})
             self.server_capabilities = result.get("capabilities", {})

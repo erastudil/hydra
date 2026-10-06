@@ -29,7 +29,7 @@
 \    Y    /\___  |/ /_/ | |  | \// __ \_
  \___|_  / / ____|\____ | |__|  (____  /
        \/  \/          \/            \/ 
-      Sovereign Multi-Headed AI Shell · v1.2.0
+      Sovereign Multi-Headed AI Shell · v1.2.1
 ```
 
 Hydra is a sovereign multi-headed command-line AI engine and model router. It dispatches single prompts, autonomous agentic loops, and multi-agent swarms across frontier models, free cloud tiers, local inference backends, and public Model Context Protocol (MCP) servers.
@@ -39,6 +39,16 @@ The Python package and the Node package share one alias catalog and operate with
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-brightgreen.svg)](pyproject.toml)
 [![Node](https://img.shields.io/badge/node-18+-success.svg)](package.json)
+
+## Fixed in v1.2.1
+
+- `hydra agent` sends the model id (not the endpoint URL) and falls back across providers like single prompts do.
+- `hydra mcp init` works after `pip install`: the MCP template now ships in the package.
+- `hydra free` uses a valid Cloudflare model and falls back to OpenRouter free models if Cloudflare fails.
+- Error messages show provider hosts only. URL paths, account ids, and key values are redacted. MCP servers no longer inherit your API keys.
+- Model ids that no provider serves were removed. Single-provider models (Vercel-only fast variants, GLM on CheaperInference) route straight to that provider.
+- `hydra swarm` waits up to 600s for pro or high-effort heads, honors `--max-tokens`, runs the auditor after the other heads so it reviews their code, and prints the provider, model, and cost for each head.
+- Default MCP servers updated: `uvx mcp-server-fetch`, GitHub's official server, `@brave/brave-search-mcp-server`, Playwright instead of Puppeteer, PostgreSQL removed, SQLite and memory data kept in `~/.hydra`.
 
 ## New in v1.2.0
 
@@ -109,23 +119,26 @@ hydra banner
 
 ## Model Context Protocol (MCP) Integration
 
-Hydra v1.2.0 integrates community Model Context Protocol (MCP) servers using a native Python standard library JSON-RPC 2.0 stdio client.
+Hydra integrates community Model Context Protocol (MCP) servers using a native Python standard library JSON-RPC 2.0 stdio client.
 
 Registered servers in `~/.hydra/mcp_servers.json` (or `./.hydra/mcp_servers.json`):
 
 | Server | Command / Transport | Capabilities |
 | --- | --- | --- |
-| `filesystem` | `npx -y @modelcontextprotocol/server-filesystem` | Read, write, list files and directories |
-| `fetch` | `npx -y @modelcontextprotocol/server-fetch` | HTTP retrieval and web markdown extraction |
-| `sqlite` | `uvx mcp-server-sqlite --db-path ./workspace.db` | Schema inspection and SQL queries |
+| `filesystem` | `npx -y @modelcontextprotocol/server-filesystem .` | Read, write, list files and directories |
+| `fetch` | `uvx mcp-server-fetch` | HTTP retrieval and web markdown extraction |
+| `sqlite` | `uvx --with "mcp<2" mcp-server-sqlite --db-path ${HYDRA_HOME}/workspace.db` | Schema inspection and SQL queries (database in `~/.hydra`; archived upstream, so it is pinned to `mcp<2`) |
 | `git` | `uvx mcp-server-git` | Git status, diff, log, and commits |
-| `github` | `npx -y @modelcontextprotocol/server-github` | Issues, PRs, and repository management |
-| `brave-search` | `npx -y @modelcontextprotocol/server-brave-search` | Live web search via Brave Search API |
-| `memory` | `npx -y @modelcontextprotocol/server-memory` | Knowledge graph entity persistence |
-| `postgres` | `npx -y @modelcontextprotocol/server-postgres` | PostgreSQL connection and query execution |
-| `puppeteer` | `npx -y @modelcontextprotocol/server-puppeteer` | Headless browser automation and screenshots |
+| `github` | `docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server` | GitHub's official server: issues, PRs, repositories (needs Docker) |
+| `brave-search` | `npx -y @brave/brave-search-mcp-server` | Live web search via Brave Search API |
+| `memory` | `npx -y @modelcontextprotocol/server-memory` | Knowledge graph persistence (stored in `~/.hydra/memory.jsonl`) |
+| `playwright` | `npx -y @playwright/mcp@latest --headless` | Headless browser automation and screenshots |
 
-Environment variables in configuration (`${VAR_NAME}`) are automatically expanded from `~/.hydra/.env` and the process environment.
+Run `hydra mcp init` to copy this template to `~/.hydra/mcp_servers.json`.
+
+Environment variables in configuration (`${VAR_NAME}`) are expanded from `~/.hydra/.env` and the process environment. `${HYDRA_HOME}` defaults to `~/.hydra`.
+
+Each server process starts with a minimal environment: system variables such as `PATH`, `HOME`, locale, temp, and proxy settings, plus only the variables its config names. Your provider API keys are not passed to MCP servers. To give a server a variable, name it in `"env"` (for example `"GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"`) or list it in `"env_passthrough"`. Optional `"timeout"` and `"init_timeout"` (seconds) bound how long Hydra waits for a server; the defaults are 60s per call and 120s for the first handshake (`HYDRA_MCP_TIMEOUT`, `HYDRA_MCP_INIT_TIMEOUT`).
 
 ## Sovereign Gateway Server (`hydra serve`)
 
@@ -191,7 +204,7 @@ Credentials live in `~/.hydra/.env` or system environment:
 | `OPENROUTER_API_KEY` | OpenRouter API key. Frontier calls try this first. |
 | `AI_GATEWAY_API_KEY` | Vercel AI Gateway API key. |
 | `VERCEL_AI_GATEWAY_TOKEN` | Fallback token for Vercel AI Gateway. |
-| `CHEAPERINFERENCE_API_KEY` | CheaperInference key for high-throughput GLM/Kolibri models. |
+| `CHEAPERINFERENCE_API_KEY` | CheaperInference key for discounted frontier models and the GLM aliases. |
 | `RUNPOD_API_KEY` | RunPod API key for serverless endpoints and pod workers. |
 | `MODAL_ENDPOINT_URL` | Modal vLLM endpoint URL for private open-weights deployments. |
 | `CLOUDFLARE_API_TOKEN` & `CLOUDFLARE_ACCOUNT_ID` | Workers AI credentials for `hydra free`. |

@@ -2,7 +2,7 @@
 Hydra · Sovereign Multi-Headed AI Summoning CLI
 """
 
-__version__ = "1.2.0"
+from hydra_cli._version import __version__
 __author__ = "erastudil"
 
 from hydra_cli.agent import run_agent_loop

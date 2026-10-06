@@ -5,6 +5,7 @@ Supports OpenRouter, Vercel AI Gateway, Cloudflare Workers AI, and local inferen
 
 import json
 import os
+import re
 import socket
 import urllib.error
 import urllib.request
@@ -15,9 +16,13 @@ from hydra_cli.config import (
     DEFAULT_CLOUDFLARE_MODEL,
     DEFAULT_FREE_MODEL,
     DEFAULT_SYSTEM_PROMPT,
+    FREE_MODELS,
+    PROVIDER_KEY_NAMES,
     load_dotenv,
+    model_providers,
     model_rejects_temperature,
     resolve_route,
+    sensitive_env_key,
 )
 
 
@@ -39,6 +44,48 @@ def clean_secret(value: Optional[str]) -> str:
     if any(char in text for char in "\r\n"):
         return ""
     return text
+
+
+_URL_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s\"'<>()]+")
+_ACCOUNT_PATH_RE = re.compile(r"(/accounts/)[^/\s\"']+")
+_MIN_SECRET_LEN = 6
+
+
+def describe_endpoint(url: str) -> str:
+    """Host (and port) only. Paths can carry account or endpoint ids, so they stay out of messages."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname or ""
+        if host and parsed.port:
+            host = f"{host}:{parsed.port}"
+        return host or "<endpoint>"
+    except Exception:
+        return "<endpoint>"
+
+
+def _short_url(match: "re.Match") -> str:
+    raw = match.group(0)
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return "<url>"
+    host = describe_endpoint(raw)
+    has_more = bool(parsed.path.strip("/") or parsed.query or parsed.fragment)
+    return f"{parsed.scheme}://{host}/..." if has_more else f"{parsed.scheme}://{host}"
+
+
+def redact(text: Any) -> str:
+    """Scrub credential values, account ids, and URL paths from text meant for a terminal."""
+    out = str(text)
+    for key, value in os.environ.items():
+        if not sensitive_env_key(key):
+            continue
+        secret = (value or "").strip()
+        if len(secret) >= _MIN_SECRET_LEN:
+            out = out.replace(secret, "<redacted>")
+    out = _URL_RE.sub(_short_url, out)
+    out = _ACCOUNT_PATH_RE.sub(r"\1<redacted>", out)
+    return out
 
 
 def gateway_api_key() -> str:
@@ -104,6 +151,7 @@ def get_cheaperinference_provider() -> Optional[Dict[str, Any]]:
         return None
     base = os.environ.get("CHEAPERINFERENCE_API_BASE", "https://api.cheaperinference.com/v1").strip()
     return {
+        "id": "cheaperinference",
         "name": "CheaperInference",
         "url": chat_completions_url(base),
         "headers": {
@@ -133,6 +181,7 @@ def get_runpod_provider() -> Optional[Dict[str, Any]]:
         return None
 
     return {
+        "id": "runpod",
         "name": "RunPod",
         "url": target_url,
         "headers": headers,
@@ -149,6 +198,7 @@ def get_modal_provider() -> Optional[Dict[str, Any]]:
     if key:
         headers["Authorization"] = f"Bearer {key}"
     return {
+        "id": "modal",
         "name": "Modal",
         "url": chat_completions_url(endpoint_url),
         "headers": headers,
@@ -163,6 +213,7 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
 
     if openrouter_key:
         providers.append({
+            "id": "openrouter",
             "name": "OpenRouter",
             "url": "https://openrouter.ai/api/v1/chat/completions",
             "headers": {
@@ -176,6 +227,7 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
     if vercel_key:
         gateway_base = os.environ.get("AI_GATEWAY_API_BASE", "https://ai-gateway.vercel.sh/v1").rstrip("/")
         providers.append({
+            "id": "vercel",
             "name": "Vercel AI Gateway",
             "url": f"{gateway_base}/chat/completions",
             "headers": {
@@ -199,44 +251,106 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
     return providers
 
 
-def get_free_provider() -> Tuple[Dict[str, Any], str]:
+def providers_for_model(model: str, providers: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
+    """Configured providers that may serve this model, in fallback order.
+
+    The catalog's model_providers map limits a model to the providers that carry it
+    (for example a Vercel-only alias). Other models may use every configured provider.
     """
-    Resolve provider and model for Free Forge.
-    Cloudflare Workers AI wins when both Cloudflare variables are set.
-    Otherwise OpenRouter's free-tier model is used. A key is required either way.
-    """
+    configured = get_frontier_providers() if providers is None else list(providers)
+    allowed = model_providers(model)
+    if not allowed:
+        return configured
+    rank = {pid: index for index, pid in enumerate(allowed)}
+    usable = [p for p in configured if p.get("id") in rank]
+    usable.sort(key=lambda p: rank[p["id"]])
+    if configured and not usable:
+        names = ", ".join(PROVIDER_KEY_NAMES.get(pid, pid) for pid in allowed)
+        raise CredentialsMissingError(
+            f"{model} is only served by: {', '.join(allowed)}. Set {names} to use it."
+        )
+    return usable
+
+
+def _cloudflare_provider() -> Optional[Dict[str, Any]]:
     cf_token = clean_secret(os.environ.get("CLOUDFLARE_API_TOKEN"))
     cf_account = clean_secret(os.environ.get("CLOUDFLARE_ACCOUNT_ID"))
+    if not (cf_token and cf_account):
+        return None
+    return {
+        "id": "cloudflare",
+        "name": "Cloudflare Workers AI",
+        "url": f"https://api.cloudflare.com/client/v4/accounts/{cf_account}/ai/v1/chat/completions",
+        "headers": {
+            "Authorization": f"Bearer {cf_token}",
+            "Content-Type": "application/json",
+        },
+    }
 
-    if cf_token and cf_account:
-        return {
-            "name": "Cloudflare Workers AI",
-            "url": f"https://api.cloudflare.com/client/v4/accounts/{cf_account}/ai/v1/chat/completions",
-            "headers": {
-                "Authorization": f"Bearer {cf_token}",
-                "Content-Type": "application/json",
-            },
-        }, DEFAULT_CLOUDFLARE_MODEL
 
+def _openrouter_free_provider() -> Optional[Dict[str, Any]]:
     openrouter_key = clean_secret(os.environ.get("OPENROUTER_API_KEY"))
-    if openrouter_key:
-        return {
-            "name": "OpenRouter Free Forge",
-            "url": "https://openrouter.ai/api/v1/chat/completions",
-            "headers": {
-                "Authorization": f"Bearer {openrouter_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/erastudil/hydra",
-                "X-Title": "Hydra Free Forge",
-            },
-        }, DEFAULT_FREE_MODEL
+    if not openrouter_key:
+        return None
+    return {
+        "id": "openrouter-free",
+        "name": "OpenRouter Free Forge",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "headers": {
+            "Authorization": f"Bearer {openrouter_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/erastudil/hydra",
+            "X-Title": "Hydra Free Forge",
+        },
+    }
 
-    raise CredentialsMissingError(
-        "Free Forge requires either:\n"
-        "  - CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, or\n"
-        "  - OPENROUTER_API_KEY\n"
-        "For a machine with no cloud key, use: hydra local \"<prompt>\""
-    )
+
+def get_free_candidates(model_override: Optional[str] = None) -> List[Tuple[Dict[str, Any], str]]:
+    """Ordered (provider, model) pairs for Free Forge.
+
+    Cloudflare Workers AI goes first when both Cloudflare variables are set. OpenRouter's
+    free models follow, so a Cloudflare failure still gets an answer. An @cf/ override
+    stays on Cloudflare. Any other override goes to OpenRouter first.
+    """
+    cloudflare = _cloudflare_provider()
+    openrouter = _openrouter_free_provider()
+    if not cloudflare and not openrouter:
+        raise CredentialsMissingError(
+            "Free Forge requires either:\n"
+            "  - CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, or\n"
+            "  - OPENROUTER_API_KEY\n"
+            "For a machine with no cloud key, use: hydra local \"<prompt>\""
+        )
+
+    candidates: List[Tuple[Dict[str, Any], str]] = []
+    if model_override and model_override.startswith("@cf/"):
+        if not cloudflare:
+            raise CredentialsMissingError(
+                f"{model_override} is a Cloudflare model. Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID."
+            )
+        return [(cloudflare, model_override)]
+
+    if model_override:
+        if openrouter:
+            candidates.append((openrouter, model_override))
+        elif cloudflare:
+            candidates.append((cloudflare, model_override))
+        return candidates
+
+    if cloudflare:
+        candidates.append((cloudflare, DEFAULT_CLOUDFLARE_MODEL))
+    if openrouter:
+        seen = set()
+        for model in [DEFAULT_FREE_MODEL] + list(FREE_MODELS):
+            if model and model not in seen:
+                seen.add(model)
+                candidates.append((openrouter, model))
+    return candidates
+
+
+def get_free_provider() -> Tuple[Dict[str, Any], str]:
+    """First Free Forge choice. Cloudflare wins when both of its variables are set."""
+    return get_free_candidates()[0]
 
 
 def adapt_model_for_url(url: str, model: str) -> str:
@@ -335,7 +449,17 @@ def _raise_if_provider_error(chunk: Dict[str, Any]) -> None:
         message = error.get("message") or json.dumps(error)
     else:
         message = str(error)
-    raise ProviderError(message)
+    raise ProviderError(redact(message))
+
+
+def _http_error(url: str, exc: "urllib.error.HTTPError") -> ProviderError:
+    error_body = ""
+    try:
+        error_body = exc.read().decode("utf-8", errors="replace")
+    except Exception:
+        error_body = ""
+    detail = _error_message(error_body, str(exc))
+    return ProviderError(redact(f"HTTP {exc.code} error from {describe_endpoint(url)}: {detail}"))
 
 
 def stream_chat_completion(
@@ -381,20 +505,15 @@ def stream_chat_completion(
                 if content:
                     yield content
             if not saw_done:
-                raise ProviderError(f"Stream from {url} ended before data: [DONE]")
+                raise ProviderError(f"Stream from {describe_endpoint(url)} ended before data: [DONE]")
     except ProviderError:
         raise
     except urllib.error.HTTPError as exc:
-        error_body = ""
-        try:
-            error_body = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            error_body = ""
-        raise ProviderError(f"HTTP {exc.code} error from {url}: {_error_message(error_body, str(exc))}") from exc
+        raise _http_error(url, exc) from exc
     except urllib.error.URLError as exc:
-        raise ProviderError(f"Connection failed to {url}: {exc.reason}") from exc
+        raise ProviderError(redact(f"Connection failed to {describe_endpoint(url)}: {exc.reason}")) from exc
     except Exception as exc:
-        raise ProviderError(f"Streaming error: {exc}") from exc
+        raise ProviderError(redact(f"Streaming error from {describe_endpoint(url)}: {exc}")) from exc
 
 
 def fetch_chat_completion(
@@ -406,14 +525,20 @@ def fetch_chat_completion(
     max_tokens: Optional[int] = None,
     timeout: Optional[int] = None,
     reasoning: Optional[Dict[str, str]] = None,
-) -> str:
-    """Fetch one complete chat completion."""
+    return_meta: bool = False,
+) -> Any:
+    """Fetch one complete chat completion.
+
+    Returns the assistant text. With return_meta=True returns a dict with the text,
+    the model id the provider reports, the upstream provider if given, and usage.
+    """
     ensure_temperature(model, temperature)
     effective_model = adapt_model_for_url(url, model)
     payload = _build_payload(effective_model, messages, False, temperature, max_tokens, reasoning)
     data_bytes = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, headers=headers, data=data_bytes, method="POST")
     wait = completion_timeout(reasoning, timeout)
+    where = describe_endpoint(url)
 
     try:
         with urllib.request.urlopen(req, timeout=wait) as resp:
@@ -422,26 +547,32 @@ def fetch_chat_completion(
             _raise_if_provider_error(res_json)
             choices = res_json.get("choices") or []
             if not choices:
-                raise ProviderError(f"Empty completion from {url}")
+                raise ProviderError(f"Empty completion from {where}")
             content = choices[0].get("message", {}).get("content")
             if not isinstance(content, str) or not content:
-                raise ProviderError(f"Empty completion from {url}")
+                if choices[0].get("finish_reason") == "length":
+                    raise ProviderError(
+                        f"Empty completion from {where}: the token limit ran out before any answer text "
+                        "(finish_reason=length). Raise --max-tokens."
+                    )
+                raise ProviderError(f"Empty completion from {where}")
+            if return_meta:
+                upstream = res_json.get("provider")
+                return {
+                    "content": content,
+                    "model": res_json.get("model") or effective_model,
+                    "upstream": upstream if isinstance(upstream, str) else None,
+                    "usage": res_json.get("usage") if isinstance(res_json.get("usage"), dict) else None,
+                }
             return content
     except ProviderError:
         raise
     except urllib.error.HTTPError as exc:
-        error_body = ""
-        try:
-            error_body = exc.read().decode("utf-8", errors="replace")
-        except Exception:
-            error_body = ""
-        raise ProviderError(f"HTTP {exc.code} error from {url}: {_error_message(error_body, str(exc))}") from exc
+        raise _http_error(url, exc) from exc
     except urllib.error.URLError as exc:
-        raise ProviderError(f"Connection failed to {url}: {exc.reason}") from exc
+        raise ProviderError(redact(f"Connection failed to {where}: {exc.reason}")) from exc
     except Exception as exc:
-        if isinstance(exc, ProviderError):
-            raise
-        raise ProviderError(f"Request failed: {exc}") from exc
+        raise ProviderError(redact(f"Request to {where} failed: {exc}")) from exc
 
 
 def complete(
@@ -454,7 +585,7 @@ def complete(
     """Summon one alias and return the assistant text. Tries each configured provider."""
     load_dotenv()
     route = resolve_route(alias)
-    providers = get_frontier_providers()
+    providers = providers_for_model(route["model"])
     if not providers:
         raise CredentialsMissingError(
             "No frontier credentials found. Export OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or CHEAPERINFERENCE_API_KEY."
@@ -482,4 +613,4 @@ def complete(
         except Exception as exc:
             last_error = exc
             continue
-    raise ProviderError(f"All configured providers failed for '{route['model']}'. Last error: {last_error}")
+    raise ProviderError(redact(f"All configured providers failed for '{route['model']}'. Last error: {last_error}"))
