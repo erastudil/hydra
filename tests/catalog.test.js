@@ -64,7 +64,7 @@ test('opus 5.5 refuses temperature locally', () => {
   );
 });
 
-test('resolves glm and kolibri aliases correctly', () => {
+test('resolves glm aliases correctly', () => {
   const g53 = hydra.resolveRoute('glm 5.3');
   assert.equal(g53.model, 'glm-5.3');
   assert.equal(g53.effort, 'high');
@@ -78,11 +78,11 @@ test('resolves glm and kolibri aliases correctly', () => {
   assert.equal(hydra.resolveRoute('glm 4.7').model, 'glm-4.7');
   assert.equal(hydra.resolveRoute('glm 4.7 flash').model, 'glm-4.7-flash');
 
-  const kolibri = hydra.resolveRoute('kolibri');
-  assert.equal(kolibri.model, 'Aleph-Alpha/Kolibri-1');
+  // Kolibri-1 is served by no configured provider, so the alias is gone.
+  assert.equal(Object.hasOwn(hydra.CATALOG.aliases, 'kolibri'), false);
 });
 
-test('consumeAlias handles compound glm and single kolibri', () => {
+test('consumeAlias handles compound and single glm', () => {
   const prime = hydra.consumeAlias(['glm', '5.3', 'prime', 'write', 'code']);
   assert.equal(prime.alias, 'glm 5.3 prime');
   assert.deepEqual(prime.rest, ['write', 'code']);
@@ -91,9 +91,9 @@ test('consumeAlias handles compound glm and single kolibri', () => {
   assert.equal(flash.alias, 'glm 4.7 flash');
   assert.deepEqual(flash.rest, ['quick']);
 
-  const kol = hydra.consumeAlias(['kolibri', 'hello']);
-  assert.equal(kol.alias, 'kolibri');
-  assert.deepEqual(kol.rest, ['hello']);
+  const single = hydra.consumeAlias(['glm', 'hello']);
+  assert.equal(single.alias, 'glm');
+  assert.deepEqual(single.rest, ['hello']);
 });
 
 test('cheaperinference strips vendor prefix', () => {
@@ -182,4 +182,65 @@ test('modal provider builder', () => {
     if (origKey !== undefined) process.env.MODAL_API_KEY = origKey;
     else delete process.env.MODAL_API_KEY;
   }
+});
+
+function withEnv(vars, fn) {
+  const saved = {};
+  for (const key of Object.keys(vars)) {
+    saved[key] = process.env[key];
+    if (vars[key] === undefined) delete process.env[key];
+    else process.env[key] = vars[key];
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test('cloudflare default model is a real Workers AI id', () => {
+  assert.equal(hydra.CATALOG.default_cloudflare_model, '@cf/meta/llama-3.3-70b-instruct-fp8-fast');
+});
+
+test('vercel-only models skip OpenRouter', () => {
+  const providers = [
+    { id: 'openrouter', name: 'OpenRouter', url: 'https://openrouter.ai/api/v1/chat/completions' },
+    { id: 'vercel', name: 'Vercel AI Gateway', url: 'https://ai-gateway.vercel.sh/v1/chat/completions' },
+  ];
+  assert.deepEqual(hydra.providersForModel('anthropic/claude-opus-5.5-fast', providers).map((p) => p.id), ['vercel']);
+  assert.deepEqual(hydra.providersForModel('anthropic/claude-sonnet-5.5', providers).map((p) => p.id), ['openrouter', 'vercel']);
+  assert.throws(() => hydra.providersForModel('glm-5.3', providers), /CHEAPERINFERENCE_API_KEY/);
+});
+
+test('free forge falls back from Cloudflare to OpenRouter free models', () => {
+  withEnv({
+    CLOUDFLARE_API_TOKEN: 'cf-token-abcdef',
+    CLOUDFLARE_ACCOUNT_ID: 'acct123456',
+    OPENROUTER_API_KEY: 'sk-or-abcdef',
+    HYDRA_FREE_MODEL: undefined,
+    HYDRA_CLOUDFLARE_MODEL: undefined,
+  }, () => {
+    const candidates = hydra.getFreeCandidates(null);
+    assert.equal(candidates[0].provider.id, 'cloudflare');
+    assert.ok(candidates.length > 1);
+    assert.ok(candidates.slice(1).every((c) => c.provider.id === 'openrouter-free' && c.model.endsWith(':free')));
+    const cfOnly = hydra.getFreeCandidates('@cf/meta/llama-3.1-8b-instruct-fp8');
+    assert.deepEqual(cfOnly.map((c) => c.provider.id), ['cloudflare']);
+  });
+});
+
+test('redact hides account ids, URL paths, and secret values', () => {
+  withEnv({ OPENROUTER_API_KEY: 'sk-or-v1-supersecret' }, () => {
+    const clean = hydra.redact('https://api.cloudflare.com/client/v4/accounts/0123abcd/ai key sk-or-v1-supersecret /accounts/0123abcd/x');
+    assert.equal(clean.includes('0123abcd'), false);
+    assert.equal(clean.includes('sk-or-v1-supersecret'), false);
+    assert.ok(clean.includes('https://api.cloudflare.com/...'));
+  });
+});
+
+test('version comes from the catalog', () => {
+  assert.equal(hydra.VERSION, '1.2.1');
 });

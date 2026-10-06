@@ -7,14 +7,14 @@
       "description": "Local file system operations (read, write, list, search)"
     },
     "fetch": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-fetch"],
+      "command": "uvx",
+      "args": ["mcp-server-fetch"],
       "description": "Web content fetching and markdown conversion"
     },
     "sqlite": {
       "command": "uvx",
-      "args": ["mcp-server-sqlite", "--db-path", "./workspace.db"],
-      "description": "Local SQLite database inspection and SQL execution"
+      "args": ["--with", "mcp<2", "mcp-server-sqlite", "--db-path", "${HYDRA_HOME}/workspace.db"],
+      "description": "SQLite database inspection and SQL execution (database kept in ~/.hydra). Archived upstream; pinned to mcp<2, which it needs."
     },
     "git": {
       "command": "uvx",
@@ -22,34 +22,32 @@
       "description": "Git repository operations (status, diff, log, commit)"
     },
     "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "command": "docker",
+      "args": ["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"],
       "env": {
         "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
       },
-      "description": "GitHub API integration (issues, PRs, repositories)"
+      "description": "GitHub's official MCP server (issues, PRs, repositories). Needs Docker."
     },
     "brave-search": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "args": ["-y", "@brave/brave-search-mcp-server"],
       "env": {
         "BRAVE_API_KEY": "${BRAVE_API_KEY}"
       },
       "description": "Real-time web search via Brave Search API"
     },
-    "postgres": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-postgres", "${DATABASE_URL}"],
-      "description": "PostgreSQL database queries and schema inspection"
-    },
     "memory": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-memory"],
-      "description": "Knowledge graph memory persistence across agent sessions"
+      "env": {
+        "MEMORY_FILE_PATH": "${HYDRA_HOME}/memory.jsonl"
+      },
+      "description": "Knowledge graph memory persistence across agent sessions (stored in ~/.hydra)"
     },
-    "puppeteer": {
+    "playwright": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+      "args": ["-y", "@playwright/mcp@latest", "--headless"],
       "description": "Headless browser automation, web scraping, and screenshots"
     }
   }

@@ -5,9 +5,15 @@ Aliases live in catalog.json so the Python and Node runtimes share one map.
 
 import json
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _CATALOG_PATH = os.path.join(os.path.dirname(__file__), "catalog.json")
+
+
+def hydra_home() -> str:
+    """Directory for Hydra state: $HYDRA_HOME, else ~/.hydra."""
+    custom = os.environ.get("HYDRA_HOME", "").strip()
+    return os.path.expanduser(custom) if custom else os.path.join(os.path.expanduser("~"), ".hydra")
 
 
 def load_catalog() -> Dict:
@@ -40,6 +46,20 @@ DEFAULT_LOCAL_MODEL = os.environ.get("HYDRA_LOCAL_MODEL", CATALOG["default_local
 
 DEFAULT_CHEAPERINFERENCE_BASE = "https://api.cheaperinference.com/v1"
 DEFAULT_RUNPOD_BASE_TEMPLATE = "https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
+
+# Models that only some providers serve. Values are provider ids in preference order.
+MODEL_PROVIDERS: Dict[str, List[str]] = {
+    model: list(ids) for model, ids in (CATALOG.get("model_providers") or {}).items()
+}
+
+# Provider id -> the variable that enables it. Used in error messages only.
+PROVIDER_KEY_NAMES: Dict[str, str] = {
+    "openrouter": "OPENROUTER_API_KEY",
+    "vercel": "AI_GATEWAY_API_KEY",
+    "cheaperinference": "CHEAPERINFERENCE_API_KEY",
+    "runpod": "RUNPOD_API_KEY",
+    "modal": "MODAL_ENDPOINT_URL",
+}
 
 SWARM_HEADS: Dict[str, Dict[str, str]] = {
     role: dict(spec) for role, spec in CATALOG["swarm"].items()
@@ -120,16 +140,22 @@ def model_rejects_temperature(model: str) -> bool:
     return model in blocked
 
 
-def resolve_route(alias: str) -> Dict[str, Optional[str]]:
-    """Return the canonical model id plus any reasoning effort or mode."""
+def model_providers(model: str) -> List[str]:
+    """Provider ids allowed to serve this model id. Empty means any provider."""
+    return list(MODEL_PROVIDERS.get(model) or [])
+
+
+def resolve_route(alias: str) -> Dict[str, Any]:
+    """Return the canonical model id, any reasoning effort or mode, and provider limits."""
     cleaned = alias.strip().lower()
     spec = CATALOG["aliases"].get(cleaned)
     if not spec:
-        return {"model": alias, "effort": None, "reasoning_mode": None}
+        return {"model": alias, "effort": None, "reasoning_mode": None, "providers": model_providers(alias)}
     return {
         "model": spec["model"],
         "effort": spec.get("effort"),
         "reasoning_mode": spec.get("reasoning_mode"),
+        "providers": model_providers(spec["model"]),
     }
 
 

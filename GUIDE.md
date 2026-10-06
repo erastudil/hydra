@@ -187,7 +187,7 @@ hydra mcp config
 hydra mcp init --force
 ```
 
-Configuration is read from `~/.hydra/mcp_servers.json` or `./.hydra/mcp_servers.json`. Standard community servers include `filesystem`, `fetch`, `sqlite`, `git`, `github`, `brave-search`, `postgres`, `memory`, and `puppeteer`.
+Configuration is read from `~/.hydra/mcp_servers.json` or `./.hydra/mcp_servers.json`. `hydra mcp init` installs the default servers: `filesystem`, `fetch`, `sqlite`, `git`, `github` (Docker), `brave-search`, `memory`, and `playwright`. Servers receive a minimal environment, never your provider API keys, unless the config names a variable in `env` or `env_passthrough`.
 
 ## External Agent Delegation (Hermes & Pi)
 

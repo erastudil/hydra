@@ -386,6 +386,7 @@ function getCheaperInferenceProvider() {
   if (!key) return null;
   const base = process.env.CHEAPERINFERENCE_API_BASE || 'https://api.cheaperinference.com/v1';
   return {
+    id: 'cheaperinference',
     name: 'CheaperInference',
     url: chatUrl(base),
     headers: {
@@ -417,6 +418,7 @@ function getRunPodProvider() {
   }
 
   return {
+    id: 'runpod',
     name: 'RunPod',
     url: targetUrl,
     headers,
@@ -432,6 +434,7 @@ function getModalProvider() {
     headers.Authorization = `Bearer ${key}`;
   }
   return {
+    id: 'modal',
     name: 'Modal',
     url: chatUrl(endpointUrl),
     headers,
@@ -444,6 +447,7 @@ function getFrontierProviders() {
   const vercelKey = gatewayKey();
   if (openRouterKey) {
     providers.push({
+      id: 'openrouter',
       name: 'OpenRouter',
       url: 'https://openrouter.ai/api/v1/chat/completions',
       headers: {
@@ -456,6 +460,7 @@ function getFrontierProviders() {
   if (vercelKey) {
     const base = (process.env.AI_GATEWAY_API_BASE || 'https://ai-gateway.vercel.sh/v1').replace(/\/+$/, '');
     providers.push({
+      id: 'vercel',
       name: 'Vercel AI Gateway',
       url: `${base}/chat/completions`,
       headers: { Authorization: `Bearer ${vercelKey}` },
@@ -470,40 +475,95 @@ function getFrontierProviders() {
   return providers;
 }
 
-function getFreeProvider() {
+const PROVIDER_KEY_NAMES = {
+  openrouter: 'OPENROUTER_API_KEY',
+  vercel: 'AI_GATEWAY_API_KEY',
+  cheaperinference: 'CHEAPERINFERENCE_API_KEY',
+  runpod: 'RUNPOD_API_KEY',
+  modal: 'MODAL_ENDPOINT_URL',
+};
+
+// Models that only some providers serve (catalog model_providers). Others may use any provider.
+function providersForModel(model, providers) {
+  const configured = providers || getFrontierProviders();
+  const allowed = (CATALOG.model_providers || {})[model];
+  if (!allowed || !allowed.length) return configured;
+  const usable = configured
+    .filter((p) => allowed.includes(p.id))
+    .sort((a, b) => allowed.indexOf(a.id) - allowed.indexOf(b.id));
+  if (configured.length && !usable.length) {
+    const names = allowed.map((id) => PROVIDER_KEY_NAMES[id] || id).join(', ');
+    throw new Error(`${model} is only served by: ${allowed.join(', ')}. Set ${names} to use it.`);
+  }
+  return usable;
+}
+
+// Scrub credential values, account ids, and URL paths from text meant for a terminal.
+function redact(text) {
+  let out = String(text);
+  for (const [key, value] of Object.entries(process.env)) {
+    const secret = (value || '').trim();
+    if (sensitiveEnvKey(key) && secret.length >= 6) out = out.split(secret).join('<redacted>');
+  }
+  out = out.replace(/[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^\s"'<>()]+/g, (raw) => {
+    try {
+      const u = new URL(raw);
+      const more = (u.pathname && u.pathname !== '/') || u.search || u.hash;
+      return `${u.protocol}//${u.host}${more ? '/...' : ''}`;
+    } catch (_) {
+      return '<url>';
+    }
+  });
+  return out.replace(/(\/accounts\/)[^/\s"']+/g, '$1<redacted>');
+}
+
+// Ordered { provider, model } pairs: Cloudflare first, then OpenRouter free models.
+function getFreeCandidates(modelOverride) {
   const cfToken = cleanSecret(process.env.CLOUDFLARE_API_TOKEN);
   const cfAccount = cleanSecret(process.env.CLOUDFLARE_ACCOUNT_ID);
-  if (cfToken && cfAccount) {
-    return {
-      provider: {
-        name: 'Cloudflare Workers AI',
-        url: `https://api.cloudflare.com/client/v4/accounts/${cfAccount}/ai/v1/chat/completions`,
-        headers: { Authorization: `Bearer ${cfToken}` },
-      },
-      model: process.env.HYDRA_CLOUDFLARE_MODEL || CATALOG.default_cloudflare_model,
-    };
-  }
   const openRouterKey = cleanSecret(process.env.OPENROUTER_API_KEY);
-  if (openRouterKey) {
-    return {
-      provider: {
-        name: 'OpenRouter Free Forge',
-        url: 'https://openrouter.ai/api/v1/chat/completions',
-        headers: {
-          Authorization: `Bearer ${openRouterKey}`,
-          'HTTP-Referer': 'https://github.com/erastudil/hydra',
-          'X-Title': 'Hydra Free Forge',
-        },
-      },
-      model: process.env.HYDRA_FREE_MODEL || CATALOG.default_free_model,
-    };
+  const cloudflare = cfToken && cfAccount ? {
+    id: 'cloudflare',
+    name: 'Cloudflare Workers AI',
+    url: `https://api.cloudflare.com/client/v4/accounts/${cfAccount}/ai/v1/chat/completions`,
+    headers: { Authorization: `Bearer ${cfToken}` },
+  } : null;
+  const openrouter = openRouterKey ? {
+    id: 'openrouter-free',
+    name: 'OpenRouter Free Forge',
+    url: 'https://openrouter.ai/api/v1/chat/completions',
+    headers: {
+      Authorization: `Bearer ${openRouterKey}`,
+      'HTTP-Referer': 'https://github.com/erastudil/hydra',
+      'X-Title': 'Hydra Free Forge',
+    },
+  } : null;
+  if (!cloudflare && !openrouter) {
+    throw new Error(
+      'Free Forge requires either:\n' +
+      '  - CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, or\n' +
+      '  - OPENROUTER_API_KEY\n' +
+      'For local execution with no cloud key: hydra local "<prompt>"'
+    );
   }
-  throw new Error(
-    'Free Forge requires either:\n' +
-    '  - CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, or\n' +
-    '  - OPENROUTER_API_KEY\n' +
-    'For local execution with no cloud key: hydra local "<prompt>"'
-  );
+  if (modelOverride && modelOverride.startsWith('@cf/')) {
+    if (!cloudflare) throw new Error(`${modelOverride} is a Cloudflare model. Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.`);
+    return [{ provider: cloudflare, model: modelOverride }];
+  }
+  if (modelOverride) return [{ provider: openrouter || cloudflare, model: modelOverride }];
+  const out = [];
+  if (cloudflare) {
+    out.push({ provider: cloudflare, model: process.env.HYDRA_CLOUDFLARE_MODEL || CATALOG.default_cloudflare_model });
+  }
+  if (openrouter) {
+    const models = [process.env.HYDRA_FREE_MODEL || CATALOG.default_free_model, ...(CATALOG.free_models || [])];
+    for (const model of [...new Set(models.filter(Boolean))]) out.push({ provider: openrouter, model });
+  }
+  return out;
+}
+
+function getFreeProvider() {
+  return getFreeCandidates(null)[0];
 }
 
 function headConfig(role, customModel) {
@@ -521,14 +581,25 @@ function headConfig(role, customModel) {
   return cfg;
 }
 
-async function runHead(role, task, providers, customModel, temperature, wrapTask) {
+async function runHead(role, task, providers, customModel, temperature, wrapTask, maxTokens, context) {
   const head = headConfig(role, customModel);
   const started = Date.now();
-  const userContent = wrapTask
+  let userContent = wrapTask
     ? `Task: ${task}\n\nExecute your specialized mandate with rigorous, production-grade output.`
     : task;
+  if (context) {
+    userContent += '\n\nThe other heads produced the work below. Review it directly: name concrete defects ' +
+      `in their design and code, and say what must change.\n\n${context}`;
+  }
   let lastError = null;
-  for (const provider of providers) {
+  let candidates;
+  try {
+    candidates = providersForModel(head.model, providers);
+  } catch (error) {
+    candidates = [];
+    lastError = error;
+  }
+  for (const provider of candidates) {
     try {
       const content = await requestJson(provider.url, provider.headers, buildPayload({
         endpointUrl: provider.url,
@@ -539,6 +610,7 @@ async function runHead(role, task, providers, customModel, temperature, wrapTask
         ],
         stream: false,
         temperature,
+        maxTokens,
         effort: head.effort || null,
         reasoningMode: head.reasoning_mode || null,
       }), completionTimeoutMs(head.effort, head.reasoning_mode));
@@ -546,6 +618,7 @@ async function runHead(role, task, providers, customModel, temperature, wrapTask
         role,
         title: head.title,
         model: head.model,
+        provider: provider.name,
         durationSec: Number(((Date.now() - started) / 1000).toFixed(1)),
         content,
         error: null,
@@ -562,7 +635,7 @@ async function runHead(role, task, providers, customModel, temperature, wrapTask
     model: head.model,
     durationSec: Number(((Date.now() - started) / 1000).toFixed(1)),
     content: '',
-    error: lastError ? lastError.message : 'No provider available',
+    error: lastError ? redact(lastError.message) : 'No provider available',
     status: 'failed',
   };
 }
@@ -570,12 +643,15 @@ async function runHead(role, task, providers, customModel, temperature, wrapTask
 function printHead(result) {
   const border = '='.repeat(64);
   process.stdout.write(`\n${border}\n`);
-  process.stdout.write(`[HEAD: ${String(result.title).toUpperCase()}] · ${result.model} (${result.durationSec}s)\n`);
+  const via = result.provider ? ` via ${result.provider}` : '';
+  process.stdout.write(`[HEAD: ${String(result.title).toUpperCase()}] · ${result.model}${via} (${result.durationSec}s)\n`);
   process.stdout.write(`${border}\n\n`);
   process.stdout.write(result.error ? `[ERROR]: ${result.error}\n` : `${result.content}\n`);
 }
 
-async function runSwarm(task, selectedRoles, customModel, jsonMode, temperature) {
+const REVIEW_ROLES = ['auditor'];
+
+async function runSwarm(task, selectedRoles, customModel, jsonMode, temperature, maxTokens) {
   const providers = getFrontierProviders();
   if (!providers.length) {
     throw new Error('Multi-agent swarm requires OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or CHEAPERINFERENCE_API_KEY.');
@@ -584,13 +660,30 @@ async function runSwarm(task, selectedRoles, customModel, jsonMode, temperature)
   const explicitSynth = requested.includes('synthesizer');
   let workerRoles = requested.filter((role) => role !== 'synthesizer');
   if (!workerRoles.length) workerRoles = ['architect', 'coder', 'auditor'];
-  if (!jsonMode) {
-    process.stderr.write(`\n[HYDRA SWARM] Fanning out ${workerRoles.length} specialist heads in parallel...\n`);
+  let reviewRoles = workerRoles.filter((role) => REVIEW_ROLES.includes(role));
+  let firstRoles = workerRoles.filter((role) => !reviewRoles.includes(role));
+  if (!firstRoles.length) {
+    firstRoles = reviewRoles;
+    reviewRoles = [];
   }
-  const finished = await Promise.all(workerRoles.map((role) => (
-    runHead(role, task, providers, customModel, temperature, true)
+  if (!jsonMode) {
+    process.stderr.write(`\n[HYDRA SWARM] Fanning out ${firstRoles.length} specialist heads in parallel...\n`);
+  }
+  const finished = await Promise.all(firstRoles.map((role) => (
+    runHead(role, task, providers, customModel, temperature, true, maxTokens, null)
   )));
   const byRole = Object.fromEntries(finished.map((result) => [result.role, result]));
+  if (reviewRoles.length) {
+    const reviewed = firstRoles.map((role) => byRole[role]).filter((r) => !r.error);
+    const context = reviewed.map((r) => `--- ${r.title} (${r.model}) ---\n${r.content}\n\n`).join('') || null;
+    if (!jsonMode) {
+      process.stderr.write(`\n[HYDRA SWARM] Dispatching review head(s) over ${reviewed.length} specialist result(s)...\n`);
+    }
+    const reviews = await Promise.all(reviewRoles.map((role) => (
+      runHead(role, task, providers, customModel, temperature, true, maxTokens, context)
+    )));
+    for (const r of reviews) byRole[r.role] = r;
+  }
   const results = workerRoles.map((role) => byRole[role]);
   if (!jsonMode) results.forEach(printHead);
   const successes = results.filter((result) => !result.error);
@@ -603,7 +696,7 @@ async function runSwarm(task, selectedRoles, customModel, jsonMode, temperature)
       synthPrompt += `--- ${result.title} (${result.model}) ---\n${result.content}\n\n`;
     }
     synthPrompt += 'Consolidate these findings into a unified, decisive action roadmap. Resolve any contradictions and provide the final engineering consensus.';
-    const synth = await runHead('synthesizer', synthPrompt, providers, customModel, temperature, false);
+    const synth = await runHead('synthesizer', synthPrompt, providers, customModel, temperature, false, maxTokens, null);
     results.push(synth);
     if (!jsonMode) printHead(synth);
   }
@@ -743,7 +836,7 @@ function printModels() {
 }
 
 async function summon(options) {
-  const providers = getFrontierProviders();
+  const providers = providersForModel(options.model, getFrontierProviders());
   if (!providers.length) {
     throw new Error(
       `No frontier credentials found to summon '${options.alias}'.\n` +
@@ -915,36 +1008,50 @@ async function main() {
 
   const cmd = consumed.alias.toLowerCase().trim();
   if (cmd === 'swarm') {
-    return runSwarm(prompt, swarmHeads, modelOverride, jsonMode, temperature);
+    return runSwarm(prompt, swarmHeads, modelOverride, jsonMode, temperature, maxTokens);
   }
   if (cmd === 'free') {
-    const { provider, model } = getFreeProvider();
-    const targetModel = modelOverride || model;
-    const payload = buildPayload({
-      endpointUrl: provider.url,
-      model: targetModel,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: prompt },
-      ],
-      stream: stream && !jsonMode,
-      temperature,
-      maxTokens,
-    });
-    if (stream && !jsonMode) {
-      await streamRequest(provider.url, provider.headers, payload, (chunk) => {
-        process.stdout.write(chunk);
-      }, 180000);
-      process.stdout.write('\n');
-    } else {
-      const text = await requestJson(provider.url, provider.headers, payload, 180000);
-      if (jsonMode) {
-        console.log(JSON.stringify({ model: targetModel, provider: provider.name, content: text }, null, 2));
-      } else {
-        console.log(text);
+    const candidates = getFreeCandidates(modelOverride);
+    let lastErr = null;
+    for (const { provider, model: targetModel } of candidates) {
+      if (lastErr) {
+        process.stderr.write(`[HYDRA FREE] Previous route failed (${redact(lastErr.message)}). Trying ${provider.name} with ${targetModel}.\n`);
+      }
+      let emitted = false;
+      try {
+        const payload = buildPayload({
+          endpointUrl: provider.url,
+          model: targetModel,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: prompt },
+          ],
+          stream: stream && !jsonMode,
+          temperature,
+          maxTokens,
+        });
+        if (stream && !jsonMode) {
+          await streamRequest(provider.url, provider.headers, payload, (chunk) => {
+            emitted = true;
+            process.stdout.write(chunk);
+          }, 180000);
+          process.stdout.write('\n');
+        } else {
+          const text = await requestJson(provider.url, provider.headers, payload, 180000);
+          if (jsonMode) {
+            console.log(JSON.stringify({ model: targetModel, provider: provider.name, content: text }, null, 2));
+          } else {
+            console.log(text);
+          }
+        }
+        return 0;
+      } catch (error) {
+        if (error.usage) throw error;
+        if (emitted) throw new Error(`Stream from ${provider.name} truncated after output started: ${error.message}`);
+        lastErr = error;
       }
     }
-    return 0;
+    throw new Error(`Every Free Forge route failed. Last error: ${lastErr && lastErr.message}`);
   }
   if (cmd === 'local') {
     const local = await detectLocalEndpoint();
@@ -1008,6 +1115,9 @@ module.exports = {
   getRunPodProvider,
   getModalProvider,
   getFreeProvider,
+  getFreeCandidates,
+  providersForModel,
+  redact,
 };
 
 if (require.main === module) {
@@ -1015,7 +1125,7 @@ if (require.main === module) {
     process.exit(code || 0);
   }).catch((error) => {
     const label = error.usage ? '[ERROR]' : '[HYDRA ERROR]';
-    process.stderr.write(`\n${label} ${error.message}\n`);
+    process.stderr.write(`\n${label} ${redact(error.message)}\n`);
     process.exit(1);
   });
 }

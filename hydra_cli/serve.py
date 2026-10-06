@@ -26,8 +26,12 @@ from hydra_cli.providers import (
     adapt_model_for_url,
     completion_timeout,
     ensure_temperature,
+    CredentialsMissingError,
+    describe_endpoint,
     get_frontier_providers,
+    providers_for_model,
     reasoning_fields,
+    redact,
 )
 
 
@@ -47,7 +51,7 @@ def _raise_if_provider_error(chunk: Dict[str, Any]) -> None:
         message = error.get("message") or json.dumps(error)
     else:
         message = str(error)
-    raise ProviderError(message)
+    raise ProviderError(redact(message))
 
 
 def get_registered_models() -> Dict[str, Any]:
@@ -156,7 +160,7 @@ def forward_chat_completion(
             raw = resp.read().decode("utf-8", errors="replace")
             res_json = json.loads(raw)
             if "error" in res_json:
-                raise ProviderError(_error_message(raw, "Provider returned an error"))
+                raise ProviderError(redact(_error_message(raw, "Provider returned an error")))
             return res_json
     except urllib.error.HTTPError as exc:
         raw_body = ""
@@ -165,11 +169,11 @@ def forward_chat_completion(
         except Exception:
             pass
         err_msg = _error_message(raw_body, str(exc))
-        raise ProviderError(f"HTTP {exc.code} error from {url}: {err_msg}") from exc
+        raise ProviderError(redact(f"HTTP {exc.code} error from {describe_endpoint(url)}: {err_msg}")) from exc
     except urllib.error.URLError as exc:
-        raise ProviderError(f"Connection failed to {url}: {exc.reason}") from exc
+        raise ProviderError(redact(f"Connection failed to {describe_endpoint(url)}: {exc.reason}")) from exc
     except json.JSONDecodeError as exc:
-        raise ProviderError(f"Invalid JSON response from {url}: {exc}") from exc
+        raise ProviderError(f"Invalid JSON response from {describe_endpoint(url)}: {exc}") from exc
 
 
 def forward_stream_completion(
@@ -210,9 +214,9 @@ def forward_stream_completion(
         except Exception:
             pass
         err_msg = _error_message(raw_body, str(exc))
-        raise ProviderError(f"HTTP {exc.code} error from {url}: {err_msg}") from exc
+        raise ProviderError(redact(f"HTTP {exc.code} error from {describe_endpoint(url)}: {err_msg}")) from exc
     except urllib.error.URLError as exc:
-        raise ProviderError(f"Connection failed to {url}: {exc.reason}") from exc
+        raise ProviderError(redact(f"Connection failed to {describe_endpoint(url)}: {exc.reason}")) from exc
 
 
 class HydraGatewayHandler(BaseHTTPRequestHandler):
@@ -325,7 +329,11 @@ class HydraGatewayHandler(BaseHTTPRequestHandler):
             self.send_error_json(400, str(ue), "invalid_request_error")
             return
 
-        providers = get_frontier_providers()
+        try:
+            providers = providers_for_model(target_model, get_frontier_providers())
+        except CredentialsMissingError as cme:
+            self.send_error_json(503, str(cme), "credentials_missing_error")
+            return
         if not providers:
             self.send_error_json(
                 503,
@@ -363,7 +371,7 @@ class HydraGatewayHandler(BaseHTTPRequestHandler):
                     last_error = exc
                     continue
 
-            self.send_error_json(502, f"All configured providers failed: {last_error}", "provider_error")
+            self.send_error_json(502, redact(f"All configured providers failed: {last_error}"), "provider_error")
             return
 
         # Streaming branch (Server-Sent Events)
@@ -434,7 +442,7 @@ class HydraGatewayHandler(BaseHTTPRequestHandler):
                 last_error = exc
                 continue
 
-        self.send_error_json(502, f"All configured providers failed: {last_error}", "provider_error")
+        self.send_error_json(502, redact(f"All configured providers failed: {last_error}"), "provider_error")
 
 
 def create_server(host: str = "127.0.0.1", port: int = 7777) -> HTTPServer:

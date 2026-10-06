@@ -9,12 +9,12 @@ import os
 import re
 from typing import Any, Callable, Dict, List, Optional
 
-from hydra_cli.config import load_dotenv
+from hydra_cli.config import hydra_home, load_dotenv
 from hydra_cli.mcp import McpSubprocessClient
 
 
 def get_default_home_config() -> str:
-    return os.path.join(os.path.expanduser("~"), ".hydra", "mcp_servers.json")
+    return os.path.join(hydra_home(), "mcp_servers.json")
 
 
 def get_default_cwd_config() -> str:
@@ -31,6 +31,7 @@ def interpolate_env_vars(obj: Any) -> Any:
     """
     Recursively interpolate ${VAR_NAME} or ${VAR_NAME:-default} in strings,
     lists, and dictionaries using values from os.environ.
+    ${HYDRA_HOME} falls back to the Hydra state directory (~/.hydra) when unset.
     """
     if isinstance(obj, str):
         def _replace(match: re.Match) -> str:
@@ -39,6 +40,8 @@ def interpolate_env_vars(obj: Any) -> Any:
                 var_name, default_val = expr.split(":-", 1)
             else:
                 var_name, default_val = expr, ""
+            if var_name == "HYDRA_HOME" and not os.environ.get(var_name):
+                return hydra_home()
             return os.environ.get(var_name, default_val)
 
         return re.sub(r"\$\{([^}]+)\}", _replace, obj)
@@ -67,6 +70,7 @@ class McpRegistry:
         self._server_configs: Dict[str, Dict[str, Any]] = {}
         self._clients: Dict[str, Any] = {}
         self._tools_cache: Optional[List[Dict[str, Any]]] = None
+        self.errors: Dict[str, str] = {}
 
         if config_path is not None:
             if not os.path.isfile(config_path):
@@ -151,7 +155,14 @@ class McpRegistry:
         env = cfg.get("env")
         cwd = cfg.get("cwd")
 
-        client = self.client_factory(command=command, args=args, env=env, cwd=cwd)
+        kwargs: Dict[str, Any] = {"command": command, "args": args, "env": env, "cwd": cwd}
+        if cfg.get("env_passthrough"):
+            kwargs["env_passthrough"] = list(cfg["env_passthrough"])
+        if cfg.get("timeout"):
+            kwargs["timeout"] = float(cfg["timeout"])
+        if cfg.get("init_timeout"):
+            kwargs["init_timeout"] = float(cfg["init_timeout"])
+        client = self.client_factory(**kwargs)
         client.start()
         self._clients[server_name] = client
         return client
@@ -178,7 +189,15 @@ class McpRegistry:
                     tool_copy["_server"] = s_name
                     tool_copy["_original_name"] = orig_name
                     tools.append(tool_copy)
-            except Exception:
+                self.errors.pop(s_name, None)
+            except Exception as exc:
+                self.errors[s_name] = str(exc) or type(exc).__name__
+                stale = self._clients.pop(s_name, None) if s_name in self._server_configs else None
+                if stale is not None:
+                    try:
+                        stale.close()
+                    except Exception:
+                        pass
                 continue
 
         self._tools_cache = tools

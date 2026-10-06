@@ -1,17 +1,16 @@
 {
-  "version": "1.2.0",
+  "version": "1.2.1",
   "no_temperature_models": [
     "anthropic/claude-opus-5.5",
     "anthropic/claude-opus-5.5-fast"
   ],
-  "default_free_model": "qwen/qwen3.8-27b:free",
-  "default_cloudflare_model": "@cf/meta/llama-3.3-70b-instruct",
+  "default_free_model": "google/gemma-4-26b-a4b-it:free",
+  "default_cloudflare_model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   "default_local_model": "qwen2.5-coder:latest",
   "free_models": [
-    "qwen/qwen3.8-27b:free",
-    "meta-llama/llama-3.3-70b-instruct:free",
     "google/gemma-4-26b-a4b-it:free",
-    "deepseek/deepseek-chat:free",
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
     "nvidia/nemotron-3.5-lightning:free"
   ],
   "aliases": {
@@ -27,7 +26,6 @@
     "sonnet": {"model": "anthropic/claude-sonnet-5.5"},
     "claude-5.5-sonnet": {"model": "anthropic/claude-sonnet-5.5"},
     "claude-sonnet-5.5": {"model": "anthropic/claude-sonnet-5.5"},
-    "sonnet 3.7": {"model": "anthropic/claude-3.7-sonnet"},
     "haiku 4.5": {"model": "anthropic/claude-haiku-4.5"},
     "haiku": {"model": "anthropic/claude-haiku-4.5"},
     "fable 5.1": {"model": "anthropic/claude-fable-5.1"},
@@ -60,12 +58,10 @@
     "qwen": {"model": "qwen/qwen3.8-27b"},
     "qwen-coder": {"model": "alibaba/qwen3-coder"},
     "qwen coder": {"model": "alibaba/qwen3-coder"},
-    "qwen 3b": {"model": "qwen/qwen-2.5-3b-instruct"},
     "qwen 3": {"model": "qwen/qwen-2.5-coder-32b-instruct"},
     "grok 4.7": {"model": "x-ai/grok-4.7"},
     "grok 4.6": {"model": "x-ai/grok-4.6"},
     "grok": {"model": "x-ai/grok-4.7"},
-    "grok 2": {"model": "x-ai/grok-2-1212"},
     "llama 4 maverick": {"model": "meta-llama/llama-4-maverick"},
     "llama 4 scout": {"model": "meta-llama/llama-4-scout"},
     "llama 4": {"model": "meta-llama/llama-4-maverick"},
@@ -79,8 +75,17 @@
     "glm 5": {"model": "glm-5.3"},
     "glm": {"model": "glm-5.3"},
     "glm 4.7 flash": {"model": "glm-4.7-flash"},
-    "glm 4.7": {"model": "glm-4.7"},
-    "kolibri": {"model": "Aleph-Alpha/Kolibri-1"}
+    "glm 4.7": {"model": "glm-4.7"}
+  },
+  "model_providers": {
+    "anthropic/claude-opus-5.5-fast": ["vercel"],
+    "openai/gpt-6.1-sol-fast": ["vercel"],
+    "deepseek/deepseek-chat": ["openrouter"],
+    "qwen/qwen-2.5-coder-32b-instruct": ["openrouter"],
+    "glm-5.3": ["cheaperinference"],
+    "glm-5.3-prime": ["cheaperinference"],
+    "glm-4.7": ["cheaperinference"],
+    "glm-4.7-flash": ["cheaperinference"]
   },
   "swarm": {
     "architect": {

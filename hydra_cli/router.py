@@ -24,9 +24,11 @@ from hydra_cli.providers import (
     detect_local_endpoint,
     ensure_temperature,
     fetch_chat_completion,
-    get_free_provider,
+    get_free_candidates,
     get_frontier_providers,
+    providers_for_model,
     reasoning_fields,
+    redact,
     stream_chat_completion,
 )
 from hydra_cli.swarm import execute_swarm
@@ -433,6 +435,7 @@ def route_command(argv: List[str]) -> int:
                 temperature=temperature,
                 json_output=json_mode,
                 stream_output=stream,
+                max_tokens=max_tokens,
             )
         else:
             return execute_summon(
@@ -448,19 +451,19 @@ def route_command(argv: List[str]) -> int:
                 reasoning_mode=reasoning_mode_override,
             )
     except UsageError as usage:
-        sys.stderr.write(f"\n[ERROR] {usage}\n")
+        sys.stderr.write(f"\n[ERROR] {redact(usage)}\n")
         return 1
     except CredentialsMissingError as cme:
-        sys.stderr.write(f"\n[CREDENTIALS ERROR]\n{cme}\n")
+        sys.stderr.write(f"\n[CREDENTIALS ERROR]\n{redact(cme)}\n")
         return 1
     except ProviderError as pe:
-        sys.stderr.write(f"\n[HYDRA ERROR] {pe}\n")
+        sys.stderr.write(f"\n[HYDRA ERROR] {redact(pe)}\n")
         return 1
     except KeyboardInterrupt:
         sys.stderr.write("\n[INTERRUPTED]\n")
         return 130
     except Exception as e:
-        sys.stderr.write(f"\n[UNEXPECTED ERROR] {e}\n")
+        sys.stderr.write(f"\n[UNEXPECTED ERROR] {redact(e)}\n")
         return 1
 
 
@@ -487,7 +490,7 @@ def execute_summon(
         route_mode = reasoning_mode if reasoning_mode is not None else route.get("reasoning_mode")
     reasoning = reasoning_fields(route_effort, route_mode)
     ensure_temperature(model_id, temperature)
-    providers = get_frontier_providers()
+    providers = providers_for_model(model_id)
 
     if not providers:
         raise CredentialsMissingError(
@@ -553,7 +556,7 @@ def execute_summon(
             continue
 
     if last_error:
-        raise ProviderError(f"All configured providers failed for '{model_id}'. Last error: {last_error}")
+        raise ProviderError(redact(f"All configured providers failed for '{model_id}'. Last error: {last_error}"))
     return 1
 
 
@@ -566,42 +569,66 @@ def execute_free(
     stream: bool = True,
     json_mode: bool = False,
 ) -> int:
-    """Execute inference via Free Forge (Cloudflare Workers AI or OpenRouter free models)."""
-    provider_info, default_model = get_free_provider()
-    model_id = model_override or default_model
+    """Free Forge: Cloudflare Workers AI first, then OpenRouter free models.
+
+    A later candidate is tried only before any text has been printed.
+    """
+    candidates = get_free_candidates(model_override)
 
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": prompt},
     ]
 
-    if stream and not json_mode:
-        for token in stream_chat_completion(
-            url=provider_info["url"],
-            headers=provider_info["headers"],
-            model=model_id,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        ):
-            sys.stdout.write(token)
-            sys.stdout.flush()
-        sys.stdout.write("\n")
-    else:
-        resp = fetch_chat_completion(
-            url=provider_info["url"],
-            headers=provider_info["headers"],
-            model=model_id,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        if json_mode:
-            import json
-            print(json.dumps({"model": model_id, "provider": provider_info["name"], "content": resp}, indent=2))
-        else:
-            print(resp)
-    return 0
+    last_error: Optional[Exception] = None
+    for index, (provider_info, model_id) in enumerate(candidates):
+        if index > 0 and last_error is not None:
+            sys.stderr.write(
+                f"[HYDRA FREE] Previous route failed ({redact(last_error)}). "
+                f"Trying {provider_info['name']} with {model_id}.\n"
+            )
+            sys.stderr.flush()
+        emitted = False
+        try:
+            if stream and not json_mode:
+                for token in stream_chat_completion(
+                    url=provider_info["url"],
+                    headers=provider_info["headers"],
+                    model=model_id,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                ):
+                    emitted = True
+                    sys.stdout.write(token)
+                    sys.stdout.flush()
+                sys.stdout.write("\n")
+                return 0
+            resp = fetch_chat_completion(
+                url=provider_info["url"],
+                headers=provider_info["headers"],
+                model=model_id,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            if json_mode:
+                import json
+                print(json.dumps({"model": model_id, "provider": provider_info["name"], "content": resp}, indent=2))
+            else:
+                print(resp)
+            return 0
+        except UsageError:
+            raise
+        except Exception as exc:
+            if emitted:
+                raise ProviderError(
+                    f"Stream from {provider_info['name']} truncated after output started: {exc}"
+                ) from exc
+            last_error = exc
+            continue
+
+    raise ProviderError(redact(f"Every Free Forge route failed. Last error: {last_error}"))
 
 
 def execute_local(
@@ -665,6 +692,7 @@ def execute_swarm_mode(
     temperature: Optional[float] = None,
     json_output: bool = False,
     stream_output: bool = True,
+    max_tokens: Optional[int] = None,
 ) -> int:
     """Dispatch the swarm. A failed head or a failed synthesis exits nonzero."""
     results = execute_swarm(
@@ -674,6 +702,7 @@ def execute_swarm_mode(
         temperature=temperature,
         json_output=json_output,
         stream_output=stream_output,
+        max_tokens=max_tokens,
     )
     if any(result.error for result in results):
         return 1
@@ -692,6 +721,17 @@ def execute_agent_mode(
     from hydra_cli.mcp_registry import McpRegistry
     reg = McpRegistry(auto_load=True)
     try:
+        tools = reg.get_openai_tools()
+        for server, err in sorted(reg.errors.items()):
+            first = redact(err).strip().splitlines()[0] if err.strip() else "unknown error"
+            sys.stderr.write(f"[HYDRA AGENT] MCP server '{server}' unavailable: {first[:200]}\n")
+        if not tools:
+            where = reg.config_path or "~/.hydra/mcp_servers.json"
+            sys.stderr.write(
+                f"[HYDRA AGENT] No MCP tools loaded from {where}. "
+                "Run `hydra mcp init` to install the default servers.\n"
+            )
+        sys.stderr.flush()
         ans = run_agent_loop(
             alias=alias,
             prompt=prompt,
@@ -777,7 +817,7 @@ def execute_mcp_command(args: List[str]) -> int:
             reg.shutdown()
             return 0
         except Exception as e:
-            sys.stderr.write(f"[ERROR] Failed testing server '{target_name}': {e}\n")
+            sys.stderr.write(f"[ERROR] Failed testing server '{target_name}': {redact(e)}\n")
             reg.shutdown()
             return 1
 
