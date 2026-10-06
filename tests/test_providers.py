@@ -9,6 +9,8 @@ from hydra_cli.providers import (
     get_cheaperinference_provider,
     get_free_provider,
     get_frontier_providers,
+    get_huggingface_provider,
+    get_hf_provider,
     get_modal_provider,
     get_runpod_provider,
 )
@@ -26,6 +28,11 @@ def clean_frontier_env(monkeypatch):
     monkeypatch.delenv("RUNPOD_ENDPOINT_ID", raising=False)
     monkeypatch.delenv("MODAL_ENDPOINT_URL", raising=False)
     monkeypatch.delenv("MODAL_API_KEY", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_API_KEY", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.delenv("HF_ENDPOINT_URL", raising=False)
+    monkeypatch.delenv("HF_INFERENCE_BASE", raising=False)
 
 
 def test_adapt_model_for_url():
@@ -206,12 +213,43 @@ def test_frontier_providers_all(monkeypatch):
     monkeypatch.setenv("RUNPOD_API_KEY", "runpod-test")
     monkeypatch.setenv("RUNPOD_ENDPOINT_ID", "pod-123")
     monkeypatch.setenv("MODAL_ENDPOINT_URL", "https://modal-test.modal.run")
+    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
     providers = get_frontier_providers()
-    assert len(providers) == 5
+    assert len(providers) == 6
     assert [p["name"] for p in providers] == [
         "OpenRouter",
         "Vercel AI Gateway",
         "CheaperInference",
         "RunPod",
         "Modal",
+        "Hugging Face Inference",
     ]
+
+
+def test_huggingface_provider_with_token(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf_test_key_123")
+    monkeypatch.delenv("HF_ENDPOINT_URL", raising=False)
+    p = get_huggingface_provider()
+    assert p is not None
+    assert p["name"] == "Hugging Face Inference"
+    assert p["url"] == "https://router.huggingface.co/v1/chat/completions"
+    assert "Bearer hf_test_key_123" in p["headers"]["Authorization"]
+
+
+def test_huggingface_provider_with_endpoint_url(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf_test_key_123")
+    monkeypatch.setenv("HF_ENDPOINT_URL", "https://custom-endpoint.endpoints.huggingface.cloud/v1")
+    p = get_huggingface_provider()
+    assert p is not None
+    assert p["name"] == "Hugging Face Inference"
+    assert p["url"] == "https://custom-endpoint.endpoints.huggingface.cloud/v1/chat/completions"
+    assert "Bearer hf_test_key_123" in p["headers"]["Authorization"]
+
+
+def test_huggingface_provider_missing(monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_API_KEY", raising=False)
+    monkeypatch.delenv("HUGGING_FACE_HUB_TOKEN", raising=False)
+    monkeypatch.delenv("HF_ENDPOINT_URL", raising=False)
+    monkeypatch.delenv("HF_INFERENCE_BASE", raising=False)
+    assert get_huggingface_provider() is None

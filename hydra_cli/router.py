@@ -9,6 +9,7 @@ from typing import List, Optional, Tuple
 
 from hydra_cli import __version__
 from hydra_cli.config import (
+    DEFAULT_HF_MODEL,
     DEFAULT_LOCAL_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     FREE_MODELS,
@@ -25,7 +26,10 @@ from hydra_cli.providers import (
     ensure_temperature,
     fetch_chat_completion,
     get_free_candidates,
+    get_huggingface_provider,
     get_frontier_providers,
+    get_hf_provider,
+    get_huggingface_provider,
     providers_for_model,
     reasoning_fields,
     redact,
@@ -67,6 +71,7 @@ HELP_BANNER = f"""
 USAGE:
     hydra <model-alias> "<prompt>"       # Direct frontier model summoning
     hydra free "<prompt>"                # Zero-cost Free Forge routing
+    hydra hf "<prompt>"                  # Hugging Face Serverless / Inference API routing
     hydra local "<prompt>"               # Offline local inference (Ollama/llama.cpp/EasyLM)
     hydra swarm "<task>"                 # Multi-agent swarm fan-out (Architect, Coder, Auditor)
     hydra agent "<prompt>"               # Autonomous ReAct agent with MCP tools
@@ -149,6 +154,14 @@ def print_registered_models():
     local_url, local_name = detect_local_endpoint()
     print(f"\nLocal Engine Detection:")
     print(f"  Detected: {local_name} at {local_url}")
+
+    hf_prov = get_huggingface_provider()
+    print(f"\nHugging Face Inference Provider:")
+    if hf_prov:
+        print(f"  Endpoint: {hf_prov['url']} (Authenticated)")
+        print(f"  Default Model: {DEFAULT_HF_MODEL}")
+    else:
+        print("  Endpoint: None configured (export HF_TOKEN in ~/.hydra/.env)")
     print()
 
 
@@ -417,6 +430,16 @@ def route_command(argv: List[str]) -> int:
                 stream=stream,
                 json_mode=json_mode,
             )
+        elif cmd_lower in ("hf", "huggingface"):
+            return execute_hf(
+                prompt=effective_prompt,
+                system_prompt=system_prompt,
+                model_override=model_override,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                stream=stream,
+                json_mode=json_mode,
+            )
         elif cmd_lower == "local":
             return execute_local(
                 prompt=effective_prompt,
@@ -629,6 +652,53 @@ def execute_free(
             continue
 
     raise ProviderError(redact(f"Every Free Forge route failed. Last error: {last_error}"))
+
+
+def execute_hf(
+    prompt: str,
+    system_prompt: str,
+    model_override: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    stream: bool = True,
+    json_mode: bool = False,
+) -> int:
+    """Execute inference via Hugging Face Serverless Inference API / Router."""
+    provider_info, default_model = get_hf_provider()
+    model_id = model_override or default_model
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},
+    ]
+
+    if stream and not json_mode:
+        for token in stream_chat_completion(
+            url=provider_info["url"],
+            headers=provider_info["headers"],
+            model=model_id,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ):
+            sys.stdout.write(token)
+            sys.stdout.flush()
+        sys.stdout.write("\n")
+    else:
+        resp = fetch_chat_completion(
+            url=provider_info["url"],
+            headers=provider_info["headers"],
+            model=model_id,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        if json_mode:
+            import json
+            print(json.dumps({"model": model_id, "provider": provider_info["name"], "endpoint": provider_info["url"], "content": resp}, indent=2))
+        else:
+            print(resp)
+    return 0
 
 
 def execute_local(

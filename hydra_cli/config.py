@@ -46,6 +46,8 @@ DEFAULT_LOCAL_MODEL = os.environ.get("HYDRA_LOCAL_MODEL", CATALOG["default_local
 
 DEFAULT_CHEAPERINFERENCE_BASE = "https://api.cheaperinference.com/v1"
 DEFAULT_RUNPOD_BASE_TEMPLATE = "https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
+DEFAULT_HF_BASE = os.environ.get("HF_INFERENCE_BASE", "https://router.huggingface.co/v1").rstrip("/")
+DEFAULT_HF_MODEL = os.environ.get("HYDRA_HF_MODEL", CATALOG.get("default_hf_model", "meta-llama/Llama-3.1-8B-Instruct"))
 
 # Models that only some providers serve. Values are provider ids in preference order.
 MODEL_PROVIDERS: Dict[str, List[str]] = {

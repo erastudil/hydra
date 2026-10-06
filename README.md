@@ -109,8 +109,9 @@ hydra serve --port 7777             # Serves /v1/models and /v1/chat/completions
 hydra swarm "Architect and test a zero-copy ring buffer"
 hydra swarm "Refactor parser" --heads architect:hermes,coder:pi,auditor
 
-# Free Forge & Offline Local Inference
+# Free Forge, Hugging Face & Offline Local Inference
 hydra free "Summarize this diff"     # Zero-cost Cloudflare / OpenRouter free models
+hydra hf "Analyze code"              # Hugging Face Serverless / Inference API routing
 hydra local "Generate unit test"     # Offline Ollama / llama.cpp / EasyLM
 
 # Display terminal green 7-headed Hydra

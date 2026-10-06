@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 from hydra_cli.config import (
     DEFAULT_CLOUDFLARE_MODEL,
     DEFAULT_FREE_MODEL,
+    DEFAULT_HF_BASE,
+    DEFAULT_HF_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     FREE_MODELS,
     PROVIDER_KEY_NAMES,
@@ -205,6 +207,50 @@ def get_modal_provider() -> Optional[Dict[str, Any]]:
     }
 
 
+def get_huggingface_provider() -> Optional[Dict[str, Any]]:
+    """Return Hugging Face Inference provider dict when credentials or endpoints are present."""
+    token = (
+        clean_secret(os.environ.get("HF_TOKEN"))
+        or clean_secret(os.environ.get("HUGGINGFACE_API_KEY"))
+        or clean_secret(os.environ.get("HUGGING_FACE_HUB_TOKEN"))
+    )
+    endpoint_url = os.environ.get("HF_ENDPOINT_URL", "").strip() or os.environ.get("HUGGINGFACE_ENDPOINT_URL", "").strip()
+    base_url = os.environ.get("HF_INFERENCE_BASE", DEFAULT_HF_BASE).strip()
+
+    if endpoint_url:
+        target_url = chat_completions_url(endpoint_url)
+    elif token or base_url != "https://router.huggingface.co/v1":
+        target_url = chat_completions_url(base_url)
+    else:
+        return None
+
+    headers: Dict[str, str] = {
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/erastudil/hydra",
+        "X-Title": "Hydra Multi-Headed AI Summoning CLI",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    return {
+        "name": "Hugging Face Inference",
+        "url": target_url,
+        "headers": headers,
+    }
+
+
+def get_hf_provider() -> Tuple[Dict[str, Any], str]:
+    """Resolve provider and default model for Hugging Face Inference API."""
+    provider = get_huggingface_provider()
+    if not provider:
+        raise CredentialsMissingError(
+            "Hugging Face Inference requires HF_TOKEN or HUGGINGFACE_API_KEY.\n"
+            "Export HF_TOKEN in ~/.hydra/.env or run 'hf auth login'."
+        )
+    default_model = os.environ.get("HYDRA_HF_MODEL", DEFAULT_HF_MODEL)
+    return provider, default_model
+
+
 def get_frontier_providers() -> List[Dict[str, Any]]:
     """Return configured frontier cloud providers. OpenRouter is tried first."""
     providers = []
@@ -247,6 +293,10 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
     modal = get_modal_provider()
     if modal:
         providers.append(modal)
+
+    hf = get_huggingface_provider()
+    if hf:
+        providers.append(hf)
 
     return providers
 
