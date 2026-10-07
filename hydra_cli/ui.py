@@ -441,12 +441,9 @@ BRAILLE_SPINNER_FRAMES: List[str] = [
     "\u280f",
 ]
 ASCII_SPINNER_FRAMES: List[str] = ["|", "/", "-", "\\\\"]
+# Single status next to the braille spinner. The TUI prompt glow carries the rest.
 DEFAULT_SPINNER_STATUS_MESSAGES: List[str] = [
-    "Reasoning...",
-    "Synthesizing plan...",
-    "Evaluating invariants...",
-    "Inspecting context...",
-    "Planning next action...",
+    "Working...",
 ]
 
 
@@ -598,18 +595,20 @@ class ThinkingSpinner:
         return " ".join(parts)
 
     def sink_text(self) -> str:
-        """Status text handed to a TUI sink: message plus the current rotating status."""
+        """Status text handed to a TUI sink. Prefer a single Working... line."""
         elapsed = time.time() - self._start_time if self._start_time else 0.0
         with self._lock:
-            if self._manual_status is not None:
-                status = self._manual_status
+            manual = self._manual_status
+            if manual is not None:
+                status = manual
             elif self.status_messages:
                 status = self.status_messages[int(elapsed / self.rotate_interval) % len(self.status_messages)]
             else:
                 status = ""
-        message = self.message.rstrip(". ").rstrip("…")
-        status = status.rstrip(". ").rstrip("…")
-        return f"{message} · {status}" if message and status else (message or status)
+        # Manual overrides (tool names, etc.) still surface; otherwise keep one word.
+        if manual is not None:
+            return (status or "Working").rstrip(". ").rstrip("…") or "Working"
+        return "Working"
 
     def _render_frame(self) -> None:
         """Render single spinner frame to stream."""

@@ -1687,6 +1687,8 @@ def setup_readline_completer(completer: Optional[HydraReplCompleter] = None) -> 
 
 REPL_COMMAND_HELP: List[Tuple[str, str]] = [
     ("/model", "numbered alias picker; sets the brain"),
+    ("/models", "alias for /model picker"),
+    ("/banner", "reprint the hydra splash once"),
     ("/summon", "inference alias Alice calls on a gap"),
     ("/stack", "live paths for hydra, alice, easylm, progen"),
     ("/skills", "written skill index"),
@@ -1699,6 +1701,7 @@ REPL_COMMAND_HELP: List[Tuple[str, str]] = [
     ("/dialect", "register: syntax, instruct, gfc, slack"),
     ("/effort", "reasoning effort: low, medium, high, xhigh, max"),
     ("/heat", "sampling heat; off omits temperature"),
+    ("/system", "show or set the session system prompt"),
     ("/window", "context window in tokens, or 128k / 1m"),
     ("/strategy", "context strategy: sliding, compact, retrieve"),
     ("/compact", "compact the session ledger now"),
@@ -2024,6 +2027,34 @@ def run_interactive_agent(
 
             elif cmd == "/new":
                 _reset_session("New")
+
+            elif cmd == "/banner":
+                from hydra_cli.ui import print_banner
+                print_banner(detailed=True, version=__version__)
+                sys.stdout.flush()
+
+            elif cmd == "/models":
+                # Same picker as bare /model — keep slash surface familiar.
+                sys.stdout.write(format_model_picker(active_alias, active_summon) + "\n")
+                sys.stdout.write(
+                    f"{c_mid}[Current active model: {session_model_label(active_alias, active_runner, active_summon)}]{c_reset}\n"
+                )
+                sys.stdout.flush()
+
+            elif cmd == "/system":
+                if not arg:
+                    preview = active_system_prompt.replace("\n", " ")
+                    if len(preview) > 160:
+                        preview = preview[:157] + "..."
+                    sys.stdout.write(f"{c_mid}[System prompt: {preview}]{c_reset}\n")
+                    sys.stdout.write(f"{c_mid}[Usage: /system <text>  or  /system reset]{c_reset}\n")
+                elif arg.lower() in ("reset", "default", "clear"):
+                    active_system_prompt = DEFAULT_AGENT_SYSTEM_PROMPT
+                    sys.stdout.write(f"{c_mid}[System prompt reset to agent default]{c_reset}\n")
+                else:
+                    active_system_prompt = arg
+                    sys.stdout.write(f"{c_mid}[System prompt updated]{c_reset}\n")
+                sys.stdout.flush()
 
             elif cmd == "/auth":
                 if arg.lower() == "status":
@@ -2386,6 +2417,8 @@ def run_interactive_agent(
                 sys.stdout.write(f"""
 {c_head}HYDRA CODING AGENT SLASH COMMANDS:{c_reset}
   /model [n|alias] Numbered alias picker. Sets the brain. Alice searches locally first
+  /models          Alias for the /model picker
+  /banner          Reprint the hydra splash once (does not change the look)
   /summon [alias]  Inference alias Alice calls when local search misses
   /stack           Live paths for hydra, alice, easylm, and progen
   /skills          Written skill index
@@ -2398,6 +2431,7 @@ def run_interactive_agent(
   /dialect [name]  Register: syntax, instruct, gfc, slack
   /effort [level]  Reasoning effort: low, medium, high, xhigh, max
   /heat [value]    Sampling heat from 0 to 2; off omits temperature
+  /system [text]   Show, set, or reset the session system prompt
   /window [size]   Context window in tokens, or 128k / 1m
   /strategy [name] Context strategy: sliding, compact, retrieve
   /compact         Compact the ledger and switch strategy to compact
@@ -2421,7 +2455,7 @@ def run_interactive_agent(
   Ctrl+Space       Dictate: start or stop voice capture; the transcript lands in the box
   Escape           Interrupt the running turn, clear the box, or exit on double press
   Ctrl+C / Ctrl+V  Copy the selection and paste, including the Windows clipboard
-  Mouse            Click moves the cursor; drag selects; Backspace deletes the selection
+  Mouse            Click moves the cursor; drag selects; wheel scrolls history; typing re-pins the prompt
   Tab              Complete slash commands and arguments
 
 {c_head}Native Coding Tools:{c_reset}

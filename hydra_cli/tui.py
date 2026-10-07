@@ -18,7 +18,8 @@ Keys: Enter sends; while a turn runs Enter queues and a second Enter on the
 empty box steers the queued text into the running turn; Alt+Enter or Ctrl+J
 inserts a newline; Ctrl+Space toggles dictation; Escape interrupts, clears,
 or exits on double press; Ctrl+C copies the selection and Ctrl+V pastes;
-mouse click moves the cursor and drag selects; Backspace or Delete removes
+mouse click moves the cursor and drag selects; mouse wheel scrolls the
+terminal history above the pinned composer; Backspace or Delete removes
 the whole selection; Tab completes slash commands.
 """
 
@@ -51,7 +52,9 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.layout.mouse_handlers import MouseHandlers
 from prompt_toolkit.layout.processors import Processor, Transformation, TransformationInput
+from prompt_toolkit.mouse_events import MouseEvent, MouseEventType
 from prompt_toolkit.output.color_depth import ColorDepth
 from prompt_toolkit.patch_stdout import StdoutProxy
 from prompt_toolkit.styles import Style
@@ -161,8 +164,78 @@ def _install_word_wrap() -> None:
     Window._hydra_word_wrap = True  # type: ignore[attr-defined]
 
 
+def _win32_scroll_viewport(lines: int) -> bool:
+    """Move the visible console window within the screen buffer (negative = older history)."""
+    if os.name != "nt" or lines == 0:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class COORD(ctypes.Structure):
+            _fields_ = [("X", wintypes.SHORT), ("Y", wintypes.SHORT)]
+
+        class SMALL_RECT(ctypes.Structure):
+            _fields_ = [
+                ("Left", wintypes.SHORT),
+                ("Top", wintypes.SHORT),
+                ("Right", wintypes.SHORT),
+                ("Bottom", wintypes.SHORT),
+            ]
+
+        class CONSOLE_SCREEN_BUFFER_INFO(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", COORD),
+                ("dwCursorPosition", COORD),
+                ("wAttributes", wintypes.WORD),
+                ("srWindow", SMALL_RECT),
+                ("dwMaximumWindowSize", COORD),
+            ]
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        info = CONSOLE_SCREEN_BUFFER_INFO()
+        if not kernel32.GetConsoleScreenBufferInfo(handle, ctypes.byref(info)):
+            return False
+        sr = info.srWindow
+        height = sr.Bottom - sr.Top
+        width = sr.Right - sr.Left
+        max_top = max(0, info.dwSize.Y - height - 1)
+        new_top = max(0, min(max_top, sr.Top + lines))
+        if new_top == sr.Top:
+            return False
+        rect = SMALL_RECT(0, new_top, width, new_top + height)
+        return bool(kernel32.SetConsoleWindowInfo(handle, True, ctypes.byref(rect)))
+    except Exception:
+        return False
+
+
+def scroll_terminal_history(lines: int) -> bool:
+    """Scroll the host terminal's history viewport. Negative lines look further up."""
+    if lines == 0:
+        return False
+    if _win32_scroll_viewport(lines):
+        return True
+    # VT hosts that still deliver wheel events while mouse tracking is on:
+    # SU / SD move the viewport contents. Prefer Win32 above when available.
+    try:
+        stream = getattr(sys, "__stdout__", None) or sys.stdout
+        if lines < 0:
+            stream.write(f"\x1b[{abs(lines)}S")
+        else:
+            stream.write(f"\x1b[{lines}T")
+        stream.flush()
+        return True
+    except Exception:
+        return False
+
+
 class _PromptControl(BufferControl):
     """Buffer whose preferred height follows word breaks, matching the painted rows."""
+
+    def __init__(self, *args: Any, on_wheel: Optional[Callable[[int], None]] = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_wheel = on_wheel
 
     def create_content(self, width: int, height: Optional[int]) -> Any:
         content = super().create_content(width, height)
@@ -178,6 +251,60 @@ class _PromptControl(BufferControl):
 
         content.get_height_for_line = get_height_for_line
         return content
+
+    def mouse_handler(self, mouse_event: MouseEvent) -> Any:
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            if self._on_wheel is not None:
+                self._on_wheel(-3)
+            else:
+                scroll_terminal_history(-3)
+            return None
+        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            if self._on_wheel is not None:
+                self._on_wheel(3)
+            else:
+                scroll_terminal_history(3)
+            return None
+        return super().mouse_handler(mouse_event)
+
+
+class _WheelRoot(HSplit):
+    """HSplit that captures mouse-wheel events over the whole composer chrome."""
+
+    def __init__(self, *args: Any, on_wheel: Optional[Callable[[int], None]] = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_wheel = on_wheel
+
+    def write_to_screen(
+        self,
+        screen: Any,
+        mouse_handlers: MouseHandlers,
+        write_position: Any,
+        parent_style: str,
+        erase_bg: bool,
+        z_index: Optional[int],
+    ) -> None:
+        super().write_to_screen(screen, mouse_handlers, write_position, parent_style, erase_bg, z_index)
+        if self._on_wheel is None:
+            return
+
+        def wrap(handler: Callable[[MouseEvent], Any]) -> Callable[[MouseEvent], Any]:
+            def combined(event: MouseEvent) -> Any:
+                if event.event_type == MouseEventType.SCROLL_UP:
+                    self._on_wheel(-3)
+                    return None
+                if event.event_type == MouseEventType.SCROLL_DOWN:
+                    self._on_wheel(3)
+                    return None
+                return handler(event)
+
+            return combined
+
+        handlers = mouse_handlers.mouse_handlers
+        for y in range(write_position.ypos, write_position.ypos + write_position.height):
+            row = handlers[y]
+            for x in range(write_position.xpos, write_position.xpos + write_position.width):
+                row[x] = wrap(row[x])
 
 
 class _SystemClipboard(Clipboard):
@@ -459,6 +586,7 @@ class HydraTUI:
         self.step_mode = False
 
         self._buffer = Buffer(multiline=True, history=self._make_history(history_path))
+        self._buffer.on_text_changed += self._on_buffer_edited
         self._main_q: "queue.Queue[object]" = queue.Queue()
         self._answer_q: "queue.Queue[object]" = queue.Queue()
         self._lock = threading.RLock()
@@ -475,6 +603,7 @@ class HydraTUI:
         self._last_ctrl_c = 0.0
         self._recorder: Any = None
         self._transcribing = False
+        self._history_scroll = 0  # <0 means viewport is looking at older scrollback
 
         self._app: Optional[Application] = None
         self._thread: Optional[threading.Thread] = None
@@ -688,12 +817,15 @@ class HydraTUI:
 
     def begin_stream(self) -> None:
         """Open a live answer above the composer. Tokens follow through write_token."""
+        self._pin_prompt()
         self.write_token("\n")
 
     def write_token(self, text: str) -> None:
         """Paint generated text immediately. Partial tokens skip the line gate."""
         if not text:
             return
+        if self._history_scroll < 0:
+            self._pin_prompt()
         proxy = self._proxy
         if proxy is not None:
             proxy.write(text)
@@ -705,8 +837,10 @@ class HydraTUI:
 
     def end_stream(self) -> None:
         self.write_token("\n\n")
+        self._pin_prompt()
 
     def print_answer(self, answer: str) -> None:
+        self._pin_prompt()
         elapsed = time.monotonic() - self._busy_since if self._busy_since else 0.0
         dot = self._g["dot"]
         header = f"{dot} {self.model} {dot} {elapsed:.1f}s" if self.model else f"{dot} {elapsed:.1f}s"
@@ -718,7 +852,40 @@ class HydraTUI:
         self._interrupting = False
 
     def _on_activity(self, text: Optional[str]) -> None:
-        self._activity = text
+        # Rotating braille chatter is gone; keep a single Working... line (glow does the rest).
+        self._activity = "working..." if text else None
+        self._invalidate()
+
+    def _on_wheel(self, lines: int) -> None:
+        """Mouse wheel: scroll terminal history. Negative looks up; pin again when back at bottom."""
+        if lines < 0:
+            if scroll_terminal_history(lines):
+                self._history_scroll += lines
+            return
+        # Scrolling down toward the live prompt.
+        if scroll_terminal_history(lines):
+            self._history_scroll = min(0, self._history_scroll + lines)
+        if self._history_scroll >= 0:
+            self._history_scroll = 0
+            self._pin_prompt()
+
+    def _pin_prompt(self) -> None:
+        """Keep the composer glued to the bottom of the visible window."""
+        self._history_scroll = 0
+        app = self._app
+        if app is None:
+            return
+        pin = getattr(app.output, "scroll_buffer_to_prompt", None)
+        if callable(pin):
+            try:
+                pin()
+            except Exception:
+                pass
+        self._invalidate()
+
+    def _on_buffer_edited(self, _buffer: Buffer) -> None:
+        if self._history_scroll < 0:
+            self._pin_prompt()
 
     def _echo_user(self, text: str) -> None:
         mode = ui.color_mode()
@@ -1045,9 +1212,7 @@ class HydraTUI:
         elif state == "answer":
             left = [("class:status.answer", f" {g['diamond']} "), ("class:status", "hydra is waiting on your answer")]
         elif state == "busy":
-            elapsed = now - self._busy_since if self._busy_since else 0.0
-            activity = self._activity or "working"
-            left = [("class:status.spin", f" {self._spin()} "), ("class:status", activity), ("class:dim", f" {g['dot']} {elapsed:.1f}s")]
+            left = [("class:status.spin", f" {self._spin()} "), ("class:status", "working...")]
             if self._interrupting:
                 left.append(("class:error", f" {g['dot']} interrupting"))
         notice: Fragments = []
@@ -1135,19 +1300,23 @@ class HydraTUI:
 
         @kb.add("enter")
         def _enter(event: Any) -> None:
+            self._pin_prompt()
             self._on_enter()
 
         @kb.add("escape", "enter")
         @kb.add("c-j")
         def _newline(event: Any) -> None:
+            self._pin_prompt()
             self._buffer.insert_text("\n")
 
         @kb.add("c-space")
         def _dictate(event: Any) -> None:
+            self._pin_prompt()
             self._toggle_dictation()
 
         @kb.add("escape")
         def _escape(event: Any) -> None:
+            self._pin_prompt()
             self._on_interrupt()
 
         @kb.add("c-c", eager=True)
@@ -1156,11 +1325,13 @@ class HydraTUI:
 
         @kb.add("c-v", eager=True)
         def _ctrl_v(event: Any) -> None:
+            self._pin_prompt()
             self._paste()
 
         @kb.add("backspace", filter=has_selection)
         @kb.add("delete", filter=has_selection)
         def _delete_selection(event: Any) -> None:
+            self._pin_prompt()
             event.current_buffer.cut_selection()
 
         @kb.add(Keys.Any, filter=has_selection)
@@ -1168,11 +1339,13 @@ class HydraTUI:
             data = event.data or ""
             if not data:
                 return
+            self._pin_prompt()
             event.current_buffer.cut_selection()
             event.current_buffer.insert_text(data)
 
         @kb.add("c-d")
         def _ctrl_d(event: Any) -> None:
+            self._pin_prompt()
             if self._buffer.text:
                 self._buffer.delete()
             else:
@@ -1180,11 +1353,16 @@ class HydraTUI:
 
         @kb.add("tab")
         def _tab(event: Any) -> None:
+            self._pin_prompt()
             self._complete()
 
         border = self._border_style
         input_window = Window(
-            _PromptControl(buffer=self._buffer, input_processors=[_Placeholder(self._placeholder_text)]),
+            _PromptControl(
+                buffer=self._buffer,
+                input_processors=[_Placeholder(self._placeholder_text)],
+                on_wheel=self._on_wheel,
+            ),
             wrap_lines=True,
             height=Dimension(min=1, max=10),
             dont_extend_height=True,
@@ -1208,13 +1386,16 @@ class HydraTUI:
             Window(char=g["h"], height=1, style=border),
             Window(width=1, height=1, char=g["br"], style=border),
         ])
-        root = HSplit([
-            Window(FormattedTextControl(self._status), height=1),
-            top,
-            middle,
-            bottom,
-            Window(FormattedTextControl(self._footer), height=1),
-        ])
+        root = _WheelRoot(
+            [
+                Window(FormattedTextControl(self._status), height=1),
+                top,
+                middle,
+                bottom,
+                Window(FormattedTextControl(self._footer), height=1),
+            ],
+            on_wheel=self._on_wheel,
+        )
 
         accent = _hex(ui.ACCENT_RGB)
         amber = _hex(ui.AMBER_RGB)

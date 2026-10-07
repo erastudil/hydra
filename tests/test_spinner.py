@@ -26,12 +26,7 @@ def test_spinner_frame_and_message_constants():
     assert BRAILLE_SPINNER_FRAMES[-1] == chr(0x280f)
     assert len(ASCII_SPINNER_FRAMES) == 4
     assert ASCII_SPINNER_FRAMES == ['|', '/', '-', '\\\\']
-    assert len(DEFAULT_SPINNER_STATUS_MESSAGES) == 5
-    assert DEFAULT_SPINNER_STATUS_MESSAGES[0] == 'Reasoning...'
-    assert DEFAULT_SPINNER_STATUS_MESSAGES[1] == 'Synthesizing plan...'
-    assert DEFAULT_SPINNER_STATUS_MESSAGES[2] == 'Evaluating invariants...'
-    assert DEFAULT_SPINNER_STATUS_MESSAGES[3] == 'Inspecting context...'
-    assert DEFAULT_SPINNER_STATUS_MESSAGES[4] == 'Planning next action...'
+    assert DEFAULT_SPINNER_STATUS_MESSAGES == ['Working...']
 
 def test_spinner_braille_vs_ascii_selection():
     sp_braille = ThinkingSpinner(use_braille=True)
@@ -50,22 +45,20 @@ def test_spinner_line_formatting_and_status_rotation():
     sp = ThinkingSpinner(message='Thinking...', stream=stream, rotate_interval=2.0, color=False)
     line0 = sp.format_line(elapsed=0.0)
     assert 'Thinking... (0.0s)' in line0
-    assert 'Reasoning...' in line0
-    line1 = sp.format_line(elapsed=3.2)
-    assert 'Thinking... (3.2s)' in line1
-    assert 'Synthesizing plan...' in line1
-    line4 = sp.format_line(elapsed=8.5)
-    assert 'Thinking... (8.5s)' in line4
-    assert 'Planning next action...' in line4
+    assert 'Working...' in line0
+    assert sp.sink_text() == 'Working'
     sp.update_status('Executing tool...')
     line_custom = sp.format_line(elapsed=1.0)
     assert 'Executing tool...' in line_custom
+    assert sp.sink_text() == 'Executing tool'
     sp.update_status(None)
     line_revert = sp.format_line(elapsed=1.0)
-    assert 'Reasoning...' in line_revert
+    assert 'Working...' in line_revert
     sp.set_status_messages(['Custom A', 'Custom B'])
     assert sp.format_line(elapsed=0.5).endswith('Custom A')
     assert sp.format_line(elapsed=2.5).endswith('Custom B')
+    # sink stays on the single Working label unless manually overridden
+    assert sp.sink_text() == 'Working'
 
 def test_spinner_colorization():
     stream_color = MockStream()

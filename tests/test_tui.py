@@ -173,11 +173,43 @@ def test_spinner_routes_status_to_sink_without_stream_writes():
     seen = []
     stream = io.StringIO()
     ui.set_status_sink(seen.append)
-    with ui.ThinkingSpinner(message="Thinking...", status_messages=["Reasoning..."], stream=stream, interval=0.01):
+    with ui.ThinkingSpinner(message="Thinking...", status_messages=["Working..."], stream=stream, interval=0.01):
         time.sleep(0.05)
     assert stream.getvalue() == ""
-    assert "Thinking · Reasoning" in seen
+    assert "Working" in seen
     assert seen[-1] is None
+
+
+def test_busy_status_is_just_working():
+    with create_pipe_input() as pipe:
+        tui = _make_tui(pipe, 80)
+        tui._waiting = None
+        tui._begin_busy()
+        tui._on_activity("Reasoning · Synthesizing plan")
+        status = "".join(text for _, text in tui._status())
+    assert "working..." in status
+    assert "Reasoning" not in status
+    assert "Synthesizing" not in status
+
+
+def test_mouse_wheel_scrolls_history_and_typing_repins():
+    with create_pipe_input() as pipe:
+        tui = _make_tui(pipe, 60)
+        tui._waiting = "main"
+        calls = []
+
+        def fake_scroll(lines):
+            calls.append(lines)
+            return True
+
+        with patch("hydra_cli.tui.scroll_terminal_history", side_effect=fake_scroll):
+            tui._on_wheel(-3)
+            assert tui._history_scroll == -3
+            tui._on_wheel(-3)
+            assert tui._history_scroll == -6
+            tui._buffer.text = "hello"
+            assert tui._history_scroll == 0
+    assert calls == [-3, -3]
 
 
 def test_prompt_input_prefers_handler():
@@ -453,6 +485,51 @@ def test_mouse_click_moves_the_cursor():
 
         asyncio.run(click())
     assert tui._buffer.cursor_position == 4
+
+
+def test_mouse_wheel_on_prompt_control_scrolls_history():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    with create_pipe_input() as pipe:
+        tui = _make_tui(pipe, 60)
+        tui._waiting = "main"
+        control = None
+        from prompt_toolkit.layout.containers import Window
+        from prompt_toolkit.layout.controls import BufferControl
+
+        def find_control(container):
+            if isinstance(container, Window) and isinstance(container.content, BufferControl):
+                return container.content
+            for child in getattr(container, "children", ()) or ():
+                found = find_control(child)
+                if found is not None:
+                    return found
+            return None
+
+        control = find_control(tui._app.layout.container)
+        assert control is not None
+        seen = []
+        with patch("hydra_cli.tui.scroll_terminal_history", side_effect=lambda n: seen.append(n) or True):
+            async def wheel():
+                with set_app(tui._app):
+                    control.mouse_handler(MouseEvent(
+                        Point(x=1, y=0),
+                        MouseEventType.SCROLL_UP,
+                        MouseButton.MIDDLE,
+                        frozenset(),
+                    ))
+            asyncio.run(wheel())
+    assert seen == [-3]
+
+
+def test_slash_help_lists_banner_models_system():
+    names = {name for name, _ in REPL_COMMAND_HELP}
+    assert "/banner" in names
+    assert "/models" in names
+    assert "/system" in names
+    assert "/help" in names
+    assert "/model" in names
 
 
 def test_tokens_stream_before_the_turn_finishes(tmp_path):
