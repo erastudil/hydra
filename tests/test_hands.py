@@ -70,6 +70,9 @@ def test_private_browse_refuses():
     text = answer_locally("browse http://127.0.0.1:7777/secret")
     assert "silence-gap" in text
     assert "Private" in text
+    from hydra_cli.alice_senses import public_https
+    assert public_https("http://[::1]/secret") is None
+    assert public_https("http://127.1/") is None
 
 
 def test_whisper_card():

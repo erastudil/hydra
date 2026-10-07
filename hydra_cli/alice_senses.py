@@ -5,6 +5,7 @@ Each one reports what it read. A missing model stays a named gap.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import shutil
@@ -34,24 +35,57 @@ COLORS = {
 }
 
 
-def _private_host(host: str) -> bool:
-    name = host.lower().rstrip(".")
-    if name in {"localhost", "localhost.localdomain"} or name.endswith(".local"):
-        return True
+def _inet_aton(name: str):
+    """Browser-style IPv4: 127.1, 2130706433, and dotted quads. Leading zeros are refused by the caller."""
     parts = name.split(".")
-    if len(parts) == 4 and all(part.isdigit() for part in parts):
-        nums = [int(part) for part in parts]
-        a, b = nums[0], nums[1]
-        if a in {0, 10, 127} or nums[0] >= 224:
+    if not parts or any(not part.isdigit() for part in parts):
+        return None
+    if any(len(part) > 1 and part.startswith("0") for part in parts):
+        return "ambiguous"
+    nums = [int(part) for part in parts]
+    if len(nums) == 1:
+        value = nums[0]
+    elif len(nums) == 2 and nums[1] <= 0xFFFFFF:
+        value = (nums[0] << 24) | nums[1]
+    elif len(nums) == 3 and nums[1] <= 0xFF and nums[2] <= 0xFFFF:
+        value = (nums[0] << 24) | (nums[1] << 16) | nums[2]
+    elif len(nums) == 4 and all(num <= 0xFF for num in nums):
+        value = (nums[0] << 24) | (nums[1] << 16) | (nums[2] << 8) | nums[3]
+    else:
+        return None
+    if value > 0xFFFFFFFF:
+        return None
+    return ipaddress.IPv4Address(value)
+
+
+def _blocked_ip(ip) -> bool:
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if isinstance(ip, ipaddress.IPv4Address) and int(ip) & 0xFFC00000 == 0x64400000:
+        return True
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
+def _private_host(host: str) -> bool:
+    name = host.lower().rstrip(".").strip("[]")
+    if not name or name in {"localhost", "localhost.localdomain"} or name.endswith(".local") or name.endswith(".localhost"):
+        return True
+    try:
+        return _blocked_ip(ipaddress.ip_address(name))
+    except ValueError:
+        parsed = _inet_aton(name)
+        if parsed == "ambiguous":
             return True
-        if a == 169 and b == 254:
-            return True
-        if a == 172 and 16 <= b <= 31:
-            return True
-        if a == 192 and b == 168:
-            return True
-        if a == 100 and 64 <= b <= 127:
-            return True
+        if isinstance(parsed, ipaddress.IPv4Address):
+            return _blocked_ip(parsed)
     return False
 
 
@@ -113,7 +147,23 @@ def _browse_playwright(url: str, timeout: int) -> dict:
         browser = playwright.chromium.launch(channel="chrome", headless=True)
         try:
             page = browser.new_page()
+
+            def _allow(route):
+                if public_https(route.request.url):
+                    route.continue_()
+                else:
+                    route.abort()
+
+            page.route("**/*", _allow)
             page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            if not public_https(page.url):
+                return {
+                    "ok": False,
+                    "act": "silence-gap",
+                    "source": "tool:playwright",
+                    "answer": "The page left the public web. The body was not read.",
+                    "next": "give a public https URL that stays public",
+                }
             title = page.title()
             text = page.inner_text("body")[:1500]
         finally:
