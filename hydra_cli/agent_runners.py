@@ -6,6 +6,14 @@ Summons autonomous external agents Hermes and Pi in sovereign execution loops.
 import os
 import shutil
 import subprocess
+from hydra_cli.alice_runner import (
+    AliceOrchestrator,
+    AliceWorker,
+    alice_available,
+    evaluate_with_alice,
+    find_alice_core,
+    run_alice,
+)
 from typing import Any, Dict, List, Optional, Union
 
 
@@ -171,9 +179,10 @@ def run_pi(
 
 
 def get_agent_status() -> Dict[str, Dict[str, Any]]:
-    """Discover capability and status for Hermes and Pi external agents."""
+    """Discover capability and status for Hermes, Pi, and Alice agent runners."""
     hermes_bin = find_hermes_binary()
     pi_bin = find_pi_binary()
+    alice_core_path = find_alice_core()
     return {
         "hermes": {
             "available": hermes_bin is not None,
@@ -184,5 +193,20 @@ def get_agent_status() -> Dict[str, Dict[str, Any]]:
             "available": pi_bin is not None,
             "path": pi_bin,
             "capabilities": ["terminal-coding", "one-shot", "bash-execution", "qwen3-coder"],
+        },
+        "alice": {
+            "available": alice_available(),
+            "path": alice_core_path,
+            "capabilities": [
+                "cognitive-grammar",
+                "tractatus-logic",
+                "kantian-analytics",
+                "philosophical-canon",
+                "deterministic-eval",
+                "memory-graph",
+                "continuous-learning",
+                "orchestrator",
+                "baseline-worker",
+            ],
         },
     }

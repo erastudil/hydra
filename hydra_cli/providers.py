@@ -577,6 +577,8 @@ def adapt_model_for_url(url: str, model: str) -> str:
             return "qwen/" + model[len("alibaba/"):]
         if model.startswith("meta/") and not model.startswith("meta-llama/"):
             return "meta-llama/" + model[len("meta/"):]
+        if model.startswith("glm-"):
+            return "z-ai/" + model
     elif "cheaperinference.com" in host or "cheaperinference" in host:
         if "/" in model:
             return model.split("/", 1)[1]

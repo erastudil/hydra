@@ -1,20 +1,48 @@
 ﻿"""
-Hydra ? Sovereign Multi-Headed AI Summoning CLI
+Hydra — Sovereign Multi-Headed AI Summoning CLI
 """
 
 from hydra_cli._version import __version__
 __author__ = "erastudil"
 
 from hydra_cli.agent import (
+    DEFAULT_AGENT_SYSTEM_PROMPT,
     HierarchicalScratchpad,
+    HydraReplCompleter,
     SessionCheckpointer,
     run_agent_loop,
+    run_interactive_agent,
+    setup_readline_completer,
 )
 from hydra_cli.agent_runners import (
+    AliceOrchestrator,
+    AliceWorker,
+    alice_available,
     hermes_available,
     pi_available,
+    run_alice,
     run_hermes,
     run_pi,
+)
+from hydra_cli.auth import (
+    PROVIDER_DIRECTORY,
+    auth_wizard,
+    execute_auth_command,
+    get_auth_status,
+    get_masked_input,
+    mask_secret,
+    open_registration_page,
+    print_auth_status,
+    probe_credential,
+    save_credentials,
+)
+from hydra_cli.tool_adapter import (
+    adapt_messages_for_prompt_tools,
+    extract_tool_calls,
+    format_tool_observation,
+    format_tool_observation_message,
+    inject_tool_prompt,
+    is_tool_unsupported_error,
 )
 from hydra_cli.config import (
     IMMUTABLE_AGENT_INVARIANTS,
@@ -22,6 +50,7 @@ from hydra_cli.config import (
 )
 from hydra_cli.mcp import McpSubprocessClient
 from hydra_cli.mcp_registry import McpRegistry
+from hydra_cli.native_tools import NativeToolRegistry
 from hydra_cli.providers import complete
 from hydra_cli.sandbox import (
     CommandInspector,
@@ -50,9 +79,29 @@ from hydra_cli.voice import (
 )
 
 __all__ = [
+    "auth_wizard",
+    "execute_auth_command",
+    "get_auth_status",
+    "save_credentials",
+    "probe_credential",
+    "print_auth_status",
+    "get_masked_input",
+    "mask_secret",
+    "PROVIDER_DIRECTORY",
+    "inject_tool_prompt",
+    "extract_tool_calls",
+    "format_tool_observation",
+    "format_tool_observation_message",
+    "is_tool_unsupported_error",
+    "adapt_messages_for_prompt_tools",
     "complete",
     "run_server",
+    "DEFAULT_AGENT_SYSTEM_PROMPT",
     "run_agent_loop",
+    "run_interactive_agent",
+    "HydraReplCompleter",
+    "setup_readline_completer",
+    "NativeToolRegistry",
     "HierarchicalScratchpad",
     "SessionCheckpointer",
     "IMMUTABLE_AGENT_INVARIANTS",
@@ -66,6 +115,10 @@ __all__ = [
     "run_pi",
     "hermes_available",
     "pi_available",
+    "alice_available",
+    "run_alice",
+    "AliceOrchestrator",
+    "AliceWorker",
     "McpSubprocessClient",
     "McpRegistry",
     "print_banner",
