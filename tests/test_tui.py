@@ -111,11 +111,17 @@ def test_art_is_mirror_symmetric():
 
 def test_launch_banner_without_tty_prints_final_frame(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(
+        ui.shutil,
+        "get_terminal_size",
+        lambda fallback=(100, 40): type("Size", (), {"columns": 160, "lines": 60})(),
+    )
     out = io.StringIO()
     ui.play_launch_banner(version="9.9.9", info=[("model", "opus-5.5"), ("cwd", "/tmp/x")], stream=out)
     text = out.getvalue()
     assert "v9.9.9" in text and "opus-5.5" in text and "/tmp/x" in text
     assert "\x1b[" not in text
+    assert text.count("vVVVVVVVv") == 1
 
 
 def test_render_answer_uses_the_window_width(monkeypatch):
