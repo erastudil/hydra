@@ -1,4 +1,4 @@
-﻿"""
+"""
 Alice cognitive engine native agent runner for Hydra CLI.
 Integrates Alice (snowgate-alice) as native orchestrator and baseline worker.
 Evaluates prompts through Alice's cognitive grammar and deterministic tool pipeline
@@ -61,11 +61,65 @@ def find_alice_core() -> Optional[str]:
 
 
 def alice_available() -> bool:
-    """Return True if Node.js and alice_core.js are discoverable and available for invocation."""
-    return find_node_binary() is not None and find_alice_core() is not None
+    """Return True if the alice mind engine or Node.js plus alice_core.js are available for invocation."""
+    if find_node_binary() is not None and find_alice_core() is not None:
+        return True
+    from hydra_cli import alice_mind
+    return alice_mind.mind_available()
 
 
-def evaluate_with_alice(prompt: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
+def _uncited_system_prompt() -> str:
+    from hydra_cli.alice_mind import UNCITED_SYSTEM
+    return UNCITED_SYSTEM
+
+
+def _run_mind_result(prompt: str, res: Dict[str, Any], fallback: Optional[str], timeout: int) -> str:
+    """
+    Render a mind result. Cited and proven routes print as-is with their Sources block.
+    Escalations go to the fallback model grounded in the mind's numbered evidence; output carries an explicit label.
+    """
+    from hydra_cli import alice_mind
+    modality = str(res.get("epistemicModality") or res.get("modality") or "").strip()
+    answer = str(res.get("answer") or "").strip()
+    if alice_mind.is_final(res) or not fallback:
+        return f"{modality} {answer}".strip()
+
+    pack = alice_mind.ground(prompt, timeout=float(timeout)) or {}
+    grounded = bool(pack.get("evidence")) and float(pack.get("confidence") or 0) >= 0.33
+    system_prompt = str(pack.get("systemPrompt") or "") if grounded else _uncited_system_prompt()
+    try:
+        from hydra_cli.providers import complete
+        response = complete(prompt=prompt, model=fallback, system_prompt=system_prompt, max_tokens=1024)
+    except Exception:
+        response = None
+    if not response:
+        return f"{modality} {answer}".strip()
+    if grounded:
+        refs = "\n".join(str(r) for r in (pack.get("references") or []))
+        return f"[GROUNDED_SYNTHESIS] {str(response).strip()}\n\nSources:\n{refs}".strip()
+    return f"[SYNTHETIC_INFERENCE · uncited] {str(response).strip()}"
+
+
+def evaluate_with_mind(prompt: str, timeout: int = 30, session: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Ask the alice mind engine (snowgate-alice/mind) for a cited answer.
+    Formal routes surface under their legacy AliceCore names; the native name stays in mindRoute.
+    Returns None when the mind is unavailable or ALICE_ENGINE=core.
+    """
+    from hydra_cli import alice_mind
+    if not alice_mind.mind_available():
+        return None
+    res = alice_mind.ask(prompt, session=session, timeout=float(timeout))
+    if not res:
+        return None
+    route = str(res.get("route") or "")
+    res["mindRoute"] = route
+    if route.startswith("FORMAL_"):
+        res["route"] = route[len("FORMAL_"):]
+    return res
+
+
+def evaluate_with_core(prompt: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
     """
     Execute proposition query directly through Alice Core engine via Node.js.
     Returns parsed dictionary payload from Alice, or None on failure.
@@ -95,10 +149,21 @@ def evaluate_with_alice(prompt: str, timeout: int = 30) -> Optional[Dict[str, An
             check=False
         )
         if proc.returncode == 0 and proc.stdout.strip():
-            return json.loads(proc.stdout.strip())
+            return json.loads(proc.stdout.strip().splitlines()[-1])
     except Exception:
         return None
     return None
+
+
+def evaluate_with_alice(prompt: str, timeout: int = 30) -> Optional[Dict[str, Any]]:
+    """
+    Evaluate a prompt through Alice: the cited mind engine first, alice_core.js second.
+    Returns parsed dictionary payload from Alice, or None on failure.
+    """
+    res = evaluate_with_mind(prompt, timeout=timeout)
+    if res is not None:
+        return res
+    return evaluate_with_core(prompt, timeout=timeout)
 
 
 def run_alice(
@@ -125,6 +190,9 @@ def run_alice(
     epistemic_modality = alice_eval.get("epistemicModality", "")
     progen_stream = alice_eval.get("progenStream", "")
     answer = alice_eval.get("answer", "")
+
+    if alice_eval.get("engine") == "alice-mind":
+        return _run_mind_result(prompt, alice_eval, model or fallback_model, timeout)
 
     # Routes where Alice provides verified deterministic evaluation or exact recall
     deterministic_routes = {

@@ -1,6 +1,6 @@
 """Local search before a Hydra summon.
 
-Order: typo table, vagueness rule, skill index, alice_core.js, then the selected inference alias.
+Order: typo table, vagueness rule, skill index, alice mind (cited stacks, formal core), then the selected inference alias.
 """
 
 from dataclasses import dataclass
@@ -232,6 +232,26 @@ def consult(
         result = evaluator(normalized)
     except Exception:
         result = None
+
+    if result and result.get("engine") == "alice-mind":
+        from hydra_cli import alice_mind
+        route = str(result.get("route") or "")
+        formatted = _format_alice(result)
+        if alice_mind.is_final(result):
+            return GateDecision(action="local", route=route, text=note + formatted)
+        prior_block = ""
+        if prior:
+            prior_block = f"prior prompt : {prior[0][:400]}\nprior answer : {prior[1][:400]}\n"
+        discovery = (
+            "[ALICE DISCOVERY]\n"
+            f"alice mind route : {route} at confidence {result.get('confidence', 0)}.\n"
+            "alice evidence : cite the numbered stack sources below when they bear on the answer; label every uncited claim as model inference.\n"
+            f"{str(result.get('answer') or '')[:1800]}\n"
+            f"summon : {summon_alias}\n"
+            + (f"normalized : {'; '.join(notes)}\n" if notes else "")
+            + prior_block
+        )
+        return GateDecision(action="summon", route=route, text="", discovery=discovery)
 
     if result:
         route = str(result.get("route") or "")

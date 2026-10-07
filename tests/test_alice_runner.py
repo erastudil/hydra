@@ -1,4 +1,4 @@
-﻿"""
+"""
 Unit tests for Alice agent runner integration in Hydra CLI.
 Verifies Alice cognitive engine, philosophical canon evaluation, orchestrator, and worker.
 """
@@ -53,18 +53,41 @@ def test_evaluate_with_alice_deterministic_math():
     assert "1066" in res.get("answer", "")
 
 
+def _mind_on() -> bool:
+    from hydra_cli import alice_mind
+    return alice_mind.mind_available()
+
+
 def test_evaluate_with_alice_philosophical_canon():
-    """evaluate_with_alice routes philosophical queries to PHILOSOPHICAL_CANON."""
+    """evaluate_with_alice answers philosophical queries from the stacks with citations; core path keeps PHILOSOPHICAL_CANON."""
     if not alice_available():
         pytest.skip("Alice core or Node.js not available in current environment")
 
     res = evaluate_with_alice("how does socrates navigate uncertainty?")
     assert res is not None
-    assert res.get("route") == "PHILOSOPHICAL_CANON"
-    assert res.get("epistemicModality") == "[VERIFIED_PROOF]"
     assert "Socrates" in res.get("answer", "")
     assert "progenStream" in res
-    assert "socrates" in res["progenStream"]
+    if res.get("engine") == "alice-mind":
+        assert res.get("route", "").startswith("CITED_")
+        assert res.get("citations")
+        assert all(c.get("stack") and c.get("locator") for c in res["citations"])
+    else:
+        assert res.get("route") == "PHILOSOPHICAL_CANON"
+        assert res.get("epistemicModality") == "[VERIFIED_PROOF]"
+        assert "socrates" in res["progenStream"]
+
+
+def test_evaluate_with_core_engine_override(monkeypatch):
+    """ALICE_ENGINE=core bypasses the mind and reaches alice_core.js directly."""
+    from hydra_cli.alice_runner import evaluate_with_core, find_node_binary
+    if not (find_node_binary() and find_alice_core()):
+        pytest.skip("Alice core or Node.js not available in current environment")
+    monkeypatch.setenv("ALICE_ENGINE", "core")
+    res = evaluate_with_alice("evaluate: 2^10 + 42")
+    assert res is not None
+    assert res.get("engine") != "alice-mind"
+    assert "1066" in res.get("answer", "")
+    assert evaluate_with_core("evaluate: 10 + 5") is not None
 
 
 def test_run_alice_verified_proof():
@@ -74,8 +97,42 @@ def test_run_alice_verified_proof():
 
     output = run_alice("what is looking glass?")
     assert output is not None
-    assert "[VERBATIM_RECALL]" in output
-    assert "LOOKING GLASS" in output
+    if _mind_on():
+        assert output.startswith("[CITED]")
+        assert "Looking glass" in output
+        assert "Sources:" in output and "[1]" in output
+    else:
+        assert "[VERBATIM_RECALL]" in output
+        assert "LOOKING GLASS" in output
+
+
+def test_mind_gap_escalates_with_label(monkeypatch):
+    """A mind gap reaches the fallback model and the output carries the uncited label."""
+    if not _mind_on():
+        pytest.skip("alice mind not available")
+    calls = {}
+
+    def fake_complete(prompt, model, system_prompt, max_tokens):
+        calls["system"] = system_prompt
+        return "model text"
+
+    monkeypatch.setattr("hydra_cli.providers.complete", fake_complete)
+    output = run_alice("what is a quaternion flux capacitor of the zorblax membrane?")
+    assert output.startswith("[SYNTHETIC_INFERENCE")
+    assert "uncited" in output
+    assert "no stack citation" in calls["system"]
+
+
+def test_mind_gate_cited_answer_stays_local():
+    """consult keeps a cited mind answer local and never summons."""
+    from hydra_cli.alice_gate import consult
+    res = {"engine": "alice-mind", "route": "CITED_DEFINITION", "mindRoute": "CITED_DEFINITION", "epistemicModality": "[CITED]", "answer": "x [1]", "escalate": False}
+    decision = consult("what is aporia", summon_alias="glm 5.3 flash", evaluator=lambda p: res)
+    assert decision.action == "local"
+    gap = dict(res, route="EPISTEMIC_GAP", mindRoute="EPISTEMIC_GAP", escalate=True, answer="I don't know.")
+    decision = consult("what is zorblax", summon_alias="glm 5.3 flash", evaluator=lambda p: gap)
+    assert decision.action == "summon"
+    assert "alice mind route : EPISTEMIC_GAP" in decision.discovery
 
 
 def test_alice_orchestrator():

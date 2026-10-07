@@ -316,7 +316,32 @@ class HydraGatewayHandler(BaseHTTPRequestHandler):
         extra_fields = {k: req_data[k] for k in passthrough_keys if k in req_data}
 
         # Resolve model alias via Hydra route catalog
-        route = resolve_route(model_requested)
+        alice_alias = model_requested.strip().lower() in ("alice", "alice-mind")
+        route = resolve_route("alice" if alice_alias else model_requested)
+        if alice_alias or route.get("runner") == "alice":
+            from hydra_cli import alice_mind
+            final, messages = alice_mind.gateway_preflight(messages)
+            if final is not None:
+                import time
+                created = int(time.time())
+                cid = f"chatcmpl-alice-{created}"
+                if not stream:
+                    self.send_json(200, alice_mind.completion_payload(final, model_requested, created, cid))
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "close")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                try:
+                    for frame in alice_mind.sse_frames(final, model_requested, created, cid):
+                        self.wfile.write(frame.encode("utf-8"))
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                self.close_connection = True
+                return
         target_model = route.get("model") or model_requested
         route_effort = route.get("effort")
         route_mode = route.get("reasoning_mode")
