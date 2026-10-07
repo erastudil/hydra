@@ -25,12 +25,15 @@ FILES="
 bin/hydra
 bin/hydra.js
 hydra_cli/__init__.py
+hydra_cli/_version.py
 hydra_cli/catalog.json
 hydra_cli/cli.py
 hydra_cli/config.py
+hydra_cli/display.py
 hydra_cli/providers.py
 hydra_cli/router.py
 hydra_cli/swarm.py
+hydra_cli/ui.py
 "
 
 echo "==> Installing Hydra into ${ROOT}"

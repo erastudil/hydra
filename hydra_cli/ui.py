@@ -25,6 +25,8 @@ HYDRA_LOGO_ASCII = r"""
        \/  \/          \/            \/ 
 """
 
+# One composition only: the 7 heads. Do not stack the wordmark under this —
+# that reads as the banner printing twice.
 HYDRA_7_HEADS_DETAILED = r"""
             [1]        [2]        [3]        [4]        [5]        [6]        [7]
            HERMES       PI      ARCHITECT  SOVEREIGN   CODER     AUDITOR   SYNTHESIS
@@ -85,20 +87,30 @@ def colorize(text: str, color_code: str = GREEN_BRIGHT) -> str:
     return f"{color_code}{text}{RESET}"
 
 
+def get_help_header(version: Optional[str] = None) -> str:
+    """Compact wordmark used above help/usage. Intentionally not the 7-head art."""
+    version = version or __version__
+    header = HYDRA_LOGO_ASCII.rstrip()
+    tagline = f"      Sovereign Multi-Headed AI Shell · v{version}"
+    body = f"{header}\n{tagline}\n"
+    if supports_color():
+        return f"{GREEN_BOLD}{header}{RESET}\n{GREEN_BRIGHT}{tagline}{RESET}\n"
+    return body
+
+
 def get_terminal_banner(detailed: bool = True, version: Optional[str] = None) -> str:
-    """Construct the complete 7-headed Hydra banner with green terminal styling."""
+    """Construct a single Hydra banner composition with green terminal styling.
+
+    `detailed=True` prints the 7 heads once. `detailed=False` prints the compact
+    monster mark. The HYDRA wordmark is never stacked under either — that looked
+    like the banner printing twice.
+    """
     version = version or __version__
     art = HYDRA_7_HEADS_DETAILED if detailed else HYDRA_7_HEADS_MONSTER
-    header = HYDRA_LOGO_ASCII.rstrip()
     tagline = f"       Sovereign Multi-Headed AI Shell · v{version}"
-    
     if supports_color():
-        c_art = f"{GREEN_MID}{art}{RESET}"
-        c_logo = f"{GREEN_BOLD}{header}{RESET}"
-        c_tag = f"{GREEN_BRIGHT}{tagline}{RESET}"
-        return f"{c_art}\n{c_logo}\n{c_tag}\n"
-    else:
-        return f"{art}\n{header}\n{tagline}\n"
+        return f"{GREEN_MID}{art}{RESET}\n{GREEN_BRIGHT}{tagline}{RESET}\n"
+    return f"{art}\n{tagline}\n"
 
 
 def print_banner(detailed: bool = True, version: Optional[str] = None) -> None:

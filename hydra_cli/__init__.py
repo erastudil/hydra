@@ -1,5 +1,5 @@
 ﻿"""
-Hydra ? Sovereign Multi-Headed AI Summoning CLI
+Hydra — Sovereign Multi-Headed AI Summoning CLI
 """
 
 from hydra_cli._version import __version__

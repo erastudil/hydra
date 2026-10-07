@@ -665,6 +665,131 @@ def _http_error(url: str, exc: "urllib.error.HTTPError") -> ProviderError:
     return ProviderError(redact(f"HTTP {exc.code} error from {describe_endpoint(url)}: {detail}"))
 
 
+def _delta_text(delta: Any) -> str:
+    """Extract visible assistant text from an OpenAI-style streaming delta."""
+    if isinstance(delta, str):
+        return delta
+    if not isinstance(delta, dict):
+        return ""
+    for key in ("content", "text"):
+        value = delta.get(key)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, list):
+            parts: List[str] = []
+            for part in value:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict):
+                    piece = part.get("text") or part.get("content") or ""
+                    if isinstance(piece, str) and piece:
+                        parts.append(piece)
+            if parts:
+                return "".join(parts)
+    return ""
+
+
+class SSEParser:
+    """Incremental SSE parser. Feed arbitrary byte chunks; emit complete events."""
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+
+    def feed(self, chunk: bytes) -> List[Dict[str, str]]:
+        if not chunk:
+            return []
+        self._buf.extend(chunk)
+        events: List[Dict[str, str]] = []
+        while True:
+            sep = self._buf.find(b"\n\n")
+            if sep < 0:
+                # Some gateways use CRLF event framing.
+                sep = self._buf.find(b"\r\n\r\n")
+                if sep < 0:
+                    break
+                raw = bytes(self._buf[:sep])
+                del self._buf[: sep + 4]
+            else:
+                raw = bytes(self._buf[:sep])
+                del self._buf[: sep + 2]
+            parsed = self._parse_event(raw)
+            if parsed is not None:
+                events.append(parsed)
+        return events
+
+    def flush(self) -> List[Dict[str, str]]:
+        """Parse any trailing unterminated event when the socket closes."""
+        if not self._buf.strip():
+            self._buf.clear()
+            return []
+        raw = bytes(self._buf)
+        self._buf.clear()
+        parsed = self._parse_event(raw)
+        return [parsed] if parsed is not None else []
+
+    @staticmethod
+    def _parse_event(raw: bytes) -> Optional[Dict[str, str]]:
+        data_lines: List[bytes] = []
+        event_type = "message"
+        for line in raw.split(b"\n"):
+            if line.endswith(b"\r"):
+                line = line[:-1]
+            if not line or line.startswith(b":"):
+                continue
+            if b":" not in line:
+                continue
+            field, _, value = line.partition(b":")
+            if value.startswith(b" "):
+                value = value[1:]
+            if field == b"data":
+                data_lines.append(value)
+            elif field == b"event":
+                event_type = value.decode("utf-8", errors="replace") or "message"
+        if not data_lines:
+            return None
+        return {
+            "type": event_type,
+            "data": b"\n".join(data_lines).decode("utf-8", errors="replace"),
+        }
+
+
+def _iter_sse_payloads(resp: Any) -> Generator[str, None, None]:
+    """Yield `data:` payload strings from an HTTP response body.
+
+    Prefers byte reads (correct across TCP chunk boundaries). Falls back to
+    line iteration for simple mocks and exotic transports.
+    """
+    parser = SSEParser()
+    read = getattr(resp, "read", None)
+    if callable(read):
+        first = read(4096)
+        if isinstance(first, (bytes, bytearray)):
+            chunk: Optional[bytes] = bytes(first)
+            while chunk:
+                for event in parser.feed(chunk):
+                    yield event["data"]
+                nxt = read(4096)
+                if not isinstance(nxt, (bytes, bytearray)) or not nxt:
+                    break
+                chunk = bytes(nxt)
+            for event in parser.flush():
+                yield event["data"]
+            return
+
+    for raw_line in resp:
+        if isinstance(raw_line, str):
+            raw_line = raw_line.encode("utf-8", errors="replace")
+        elif not isinstance(raw_line, (bytes, bytearray)):
+            continue
+        piece = bytes(raw_line)
+        if not piece.endswith(b"\n"):
+            piece += b"\n"
+        for event in parser.feed(piece):
+            yield event["data"]
+    for event in parser.flush():
+        yield event["data"]
+
+
 def stream_chat_completion(
     url: str,
     headers: Dict[str, str],
@@ -694,29 +819,31 @@ def stream_chat_completion(
         try:
             with urllib.request.urlopen(req, timeout=wait) as resp:
                 saw_done = False
-                for raw_line in resp:
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if not line or line.startswith(":"):
+                for data in _iter_sse_payloads(resp):
+                    payload_text = data.strip()
+                    if not payload_text:
                         continue
-                    if line == "data: [DONE]":
+                    if payload_text == "[DONE]":
                         saw_done = True
                         break
-                    if not line.startswith("data: "):
-                        continue
                     try:
-                        chunk = json.loads(line[6:].strip())
+                        chunk = json.loads(payload_text)
                     except json.JSONDecodeError:
                         continue
                     _raise_if_provider_error(chunk)
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue
-                    delta = choices[0].get("delta") or {}
-                    content = delta.get("content") or ""
+                    choice = choices[0] if isinstance(choices[0], dict) else {}
+                    delta = choice.get("delta")
+                    if delta is None and "text" in choice:
+                        delta = {"text": choice.get("text")}
+                    content = _delta_text(delta or {})
                     if content:
                         saw_token = True
                         yield content
-                if not saw_done:
+                # Providers sometimes close after the last token without [DONE].
+                if not saw_done and not saw_token:
                     raise ProviderError(f"Stream from {where} ended before data: [DONE]")
                 record_provider_success(url)
                 return

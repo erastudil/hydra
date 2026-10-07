@@ -24,6 +24,7 @@ URLS = {
     "openrouter": "https://openrouter.ai/api/v1/chat/completions",
     "vercel": "https://ai-gateway.vercel.sh/v1/chat/completions",
     "cheaperinference": "https://api.cheaperinference.com/v1/chat/completions",
+    "huggingface": "https://router.huggingface.co/v1/chat/completions",
 }
 
 
@@ -43,6 +44,13 @@ def main():
     ci_key = os.environ.get("CHEAPERINFERENCE_API_KEY", "").strip()
     if ci_key:
         lists["cheaperinference"] = fetch_ids("https://api.cheaperinference.com/v1/models", ci_key)
+    hf_key = (
+        os.environ.get("HF_TOKEN", "").strip()
+        or os.environ.get("HUGGINGFACE_API_KEY", "").strip()
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN", "").strip()
+    )
+    if hf_key:
+        lists["huggingface"] = fetch_ids("https://router.huggingface.co/v1/models", hf_key)
 
     models = {spec["model"] for spec in CATALOG["aliases"].values()}
     models |= {head["model"] for head in CATALOG["swarm"].values()}

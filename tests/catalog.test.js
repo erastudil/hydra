@@ -242,5 +242,16 @@ test('redact hides account ids, URL paths, and secret values', () => {
 });
 
 test('version comes from the catalog', () => {
-  assert.equal(hydra.VERSION, '1.2.1');
+  assert.equal(hydra.VERSION, '1.2.2');
+});
+
+test('dead alice-emap alias is gone; current gateway aliases resolve', () => {
+  assert.equal(Object.hasOwn(hydra.CATALOG.aliases, 'alice-emap'), false);
+  assert.equal(hydra.resolveRoute('sol 5.6').model, 'openai/gpt-5.6-sol');
+  assert.equal(hydra.resolveRoute('muse').model, 'meta/muse-spark-1.3');
+  assert.equal(hydra.resolveRoute('llama 3.1 8b').model, 'meta-llama/Llama-3.1-8B-Instruct');
+});
+
+test('sanitizeStreamText strips CR and mouse-tracking ANSI', () => {
+  assert.equal(hydra.sanitizeStreamText('a\rb\x1b[?1000hc'), 'abc');
 });

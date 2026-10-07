@@ -90,6 +90,7 @@ PROVIDER_KEY_NAMES: Dict[str, str] = {
     "cheaperinference": "CHEAPERINFERENCE_API_KEY",
     "runpod": "RUNPOD_API_KEY",
     "modal": "MODAL_ENDPOINT_URL",
+    "huggingface": "HF_TOKEN",
 }
 
 SWARM_HEADS: Dict[str, Dict[str, str]] = {

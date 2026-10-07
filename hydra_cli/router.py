@@ -22,6 +22,7 @@ from hydra_cli.config import (
     load_dotenv,
     resolve_route,
 )
+from hydra_cli.display import TokenStreamWriter
 from hydra_cli.providers import (
     CredentialsMissingError,
     ProviderError,
@@ -32,7 +33,6 @@ from hydra_cli.providers import (
     ensure_temperature,
     fetch_chat_completion,
     get_free_candidates,
-    get_huggingface_provider,
     get_frontier_providers,
     get_hf_provider,
     get_huggingface_provider,
@@ -43,29 +43,9 @@ from hydra_cli.providers import (
 )
 from hydra_cli.swarm import execute_swarm
 
+# Help uses the compact wordmark only. The full 7-head art lives on `hydra banner`
+# so the CLI does not look like it printed the banner twice.
 HELP_BANNER = f"""
-            [1]        [2]        [3]        [4]        [5]        [6]        [7]
-           HERMES       PI      ARCHITECT  SOVEREIGN   CODER     AUDITOR   SYNTHESIS
-          (\\___/)    (\\___/)    (\\___/)    <(\\___/)>   (\\___/)    (\\___/)    (\\___/)
-          /0   0\\    /o   o\\    /^   ^\\    {{ 0   0 }}   /^   ^\\    /o   o\\    /0   0\\
-         ( ==Y== )  ( ==v== )  ( ==w== )  (  ==X==  ) ( ==w== )  ( ==v== )  ( ==Y== )
-          )     (    )     (    )     (   / )     ( \\  )     (    )     (    )     (
-         /       \\  /       \\  /       \\ ( /       \\ )/       \\  /       \\  /       \\
-        /   | |   \\/   | |   \\/   | |   \\ V   | |   V /   | |   \\/   | |   \\/   | |   \\
-       |    | |        | |        | |    |    | |   |   | |        | |        | |    |
-       \\    \\ \\       / /        / /     |    | |   |    \\ \\        \\ \\       / /    /
-        \\    \\ \\_____/ /        / /      \\    | |   /     \\ \\________\\ \\_____/ /    /
-         \\    \\_______/        / /        \\___/ \\__/       \\_______/  \\_______/    /
-          \\                   / /          |       |        \\                     /
-           '.               .' /           |  VII  |         \\                  .'
-             '.           .'  /            |       |          \\               .'
-               '---------'   /             /_______\\           \\   '---------'
-                            /             /         \\           \\
-                           (             /   HYDRA   \\           )
-                            '._________.'|   CORE    |'._________.'
-                                         \\           /
-                                          '---------'
-
   ___ ___            .___              
  /   |   \\___.__.  __| _/___________   
 /    ~    <   |  | / __ |\\_  __ \\__  \\  
@@ -109,7 +89,8 @@ OPTIONS:
     --json                  Output raw JSON
     --mcp                   Enable Model Context Protocol (MCP) tools
     --heads <roles>         Comma-separated swarm heads (e.g. architect:hermes,coder:pi,auditor)
-    --list-models           List all registered aliases and providers
+    --list-models           List registered aliases (add --verbose for model ids)
+    --verbose, -V           Show resolved model ids with --list-models
     --guide, --setup        Show setup and integration guide
     -v, --version           Display version
     -h, --help              Show this help message
@@ -151,12 +132,24 @@ def format_combined_prompt(user_prompt: str, piped_input: Optional[str]) -> str:
     return f"[Piped Input]:\n{piped_input}\n\n[Instruction]:\n{user_prompt}"
 
 
-def print_registered_models():
-    """Print all configured models, aliases, free tiers, and endpoints."""
+def print_registered_models(verbose: bool = False):
+    """Print registered aliases. Full model ids only with --verbose."""
     print(f"\n--- Hydra Registered Models & Aliases (v{__version__}) ---")
     print("\nFrontier Aliases:")
-    for alias, target in sorted(MODEL_MAP.items()):
-        print(f"  {alias:<15} -> {target}")
+    for alias in sorted(MODEL_MAP):
+        if verbose:
+            route = resolve_route(alias)
+            extras = []
+            if route.get("effort"):
+                extras.append(f"effort={route['effort']}")
+            if route.get("reasoning_mode"):
+                extras.append(f"mode={route['reasoning_mode']}")
+            suffix = f"  ({', '.join(extras)})" if extras else ""
+            print(f"  {alias:<18}  {route['model']}{suffix}")
+        else:
+            print(f"  {alias}")
+    if not verbose:
+        print("\n  Tip: hydra --list-models --verbose  # show resolved model ids")
 
     print("\nFree Forge Tier Models:")
     for model in FREE_MODELS:
@@ -174,6 +167,12 @@ def print_registered_models():
     else:
         print("  Endpoint: None configured (export HF_TOKEN in ~/.hydra/.env)")
     print()
+
+
+def _emit_stream(token_iter) -> bool:
+    """Write streamed tokens through the flicker-safe display writer."""
+    writer = TokenStreamWriter()
+    return writer.write_all(token_iter, trailing_newline=True)
 
 
 def print_setup_guide():
@@ -317,7 +316,8 @@ def route_command(argv: List[str]) -> int:
         print_setup_guide()
         return 0
     if argv and argv[0] in ("--list-models", "list-models", "models"):
-        print_registered_models()
+        verbose = any(flag in argv[1:] for flag in ("--verbose", "-V", "--show-ids"))
+        print_registered_models(verbose=verbose)
         return 0
     if argv and argv[0] in ("mcp", "--mcp") and len(argv) > 1 and argv[1] in ("list", "test", "init", "default", "config"):
         return execute_mcp_command(argv[1:])
@@ -372,6 +372,7 @@ def route_command(argv: List[str]) -> int:
     max_tokens = None
     stream = True
     json_mode = False
+    verbose = False
     mcp_mode = False
     session_id = None
     swarm_heads = None
@@ -424,6 +425,9 @@ def route_command(argv: List[str]) -> int:
         elif arg == "--json":
             json_mode = True
             stream = False
+            idx += 1
+        elif arg in ("--verbose", "-V", "--show-ids"):
+            verbose = True
             idx += 1
         elif arg == "--mcp":
             mcp_mode = True
@@ -606,7 +610,7 @@ def execute_summon(
 
     if not providers and not cascade_enabled:
         raise CredentialsMissingError(
-            f"No frontier credentials found to summon '{alias}' ({model_id}).\n"
+            f"No frontier credentials found to summon '{alias}'.\n"
             "Export OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or CHEAPERINFERENCE_API_KEY.\n"
             "Free-tier cloud models: hydra free \"<prompt>\"\n"
             "This machine only:        hydra local \"<prompt>\""
@@ -622,19 +626,17 @@ def execute_summon(
         emitted = False
         try:
             if stream and not json_mode:
-                for token in stream_chat_completion(
-                    url=provider["url"],
-                    headers=provider["headers"],
-                    model=model_id,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    reasoning=reasoning,
-                ):
-                    emitted = True
-                    sys.stdout.write(token)
-                    sys.stdout.flush()
-                sys.stdout.write("\n")
+                emitted = _emit_stream(
+                    stream_chat_completion(
+                        url=provider["url"],
+                        headers=provider["headers"],
+                        model=model_id,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        reasoning=reasoning,
+                    )
+                )
                 return 0
             resp = fetch_chat_completion(
                 url=provider["url"],
@@ -686,18 +688,16 @@ def execute_summon(
             emitted = False
             try:
                 if stream and not json_mode:
-                    for token in stream_chat_completion(
-                        url=cf["url"],
-                        headers=cf["headers"],
-                        model=DEFAULT_CLOUDFLARE_MODEL,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    ):
-                        emitted = True
-                        sys.stdout.write(token)
-                        sys.stdout.flush()
-                    sys.stdout.write("\n")
+                    emitted = _emit_stream(
+                        stream_chat_completion(
+                            url=cf["url"],
+                            headers=cf["headers"],
+                            model=DEFAULT_CLOUDFLARE_MODEL,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                        )
+                    )
                     return 0
                 resp = fetch_chat_completion(
                     url=cf["url"],
@@ -732,18 +732,16 @@ def execute_summon(
                 emitted = False
                 try:
                     if stream and not json_mode:
-                        for token in stream_chat_completion(
-                            url=or_free["url"],
-                            headers=or_free["headers"],
-                            model=fm,
-                            messages=messages,
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                        ):
-                            emitted = True
-                            sys.stdout.write(token)
-                            sys.stdout.flush()
-                        sys.stdout.write("\n")
+                        emitted = _emit_stream(
+                            stream_chat_completion(
+                                url=or_free["url"],
+                                headers=or_free["headers"],
+                                model=fm,
+                                messages=messages,
+                                temperature=temperature,
+                                max_tokens=max_tokens,
+                            )
+                        )
                         return 0
                     resp = fetch_chat_completion(
                         url=or_free["url"],
@@ -776,18 +774,16 @@ def execute_summon(
             emitted = False
             try:
                 if stream and not json_mode:
-                    for token in stream_chat_completion(
-                        url=local_url,
-                        headers={"Content-Type": "application/json"},
-                        model=DEFAULT_LOCAL_MODEL,
-                        messages=messages,
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                    ):
-                        emitted = True
-                        sys.stdout.write(token)
-                        sys.stdout.flush()
-                    sys.stdout.write("\n")
+                    emitted = _emit_stream(
+                        stream_chat_completion(
+                            url=local_url,
+                            headers={"Content-Type": "application/json"},
+                            model=DEFAULT_LOCAL_MODEL,
+                            messages=messages,
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                        )
+                    )
                     return 0
                 resp = fetch_chat_completion(
                     url=local_url,
@@ -855,18 +851,16 @@ def execute_free(
         emitted = False
         try:
             if stream and not json_mode:
-                for token in stream_chat_completion(
-                    url=provider_info["url"],
-                    headers=provider_info["headers"],
-                    model=model_id,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                ):
-                    emitted = True
-                    sys.stdout.write(token)
-                    sys.stdout.flush()
-                sys.stdout.write("\n")
+                emitted = _emit_stream(
+                    stream_chat_completion(
+                        url=provider_info["url"],
+                        headers=provider_info["headers"],
+                        model=model_id,
+                        messages=messages,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                    )
+                )
                 return 0
             resp = fetch_chat_completion(
                 url=provider_info["url"],
@@ -914,17 +908,16 @@ def execute_hf(
     ]
 
     if stream and not json_mode:
-        for token in stream_chat_completion(
-            url=provider_info["url"],
-            headers=provider_info["headers"],
-            model=model_id,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        ):
-            sys.stdout.write(token)
-            sys.stdout.flush()
-        sys.stdout.write("\n")
+        _emit_stream(
+            stream_chat_completion(
+                url=provider_info["url"],
+                headers=provider_info["headers"],
+                model=model_id,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        )
     else:
         resp = fetch_chat_completion(
             url=provider_info["url"],
@@ -963,17 +956,16 @@ def execute_local(
 
     try:
         if stream and not json_mode:
-            for token in stream_chat_completion(
-                url=url,
-                headers=headers,
-                model=model_id,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            ):
-                sys.stdout.write(token)
-                sys.stdout.flush()
-            sys.stdout.write("\n")
+            _emit_stream(
+                stream_chat_completion(
+                    url=url,
+                    headers=headers,
+                    model=model_id,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            )
         else:
             resp = fetch_chat_completion(
                 url=url,
