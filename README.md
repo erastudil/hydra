@@ -106,7 +106,14 @@ hydra local "Generate unit test"     # Offline Ollama / llama.cpp / EasyLM
 
 # Display terminal green 3-head TUI Hydra + title
 hydra banner
+
+# Interactive REPL (slash commands: /help /model /models /banner /quit)
+hydra
+hydra chat
+hydra tui
 ```
+
+Windows launchers tracked in-repo: `hydra.bat` and `bin/hydra.bat` (same as the installer `hydra.cmd` shim).
 
 ## Model Context Protocol (MCP) Integration
 

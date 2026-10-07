@@ -68,6 +68,7 @@ USAGE:
     hydra voice benchmark                # Sub-500ms real-time voice latency budget trace
     hydra voice stream                   # Chunked streaming TTS & early audio playback
     hydra banner                         # Display 3-head TUI Hydra + title wordmark
+    hydra / hydra chat / hydra tui       # Interactive REPL with slash commands
     hydra setup                          # Interactive setup & app/agent integration guide
     cat file.txt | hydra <alias>         # The pipe is the prompt
     cat file.txt | hydra <alias> - "do"  # Pipe plus an instruction
@@ -311,6 +312,9 @@ def route_command(argv: List[str]) -> int:
         from hydra_cli.ui import print_banner
         print_banner(detailed=True, version=__version__)
         return 0
+    if argv and argv[0].lower() in ("chat", "tui", "repl", "interactive"):
+        from hydra_cli.repl import run_repl
+        return run_repl(initial_argv=argv[1:])
     if argv and argv[0] in ("setup", "guide", "--setup", "--guide"):
         print_setup_guide()
         return 0
@@ -352,6 +356,10 @@ def route_command(argv: List[str]) -> int:
         piped_input = read_stdin_if_piped()
         if piped_input:
             return execute_summon("sonnet 5.5", piped_input, system_prompt=DEFAULT_SYSTEM_PROMPT)
+        # Bare `hydra` on a TTY enters the slash-command REPL (Claude Code / Codex style).
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            from hydra_cli.repl import run_repl
+            return run_repl()
         from hydra_cli.ui import GREEN_MID, RESET, supports_color
         if supports_color():
             print(f"{GREEN_MID}{HELP_BANNER}{RESET}")

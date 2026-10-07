@@ -5,6 +5,7 @@
  * Zero external dependencies. Model aliases come from hydra_cli/catalog.json.
  */
 
+const { spawnSync } = require('child_process');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
@@ -12,6 +13,22 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { URL } = require('url');
+
+/** Interactive slash-command REPL lives in Python (`hydra_cli/repl.py`). */
+function launchPythonRepl(extraArgs) {
+  const pythonBin = path.join(__dirname, 'hydra');
+  const py = process.platform === 'win32' ? 'python' : 'python3';
+  const args = [pythonBin, 'chat', ...(extraArgs || [])];
+  const result = spawnSync(py, args, { stdio: 'inherit', env: process.env });
+  if (result.error && result.error.code === 'ENOENT') {
+    process.stderr.write(
+      '[ERROR] Interactive chat/tui needs Python 3 (hydra_cli/repl.py).\n' +
+      '        Install Python or run: python3 bin/hydra chat\n'
+    );
+    return 1;
+  }
+  return result.status == null ? 1 : result.status;
+}
 
 function loadCatalog() {
   const candidates = [
@@ -798,6 +815,7 @@ USAGE:
     hydra serve [--port 7777]            # Sovereign OpenAI Gateway for Hermes and Pi
     hydra mcp list                       # List configured community MCP servers & tools
     hydra banner                         # Display 3-head TUI Hydra + title wordmark
+    hydra / hydra chat / hydra tui       # Interactive REPL with slash commands (Python)
     hydra setup                          # Interactive setup & app/agent integration guide
     cat file.txt | hydra <alias>         # The pipe is the prompt
     cat file.txt | hydra <alias> - "instruction"
@@ -972,6 +990,9 @@ async function main() {
     );
     return 0;
   }
+  if (early === 'chat' || early === 'tui' || early === 'repl' || early === 'interactive') {
+    return launchPythonRepl(rawArgs.slice(1));
+  }
   if (early === 'setup' || early === 'guide' || early === '--setup' || early === '--guide') {
     printSetupGuide();
     return 0;
@@ -986,6 +1007,9 @@ async function main() {
   if (!rawArgs.length) {
     const piped = await readStdin();
     if (!piped) {
+      if (process.stdin.isTTY && process.stdout.isTTY) {
+        return launchPythonRepl([]);
+      }
       console.log(HELP_BANNER);
       return 0;
     }
