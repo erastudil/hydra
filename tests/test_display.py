@@ -35,17 +35,20 @@ def test_token_stream_writer_coalesces_and_sanitizes():
 def test_banner_is_single_composition(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     banner = get_terminal_banner(detailed=True)
-    assert banner.count("[1]") == 1
+    # One splash: 3-head TUI creature + classic wordmark + one tagline.
+    assert banner.count(r"(\___/)") == 3
+    assert "HERMES" not in banner
+    assert "ARCHITECT" not in banner
+    assert banner.count("___ ___") == 1
     assert banner.count("Sovereign Multi-Headed AI Shell") == 1
-    # Wordmark must not be stacked under the heads (that looked like a double print).
-    assert "___ ___" not in banner
     assert f"v{__version__}" in banner
 
 
 def test_help_banner_uses_wordmark_not_heads():
-    assert "[1]" not in HELP_BANNER
+    assert r"(\___/)" not in HELP_BANNER
     assert "___ ___" in HELP_BANNER
     assert HELP_BANNER.count("Sovereign Multi-Headed AI Shell") == 1
+    assert "HERMES" not in HELP_BANNER
 
 
 def test_list_models_alias_only_by_default(capsys):

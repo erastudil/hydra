@@ -1,27 +1,17 @@
 # Hydra
 
 ```text
-            [1]        [2]        [3]        [4]        [5]        [6]        [7]
-           HERMES       PI      ARCHITECT  SOVEREIGN   CODER     AUDITOR   SYNTHESIS
-          (\___/)    (\___/)    (\___/)    <(\___/)>   (\___/)    (\___/)    (\___/)
-          /0   0\    /o   o\    /^   ^\    { 0   0 }   /^   ^\    /o   o\    /0   0\
-         ( ==Y== )  ( ==v== )  ( ==w== )  (  ==X==  ) ( ==w== )  ( ==v== )  ( ==Y== )
-          )     (    )     (    )     (   / )     ( \  )     (    )     (    )     (
-         /       \  /       \  /       \ ( /       \ )/       \  /       \  /       \
-        /   | |   \/   | |   \/   | |   \ V   | |   V /   | |   \/   | |   \/   | |   \
-       |    | |        | |        | |    |    | |   |   | |        | |        | |    |
-       \    \ \       / /        / /     |    | |   |    \ \        \ \       / /    /
-        \    \ \_____/ /        / /      \    | |   /     \ \________\ \_____/ /    /
-         \    \_______/        / /        \___/ \__/       \_______/  \_______/    /
-          \                   / /          |       |        \                     /
-           '.               .' /           |  VII  |         \                  .'
-             '.           .'  /            |       |          \               .'
-               '---------'   /             /_______\           \   '---------'
-                            /             /         \           \
-                           (             /   HYDRA   \           )
-                            '._________.'|   CORE    |'._________.'
-                                         \           /
-                                          '---------'
+                         __====-_          _-====__
+                   _--~~~       ~~--_  _--~~       ~~~--_
+                _-~                       ~~              ~-_
+              .~     (\___/)   (\___/)   (\___/)            ~.
+             /      ( 0   0 ) ( o   o ) ( 0   0 )             \
+            |        \  =  /   \  v  /   \  =  /               |
+            |         '--'      '--'      '--'                 |
+             \        .-------------------------------.       /
+              ~-._     \                             /    _.-~
+                  `--.  \         H Y D R A         /  .--'
+                      `'--..___________________..--'`
 
   ___ ___            .___              
  /   |   \___.__.  __| _/___________   
@@ -29,7 +19,7 @@
 \    Y    /\___  |/ /_/ | |  | \// __ \_
  \___|_  / / ____|\____ | |__|  (____  /
        \/  \/          \/            \/ 
-      Sovereign Multi-Headed AI Shell · v1.2.1
+      Sovereign Multi-Headed AI Shell · v1.2.2
 ```
 
 Hydra is a sovereign multi-headed command-line AI engine and model router. It dispatches single prompts, autonomous agentic loops, and multi-agent swarms across frontier models, free cloud tiers, local inference backends, and public Model Context Protocol (MCP) servers.
@@ -56,7 +46,7 @@ The Python package and the Node package share one alias catalog and operate with
 - **Model Context Protocol (MCP) Client (`hydra mcp`)**: Zero-dependency stdio JSON-RPC 2.0 client supporting Filesystem, Fetch, SQLite, Git, GitHub, Brave Search, PostgreSQL, and Memory.
 - **Sovereign OpenAI Gateway Server (`hydra serve`)**: Host an OpenAI-compatible local endpoint (`http://127.0.0.1:7777/v1`) for external agents like Hermes and Pi with transparent alias resolution and tool passthrough.
 - **External Agent Runners (Hermes & Pi)**: Swarm heads can delegate execution directly to `hermes` and `pi` CLI binaries (`--heads architect:hermes,coder:pi,auditor`).
-- **Phosphor Green 7-Headed Hydra ASCII Banner (`hydra banner`)**: Retro terminal green rendering of the sovereign 7-headed Hydra.
+- **Phosphor Green TUI Banner (`hydra banner`)**: 3-head hydra splash plus the classic HYDRA title wordmark.
 
 ## Install
 
@@ -114,7 +104,7 @@ hydra free "Summarize this diff"     # Zero-cost Cloudflare / OpenRouter free mo
 hydra hf "Analyze code"              # Hugging Face Serverless / Inference API routing
 hydra local "Generate unit test"     # Offline Ollama / llama.cpp / EasyLM
 
-# Display terminal green 7-headed Hydra
+# Display terminal green 3-head TUI Hydra + title
 hydra banner
 ```
 

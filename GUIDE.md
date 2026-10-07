@@ -202,7 +202,7 @@ When `:hermes` or `:pi` is specified, Hydra executes `hermes -z "<prompt>"` or `
 
 ## Terminal Green Banner (`hydra banner`)
 
-Display the sovereign 7-headed Hydra ASCII art in retro terminal green:
+Display the 3-head TUI Hydra splash plus the classic title wordmark in retro terminal green:
 
 ```bash
 hydra banner

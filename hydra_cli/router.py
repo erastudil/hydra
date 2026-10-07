@@ -43,8 +43,7 @@ from hydra_cli.providers import (
 )
 from hydra_cli.swarm import execute_swarm
 
-# Help uses the compact wordmark only. The full 7-head art lives on `hydra banner`
-# so the CLI does not look like it printed the banner twice.
+# Help uses the compact wordmark only. The 3-head TUI splash lives on `hydra banner`.
 HELP_BANNER = f"""
   ___ ___            .___              
  /   |   \\___.__.  __| _/___________   
@@ -68,7 +67,7 @@ USAGE:
     hydra sandbox run "<cmd>"            # Isolated zero-trust command execution
     hydra voice benchmark                # Sub-500ms real-time voice latency budget trace
     hydra voice stream                   # Chunked streaming TTS & early audio playback
-    hydra banner                         # Display 7-headed Sovereign Hydra in terminal green
+    hydra banner                         # Display 3-head TUI Hydra + title wordmark
     hydra setup                          # Interactive setup & app/agent integration guide
     cat file.txt | hydra <alias>         # The pipe is the prompt
     cat file.txt | hydra <alias> - "do"  # Pipe plus an instruction

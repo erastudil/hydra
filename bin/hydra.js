@@ -757,28 +757,27 @@ const GREEN_MID = process.stdout.isTTY && !process.env.NO_COLOR ? '\x1b[38;5;40m
 const GREEN_BOLD = process.stdout.isTTY && !process.env.NO_COLOR ? '\x1b[1;38;5;46m' : '';
 const COLOR_RESET = process.stdout.isTTY && !process.env.NO_COLOR ? '\x1b[0m' : '';
 
-const HYDRA_7_HEADS_ART = `
-            [1]        [2]        [3]        [4]        [5]        [6]        [7]
-           HERMES       PI      ARCHITECT  SOVEREIGN   CODER     AUDITOR   SYNTHESIS
-          (\\___/)    (\\___/)    (\\___/)    <(\\___/)>   (\\___/)    (\\___/)    (\\___/)
-          /0   0\\    /o   o\\    /^   ^\\    { 0   0 }   /^   ^\\    /o   o\\    /0   0\\
-         ( ==Y== )  ( ==v== )  ( ==w== )  (  ==X==  ) ( ==w== )  ( ==v== )  ( ==Y== )
-          )     (    )     (    )     (   / )     ( \\  )     (    )     (    )     (
-         /       \\  /       \\  /       \\ ( /       \\ )/       \\  /       \\  /       \\
-        /   | |   \\/   | |   \\/   | |   \\ V   | |   V /   | |   \\/   | |   \\/   | |   \\
-       |    | |        | |        | |    |    | |   |   | |        | |        | |    |
-       \\    \\ \\       / /        / /     |    | |   |    \\ \\        \\ \\       / /    /
-        \\    \\ \\_____/ /        / /      \\    | |   /     \\ \\________\\ \\_____/ /    /
-         \\    \\_______/        / /        \\___/ \\__/       \\_______/  \\_______/    /
-          \\                   / /          |       |        \\                     /
-           '.               .' /           |  VII  |         \\                  .'
-             '.           .'  /            |       |          \\               .'
-               '---------'   /             /_______\\           \\   '---------'
-                            /             /         \\           \\
-                           (             /   HYDRA   \\           )
-                            '._________.'|   CORE    |'._________.'
-                                         \\           /
-                                          '---------'
+const HYDRA_TUI_3_HEADS = `
+                         __====-_          _-====__
+                   _--~~~       ~~--_  _--~~       ~~~--_
+                _-~                       ~~              ~-_
+              .~     (\\___/)   (\\___/)   (\\___/)            ~.
+             /      ( 0   0 ) ( o   o ) ( 0   0 )             \\
+            |        \\  =  /   \\  v  /   \\  =  /               |
+            |         '--'      '--'      '--'                 |
+             \\        .-------------------------------.       /
+              ~-._     \\                             /    _.-~
+                  \`--.  \\         H Y D R A         /  .--'
+                      \`'--..___________________..--'\`
+`;
+
+const HYDRA_WORDMARK = `
+  ___ ___            .___
+ /   |   \\___.__.  __| _/___________
+/    ~    <   |  | / __ |\\_  __ \\__  \\
+\\    Y    /\\___  |/ /_/ | |  | \\// __ \\_
+ \\___|_  / / ____|\\____ | |__|  (____  /
+       \\/  \\/          \\/            \\/
 `;
 
 const HELP_BANNER = `${GREEN_BOLD || GREEN_MID}  ___ ___            .___
@@ -798,7 +797,7 @@ USAGE:
     hydra <alias> --mcp "<prompt>"       # Tool-augmented execution loop
     hydra serve [--port 7777]            # Sovereign OpenAI Gateway for Hermes and Pi
     hydra mcp list                       # List configured community MCP servers & tools
-    hydra banner                         # Display 7-headed Sovereign Hydra in terminal green
+    hydra banner                         # Display 3-head TUI Hydra + title wordmark
     hydra setup                          # Interactive setup & app/agent integration guide
     cat file.txt | hydra <alias>         # The pipe is the prompt
     cat file.txt | hydra <alias> - "instruction"
@@ -965,8 +964,12 @@ async function main() {
     return 0;
   }
   if (early === 'banner' || early === '--banner') {
-    // Single composition: 7 heads + tagline. Never stack the wordmark under it.
-    console.log(`${GREEN_MID}${HYDRA_7_HEADS_ART}${COLOR_RESET}${GREEN_PHOSPHOR}       Sovereign Multi-Headed AI Shell · v${VERSION} (Node.js)${COLOR_RESET}\n`);
+    // One splash: 3-head TUI art + classic wordmark + single tagline.
+    console.log(
+      `${GREEN_MID}${HYDRA_TUI_3_HEADS}${COLOR_RESET}` +
+      `${GREEN_BOLD}${HYDRA_WORDMARK}${COLOR_RESET}` +
+      `${GREEN_PHOSPHOR}      Sovereign Multi-Headed AI Shell · v${VERSION} (Node.js)${COLOR_RESET}\n`
+    );
     return 0;
   }
   if (early === 'setup' || early === 'guide' || early === '--setup' || early === '--guide') {
