@@ -16,6 +16,9 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from hydra_cli.alice_interpret import interpret
+from hydra_cli.alice_knowledge import search_knowledge
+from hydra_cli.alice_senses import browse, hear_audio, search_code, see_image, write_drawing
 from hydra_cli.config import hydra_home
 
 CARDS_PATH = Path(__file__).resolve().parent / "data" / "stacks_cards.jsonl"
@@ -319,6 +322,54 @@ def _card_answer(card: dict) -> str:
     )
 
 
+def _lines(act: str, route: str, source: str, answer: str, frame: str = "", nxt: str = "") -> str:
+    rows = [f"act: {act}", f"route: {route}"]
+    if frame:
+        rows.append(f"frame: {frame}")
+    rows.append(f"source: {source or '-'}")
+    rows.append(f"answer: {answer}")
+    if nxt:
+        rows.append(f"next: {nxt}")
+    return "\n".join(rows)
+
+
+def _instrument_answer(text: str, personality_id: str) -> Optional[str]:
+    """Cite a Hydra command, or run a local eye, ear, or drawing hand. None walks the shelves."""
+    reading = interpret(text, personality_id)
+    if reading.frame in {"swarm", "agent", "mcp", "serve"}:
+        return _lines(
+            "cite",
+            "ORCHESTRATE",
+            reading.shelves[0] if reading.shelves else reading.tool,
+            reading.command,
+            frame=reading.frame,
+            nxt="run that command yourself; Alice does not launch a paid swarm or a frontier agent",
+        )
+    if reading.frame == "browse":
+        result = browse(reading.subject)
+        route = "SENSE" if result.get("ok") else "ABSTAIN"
+        return _lines(result["act"], route, result["source"], result["answer"], frame="browse", nxt=result.get("next") or "")
+    if reading.frame == "see":
+        result = see_image(Path(reading.subject))
+        route = "SENSE" if result.get("ok") else "ABSTAIN"
+        return _lines(result["act"], route, result["source"], result["answer"], frame="see", nxt=result.get("next") or "")
+    if reading.frame == "hear":
+        result = hear_audio(Path(reading.subject))
+        route = "SENSE" if result.get("ok") else "ABSTAIN"
+        return _lines(result["act"], route, result["source"], result["answer"], frame="hear", nxt=result.get("next") or "")
+    if reading.frame == "draw":
+        dest = Path(hydra_home()) / "drawings" / "drawing.svg"
+        result = write_drawing(text, dest)
+        svg = result.get("svg") or ""
+        answer = result["answer"] + ("\n" + svg if svg else "")
+        return _lines("say", "SENSE", "tool:draw", answer, frame="draw")
+    if reading.frame == "search":
+        result = search_code(reading.subject, Path.cwd())
+        route = "SENSE" if result.get("ok") else "ABSTAIN"
+        return _lines(result["act"], route, result["source"], result["answer"], frame="search", nxt=result.get("next") or "")
+    return None
+
+
 def answer_locally(query: str, personality: str = "chat", memory_file: Optional[Path] = None) -> str:
     personality_id = resolve_personality(personality)
     text = query.strip()
@@ -347,6 +398,9 @@ def _answer(text: str, personality_id: str, store: MemoryStore) -> str:
             return "act: silence-gap\nroute: ABSTAIN\nsource: -\nanswer: No memory notes matched.\nnext: remember a note, or ask a stack"
         lines = "\n".join(f"- [{atom['kind']}] {atom['text']}" for atom in found)
         return f"act: say\nroute: MEMORY\nsource: memory:search\nanswer: {lines}"
+    instrument = _instrument_answer(text, personality_id)
+    if instrument:
+        return instrument
     for attempt in (try_clock, try_units, try_calc):
         hit = attempt(text)
         if hit:
@@ -357,6 +411,12 @@ def _answer(text: str, personality_id: str, store: MemoryStore) -> str:
     feature = search_features(text)
     if feature:
         return f"act: cite\nroute: RETRIEVE\nsource: {feature[0]}\nanswer: {feature[2]}"
+    known = search_knowledge(text)
+    if known:
+        return (
+            f"act: cite\nroute: RETRIEVE\nsource: {known['card_id']}\n"
+            f"answer: {known['topic']}: {known['comment']}"
+        )
     return (
         "act: silence-gap\nroute: ABSTAIN\nsource: -\n"
         "answer: No stack card, feature card, or tool covered that.\n"

@@ -48,3 +48,31 @@ def test_native_dispatch_misses_mcp_names():
 def test_unknown_voice():
     with pytest.raises(KeyError):
         resolve_personality("wizard")
+
+
+def test_swarm_is_a_cited_command():
+    text = answer_locally("summon a swarm to review the lattice")
+    assert "route: ORCHESTRATE" in text
+    assert "hydra swarm" in text
+    assert "architect,coder,auditor" in text
+    assert "review the lattice" in text
+
+
+def test_draw_hand_writes_svg(monkeypatch, tmp_path: Path):
+    monkeypatch.setenv("HYDRA_HOME", str(tmp_path))
+    text = answer_locally("draw a red circle")
+    assert "route: SENSE" in text
+    assert "<circle" in text
+    assert "#c0392b" in text
+
+
+def test_private_browse_refuses():
+    text = answer_locally("browse http://127.0.0.1:7777/secret")
+    assert "silence-gap" in text
+    assert "Private" in text
+
+
+def test_whisper_card():
+    text = answer_locally("what library transcribes speech")
+    assert "source: oss:whisper" in text
+    assert "ffprobe" in text
