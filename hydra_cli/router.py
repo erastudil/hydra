@@ -80,7 +80,8 @@ USAGE:
     hydra hf "<prompt>"                  # Hugging Face Serverless / Inference API routing
     hydra local "<prompt>"               # Offline local inference (Ollama/llama.cpp/EasyLM)
     hydra swarm "<task>"                 # Multi-agent swarm fan-out (Architect, Coder, Auditor)
-    hydra agent "<prompt>"               # Autonomous ReAct agent with MCP tools
+    hydra hands "<prompt>"               # Local answer: stacks, calc, units, clock, memory
+    hydra agent "<prompt>"               # Autonomous ReAct agent with hands and MCP tools
     hydra <alias> --mcp "<prompt>"       # Tool-augmented execution loop
     hydra serve [--port 7777]            # Sovereign OpenAI Gateway for Hermes and Pi
     hydra mcp list                       # List configured community MCP servers & tools
@@ -98,6 +99,7 @@ POPULAR ALIASES:
 
 OPTIONS:
     --system <prompt>       Custom system prompt
+    --personality <voice>   coder, researcher, chat, or writer
     --model <id>            Explicit model override
     --effort <level>        Reasoning effort (low, medium, high, xhigh, max)
     --reasoning-mode <mode> Reasoning mode, such as pro
@@ -319,6 +321,8 @@ def route_command(argv: List[str]) -> int:
         return 0
     if argv and argv[0] in ("mcp", "--mcp") and len(argv) > 1 and argv[1] in ("list", "test", "init", "default", "config"):
         return execute_mcp_command(argv[1:])
+    if argv and argv[0] in ("hands", "--hands"):
+        return execute_hands_command(argv[1:])
     if argv and argv[0] in ("sandbox", "--sandbox"):
         return execute_sandbox_command(argv[1:])
     if argv and argv[0] in ('voice', '--voice'):
@@ -360,6 +364,7 @@ def route_command(argv: List[str]) -> int:
 
     prompt_tokens = []
     system_prompt = DEFAULT_SYSTEM_PROMPT
+    personality = None
     model_override = None
     effort_override = None
     reasoning_mode_override = None
@@ -381,6 +386,9 @@ def route_command(argv: List[str]) -> int:
         arg = remaining[idx]
         if arg == "--system" and idx + 1 < len(remaining):
             system_prompt = remaining[idx + 1]
+            idx += 2
+        elif arg == "--personality" and idx + 1 < len(remaining):
+            personality = remaining[idx + 1]
             idx += 2
         elif arg == "--model" and idx + 1 < len(remaining):
             model_override = remaining[idx + 1]
@@ -444,6 +452,14 @@ def route_command(argv: List[str]) -> int:
             idx += 1
 
     effective_prompt = compose_prompt(prompt_tokens)
+
+    if personality:
+        try:
+            from hydra_cli.hands import personality_preface
+            system_prompt = personality_preface(personality) + "\n\n" + system_prompt
+        except KeyError as exc:
+            sys.stderr.write(f"[ERROR] {exc}\n")
+            return 1
 
     if not effective_prompt:
         sys.stderr.write(f"[ERROR] No prompt or piped input provided for '{command_or_alias}'.\n")
@@ -1000,6 +1016,39 @@ def execute_swarm_mode(
         max_tokens=max_tokens,
     )
     if any(result.error for result in results):
+        return 1
+    return 0
+
+
+def execute_hands_command(argv: List[str]) -> int:
+    """Answer from local hands. No model call."""
+    from hydra_cli.hands import answer_locally
+
+    personality = "chat"
+    tokens: List[str] = []
+    idx = 0
+    while idx < len(argv):
+        arg = argv[idx]
+        if arg == "--personality" and idx + 1 < len(argv):
+            personality = argv[idx + 1]
+            idx += 2
+        elif arg == "--":
+            tokens.extend(argv[idx + 1 :])
+            break
+        else:
+            tokens.append(arg)
+            idx += 1
+    prompt = " ".join(tokens).strip()
+    if not prompt:
+        piped = read_stdin_if_piped()
+        prompt = (piped or "").strip()
+    if not prompt:
+        sys.stderr.write("[ERROR] hydra hands needs a prompt.\n")
+        return 1
+    try:
+        print(answer_locally(prompt, personality=personality))
+    except KeyError as exc:
+        sys.stderr.write(f"[ERROR] {exc}\n")
         return 1
     return 0
 

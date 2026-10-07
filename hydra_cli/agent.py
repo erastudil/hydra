@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 import uuid
 
 from hydra_cli.config import DEFAULT_SYSTEM_PROMPT, build_cached_system_prompt, hydra_home, resolve_route
+from hydra_cli.hands import dispatch_native, native_openai_tools
 from hydra_cli.providers import (
     ProviderError,
     UsageError,
@@ -330,7 +331,7 @@ def run_agent_loop(
         {"role": "user", "content": prompt},
     ]
 
-    tools = registry.get_openai_tools() if registry else []
+    tools = native_openai_tools() + (registry.get_openai_tools() if registry else [])
     reasoning = reasoning_fields(route.get("effort"), route.get("reasoning_mode"))
     timeout = completion_timeout(reasoning)
 
@@ -421,7 +422,10 @@ def run_agent_loop(
             sys.stderr.flush()
 
             is_error = False
-            if registry:
+            native = dispatch_native(fn_name, args if isinstance(args, dict) else {})
+            if native is not None:
+                result_content = native
+            elif registry:
                 try:
                     result_content: Any = registry.dispatch(fn_name, args)
                     if isinstance(result_content, dict) and result_content.get("isError"):
