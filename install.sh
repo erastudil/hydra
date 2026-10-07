@@ -21,16 +21,29 @@ fi
 ROOT="${HOME}/.hydra"
 BIN="${HOME}/.local/bin"
 REPO="https://raw.githubusercontent.com/erastudil/hydra/main"
+# Every runtime file. tests/test_installers.py fails if this list drifts.
 FILES="
 bin/hydra
 bin/hydra.js
 hydra_cli/__init__.py
+hydra_cli/__main__.py
+hydra_cli/_version.py
+hydra_cli/agent.py
+hydra_cli/agent_runners.py
 hydra_cli/catalog.json
 hydra_cli/cli.py
 hydra_cli/config.py
+hydra_cli/mcp.py
+hydra_cli/mcp_registry.py
+hydra_cli/mcp_servers.default.json
 hydra_cli/providers.py
 hydra_cli/router.py
+hydra_cli/sandbox.py
+hydra_cli/serve.py
+hydra_cli/speculative.py
 hydra_cli/swarm.py
+hydra_cli/ui.py
+hydra_cli/voice.py
 "
 
 echo "==> Installing Hydra into ${ROOT}"
