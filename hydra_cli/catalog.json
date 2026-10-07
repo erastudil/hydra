@@ -6,7 +6,7 @@
   ],
   "default_free_model": "google/gemma-4-26b-a4b-it:free",
   "default_cloudflare_model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-  "default_local_model": "qwen2.5-coder:latest",
+  "default_local_model": "qwen2.5-coder:7b",
   "free_models": [
     "google/gemma-4-26b-a4b-it:free",
     "google/gemma-4-31b-it:free",
@@ -196,6 +196,9 @@
       "model": "glm-5.3",
       "effort": "high"
     },
+    "glm 5.3 flash": {
+      "model": "glm-5.3-flash"
+    },
     "glm 5": {
       "model": "glm-5.3"
     },
@@ -219,6 +222,31 @@
     },
     "alice-emap": {
       "model": "Bluebarrels/alice-emap-adapter"
+    },
+    "qwen2.5-coder:7b": {
+      "model": "qwen2.5-coder:7b"
+    },
+    "qwen2.5-coder": {
+      "model": "qwen2.5-coder:7b"
+    },
+    "qwen2.5-coder:latest": {
+      "model": "qwen2.5-coder:latest"
+    },
+    "qwen-coder-7b": {
+      "model": "qwen2.5-coder:7b"
+    },
+    "qwen 7b": {
+      "model": "qwen2.5-coder:7b"
+    },
+    "glm-5.3-flash": {
+      "model": "glm-5.3-flash"
+    },
+    "orchestrator": {
+      "model": "glm-5.3-flash"
+    },
+    "alice": {
+      "model": "glm-5.3-flash",
+      "runner": "alice"
     }
   },
   "model_providers": {
@@ -245,6 +273,14 @@
     ],
     "glm-4.7-flash": [
       "cheaperinference"
+    ],
+    "glm-5.3-flash": [
+      "cheaperinference",
+      "openrouter"
+    ],
+    "glm 5.3 flash": [
+      "cheaperinference",
+      "openrouter"
     ]
   },
   "swarm": {
@@ -270,7 +306,27 @@
       "title": "Synthesizer",
       "model": "google/gemini-3.8-flash",
       "system": "You are the Swarm Lead Synthesizer. Review all perspectives, resolve conflicting tradeoffs, and emit a final prioritized execution roadmap."
+    },
+    "alice": {
+      "title": "Alice Cognitive Head",
+      "model": "glm-5.3-flash",
+      "runner": "alice",
+      "system": "You are Alice, sovereign cognitive reasoning agent. Enforce Progen syntax, Tractatus logic, and Kantian categories."
     }
   },
-  "default_hf_model": "meta-llama/Llama-3.1-8B-Instruct"
+  "default_hf_model": "meta-llama/Llama-3.1-8B-Instruct",
+  "context_profiles": {
+    "default": 131072,
+    "128k": 131072,
+    "qwen2.5-coder:7b": 131072,
+    "qwen2.5-coder:latest": 131072,
+    "qwen/qwen-2.5-coder-32b-instruct": 131072,
+    "anthropic/claude-sonnet-5.5": 200000,
+    "anthropic/claude-opus-5.5": 200000,
+    "openai/gpt-6.1-sol": 131072,
+    "meta-llama/llama-3.3-70b-instruct": 131072,
+    "google/gemini-3.8-flash": 1000000
+  },
+  "default_orchestrator_model": "glm 5.3 flash",
+  "default_agent_model": "glm 5.3 flash"
 }

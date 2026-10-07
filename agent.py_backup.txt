@@ -2,17 +2,13 @@
 Autonomous ReAct agent execution loop with MCP tool calling, native coding tools, and multi-turn state.
 Zero external dependencies.
 """
-from hydra_cli.context import SessionContextLedger
-from hydra_cli.ui import StreamWrap, clean_pasted_text, drain_steering, prompt_input, render_prompt_box, wrap_text
-from hydra_cli._version import __version__
 
 from datetime import datetime, timezone
 import json
 import os
-import shutil
 import sys
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import uuid
@@ -28,7 +24,6 @@ from hydra_cli.config import (
     DEFAULT_LOCAL_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     build_cached_system_prompt,
-    MODEL_MAP,
     get_context_window,
     hydra_home,
     resolve_route,
@@ -100,16 +95,13 @@ def print_unified_diff(path: str, old_content: str, new_content: str, raw_diff: 
 DEFAULT_AGENT_SYSTEM_PROMPT = os.environ.get(
     "HYDRA_AGENT_SYSTEM_PROMPT",
     (
-        f"You are Hydra v{__version__}, an elite autonomous software engineering agent operating with the autonomy, precision, and multi-turn execution rigor of Cursor and Antigravity.\n"
+        "You are Hydra, an elite autonomous software engineering agent operating with the autonomy, precision, and multi-turn execution rigor of Cursor and Antigravity.\n"
         "Your mission is to solve coding tasks, refactorings, bug fixes, and implementations end-to-end with verifiable empirical proof.\n\n"
         "OPERATIONAL WORKFLOW (Autonomous ReAct Loop):\n"
         "1. Inspect: Systematically explore the workspace before making changes. Use grep_search, find_files, list_dir, and read_file to inspect files, locate symbols, and understand existing patterns.\n"
         "2. Plan: Formulate a minimal, deterministic plan. Identify invariants, dependencies, and potential side effects.\n"
         "3. Implement: Apply surgical changes using edit_file or write_file. Prefer minimal, clean diffs that preserve existing code conventions and formatting.\n"
         "4. Verify: Always run tests, type checks, or build commands using run_command to verify changes before declaring completion. Exit code 0 is passing; unverified assertions carry zero truth value.\n\n"
-        "CONTEXT LEDGER & STEERING:\n"
-        "- The system maintains a rigorous context ledger of your execution history. Commands like /compact and /retrieve manipulate this state.\n"
-        "- The user may interrupt your execution or provide in-flight steering directives. You must immediately realign your plan to these directives.\n\n"
         "TOOL USAGE INSTRUCTIONS:\n"
         "- Proactively invoke tools at every turn to inspect and modify state: read_file, edit_file, write_file, run_command, grep_search, find_files, list_dir.\n"
         "- Never guess or hallucinate file contents or test results. Always read files before modifying them.\n"
@@ -123,217 +115,32 @@ DEFAULT_AGENT_SYSTEM_PROMPT = os.environ.get(
 
 
 PROJECT_RULE_FILES = ("AGENTS.md", ".cursorrules", "CLAUDE.md")
-_PROGEN_KEYS = ("progen specification", "progen skill specification")
-_RULE_CAP = 25_000
-
-DIALECTS = ("syntax", "instruct", "gfc", "slack")
-EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-CONTEXT_STRATEGIES = ("sliding", "compact", "retrieve")
-
-
-def _read_capped(path: str, cap: int = _RULE_CAP) -> str:
-    with open(path, "r", encoding="utf-8", errors="replace") as handle:
-        content = handle.read()
-    if len(content) > cap:
-        return content[:cap] + "\n[RULES TRUNCATED: 25k limit]"
-    return content
-
-
-def progen_paths(text: str) -> List[str]:
-    """Paths named by an AGENTS.md turn-one read, in file order."""
-    found: List[str] = []
-    for raw in text.splitlines():
-        line = raw.strip()
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        if key.strip().lower() not in _PROGEN_KEYS:
-            continue
-        path = value.strip().strip(".").strip().strip('"').strip("'")
-        if path and os.path.isfile(path) and path not in found:
-            found.append(path)
-    return found
 
 
 def detect_project_rules(cwd: Optional[str] = None) -> Optional[str]:
     """
     Search cwd and up to 5 parent directories for project guidance files
-    (AGENTS.md, .cursorrules, CLAUDE.md).
-
-    When the file names a progen specification and skill, those files are
-    loaded first and the project rules follow.
+    (AGENTS.md, .cursorrules, CLAUDE.md) and return formatted rules.
     """
     curr = os.path.abspath(cwd or os.getcwd())
     for _ in range(6):
         for fname in PROJECT_RULE_FILES:
             target = os.path.join(curr, fname)
-            if not os.path.isfile(target):
-                continue
-            try:
-                with open(target, "r", encoding="utf-8", errors="replace") as handle:
-                    content = handle.read()
-            except OSError:
-                continue
-            if not content.strip():
-                continue
-            paths = progen_paths(content)
-            if len(content) > _RULE_CAP:
-                content = content[:_RULE_CAP] + "\n[RULES TRUNCATED: 25k limit]"
-            chunks: List[str] = []
-            for path in paths:
+            if os.path.isfile(target):
                 try:
-                    body = _read_capped(path).strip()
-                except OSError:
-                    continue
-                if body:
-                    chunks.append(f"[PROGEN READ FIRST: {os.path.basename(path)}]\n{body}")
-            chunks.append(f"[PROJECT CONTEXT & RULES: {fname}]\n{content}")
-            return "\n\n".join(chunks)
+                    with open(target, "r", encoding="utf-8", errors="replace") as f:
+                        content = f.read()
+                    if content.strip():
+                        if len(content) > 25_000:
+                            content = content[:25_000] + "\n[RULES TRUNCATED: 25k limit]"
+                        return f"[PROJECT CONTEXT & RULES: {fname}]\n{content}"
+                except Exception:
+                    pass
         parent = os.path.dirname(curr)
         if parent == curr:
             break
         curr = parent
     return None
-
-
-def model_status_label(alias: str) -> str:
-    """Alias plus the provider model id the next request will post."""
-    model_id = resolve_route(alias)["model"]
-    if model_id == alias:
-        return alias
-    return f"{alias} -> {model_id}"
-
-
-MODEL_PICKER: List[str] = [
-    "alice",
-    "glm 5.3 flash",
-    "glm 5.3",
-    "opus 5.5",
-    "sonnet 5.5",
-    "sol 6.1",
-    "gemini 3.8",
-    "grok 4.7",
-    "qwen 3.8",
-    "deepseek",
-    "llama 4",
-    "qwen2.5-coder:7b",
-]
-
-ALIAS_TYPOS = {
-    "alise": "alice",
-    "alicee": "alice",
-    "glm flash": "glm 5.3 flash",
-    "opus5.5": "opus 5.5",
-    "sonnet5.5": "sonnet 5.5",
-}
-
-COMMAND_TYPOS = {
-    "/modle": "/model",
-    "/modl": "/model",
-    "/mdoel": "/model",
-    "/cleer": "/clear",
-    "/claer": "/clear",
-    "/hlep": "/help",
-    "/helpp": "/help",
-    "/staus": "/status",
-    "/stak": "/stack",
-    "/skils": "/skills",
-    "/summonn": "/summon",
-    "/nw": "/new",
-    "/neu": "/new",
-}
-
-
-def session_model_label(alias: str, runner: Optional[str], summon: str) -> str:
-    """Session label. Alice names the local brain and the summon model separately."""
-    if runner == "alice":
-        return f"alice | summon {resolve_route(summon)['model']}"
-    return model_status_label(alias)
-
-
-def resolve_model_choice(arg: str) -> Optional[str]:
-    """Map a picker number or catalog alias to a registered alias. Unknown input returns None."""
-    text = " ".join(arg.strip().lower().split())
-    if not text:
-        return None
-    if text.isdigit():
-        index = int(text)
-        if 1 <= index <= len(MODEL_PICKER):
-            return MODEL_PICKER[index - 1]
-        return None
-    text = ALIAS_TYPOS.get(text, text)
-    if text in MODEL_MAP:
-        return text
-    return None
-
-
-def format_model_picker(active_alias: str, active_summon: str) -> str:
-    """Numbered alias list. The marker names the active brain."""
-    lines = ["model picker :"]
-    summon_id = resolve_route(active_summon)["model"]
-    for index, name in enumerate(MODEL_PICKER, 1):
-        route = resolve_route(name)
-        mark = ">" if name == active_alias else " "
-        if route.get("runner") == "alice":
-            detail = f"local brain, summons {summon_id}"
-        else:
-            detail = route["model"]
-        lines.append(f"{mark} {index:>2}  {name:<22} {detail}")
-    lines.append("select : /model <number or alias>")
-    return "\n".join(lines)
-
-
-def dialect_instruction(name: str) -> str:
-    """Session register block appended after project rules."""
-    key = (name or "syntax").strip().lower()
-    blocks = {
-        "syntax": (
-            "[REGISTER: syntax]\n"
-            "Every unit is topic : comment.\n"
-            "One blank line between units.\n"
-            "Zero leading copula."
-        ),
-        "instruct": (
-            "[REGISTER: instruct]\n"
-            "Condition words: always, never, if, then, else, until, while, require, assert, emit."
-        ),
-        "gfc": (
-            "[REGISTER: gfc]\n"
-            "Greene Feynman Clarity. Plain words, concrete examples, short sentences."
-        ),
-        "slack": (
-            "[REGISTER: slack]\n"
-            "Conversational prose permitted."
-        ),
-    }
-    return blocks.get(key, blocks["syntax"])
-
-
-def parse_heat(arg: str) -> Optional[float]:
-    """Sampling heat. None omits temperature. Raises ValueError on a bad token."""
-    token = arg.strip().lower()
-    if token in ("", "off", "omit", "none", "default"):
-        return None
-    value = float(token)
-    if value < 0 or value > 2:
-        raise ValueError("heat must be between 0 and 2")
-    return value
-
-
-def parse_window(arg: str) -> int:
-    """Context window in tokens. Accepts 131072, 128k, or 1m."""
-    token = arg.strip().lower().replace(",", "").replace("_", "")
-    mult = 1
-    if token.endswith("m"):
-        mult = 1024 * 1024
-        token = token[:-1]
-    elif token.endswith("k"):
-        mult = 1024
-        token = token[:-1]
-    value = int(float(token) * mult)
-    if value < 1024:
-        raise ValueError("context window must be at least 1024 tokens")
-    return value
 
 
 class HierarchicalScratchpad:
@@ -587,147 +394,6 @@ def _fetch_raw_completion(url: str, headers: Dict[str, str], payload: Dict[str, 
     return parsed
 
 
-def _emit_message_content(message: Dict[str, Any], on_token: Optional[Callable[[str], None]]) -> None:
-    content = message.get("content")
-    if on_token and isinstance(content, str) and content:
-        on_token(content)
-
-
-def _apply_stream_delta(delta: Dict[str, Any], state: Dict[str, Any], on_token: Optional[Callable[[str], None]]) -> None:
-    content = delta.get("content") or ""
-    if content:
-        state["content"].append(content)
-        if on_token:
-            on_token(content)
-    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
-    if isinstance(reasoning, str) and reasoning:
-        state["reasoning"].append(reasoning)
-    for tc in delta.get("tool_calls") or []:
-        idx = int(tc.get("index", 0))
-        slot = state["tools"].setdefault(idx, {
-            "id": "",
-            "type": "function",
-            "function": {"name": "", "arguments": ""},
-        })
-        if tc.get("id"):
-            slot["id"] = tc["id"]
-        fn = tc.get("function") or {}
-        if fn.get("name"):
-            slot["function"]["name"] += fn["name"]
-        if fn.get("arguments"):
-            slot["function"]["arguments"] += fn["arguments"]
-
-
-def _message_from_stream_state(state: Dict[str, Any]) -> Dict[str, Any]:
-    message: Dict[str, Any] = {
-        "role": "assistant",
-        "content": "".join(state["content"]) or None,
-    }
-    if state["tools"]:
-        calls = []
-        for idx in sorted(state["tools"]):
-            slot = state["tools"][idx]
-            if not slot["id"]:
-                slot["id"] = f"call_{idx}"
-            calls.append(slot)
-        message["tool_calls"] = calls
-    if state["reasoning"]:
-        message["reasoning_content"] = "".join(state["reasoning"])
-    return message
-
-
-def _empty_stream_state() -> Dict[str, Any]:
-    return {"content": [], "reasoning": [], "tools": {}}
-
-
-def _consume_completion_body(resp: Any, on_token: Optional[Callable[[str], None]], where: str) -> Dict[str, Any]:
-    """Read an SSE stream, or one JSON body, and return an OpenAI chat completion object."""
-    state = _empty_stream_state()
-    saw_done = False
-    buffered: List[str] = []
-    for raw_line in resp:
-        line = raw_line.decode("utf-8", errors="replace").strip()
-        if not line or line.startswith(":"):
-            continue
-        if line.startswith("{") and not line.startswith("data:"):
-            parsed = json.loads(line)
-            if isinstance(parsed, dict) and parsed.get("error"):
-                err = parsed["error"]
-                message = err.get("message") if isinstance(err, dict) else str(err)
-                raise ProviderError(redact(f"Provider error from {where}: {message}"))
-            choices = parsed.get("choices") or []
-            if not choices:
-                raise ProviderError(f"Empty completion from {where}")
-            message = choices[0].get("message") or {}
-            _emit_message_content(message, on_token)
-            return parsed
-        if line.startswith("data:"):
-            data = line[5:].strip()
-            if data == "[DONE]":
-                saw_done = True
-                break
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(chunk, dict) and chunk.get("error"):
-                err = chunk["error"]
-                message = err.get("message") if isinstance(err, dict) else str(err)
-                raise ProviderError(redact(f"Provider error from {where}: {message}"))
-            choices = chunk.get("choices") or []
-            if not choices:
-                continue
-            delta = choices[0].get("delta") or {}
-            if not delta and choices[0].get("message"):
-                message = choices[0]["message"]
-                _emit_message_content(message, on_token)
-                return {"choices": [{"message": message}]}
-            _apply_stream_delta(delta, state, on_token)
-            continue
-        buffered.append(line)
-    if buffered and not state["content"] and not state["tools"]:
-        blob = "\n".join(buffered)
-        if blob.startswith("{"):
-            parsed = json.loads(blob)
-            choices = parsed.get("choices") or []
-            if choices:
-                message = choices[0].get("message") or {}
-                _emit_message_content(message, on_token)
-                return parsed
-    if not saw_done and not state["content"] and not state["tools"] and not state["reasoning"]:
-        raise ProviderError(f"Stream from {where} ended before data: [DONE]")
-    return {"choices": [{"message": _message_from_stream_state(state), "finish_reason": "stop"}]}
-
-
-def _fetch_streaming_completion(
-    url: str,
-    headers: Dict[str, str],
-    payload: Dict[str, Any],
-    timeout: int = 120,
-    on_token: Optional[Callable[[str], None]] = None,
-) -> Dict[str, Any]:
-    """Stream one chat completion and return the assembled message JSON."""
-    body = dict(payload)
-    body["stream"] = True
-    data = json.dumps(body).encode("utf-8")
-    req = Request(url, data=data, headers=headers, method="POST")
-    where = describe_endpoint(url)
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            return _consume_completion_body(resp, on_token, where)
-    except HTTPError as e:
-        error_body = ""
-        try:
-            error_body = e.read().decode("utf-8", errors="replace")
-        except Exception:
-            pass
-        raise ProviderError(redact(f"HTTP {e.code} from {where}: {error_body}")) from e
-    except URLError as e:
-        raise ProviderError(redact(f"Connection failed to {where}: {e.reason}")) from e
-    except json.JSONDecodeError as e:
-        raise ProviderError(f"Invalid JSON from {where}: {e}") from e
-
-
 def tool_result_text(result: Any) -> str:
     """Serialize an MCP tool result for the model. Strings pass through; anything else is JSON."""
     if isinstance(result, str):
@@ -756,12 +422,6 @@ def run_agent_loop(
     use_prompt_adapter: bool = False,
     steer_mode: bool = False,
     skip_next_tool: bool = False,
-    ledger: Optional[SessionContextLedger] = None,
-    effort: Optional[str] = None,
-    dialect: Optional[str] = None,
-    strategy: str = "sliding",
-    on_token: Optional[Callable[[str], None]] = None,
-    max_context_chars: Optional[int] = None,
 ) -> str:
     """
     Execute autonomous agent loop with native coding tools and MCP tool invocation until completion or max turns.
@@ -803,9 +463,6 @@ def run_agent_loop(
     if resume_session and clean_id:
         checkpointer = SessionCheckpointer.load(clean_id)
 
-    if ledger is None:
-        ledger = SessionContextLedger(session_id=clean_id)
-
     if not checkpointer:
         checkpointer = SessionCheckpointer(
             session_id=clean_id,
@@ -828,33 +485,12 @@ def run_agent_loop(
         effective_sys = f"{base_sys}\n\n{rules_context}"
     else:
         effective_sys = base_sys
-    register = dialect_instruction(dialect) if dialect else ""
-    if register and register not in effective_sys:
-        effective_sys = f"{effective_sys}\n\n{register}"
-
-    original_prompt = prompt
-    if strategy == "retrieve" and ledger.turns:
-        hits = ledger.retrieve_verbatim(ledger.extract_keywords(original_prompt), max_turns=3)
-        retrieved = [str(hit.get("content") or "").strip() for hit in hits]
-        retrieved = [item for item in retrieved if item]
-        if retrieved:
-            prompt = "[RETRIEVED CONTEXT]\n" + "\n".join(retrieved) + "\n\n" + original_prompt
-    elif strategy == "sliding" and ledger.turns:
-        prior_lines: List[str] = []
-        for turn in ledger.turns[-6:]:
-            role = turn.get("role")
-            content = str(turn.get("content") or "").strip()
-            if role in ("user", "assistant") and content and not content.startswith("[IN-FLIGHT"):
-                prior_lines.append(f"{role} : {content[:800]}")
-        if prior_lines:
-            prompt = "[PRIOR TURNS]\n" + "\n".join(prior_lines) + "\n\n" + original_prompt
 
     sys_text = build_cached_system_prompt(effective_sys)
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": sys_text},
         {"role": "user", "content": prompt},
     ]
-    ledger.append_turn(role="user", content=original_prompt)
 
     # Native tools and MCP registry setup
     native_reg = None
@@ -871,8 +507,6 @@ def run_agent_loop(
                 tier=resolved_tier or None,
                 alias=actual_alias,
             )
-            if hasattr(native_reg, "ledger"):
-                native_reg.ledger = ledger
             mcp_reg = registry
     else:
         mcp_reg = registry
@@ -883,11 +517,8 @@ def run_agent_loop(
     if mcp_reg:
         tools.extend(mcp_reg.get_openai_tools())
 
-    route_effort = effort if effort else route.get("effort")
-    reasoning = reasoning_fields(route_effort, route.get("reasoning_mode"))
+    reasoning = reasoning_fields(route.get("effort"), route.get("reasoning_mode"))
     timeout = completion_timeout(reasoning)
-    history_turns = 1 if strategy == "compact" else max_history_turns
-    context_chars = 400_000 if max_context_chars is None else max_context_chars
 
     color_on = supports_color()
     c_bright = GREEN_BRIGHT if color_on else ""
@@ -907,8 +538,7 @@ def run_agent_loop(
             messages=messages,
             turn_groups=turn_groups,
             scratchpad=checkpointer.scratchpad,
-            max_history_turns=history_turns,
-            max_context_chars=context_chars,
+            max_history_turns=max_history_turns,
         )
         checkpointer.bounded_messages = list(bounded_messages)
 
@@ -933,17 +563,7 @@ def run_agent_loop(
             if max_tokens is not None:
                 payload["max_tokens"] = max_tokens
             try:
-                if on_token is not None:
-                    payload["stream"] = True
-                    res_json = _fetch_streaming_completion(
-                        provider["url"],
-                        provider["headers"],
-                        payload,
-                        timeout=timeout,
-                        on_token=on_token,
-                    )
-                else:
-                    res_json = _fetch_raw_completion(provider["url"], provider["headers"], payload, timeout=timeout)
+                res_json = _fetch_raw_completion(provider["url"], provider["headers"], payload, timeout=timeout)
                 if not res_json.get("choices"):
                     raise ProviderError(f"{provider.get('name', 'Provider')} returned an empty choices array.")
             except UsageError:
@@ -976,17 +596,6 @@ def run_agent_loop(
     active_skip_next = skip_next_tool
 
     while turn_idx < max_turns:
-        for directive in drain_steering():
-            directive_msg = {
-                "role": "user",
-                "content": f"[IN-FLIGHT STEERING DIRECTIVE]: {directive}",
-            }
-            messages.append(directive_msg)
-            if turn_groups:
-                turn_groups[-1].append(directive_msg)
-            ledger.append_turn(role="user", content=f"[IN-FLIGHT STEERING DIRECTIVE]: {directive}")
-            sys.stderr.write(f"{c_tool_head} Steering directive received: {directive}\n")
-            sys.stderr.flush()
         try:
             with ThinkingSpinner(
                 message="Thinking...",
@@ -1001,7 +610,7 @@ def run_agent_loop(
                 res_json = complete_turn()
         except KeyboardInterrupt:
             try:
-                steer_input = prompt_input(
+                steer_input = input(
                     "\n[Interrupted] Steer in-flight (enter instruction to redirect agent, or press Enter to cancel turn): "
                 ).strip()
             except (KeyboardInterrupt, EOFError):
@@ -1033,24 +642,11 @@ def run_agent_loop(
                 tool_calls = parsed_calls
                 message["tool_calls"] = tool_calls
 
-        if tool_calls:
-            ledger.append_turn(
-                role="assistant",
-                content=message.get("content") or "",
-                thought=message.get("reasoning_content") or message.get("thought"),
-                tool_calls=tool_calls
-            )
-
         if not tool_calls:
             # Model emitted final answer -> statechart transition to COMPLETED
             final_content = message.get("content", "") or ""
             checkpointer.final_response = final_content
             checkpointer.transition("COMPLETED")
-            ledger.append_turn(
-                role="assistant",
-                content=final_content,
-                thought=message.get("reasoning_content") or message.get("thought")
-            )
             return final_content
 
         # Statechart transition to EXECUTING
@@ -1065,17 +661,15 @@ def run_agent_loop(
         # Telemetry: print model thought/preamble if present before tool calls
         thought_content = message.get("reasoning_content") or message.get("thought")
         if thought_content and str(thought_content).strip():
-            wrapped = wrap_text(str(thought_content).strip())
-            sys.stderr.write(f"\n{c_mid}[Thought]{c_reset} {wrapped}\n")
+            sys.stderr.write(f"\n{c_mid}[Thought]{c_reset} {str(thought_content).strip()}\n")
             sys.stderr.flush()
 
         msg_content = message.get("content") or ""
-        if msg_content and on_token is None:
+        if msg_content:
             preamble = re.sub(r"<tool_call>.*?</tool_call>", "", msg_content, flags=re.DOTALL | re.IGNORECASE).strip()
             preamble = re.sub(r"```(?:tool_call|tool).*?```", "", preamble, flags=re.DOTALL | re.IGNORECASE).strip()
             if preamble:
-                wrapped_pre = wrap_text(preamble)
-                sys.stderr.write(f"\n{c_mid}{wrapped_pre}{c_reset}\n")
+                sys.stderr.write(f"\n{c_mid}{preamble}{c_reset}\n")
                 sys.stderr.flush()
 
         # Execute each tool call
@@ -1124,10 +718,10 @@ def run_agent_loop(
             if steer_mode and not tool_skipped:
                 try:
                     c_prompt = f"[HYDRA STEER] Tool: {fn_name}({args_str}). Execute? [y/n/s(teer)/q]: "
-                    steer_choice = prompt_input(c_prompt).strip()
+                    steer_choice = input(c_prompt).strip()
                 except KeyboardInterrupt:
                     try:
-                        steer_input = prompt_input(
+                        steer_input = input(
                             "\n[Interrupted] Steer in-flight (enter instruction to redirect agent, or press Enter to cancel turn): "
                         ).strip()
                     except (KeyboardInterrupt, EOFError):
@@ -1148,7 +742,7 @@ def run_agent_loop(
                 elif s_lower in ("s", "steer"):
                     if not steering_directive:
                         try:
-                            prompt_text = prompt_input("[HYDRA STEER] Enter steering instruction: ").strip()
+                            prompt_text = input("[HYDRA STEER] Enter steering instruction: ").strip()
                         except (KeyboardInterrupt, EOFError):
                             prompt_text = ""
                         steering_directive = prompt_text or "Re-evaluate plan and proceed."
@@ -1163,7 +757,7 @@ def run_agent_loop(
                     elif s_lower.startswith("s"):
                         if not steering_directive:
                             try:
-                                prompt_text = prompt_input("[HYDRA STEER] Enter steering instruction: ").strip()
+                                prompt_text = input("[HYDRA STEER] Enter steering instruction: ").strip()
                             except (KeyboardInterrupt, EOFError):
                                 prompt_text = ""
                             steering_directive = prompt_text or "Re-evaluate plan and proceed."
@@ -1372,7 +966,7 @@ def run_agent_loop(
 
             if interrupted_during_tool:
                 try:
-                    steer_input = prompt_input(
+                    steer_input = input(
                         "\n[Interrupted] Steer in-flight (enter instruction to redirect agent, or press Enter to cancel turn): "
                     ).strip()
                 except (KeyboardInterrupt, EOFError):
@@ -1522,18 +1116,6 @@ def run_agent_loop(
             messages.append(directive_msg)
             current_turn_msgs.append(directive_msg)
 
-        if tool_executions:
-            ledger.append_turn(
-                role="tool",
-                content="",
-                tool_results=tool_executions
-            )
-        if steering_directive:
-            ledger.append_turn(
-                role="user",
-                content=f"[IN-FLIGHT STEERING DIRECTIVE]: {steering_directive}"
-            )
-
         turn_groups.append(current_turn_msgs)
         checkpointer.transition("OBSERVING")
         checkpointer.record_turn(turn_idx + 1, message, tool_executions)
@@ -1557,26 +1139,14 @@ class HydraReplCompleter:
         "/retry",
         "/skip",
         "/context",
-        "/dialect",
-        "/effort",
-        "/heat",
-        "/window",
-        "/strategy",
         "/swarm",
         "/auth",
         "/diff",
         "/tokens",
         "/undo",
-        "/compact",
-        "/retrieve",
         "/status",
         "/history",
         "/clear",
-        "/new",
-        "/summon",
-        "/stack",
-        "/skills",
-        "/route",
         "/help",
         "/exit",
         "/quit",
@@ -1615,20 +1185,9 @@ class HydraReplCompleter:
             return [c for c in self.COMMANDS if c.startswith(prefix)]
 
         first = tokens[0].lower()
-        if first in ("/model", "/summon"):
-            marker = "/model" if first == "/model" else "/summon"
-            remainder = raw_line[raw_line.find(marker) + len(marker):].lstrip()
-            pool = self.model_aliases
-            pool_lower = {item.lower() for item in pool}
-            heads = [name for name in MODEL_PICKER if name.lower() in pool_lower]
-            if not remainder:
-                return heads or list(pool)
-            hits = [name for name in heads if name.lower().startswith(remainder.lower())]
-            extra = [
-                name for name in pool
-                if name.lower().startswith(remainder.lower()) and name not in hits
-            ]
-            return hits + extra
+        if first == "/model":
+            remainder = raw_line[raw_line.find("/model") + len("/model"):].lstrip()
+            return [m for m in self.model_aliases if m.lower().startswith(remainder.lower())]
         elif first == "/tier":
             remainder = raw_line[raw_line.find("/tier") + len("/tier"):].lstrip()
             return [t for t in self.TIERS if t.lower().startswith(remainder.lower())]
@@ -1643,21 +1202,6 @@ class HydraReplCompleter:
             remainder = raw_line[raw_line.find("/context") + len("/context"):].lstrip()
             if "dump".startswith(remainder.lower()):
                 return ["dump"]
-        elif first == "/dialect":
-            remainder = raw_line[raw_line.find("/dialect") + len("/dialect"):].lstrip()
-            return [d for d in DIALECTS if d.startswith(remainder.lower())]
-        elif first == "/effort":
-            remainder = raw_line[raw_line.find("/effort") + len("/effort"):].lstrip()
-            return [e for e in EFFORT_LEVELS if e.startswith(remainder.lower())]
-        elif first == "/strategy":
-            remainder = raw_line[raw_line.find("/strategy") + len("/strategy"):].lstrip()
-            return [s for s in CONTEXT_STRATEGIES if s.startswith(remainder.lower())]
-        elif first == "/heat":
-            remainder = raw_line[raw_line.find("/heat") + len("/heat"):].lstrip()
-            return [h for h in ("off", "0", "0.2", "0.7", "1") if h.startswith(remainder.lower())]
-        elif first == "/window":
-            remainder = raw_line[raw_line.find("/window") + len("/window"):].lstrip()
-            return [w for w in ("128k", "200k", "1m") if w.startswith(remainder.lower())]
 
         all_options = self.COMMANDS + self.model_aliases + self.TIERS
         return [opt for opt in all_options if opt.lower().startswith(text.lower())]
@@ -1683,59 +1227,6 @@ def setup_readline_completer(completer: Optional[HydraReplCompleter] = None) -> 
         return comp
     except Exception:
         return None
-
-
-REPL_COMMAND_HELP: List[Tuple[str, str]] = [
-    ("/model", "numbered alias picker; sets the brain"),
-    ("/summon", "inference alias Alice calls on a gap"),
-    ("/stack", "live paths for hydra, alice, easylm, progen"),
-    ("/skills", "written skill index"),
-    ("/route", "last local gate action and summon target"),
-    ("/tier", "switch tier: free, local, paid, frontier, none"),
-    ("/steer", "toggle step-by-step tool confirmation"),
-    ("/skip", "skip the next tool call"),
-    ("/retry", "retry the previous turn with guidance"),
-    ("/context", "context token usage; dump shows the payload"),
-    ("/dialect", "register: syntax, instruct, gfc, slack"),
-    ("/effort", "reasoning effort: low, medium, high, xhigh, max"),
-    ("/heat", "sampling heat; off omits temperature"),
-    ("/window", "context window in tokens, or 128k / 1m"),
-    ("/strategy", "context strategy: sliding, compact, retrieve"),
-    ("/compact", "compact the session ledger now"),
-    ("/retrieve", "pull matching ledger turns by keyword"),
-    ("/diff", "colorized git diff of the worktree"),
-    ("/undo", "revert the last modified file"),
-    ("/auth", "provider key wizard; status shows keys"),
-    ("/swarm", "parallel Architect, Coder, Auditor swarm"),
-    ("/tokens", "alias for /context"),
-    ("/history", "turn-by-turn history"),
-    ("/status", "session, model, tier, rules"),
-    ("/clear", "reset session memory"),
-    ("/new", "reset session memory"),
-    ("/help", "slash command and key reference"),
-    ("/exit", "leave hydra"),
-]
-
-
-def _create_tui() -> Optional[Any]:
-    """Composer TUI for real terminals; None under pipes, tests, HYDRA_CLASSIC_UI=1, or without prompt_toolkit."""
-    if os.environ.get("HYDRA_CLASSIC_UI", "").strip().lower() in ("1", "true", "yes", "on"):
-        return None
-    try:
-        if not (sys.stdin.isatty() and sys.stdout.isatty()):
-            return None
-    except (AttributeError, ValueError):
-        return None
-    try:
-        from hydra_cli.tui import HydraTUI
-    except ImportError:
-        return None
-    completer = HydraReplCompleter()
-    return HydraTUI(
-        commands=REPL_COMMAND_HELP,
-        complete=completer.get_candidates,
-        history_path=os.path.join(hydra_home(), "agent_history"),
-    )
 
 
 def run_interactive_agent(
@@ -1767,17 +1258,6 @@ def run_interactive_agent(
     active_tier = tier
     active_session_id = session_id or f"session_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     active_steer_mode = steer_mode
-    active_dialect = "syntax"
-    active_effort: Optional[str] = None
-    boot_route = resolve_route(active_alias)
-    active_runner = boot_route.get("runner")
-    active_summon = DEFAULT_AGENT_MODEL if active_runner == "alice" else active_alias
-    if boot_route.get("effort"):
-        active_effort = boot_route["effort"]
-    last_gate = {"action": "", "route": ""}
-    active_heat: Optional[float] = temperature
-    active_window: Optional[int] = None
-    active_strategy = "sliding"
     active_system_prompt = (
         DEFAULT_AGENT_SYSTEM_PROMPT
         if (not system_prompt or system_prompt == DEFAULT_SYSTEM_PROMPT)
@@ -1785,205 +1265,24 @@ def run_interactive_agent(
     )
     skip_next_tool = False
     turns_history: List[Tuple[str, str]] = []
-    active_ledger = SessionContextLedger(session_id=active_session_id)
 
     rules_msg = detect_project_rules(target_cwd)
     rules_label = "Detected (AGENTS.md / .cursorrules / CLAUDE.md)" if rules_msg else "None"
 
-    tui = _create_tui()
-    if tui is not None:
-        from hydra_cli.ui import glyph, play_launch_banner
-
-        dot = glyph("dot")
-        play_launch_banner(
-            version=__version__,
-            info=[
-                ("model", f"{session_model_label(active_alias, active_runner, active_summon)} {dot} {active_tier or 'frontier'}"),
-                ("cwd", target_cwd),
-                ("rules", rules_label),
-                ("session", active_session_id),
-            ],
-        )
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-        tui.start()
-    else:
-        sys.stdout.write(f"\n{c_head}================================================================================{c_reset}\n")
-        sys.stdout.write(f"  {c_bright}HYDRA CODING AGENT{c_reset} // Sovereign Autonomous Shell (v{__version__})\n")
-        sys.stdout.write(f"  Model: {c_mid}{session_model_label(active_alias, active_runner, active_summon)}{c_reset} | Tier: {c_mid}{active_tier or 'frontier'}{c_reset} | CWD: {target_cwd}\n")
-        sys.stdout.write(f"  Project Rules: {rules_label}\n")
-        sys.stdout.write(f"  Type {c_bright}/help{c_reset} for slash commands or enter your instruction to begin.\n")
-        sys.stdout.write(f"{c_head}================================================================================{c_reset}\n\n")
-        sys.stdout.flush()
+    sys.stdout.write(f"\n{c_head}================================================================================{c_reset}\n")
+    sys.stdout.write(f"  {c_bright}HYDRA CODING AGENT{c_reset} // Sovereign Autonomous Shell (v{__version__})\n")
+    sys.stdout.write(f"  Model: {c_mid}{active_alias}{c_reset} | Tier: {c_mid}{active_tier or 'frontier'}{c_reset} | CWD: {target_cwd}\n")
+    sys.stdout.write(f"  Project Rules: {rules_label}\n")
+    sys.stdout.write(f"  Type {c_bright}/help{c_reset} for slash commands or enter your instruction to begin.\n")
+    sys.stdout.write(f"{c_head}================================================================================{c_reset}\n\n")
+    sys.stdout.flush()
 
     last_interrupt_time = 0.0
 
-    def _run_turn(prompt_text: str) -> str:
-        streamed = {"open": False}
-
-        def emit(text: str) -> None:
-            if not text:
-                return
-            if not streamed["open"]:
-                streamed["open"] = True
-                if tui is not None:
-                    tui.begin_stream()
-            if tui is not None:
-                tui.write_token(text)
-            else:
-                sys.stdout.write(text)
-                sys.stdout.flush()
-
-        def _stream_width() -> int:
-            if tui is not None:
-                return tui._width()
-            return shutil.get_terminal_size((100, 40)).columns
-
-        wrapper = StreamWrap(emit, width_fn=_stream_width)
-
-        def on_token(text: str) -> None:
-            wrapper.feed(text)
-
-        loop_alias = active_alias
-        loop_system = active_system_prompt
-        loop_effort = active_effort
-        if active_runner == "alice":
-            from hydra_cli.alice_gate import consult
-
-            prior = turns_history[-1] if turns_history else None
-            decision = consult(
-                prompt_text,
-                summon_alias=active_summon,
-                has_referent=prior is not None,
-                prior=prior,
-            )
-            last_gate["action"] = decision.action
-            last_gate["route"] = decision.route
-            if decision.action != "summon":
-                text = decision.text
-                active_ledger.append_turn("user", prompt_text)
-                active_ledger.append_turn("assistant", text)
-                if tui is not None:
-                    tui.print_answer(text)
-                else:
-                    sys.stdout.write(f"\n{text}\n\n")
-                    sys.stdout.flush()
-                return text
-            loop_alias = active_summon
-            loop_effort = resolve_route(active_summon).get("effort") or active_effort
-            if decision.discovery:
-                loop_system = active_system_prompt + "\n\n" + decision.discovery
-
-        try:
-            answer = run_agent_loop(
-                alias=loop_alias,
-                prompt=prompt_text,
-                system_prompt=loop_system,
-                registry=registry,
-                temperature=active_heat,
-                max_tokens=max_tokens,
-                session_id=active_session_id,
-                resume_session=True,
-                tier=active_tier,
-                cwd=target_cwd,
-                steer_mode=active_steer_mode,
-                skip_next_tool=skip_next_tool,
-                ledger=active_ledger,
-                effort=loop_effort,
-                dialect=active_dialect,
-                strategy=active_strategy,
-                on_token=on_token,
-                max_context_chars=(active_window or get_context_window(loop_alias)) * 4,
-            )
-        finally:
-            wrapper.finish()
-            if streamed["open"]:
-                if tui is not None:
-                    tui.end_stream()
-                else:
-                    sys.stdout.write("\n\n")
-                    sys.stdout.flush()
-        if not streamed["open"]:
-            if tui is not None:
-                tui.print_answer(answer)
-            else:
-                sys.stdout.write(f"\n{answer}\n\n")
-                sys.stdout.flush()
-        return answer
-
-    def _budget_alias() -> str:
-        return active_summon if active_runner == "alice" else active_alias
-
-    def _reset_session(verb: str) -> None:
-        nonlocal active_session_id, active_ledger
-        active_session_id = f"session_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-        turns_history.clear()
-        active_ledger = SessionContextLedger(session_id=active_session_id)
-        last_gate["action"] = ""
-        last_gate["route"] = ""
-        sys.stdout.write(f"{c_mid}[{verb} session history. New session: {active_session_id}]{c_reset}\n")
-        sys.stdout.flush()
-
     while True:
-        if sys.stdin.isatty():
-            sys_len = len(active_system_prompt)
-            rules_len = len(rules_msg or "")
-            turns_chars = sum(len(p) + len(a) for p, a in turns_history)
-            cp = SessionCheckpointer.load(active_session_id)
-            scratch_chars = len(cp.scratchpad.format_for_context()) if cp else 0
-            total_chars = sys_len + rules_len + turns_chars + scratch_chars
-            est_tokens = total_chars // 4
-            max_budget = active_window or get_context_window(_budget_alias())
-            if tui is not None:
-                tui.update_status(
-                    model=session_model_label(active_alias, active_runner, active_summon),
-                    tier=active_tier or "frontier",
-                    tokens=est_tokens,
-                    budget=max_budget,
-                    turns=len(turns_history),
-                    step_mode=active_steer_mode,
-                    dialect=active_dialect,
-                    effort=active_effort or "",
-                    heat="" if active_heat is None else f"heat {active_heat:g}",
-                    strategy=active_strategy,
-                )
-            else:
-                box = render_prompt_box(model=session_model_label(active_alias, active_runner, active_summon), version=__version__, est_tokens=est_tokens, max_budget=max_budget, turns=len(turns_history))
-                sys.stdout.write(f"\n{box}\n")
-                sys.stdout.flush()
-
-        shown = "alice" if active_runner == "alice" else active_alias
-        prompt_label = f"{c_bright}hydra-agent [{shown}:{active_tier or 'frontier'}]{c_reset}> "
+        prompt_label = f"{c_bright}hydra-agent [{active_alias}:{active_tier or 'frontier'}]{c_reset}> "
         try:
-            if tui is not None:
-                try:
-                    line = tui.read_line()
-                except EOFError:
-                    sys.stdout.write(f"\n{c_mid}Exiting Hydra agent session.{c_reset}\n")
-                    sys.stdout.flush()
-                    break
-            else:
-                sys.stdout.write(prompt_label)
-                sys.stdout.flush()
-                try:
-                    line = input('')
-                except (EOFError, StopIteration):
-                    break
-                
-            line = clean_pasted_text(line).strip()
-            
-            if not line and tui is None:
-                try:
-                    second = input("... ")
-                    if not second.strip():
-                        active_steer_mode = not active_steer_mode
-                        state_str = "active" if active_steer_mode else "disabled"
-                        sys.stdout.write(f"\n{c_bright}[Steering directive mode toggled: step-by-step confirmation {state_str}]{c_reset}\n")
-                        sys.stdout.flush()
-                except (EOFError, StopIteration):
-                    break
-                continue
-                
+            line = input(prompt_label).strip()
             last_interrupt_time = 0.0
         except KeyboardInterrupt:
             now = time.time()
@@ -1992,8 +1291,7 @@ def run_interactive_agent(
                 sys.stdout.flush()
                 break
             last_interrupt_time = now
-            key_name = "Escape" if tui is not None else "Ctrl+C"
-            sys.stdout.write(f"\n{c_mid}{key_name} interrupted. Press {key_name} again within 1.5s to exit REPL.{c_reset}\n")
+            sys.stdout.write(f"\n{c_mid}^C Interrupted. Press Ctrl+C again within 1.5s to exit REPL.{c_reset}\n")
             sys.stdout.flush()
             continue
         except EOFError:
@@ -2009,10 +1307,6 @@ def run_interactive_agent(
             parts = line.split(maxsplit=1)
             cmd = parts[0].lower()
             arg = parts[1].strip() if len(parts) > 1 else ""
-            raw_cmd = cmd
-            cmd = COMMAND_TYPOS.get(cmd, cmd)
-            if cmd != raw_cmd:
-                sys.stdout.write(f"{c_mid}[normalized : {raw_cmd} -> {cmd}]{c_reset}\n")
 
             if cmd in ("/exit", "/quit", "/q"):
                 sys.stdout.write(f"\n{c_mid}Exiting Hydra agent session.{c_reset}\n")
@@ -2020,10 +1314,10 @@ def run_interactive_agent(
                 break
 
             elif cmd == "/clear":
-                _reset_session("Cleared")
-
-            elif cmd == "/new":
-                _reset_session("New")
+                active_session_id = f"session_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+                turns_history.clear()
+                sys.stdout.write(f"{c_mid}[Cleared session history. New session: {active_session_id}]{c_reset}\n")
+                sys.stdout.flush()
 
             elif cmd == "/auth":
                 if arg.lower() == "status":
@@ -2031,11 +1325,7 @@ def run_interactive_agent(
                     print_auth_status()
                 else:
                     from hydra_cli.auth import auth_wizard
-                    if tui is not None:
-                        with tui.suspended():
-                            auth_wizard()
-                    else:
-                        auth_wizard()
+                    auth_wizard()
                 sys.stdout.flush()
 
             elif cmd == "/diff":
@@ -2060,16 +1350,10 @@ def run_interactive_agent(
                 scratch_chars = len(cp.scratchpad.format_for_context()) if cp else 0
                 total_chars = sys_len + rules_len + turns_chars + scratch_chars
                 est_tokens = total_chars // 4
-                max_budget = active_window or get_context_window(_budget_alias())
+                max_budget = get_context_window(active_alias)
                 pct = (est_tokens / max_budget) * 100
-                heat_label = "omitted" if active_heat is None else f"{active_heat:g}"
                 sys.stdout.write(f"\n{c_head}--- Active Session Context Size ---{c_reset}\n")
-                sys.stdout.write(f"  Estimated Tokens : ~{est_tokens:,} / {max_budget:,} ({pct:.2f}%)\n")
-                sys.stdout.write(f"  Context Window   : {max_budget:,} tokens\n")
-                sys.stdout.write(f"  Strategy         : {active_strategy}\n")
-                sys.stdout.write(f"  Dialect          : {active_dialect}\n")
-                sys.stdout.write(f"  Effort           : {active_effort or 'route default'}\n")
-                sys.stdout.write(f"  Sampling Heat    : {heat_label}\n")
+                sys.stdout.write(f"  Estimated Tokens : ~{est_tokens:,} / {max_budget:,} ({pct:.2f}% of 128k budget)\n")
                 sys.stdout.write(f"  Turns Count      : {len(turns_history)}\n")
                 sys.stdout.write(f"  System & Rules   : ~{(sys_len + rules_len) // 4:,} tokens\n")
                 sys.stdout.write(f"  Scratchpad       : ~{scratch_chars // 4:,} tokens\n")
@@ -2119,9 +1403,23 @@ def run_interactive_agent(
                 sys.stdout.flush()
                 # Run retry directly
                 try:
-                    answer = _run_turn(retry_p)
+                    answer = run_agent_loop(
+                        alias=active_alias,
+                        prompt=retry_p,
+                        system_prompt=active_system_prompt,
+                        registry=registry,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        session_id=active_session_id,
+                        resume_session=True,
+                        tier=active_tier,
+                        cwd=target_cwd,
+                        steer_mode=active_steer_mode,
+                        skip_next_tool=skip_next_tool,
+                    )
                     skip_next_tool = False
                     turns_history.append((retry_p, answer))
+                    sys.stdout.write(f"\n{answer}\n\n")
                     sys.stdout.flush()
                 except KeyboardInterrupt:
                     sys.stderr.write(f"\n{c_mid}^C Agent turn aborted by user.{c_reset}\n\n")
@@ -2186,18 +1484,9 @@ def run_interactive_agent(
 
             elif cmd == "/status":
                 sys.stdout.write(f"\n{c_head}--- Hydra Agent Status ---{c_reset}\n")
-                sys.stdout.write(f"  Active Model : {session_model_label(active_alias, active_runner, active_summon)}\n")
-                sys.stdout.write(f"  Brain        : {active_runner or 'direct'}\n")
-                sys.stdout.write(f"  Summon       : {active_summon} -> {resolve_route(active_summon)['model']}\n")
+                sys.stdout.write(f"  Active Model : {active_alias}\n")
                 sys.stdout.write(f"  Active Tier  : {active_tier or 'frontier (paid)'}\n")
-                heat_label = "omitted" if active_heat is None else f"{active_heat:g}"
-                window_label = active_window or get_context_window(_budget_alias())
                 sys.stdout.write(f"  Active Steer : {'enabled' if active_steer_mode else 'disabled'}\n")
-                sys.stdout.write(f"  Dialect      : {active_dialect}\n")
-                sys.stdout.write(f"  Effort       : {active_effort or 'route default'}\n")
-                sys.stdout.write(f"  Heat         : {heat_label}\n")
-                sys.stdout.write(f"  Window       : {window_label:,} tokens\n")
-                sys.stdout.write(f"  Strategy     : {active_strategy}\n")
                 sys.stdout.write(f"  Session ID   : {active_session_id}\n")
                 sys.stdout.write(f"  Turns Count  : {len(turns_history)}\n")
                 sys.stdout.write(f"  Working Dir  : {target_cwd}\n")
@@ -2205,80 +1494,11 @@ def run_interactive_agent(
                 sys.stdout.flush()
 
             elif cmd == "/model":
-                if not arg:
-                    sys.stdout.write(format_model_picker(active_alias, active_summon) + "\n")
-                    sys.stdout.write(
-                        f"{c_mid}[Current active model: {session_model_label(active_alias, active_runner, active_summon)}]{c_reset}\n"
-                    )
+                if arg:
+                    active_alias = arg
+                    sys.stdout.write(f"{c_mid}[Active model set to: {active_alias}]{c_reset}\n")
                 else:
-                    choice = resolve_model_choice(arg)
-                    if choice is None:
-                        sys.stdout.write(
-                            f"{c_mid}[Unknown alias '{arg}'. Select a number or a catalog alias.]{c_reset}\n"
-                        )
-                        sys.stdout.write(format_model_picker(active_alias, active_summon) + "\n")
-                    else:
-                        route = resolve_route(choice)
-                        active_alias = choice
-                        if route.get("runner") == "alice":
-                            active_runner = "alice"
-                            summon_id = resolve_route(active_summon)["model"]
-                            sys.stdout.write(f"{c_mid}[Active model set to: alice]{c_reset}\n")
-                            sys.stdout.write(f"{c_mid}[Local brain. Summon model: {summon_id}]{c_reset}\n")
-                            sys.stdout.write(
-                                f"{c_mid}[The next turn searches local rules and Alice before any provider call.]{c_reset}\n"
-                            )
-                        else:
-                            active_runner = None
-                            active_summon = choice
-                            if route.get("effort"):
-                                active_effort = route["effort"]
-                            sys.stdout.write(f"{c_mid}[Active model set to: {choice}]{c_reset}\n")
-                            sys.stdout.write(f"{c_mid}[Request model: {route['model']}]{c_reset}\n")
-                sys.stdout.flush()
-
-            elif cmd == "/summon":
-                if not arg:
-                    summon_id = resolve_route(active_summon)["model"]
-                    sys.stdout.write(f"{c_mid}[Summon model: {active_summon} -> {summon_id}]{c_reset}\n")
-                    sys.stdout.write(f"{c_mid}[Usage: /summon <number or alias>]{c_reset}\n")
-                else:
-                    choice = resolve_model_choice(arg)
-                    route = resolve_route(choice) if choice else None
-                    if choice is None or (route and route.get("runner") == "alice"):
-                        sys.stdout.write(
-                            f"{c_mid}[Summon target '{arg}' refused. Pick an inference alias.]{c_reset}\n"
-                        )
-                    else:
-                        active_summon = choice
-                        if active_runner != "alice":
-                            active_alias = choice
-                            active_runner = None
-                            if route.get("effort"):
-                                active_effort = route["effort"]
-                        sys.stdout.write(
-                            f"{c_mid}[Summon model set to: {choice} -> {route['model']}]{c_reset}\n"
-                        )
-                sys.stdout.flush()
-
-            elif cmd == "/stack":
-                from hydra_cli.alice_gate import stack_report
-                sys.stdout.write(stack_report() + "\n")
-                sys.stdout.flush()
-
-            elif cmd == "/skills":
-                from hydra_cli.alice_gate import skill_index_report
-                sys.stdout.write(skill_index_report() + "\n")
-                sys.stdout.flush()
-
-            elif cmd == "/route":
-                sys.stdout.write(
-                    f"{c_mid}[Last gate: {last_gate['action'] or 'none'} {last_gate['route']}]{c_reset}\n"
-                )
-                sys.stdout.write(f"{c_mid}[Brain: {active_runner or 'direct'}]{c_reset}\n")
-                sys.stdout.write(
-                    f"{c_mid}[Summon: {active_summon} -> {resolve_route(active_summon)['model']}]{c_reset}\n"
-                )
+                    sys.stdout.write(f"{c_mid}[Current active model: {active_alias}]{c_reset}\n")
                 sys.stdout.flush()
 
             elif cmd == "/tier":
@@ -2293,115 +1513,15 @@ def run_interactive_agent(
                     sys.stdout.write(f"{c_mid}[Current active tier: {active_tier or 'frontier (paid)'}]{c_reset}\n")
                 sys.stdout.flush()
 
-            elif cmd == "/dialect":
-                if not arg:
-                    sys.stdout.write(f"{c_mid}[Dialect: {active_dialect}. Valid: {', '.join(DIALECTS)}]{c_reset}\n")
-                elif arg.lower() in DIALECTS:
-                    active_dialect = arg.lower()
-                    sys.stdout.write(f"{c_mid}[Dialect set to: {active_dialect}]{c_reset}\n")
-                else:
-                    sys.stdout.write(f"{c_mid}[Invalid dialect '{arg}'. Valid: {', '.join(DIALECTS)}]{c_reset}\n")
-                sys.stdout.flush()
-
-            elif cmd == "/effort":
-                if not arg:
-                    sys.stdout.write(f"{c_mid}[Effort: {active_effort or 'route default'}. Valid: {', '.join(EFFORT_LEVELS)}]{c_reset}\n")
-                elif arg.lower() in ("off", "none", "default"):
-                    active_effort = None
-                    sys.stdout.write(f"{c_mid}[Effort set to route default]{c_reset}\n")
-                elif arg.lower() in EFFORT_LEVELS:
-                    active_effort = arg.lower()
-                    sys.stdout.write(f"{c_mid}[Effort set to: {active_effort}]{c_reset}\n")
-                else:
-                    sys.stdout.write(f"{c_mid}[Invalid effort '{arg}'. Valid: {', '.join(EFFORT_LEVELS)}]{c_reset}\n")
-                sys.stdout.flush()
-
-            elif cmd == "/heat":
-                if not arg:
-                    label = "omitted" if active_heat is None else f"{active_heat:g}"
-                    sys.stdout.write(f"{c_mid}[Sampling heat: {label}]{c_reset}\n")
-                else:
-                    try:
-                        active_heat = parse_heat(arg)
-                    except ValueError as exc:
-                        sys.stdout.write(f"{c_mid}[{exc}]{c_reset}\n")
-                    else:
-                        label = "omitted" if active_heat is None else f"{active_heat:g}"
-                        sys.stdout.write(f"{c_mid}[Sampling heat set to: {label}]{c_reset}\n")
-                sys.stdout.flush()
-
-            elif cmd == "/window":
-                if not arg:
-                    current = active_window or get_context_window(_budget_alias())
-                    sys.stdout.write(f"{c_mid}[Context window: {current:,} tokens]{c_reset}\n")
-                elif arg.lower() in ("off", "default", "catalog"):
-                    active_window = None
-                    sys.stdout.write(f"{c_mid}[Context window set to catalog default]{c_reset}\n")
-                else:
-                    try:
-                        active_window = parse_window(arg)
-                    except ValueError as exc:
-                        sys.stdout.write(f"{c_mid}[{exc}]{c_reset}\n")
-                    else:
-                        sys.stdout.write(f"{c_mid}[Context window set to: {active_window:,} tokens]{c_reset}\n")
-                sys.stdout.flush()
-
-            elif cmd == "/strategy":
-                if not arg:
-                    sys.stdout.write(
-                        f"{c_mid}[Context strategy: {active_strategy}. "
-                        f"sliding keeps recent turns. compact folds older turns into the scratchpad. "
-                        f"retrieve pulls matching ledger turns back into the next prompt.]{c_reset}\n"
-                    )
-                elif arg.lower() in CONTEXT_STRATEGIES:
-                    active_strategy = arg.lower()
-                    sys.stdout.write(f"{c_mid}[Context strategy set to: {active_strategy}]{c_reset}\n")
-                else:
-                    sys.stdout.write(f"{c_mid}[Invalid strategy '{arg}'. Valid: {', '.join(CONTEXT_STRATEGIES)}]{c_reset}\n")
-                sys.stdout.flush()
-
-            elif cmd == "/compact":
-                summary = active_ledger.compact_session(max_history_turns=1 if active_strategy == "compact" else 5)
-                active_strategy = "compact"
-                sys.stdout.write(f"{c_mid}[Compacted session. {summary['summary']}]{c_reset}\n")
-                sys.stdout.flush()
-
-            elif cmd == "/retrieve":
-                words = arg.split() if arg else []
-                if not words:
-                    sys.stdout.write(f"{c_mid}[Usage: /retrieve <keywords>]{c_reset}\n")
-                else:
-                    hits = active_ledger.retrieve_verbatim(words, max_turns=3)
-                    if not hits:
-                        sys.stdout.write(f"{c_mid}[No ledger turns matched]{c_reset}\n")
-                    else:
-                        sys.stdout.write(f"\n{c_head}--- Retrieved Turns ---{c_reset}\n")
-                        for hit in hits:
-                            body = str(hit.get("content") or "").strip()
-                            sys.stdout.write(f"  {hit.get('role', 'turn')}: {body[:500]}\n")
-                        sys.stdout.write("\n")
-                sys.stdout.flush()
-
             elif cmd in ("/help", "/h", "?"):
                 sys.stdout.write(f"""
 {c_head}HYDRA CODING AGENT SLASH COMMANDS:{c_reset}
-  /model [n|alias] Numbered alias picker. Sets the brain. Alice searches locally first
-  /summon [alias]  Inference alias Alice calls when local search misses
-  /stack           Live paths for hydra, alice, easylm, and progen
-  /skills          Written skill index
-  /route           Last gate action, brain, and summon target
+  /model [alias]   Display or switch active model alias
   /tier [tier]     Display or switch active tier (free, local, paid, frontier, none)
   /steer [opts]    Toggle or set step-by-step confirmation mode (on/off/status)
   /skip            Skip the next tool call in the next agent turn
   /retry [guide]   Retry the previous turn with optional additional guidance
   /context [dump]  Display context token usage and inspect bounded messages
-  /dialect [name]  Register: syntax, instruct, gfc, slack
-  /effort [level]  Reasoning effort: low, medium, high, xhigh, max
-  /heat [value]    Sampling heat from 0 to 2; off omits temperature
-  /window [size]   Context window in tokens, or 128k / 1m
-  /strategy [name] Context strategy: sliding, compact, retrieve
-  /compact         Compact the ledger and switch strategy to compact
-  /retrieve <words> Show ledger turns matching keywords
   /diff            Display colorized unified git diff of current changes
   /undo [path]     Revert last modified file or specific file via git checkout
   /auth [status]   Launch interactive provider API key wizard or view status
@@ -2409,20 +1529,9 @@ def run_interactive_agent(
   /tokens          Alias for /context
   /history         View turn-by-turn prompt and outcome history for active session
   /status          Display comprehensive session, rules, model, and tier status
-  /clear           Reset active session memory and initialize a new ledger
-  /new             Reset active session memory and initialize a new ledger
+  /clear           Reset active session memory and initialize clean checkpointer
   /help, /h, ?     Display this slash command reference guide
   /exit, /quit, /q Exit the Hydra agent REPL session
-
-{c_head}Composer Keys:{c_reset}
-  Enter            Send; while a turn runs, queue the message
-  Enter twice      Steer: inject the queued message into the running turn
-  Ctrl+Enter       Insert a newline; Alt+Enter on POSIX, Ctrl+J or a trailing backslash anywhere
-  Ctrl+Space       Dictate: start or stop voice capture; the transcript lands in the box
-  Escape           Interrupt the running turn, clear the box, or exit on double press
-  Ctrl+C / Ctrl+V  Copy the selection and paste, including the Windows clipboard
-  Mouse            Click moves the cursor; drag selects; Backspace deletes the selection
-  Tab              Complete slash commands and arguments
 
 {c_head}Native Coding Tools:{c_reset}
   read_file        Read file contents with line slicing and byte limits
@@ -2444,9 +1553,23 @@ def run_interactive_agent(
 
         # Execute instruction via run_agent_loop with Ctrl+C turn abort handling
         try:
-            answer = _run_turn(line)
+            answer = run_agent_loop(
+                alias=active_alias,
+                prompt=line,
+                system_prompt=active_system_prompt,
+                registry=registry,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                session_id=active_session_id,
+                resume_session=True,
+                tier=active_tier,
+                cwd=target_cwd,
+                steer_mode=active_steer_mode,
+                skip_next_tool=skip_next_tool,
+            )
             skip_next_tool = False
             turns_history.append((line, answer))
+            sys.stdout.write(f"\n{answer}\n\n")
             sys.stdout.flush()
         except KeyboardInterrupt:
             sys.stderr.write(f"\n{c_mid}^C Agent turn aborted by user.{c_reset}\n\n")
@@ -2455,6 +1578,4 @@ def run_interactive_agent(
             sys.stderr.write(f"\n[Agent Error]: {redact(exc)}\n\n")
             sys.stderr.flush()
 
-    if tui is not None:
-        tui.close()
     return 0

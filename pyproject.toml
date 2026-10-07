@@ -44,4 +44,8 @@ Repository = "https://github.com/erastudil/hydra"
 include = ["hydra_cli*"]
 
 [tool.setuptools.package-data]
-hydra_cli = ["catalog.json", "mcp_servers.default.json"]
+hydra_cli = ["catalog.json", "mcp_servers.default.json", "skills/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--basetemp=.pytest_tmp"
