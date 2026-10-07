@@ -13,19 +13,35 @@ if (-not $python -and -not $node) {
 $Root = Join-Path $HOME '.hydra'
 $Bin = Join-Path $Root 'bin'
 $Repo = 'https://raw.githubusercontent.com/erastudil/hydra/main'
+# Every runtime file. tests/test_installers.py fails if this list drifts.
 $Files = @(
     'bin/hydra',
     'bin/hydra.js',
     'hydra_cli/__init__.py',
+    'hydra_cli/__main__.py',
     'hydra_cli/_version.py',
+    'hydra_cli/agent.py',
+    'hydra_cli/agent_runners.py',
+    'hydra_cli/alice_interpret.py',
+    'hydra_cli/alice_knowledge.py',
+    'hydra_cli/alice_senses.py',
     'hydra_cli/catalog.json',
     'hydra_cli/cli.py',
     'hydra_cli/config.py',
     'hydra_cli/display.py',
+    'hydra_cli/hands.py',
+    'hydra_cli/mcp.py',
+    'hydra_cli/mcp_registry.py',
+    'hydra_cli/mcp_servers.default.json',
     'hydra_cli/providers.py',
+    'hydra_cli/repl.py',
     'hydra_cli/router.py',
+    'hydra_cli/sandbox.py',
+    'hydra_cli/serve.py',
+    'hydra_cli/speculative.py',
     'hydra_cli/swarm.py',
-    'hydra_cli/ui.py'
+    'hydra_cli/ui.py',
+    'hydra_cli/voice.py'
 )
 
 Write-Host "==> Installing Hydra into $Root"
@@ -55,6 +71,8 @@ echo [ERROR] Hydra needs Python 3 or Node.js 18+.
 exit /b 1
 '@
 Set-Content -Path (Join-Path $Bin 'hydra.cmd') -Value $CmdContent -Encoding ASCII
+# Same launcher as repo bin/hydra.bat — keep both names so desktop shortcuts work.
+Set-Content -Path (Join-Path $Bin 'hydra.bat') -Value $CmdContent -Encoding ASCII
 
 $PsShim = @'
 $python = Get-Command python -ErrorAction SilentlyContinue
