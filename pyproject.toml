@@ -30,7 +30,9 @@ classifiers = [
 ]
 keywords = ["ai", "cli", "openrouter", "vercel", "swarm", "agents", "ollama", "llm"]
 requires-python = ">=3.8"
-dependencies = []
+dependencies = [
+  "prompt_toolkit>=3.0.36",
+]
 
 [project.scripts]
 hydra = "hydra_cli.cli:main"
@@ -45,7 +47,4 @@ include = ["hydra_cli*"]
 
 [tool.setuptools.package-data]
 hydra_cli = ["catalog.json", "mcp_servers.default.json", "data/*.jsonl", "skills/*.md"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
 

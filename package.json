@@ -7,7 +7,7 @@
     "hydra": "bin/hydra.js"
   },
   "scripts": {
-    "test": "node --test tests/catalog.test.js"
+    "test": "python3 scripts/verify.py"
   },
   "keywords": [
     "ai",

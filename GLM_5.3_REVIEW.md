@@ -12,7 +12,7 @@ A Python CLI with no framework and a Node runtime twin with no npm deps is the c
 - **No supply-chain surface.** No `openai` SDK, no `axios`, no `node-fetch`. The only trust boundary is `stdlib + HTTP`. This is the single most important property for a tool meant to be auditable and self-hosted.
 - **Dual-runtime parity forces a transport spec.** When Python and JS must both parse OpenRouter SSE identically, the SSE grammar implicitly becomes a documented contract. That's better discipline than most production LLM clients have.
 
-**[verify]** The parity claim is only real if `catalog.test.js` and the Python tests assert *identical outputs* on identical fixtures (golden-file SSE streams). If the two test suites are independent, you have two implementations and zero parity.
+**[verify]** The parity claim is only real if `scripts/verify.py` asserts identical outputs from the Python modules and `bin/hydra.js` on the same inputs. If the two runtimes are unchecked, you have two implementations and zero parity.
 
 ### 1.2 Shared `catalog.json` as single source of truth **[spec-inferred]**
 One alias registry consumed by both runtimes is the right inversion. Model churn is the dominant maintenance cost of LLM tooling; centralizing it means adding a model is a data change, not a code change.
@@ -256,7 +256,7 @@ Prints which providers are configured (yes/no, never the key), validates catalog
 
 ### 4.4 Node twin: share the delta-mapping logic via generated fixtures
 
-Full logic parity across Python/JS is expensive to maintain by hand. Cheaper discipline: maintain a `fixtures/` directory of raw SSE byte streams + expected parsed event JSON. Both test suites (`test_cli.py`, `catalog.test.js` expanded) run the same fixtures. Any provider-behavior fix lands once in fixtures and both runtimes must pass or CI fails. This converts "parity" from aspiration to test invariant — and it's zero-dependency-compatible since fixtures are plain files.
+Full logic parity across Python/JS is expensive to maintain by hand. Cheaper discipline: maintain a `fixtures/` directory of raw SSE byte streams + expected parsed event JSON. `scripts/verify.py` runs both runtimes against the same fixtures. Any provider-behavior fix lands once in fixtures and both runtimes must pass or the gate fails. This converts "parity" from aspiration to a gate invariant.
 
 ---
 
