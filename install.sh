@@ -21,7 +21,6 @@ fi
 ROOT="${HOME}/.hydra"
 BIN="${HOME}/.local/bin"
 REPO="https://raw.githubusercontent.com/erastudil/hydra/main"
-# Every runtime file. tests/test_installers.py fails if this list drifts.
 FILES="
 bin/hydra
 bin/hydra.js
@@ -30,17 +29,23 @@ hydra_cli/__main__.py
 hydra_cli/_version.py
 hydra_cli/agent.py
 hydra_cli/agent_runners.py
+hydra_cli/alice_gate.py
 hydra_cli/alice_interpret.py
 hydra_cli/alice_knowledge.py
+hydra_cli/alice_runner.py
 hydra_cli/alice_senses.py
+hydra_cli/auth.py
 hydra_cli/catalog.json
 hydra_cli/cli.py
 hydra_cli/config.py
+hydra_cli/context.py
+hydra_cli/dictation.py
 hydra_cli/display.py
 hydra_cli/hands.py
 hydra_cli/mcp.py
 hydra_cli/mcp_registry.py
 hydra_cli/mcp_servers.default.json
+hydra_cli/native_tools.py
 hydra_cli/providers.py
 hydra_cli/repl.py
 hydra_cli/router.py
@@ -48,6 +53,8 @@ hydra_cli/sandbox.py
 hydra_cli/serve.py
 hydra_cli/speculative.py
 hydra_cli/swarm.py
+hydra_cli/tool_adapter.py
+hydra_cli/tui.py
 hydra_cli/ui.py
 hydra_cli/voice.py
 "

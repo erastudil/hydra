@@ -10,6 +10,8 @@ from typing import List, Optional, Tuple
 
 from hydra_cli import __version__
 from hydra_cli.config import (
+    DEFAULT_ORCHESTRATOR_MODEL,
+    DEFAULT_AGENT_MODEL,
     DEFAULT_CLOUDFLARE_MODEL,
     DEFAULT_FREE_MODEL,
     DEFAULT_HF_MODEL,
@@ -60,7 +62,12 @@ USAGE:
     hydra local "<prompt>"               # Offline local inference (Ollama/llama.cpp/EasyLM)
     hydra swarm "<task>"                 # Multi-agent swarm fan-out (Architect, Coder, Auditor)
     hydra hands "<prompt>"               # Local answer: stacks, calc, units, clock, memory
-    hydra agent "<prompt>"               # Autonomous ReAct agent with hands and MCP tools
+    hydra agent                          # Launch interactive coding agent REPL (Cursor & Antigravity style)
+    hydra agent --steer                  # Interactive coding agent with in-flight tool confirmation
+    hydra agent "<prompt>"               # Autonomous coding agent with native tools & MCP
+    hydra agent --steer "<prompt>"       # Autonomous agent with in-flight steering
+    hydra agent --free "<prompt>"        # Zero-cost agent loop routing Free Forge
+    hydra agent --local "<prompt>"       # Offline local agent loop (Ollama/llama.cpp)
     hydra <alias> --mcp "<prompt>"       # Tool-augmented execution loop
     hydra serve [--port 7777]            # Sovereign OpenAI Gateway for Hermes and Pi
     hydra mcp list                       # List configured community MCP servers & tools
@@ -70,6 +77,8 @@ USAGE:
     hydra banner                         # Display 3-head TUI Hydra + title wordmark
     hydra / hydra chat / hydra tui       # Interactive REPL with slash commands
     hydra setup                          # Interactive setup & app/agent integration guide
+    hydra auth                           # Interactive credential onboarding wizard & provider status
+    hydra auth status                    # Inspect configured model providers without leaking secrets
     cat file.txt | hydra <alias>         # The pipe is the prompt
     cat file.txt | hydra <alias> - "do"  # Pipe plus an instruction
     hydra <alias> -- <prompt>            # Keep prompt words that match an alias
@@ -88,9 +97,16 @@ OPTIONS:
     --no-stream             Disable real-time SSE streaming
     --json                  Output raw JSON
     --mcp                   Enable Model Context Protocol (MCP) tools
+    --tier <tier>           Routing tier: free, local, paid, frontier
+    --free                  Shortcut for --tier free
+    --local                 Shortcut for --tier local
+    --steer                 Enable interactive in-flight tool confirmation & steering
+    -i, --interactive       Launch interactive coding agent REPL
+    --agentic               Enable tool-augmented loop in swarm heads
     --heads <roles>         Comma-separated swarm heads (e.g. architect:hermes,coder:pi,auditor)
     --list-models           List registered aliases (add --verbose for model ids)
     --verbose, -V           Show resolved model ids with --list-models
+    --auth                  Credential onboarding wizard
     --guide, --setup        Show setup and integration guide
     -v, --version           Display version
     -h, --help              Show this help message
@@ -322,6 +338,9 @@ def route_command(argv: List[str]) -> int:
         verbose = any(flag in argv[1:] for flag in ("--verbose", "-V", "--show-ids"))
         print_registered_models(verbose=verbose)
         return 0
+    if argv and argv[0] in ("auth", "--auth"):
+        from hydra_cli.auth import execute_auth_command
+        return execute_auth_command(argv[1:])
     if argv and argv[0] in ("mcp", "--mcp") and len(argv) > 1 and argv[1] in ("list", "test", "init", "default", "config"):
         return execute_mcp_command(argv[1:])
     if argv and argv[0] in ("hands", "--hands"):
@@ -355,7 +374,7 @@ def route_command(argv: List[str]) -> int:
     if not argv:
         piped_input = read_stdin_if_piped()
         if piped_input:
-            return execute_summon("sonnet 5.5", piped_input, system_prompt=DEFAULT_SYSTEM_PROMPT)
+            return execute_summon(DEFAULT_ORCHESTRATOR_MODEL, piped_input, system_prompt=DEFAULT_SYSTEM_PROMPT)
         # Bare `hydra` on a TTY enters the slash-command REPL (Claude Code / Codex style).
         if sys.stdin.isatty() and sys.stdout.isatty():
             from hydra_cli.repl import run_repl
@@ -388,6 +407,10 @@ def route_command(argv: List[str]) -> int:
     spec_k = 4
     draft_model_override = None
     target_model_override = None
+    tier_override = None
+    interactive_mode = False
+    agentic_mode = False
+    steer_mode = False
 
     idx = 0
     while idx < len(remaining):
@@ -458,10 +481,29 @@ def route_command(argv: List[str]) -> int:
                 sys.stderr.write(f"[ERROR] --k expects an integer, got {remaining[idx + 1]!r}.\n")
                 return 1
             idx += 2
+        elif arg == "--tier" and idx + 1 < len(remaining):
+            tier_override = remaining[idx + 1].strip().lower()
+            idx += 2
+        elif arg == "--free":
+            tier_override = "free"
+            idx += 1
+        elif arg == "--local":
+            tier_override = "local"
+            idx += 1
+        elif arg in ("--interactive", "-i"):
+            interactive_mode = True
+            idx += 1
+        elif arg == "--agentic":
+            agentic_mode = True
+            idx += 1
+        elif arg == "--steer":
+            steer_mode = True
+            idx += 1
         else:
             prompt_tokens.append(arg)
             idx += 1
 
+    cmd_lower = command_or_alias.lower().strip()
     effective_prompt = compose_prompt(prompt_tokens)
 
     if personality:
@@ -473,15 +515,26 @@ def route_command(argv: List[str]) -> int:
             return 1
 
     if not effective_prompt:
+        if cmd_lower in ("agent", "mcp", "orchestrator") or interactive_mode:
+            target_alias = command_or_alias if cmd_lower not in ("agent", "mcp", "orchestrator") else (model_override or DEFAULT_ORCHESTRATOR_MODEL)
+            return execute_agent_mode(
+                alias=target_alias,
+                prompt="",
+                system_prompt=system_prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                session_id=session_id,
+                tier=tier_override,
+                interactive=True,
+                steer_mode=steer_mode,
+            )
         sys.stderr.write(f"[ERROR] No prompt or piped input provided for '{command_or_alias}'.\n")
         return 1
 
     # Route based on command/alias
-    cmd_lower = command_or_alias.lower().strip()
-
     try:
-        if cmd_lower in ("agent", "mcp") or mcp_mode:
-            target_alias = command_or_alias if cmd_lower not in ("agent", "mcp") else (model_override or "sonnet 5.5")
+        if cmd_lower in ("agent", "mcp", "orchestrator") or mcp_mode or interactive_mode:
+            target_alias = command_or_alias if cmd_lower not in ("agent", "mcp", "orchestrator") else (model_override or DEFAULT_ORCHESTRATOR_MODEL)
             return execute_agent_mode(
                 alias=target_alias,
                 prompt=effective_prompt,
@@ -489,6 +542,9 @@ def route_command(argv: List[str]) -> int:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 session_id=session_id,
+                tier=tier_override,
+                interactive=interactive_mode,
+                steer_mode=steer_mode,
             )
         elif cmd_lower == "free":
             return execute_free(
@@ -545,6 +601,8 @@ def route_command(argv: List[str]) -> int:
                 json_output=json_mode,
                 stream_output=stream,
                 max_tokens=max_tokens,
+                tier=tier_override,
+                agentic=agentic_mode,
             )
         else:
             return execute_summon(
@@ -596,6 +654,25 @@ def execute_summon(
     Cloudflare Workers AI -> OpenRouter Free Forge -> Local/Ollama (WO-05).
     """
     route = resolve_route(alias)
+    if route.get("runner") == "alice" or alias.strip().lower() == "alice":
+        from hydra_cli.alice_runner import alice_available, run_alice
+        if alice_available():
+            output = run_alice(
+                prompt,
+                model=model_override or route.get("model"),
+                fallback_model=model_override or route.get("model"),
+            )
+            if output:
+                if json_mode:
+                    import json
+                    print(json.dumps({
+                        "model": "alice-cognitive-core",
+                        "runner": "alice",
+                        "content": output,
+                    }, indent=2))
+                else:
+                    print(output)
+                return 0
     model_id = model_override or route["model"]
     if model_override:
         route_effort = effort
@@ -1003,6 +1080,8 @@ def execute_swarm_mode(
     json_output: bool = False,
     stream_output: bool = True,
     max_tokens: Optional[int] = None,
+    tier: Optional[str] = None,
+    agentic: bool = False,
 ) -> int:
     """Dispatch the swarm. A failed head or a failed synthesis exits nonzero."""
     results = execute_swarm(
@@ -1013,6 +1092,8 @@ def execute_swarm_mode(
         json_output=json_output,
         stream_output=stream_output,
         max_tokens=max_tokens,
+        tier=tier,
+        agentic=agentic,
     )
     if any(result.error for result in results):
         return 1
@@ -1059,22 +1140,31 @@ def execute_agent_mode(
     temperature: Optional[float] = None,
     max_tokens: Optional[int] = None,
     session_id: Optional[str] = None,
+    tier: Optional[str] = None,
+    interactive: bool = False,
+    steer_mode: bool = False,
 ) -> int:
-    """Execute autonomous agent loop with discovered MCP tools."""
-    from hydra_cli.agent import run_agent_loop
+    """Execute autonomous agent loop with discovered MCP tools and native coding tools."""
+    from hydra_cli.agent import run_agent_loop, run_interactive_agent
     from hydra_cli.mcp_registry import McpRegistry
+
+    if interactive or not prompt:
+        return run_interactive_agent(
+            alias=alias,
+            tier=tier,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            session_id=session_id,
+            steer_mode=steer_mode,
+        )
+
     reg = McpRegistry(auto_load=True)
     try:
         tools = reg.get_openai_tools()
         for server, err in sorted(reg.errors.items()):
             first = redact(err).strip().splitlines()[0] if err.strip() else "unknown error"
             sys.stderr.write(f"[HYDRA AGENT] MCP server '{server}' unavailable: {first[:200]}\n")
-        if not tools:
-            where = reg.config_path or "~/.hydra/mcp_servers.json"
-            sys.stderr.write(
-                f"[HYDRA AGENT] No MCP tools loaded from {where}. "
-                "Run `hydra mcp init` to install the default servers.\n"
-            )
         sys.stderr.flush()
         ans = run_agent_loop(
             alias=alias,
@@ -1084,6 +1174,8 @@ def execute_agent_mode(
             temperature=temperature,
             max_tokens=max_tokens,
             session_id=session_id,
+            tier=tier,
+            steer_mode=steer_mode,
         )
         print(ans)
         return 0

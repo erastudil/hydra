@@ -77,6 +77,17 @@ DEFAULT_CHEAPERINFERENCE_BASE = "https://api.cheaperinference.com/v1"
 DEFAULT_RUNPOD_BASE_TEMPLATE = "https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
 DEFAULT_HF_BASE = os.environ.get("HF_INFERENCE_BASE", "https://router.huggingface.co/v1").rstrip("/")
 DEFAULT_HF_MODEL = os.environ.get("HYDRA_HF_MODEL", CATALOG.get("default_hf_model", "meta-llama/Llama-3.1-8B-Instruct"))
+DEFAULT_ORCHESTRATOR_MODEL = os.environ.get(
+    "HYDRA_ORCHESTRATOR_MODEL",
+    os.environ.get(
+        "HYDRA_DEFAULT_MODEL",
+        CATALOG.get("default_orchestrator_model", "glm 5.3 flash"),
+    ),
+)
+DEFAULT_AGENT_MODEL = os.environ.get(
+    "HYDRA_AGENT_MODEL",
+    CATALOG.get("default_agent_model", DEFAULT_ORCHESTRATOR_MODEL),
+)
 
 # Models that only some providers serve. Values are provider ids in preference order.
 MODEL_PROVIDERS: Dict[str, List[str]] = {
@@ -92,6 +103,17 @@ PROVIDER_KEY_NAMES: Dict[str, str] = {
     "modal": "MODAL_ENDPOINT_URL",
     "huggingface": "HF_TOKEN",
 }
+
+DEFAULT_CONTEXT_WINDOW = 131072
+CONTEXT_PROFILES: Dict[str, int] = dict(CATALOG.get("context_profiles") or {"default": 131072, "128k": 131072})
+
+
+def get_context_window(model: Optional[str] = None) -> int:
+    """Return context window budget for model, defaulting to 128k (131072)."""
+    if not model:
+        return DEFAULT_CONTEXT_WINDOW
+    return CONTEXT_PROFILES.get(model, CONTEXT_PROFILES.get("default", DEFAULT_CONTEXT_WINDOW))
+
 
 SWARM_HEADS: Dict[str, Dict[str, str]] = {
     role: dict(spec) for role, spec in CATALOG["swarm"].items()
@@ -174,7 +196,15 @@ def model_rejects_temperature(model: str) -> bool:
 
 def model_providers(model: str) -> List[str]:
     """Provider ids allowed to serve this model id. Empty means any provider."""
-    return list(MODEL_PROVIDERS.get(model) or [])
+    providers = MODEL_PROVIDERS.get(model)
+    if providers is not None:
+        return list(providers)
+    cleaned = model.strip().lower()
+    if cleaned in CATALOG.get("aliases", {}):
+        target_model = CATALOG["aliases"][cleaned].get("model")
+        if target_model and target_model in MODEL_PROVIDERS:
+            return list(MODEL_PROVIDERS[target_model])
+    return []
 
 
 def resolve_route(alias: str) -> Dict[str, Any]:
@@ -182,11 +212,12 @@ def resolve_route(alias: str) -> Dict[str, Any]:
     cleaned = alias.strip().lower()
     spec = CATALOG["aliases"].get(cleaned)
     if not spec:
-        return {"model": alias, "effort": None, "reasoning_mode": None, "providers": model_providers(alias)}
+        return {"model": alias, "effort": None, "reasoning_mode": None, "runner": None, "providers": model_providers(alias)}
     return {
         "model": spec["model"],
         "effort": spec.get("effort"),
         "reasoning_mode": spec.get("reasoning_mode"),
+        "runner": spec.get("runner"),
         "providers": model_providers(spec["model"]),
     }
 
@@ -231,3 +262,19 @@ def consume_alias(tokens: List[str]) -> Tuple[str, List[str]]:
     if window:
         return window[0], window[1:] + tail
     return "", tail
+
+
+if __name__ == "__main__":
+    import sys
+    load_dotenv()
+    target = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_ORCHESTRATOR_MODEL
+    route = resolve_route(target)
+    providers = model_providers(route["model"])
+    print(f"alias: {target}")
+    print(f"model: {route['model']}")
+    print(f"allowed_providers: {providers}")
+    if providers:
+        print(f"primary_provider: {providers[0]}")
+        print(f"fallback_providers: {providers[1:]}")
+    else:
+        print("allowed_providers: all configured providers")

@@ -1,7 +1,8 @@
-"""
+﻿"""
 Multi-agent swarm for Hydra CLI.
 Specialists run together. Review heads (the auditor) run next, over the specialists' output.
 The synthesizer runs once, after every other result exists.
+Supports tier routing (free, local, paid) and agentic tool-augmented execution loops.
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -29,6 +30,7 @@ HEAD_ICONS = {
     "coder": "[CODE]",
     "auditor": "[AUDIT]",
     "synthesizer": "[SYNTH]",
+    "alice": "[ALICE]",
 }
 
 # Heads that review the other heads' work, so they run after them.
@@ -101,6 +103,8 @@ def run_single_head(
     wrap_task: bool = True,
     max_tokens: Optional[int] = None,
     context: Optional[str] = None,
+    tier: Optional[str] = None,
+    agentic: bool = False,
 ) -> SwarmResult:
     """Run one head, trying external agent runners first if configured, then each provider.
 
@@ -135,6 +139,16 @@ def run_single_head(
                                    duration_sec=duration, provider="pi")
         except Exception:
             pass
+    elif runner == "alice":
+        try:
+            from hydra_cli.alice_runner import run_alice
+            content = run_alice(task, timeout=wait)
+            if content:
+                duration = time.time() - start_time
+                return SwarmResult(role=role, title=title, model="alice-core", content=content,
+                                   duration_sec=duration, provider="alice")
+        except Exception:
+            pass
 
     user_content = task
     if wrap_task:
@@ -147,6 +161,30 @@ def run_single_head(
             "\n\nThe other heads produced the work below. Review it directly: name concrete defects "
             "in their design and code, and say what must change.\n\n" + context
         )
+
+    # Tool-augmented agentic execution mode
+    if agentic:
+        try:
+            from hydra_cli.agent import run_agent_loop
+            content = run_agent_loop(
+                alias=model,
+                prompt=user_content,
+                system_prompt=system_prompt,
+                tier=tier,
+                max_turns=30,
+            )
+            duration = time.time() - start_time
+            return SwarmResult(
+                role=role,
+                title=title,
+                model=model,
+                content=content,
+                duration_sec=duration,
+                provider="agentic",
+            )
+        except Exception:
+            pass
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_content},
@@ -267,6 +305,8 @@ def _run_stage(
     max_tokens: Optional[int],
     json_output: bool,
     context: Optional[str] = None,
+    tier: Optional[str] = None,
+    agentic: bool = False,
 ) -> Dict[str, SwarmResult]:
     results: Dict[str, SwarmResult] = {}
     if not roles:
@@ -284,6 +324,8 @@ def _run_stage(
                 True,
                 max_tokens,
                 context,
+                tier,
+                agentic,
             ): role
             for role in roles
         }
@@ -307,19 +349,36 @@ def execute_swarm(
     json_output: bool = False,
     stream_output: bool = True,
     max_tokens: Optional[int] = None,
+    tier: Optional[str] = None,
+    agentic: bool = False,
 ) -> List[SwarmResult]:
     """
     Run specialist heads in parallel, then review heads over their output, then one
     synthesizer over everything. stream_output is accepted for CLI compatibility.
     max_tokens caps every head, the synthesizer included.
+    Supports tier routing (free, local, paid) and agentic tool execution loops.
     """
     del stream_output
-    providers = get_frontier_providers()
-    if not providers:
-        raise ProviderError(
-            "Multi-agent swarm requires frontier credentials.\n"
-            "Set OPENROUTER_API_KEY or AI_GATEWAY_API_KEY in your environment."
-        )
+    resolved_tier = (tier or "").lower().strip()
+    if resolved_tier == "free":
+        from hydra_cli.providers import get_free_candidates
+        candidates = get_free_candidates(custom_model)
+        providers = [c[0] for c in candidates]
+        if not custom_model and candidates:
+            custom_model = candidates[0][1]
+    elif resolved_tier == "local":
+        from hydra_cli.providers import detect_local_endpoint, DEFAULT_LOCAL_MODEL
+        url, name = detect_local_endpoint()
+        providers = [{"name": name, "url": url, "headers": {"Content-Type": "application/json"}}]
+        if not custom_model:
+            custom_model = DEFAULT_LOCAL_MODEL
+    else:
+        providers = get_frontier_providers()
+        if not providers:
+            raise ProviderError(
+                "Multi-agent swarm requires frontier credentials.\n"
+                "Set OPENROUTER_API_KEY or AI_GATEWAY_API_KEY in your environment."
+            )
 
     requested = heads or ["architect", "coder", "auditor"]
     explicit_synth = "synthesizer" in requested
@@ -336,7 +395,7 @@ def execute_swarm(
         sys.stderr.write(f"\n[HYDRA SWARM] Fanning out {len(first_roles)} specialist heads in parallel...\n")
         sys.stderr.flush()
 
-    results_by_role = _run_stage(first_roles, task, providers, custom_model, temperature, max_tokens, json_output)
+    results_by_role = _run_stage(first_roles, task, providers, custom_model, temperature, max_tokens, json_output, tier=tier, agentic=agentic)
 
     if review_roles:
         reviewed = [results_by_role[r] for r in first_roles if not results_by_role[r].error]
@@ -347,7 +406,7 @@ def execute_swarm(
             sys.stderr.flush()
         context = _findings_text(reviewed) if reviewed else None
         results_by_role.update(
-            _run_stage(review_roles, task, providers, custom_model, temperature, max_tokens, json_output, context)
+            _run_stage(review_roles, task, providers, custom_model, temperature, max_tokens, json_output, context, tier=tier, agentic=agentic)
         )
 
     results = [results_by_role[role] for role in worker_roles]
@@ -370,6 +429,8 @@ def execute_swarm(
             temperature,
             wrap_task=False,
             max_tokens=max_tokens,
+            tier=tier,
+            agentic=agentic,
         )
         results.append(synth_res)
         if not json_output:

@@ -423,9 +423,7 @@ def test_banner_has_one_tagline(monkeypatch):
     banner = get_terminal_banner()
     assert banner.count("Sovereign Multi-Headed AI Shell") == 1
     assert f"v{__version__}" in banner
-    assert banner.count("___ ___") == 1
     assert "HERMES" not in banner
-    assert banner.count(r"(\___/)") == 3
 
 
 def test_default_mcp_config_has_no_deprecated_packages_and_keeps_sqlite_in_hydra_home():

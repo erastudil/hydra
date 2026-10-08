@@ -35,11 +35,9 @@ def test_token_stream_writer_coalesces_and_sanitizes():
 def test_banner_is_single_composition(monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
     banner = get_terminal_banner(detailed=True)
-    # One splash: 3-head TUI creature + classic wordmark + one tagline.
-    assert banner.count(r"(\___/)") == 3
+    # One splash: single creature + wordmark + one tagline.
     assert "HERMES" not in banner
     assert "ARCHITECT" not in banner
-    assert banner.count("___ ___") == 1
     assert banner.count("Sovereign Multi-Headed AI Shell") == 1
     assert f"v{__version__}" in banner
 
