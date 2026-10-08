@@ -114,10 +114,14 @@ def run_alice(
     before falling back to model generation.
     Returns agent string output or None if Alice is unavailable.
     """
-    if not alice_available():
-        return None
+    from hydra_cli.alice_retrieve import answer as retrieve, is_inquiry
 
-    alice_eval = evaluate_with_alice(prompt, timeout=timeout)
+    alice_eval = evaluate_with_alice(prompt, timeout=timeout) if alice_available() else None
+    strict = {"DETERMINISTIC_EVAL", "DETERMINISTIC_LOGIC", "SYLLOGISTIC_DEDUCTION", "SYSTEM_COMMAND", "VERBATIM_RECALL"}
+    if (not alice_eval or alice_eval.get("route") not in strict) and is_inquiry(prompt):
+        found = retrieve(prompt, session="runner")
+        if found.action in ("answer", "ask"):
+            return found.text
     if not alice_eval:
         return None
 

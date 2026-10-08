@@ -647,24 +647,23 @@ def execute_summon(
     """
     route = resolve_route(alias)
     if route.get("runner") == "alice" or alias.strip().lower() == "alice":
-        from hydra_cli.alice_runner import alice_available, run_alice
-        if alice_available():
-            output = run_alice(
-                prompt,
-                model=model_override or route.get("model"),
-                fallback_model=model_override or route.get("model"),
-            )
-            if output:
-                if json_mode:
-                    import json
-                    print(json.dumps({
-                        "model": "alice-cognitive-core",
-                        "runner": "alice",
-                        "content": output,
-                    }, indent=2))
-                else:
-                    print(output)
-                return 0
+        from hydra_cli.alice_runner import run_alice
+        output = run_alice(
+            prompt,
+            model=model_override or route.get("model"),
+            fallback_model=model_override or route.get("model"),
+        )
+        if output:
+            if json_mode:
+                import json
+                print(json.dumps({
+                    "model": "alice-cognitive-core",
+                    "runner": "alice",
+                    "content": output,
+                }, indent=2))
+            else:
+                print(output)
+            return 0
     model_id = model_override or route["model"]
     if model_override:
         route_effort = effort
