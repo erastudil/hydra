@@ -160,7 +160,7 @@ def test_build_bounded_messages():
     assert len(bounded_pruned) == 8
     assert bounded_pruned[0]["content"] == "SYSTEM_PROMPT"
     assert bounded_pruned[1]["content"] == "USER_TASK"
-    assert "[ACTIVE WORKING MEMORY" in bounded_pruned[2]["content"]
+    assert "[UNLOADED TOOL ROUNDS]" in bounded_pruned[2]["content"]
     assert bounded_pruned[3]["role"] == "user"
     assert bounded_pruned[4]["tool_calls"][0]["id"] == "c_2"
     assert bounded_pruned[6]["tool_calls"][0]["id"] == "c_3"

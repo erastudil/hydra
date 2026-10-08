@@ -257,6 +257,6 @@ def test_bounded_messages_context_budget_compression():
         max_context_chars=10_000,
     )
 
-    # Verifies compression occurred on oversized tool outputs
-    has_compacted = any("TOOL OBSERVATION COMPACTED FOR 128K BUDGET" in str(m.get("content")) for m in bounded)
-    assert has_compacted is True
+    assert bounded[0]["content"] == "SYSTEM PROMPT"
+    assert any(str(m.get("content") or "") == huge_content for m in bounded)
+    assert all("TOOL OBSERVATION COMPACTED" not in str(m.get("content") or "") for m in bounded)

@@ -1190,11 +1190,13 @@ class HydraTUI:
         return [(border, g["tl"] + g["h"])] + title
 
     def _top_right(self) -> Fragments:
-        label = (self.model or "").strip()
-        if not label:
+        g = self._g
+        parts = [p for p in ((self.model or "").strip(), (self.dialect or "").strip(), (self.strategy or "").strip()) if p]
+        if not parts:
             return []
-        room = max(0, self._width() - 30)
-        return [("class:dim", _trim(" " + label + " ", room)), (self._border_style(), self._g["h"])]
+        sep = " " + g["dot"] + " "
+        room = max(0, self._width() - 24)
+        return [("class:dim", _trim(" " + sep.join(parts) + " ", room)), (self._border_style(), g["h"])]
 
     def _status(self) -> Fragments:
         g = self._g

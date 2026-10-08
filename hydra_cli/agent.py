@@ -2,7 +2,13 @@
 Autonomous ReAct agent execution loop with MCP tool calling, native coding tools, and multi-turn state.
 Zero external dependencies.
 """
-from hydra_cli.context import SessionContextLedger
+from hydra_cli.context import (
+    SessionContextLedger,
+    context_label,
+    format_context_picker,
+    register_label,
+    resolve_context_mode,
+)
 from hydra_cli.ui import StreamWrap, clean_pasted_text, drain_steering, prompt_input, render_prompt_box, wrap_text
 from hydra_cli._version import __version__
 
@@ -127,9 +133,9 @@ PROJECT_RULE_FILES = ("AGENTS.md", ".cursorrules", "CLAUDE.md")
 _PROGEN_KEYS = ("progen specification", "progen skill specification")
 _RULE_CAP = 25_000
 
-DIALECTS = ("syntax", "instruct", "gfc", "slack")
+DIALECTS = ("progen", "instruct", "gfc", "slack")
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
-CONTEXT_STRATEGIES = ("sliding", "compact", "retrieve")
+CONTEXT_STRATEGIES = ("recall", "sliding")
 
 
 def _read_capped(path: str, cap: int = _RULE_CAP) -> str:
@@ -334,10 +340,12 @@ def format_model_picker(active_alias: str, active_summon: str) -> str:
 
 def dialect_instruction(name: str) -> str:
     """Session register block appended after project rules."""
-    key = (name or "syntax").strip().lower()
+    key = (name or "progen").strip().lower()
+    if key == "syntax":
+        key = "progen"
     blocks = {
-        "syntax": (
-            "[REGISTER: syntax]\n"
+        "progen": (
+            "[REGISTER: progen]\n"
             "Every unit is topic : comment.\n"
             "One blank line between units.\n"
             "Zero leading copula."
@@ -355,7 +363,7 @@ def dialect_instruction(name: str) -> str:
             "Conversational prose permitted."
         ),
     }
-    return blocks.get(key, blocks["syntax"])
+    return blocks.get(key, blocks["progen"])
 
 
 def parse_heat(arg: str) -> Optional[float]:
@@ -568,44 +576,48 @@ def _build_bounded_messages(
     max_context_chars: int = 400_000,
 ) -> List[Dict[str, Any]]:
     """
-    Construct bounded working memory message list (WO-06).
-    Keeps system prompt (token 0 cache block) and initial user prompt.
-    Compacts older completed tool turn groups into a structured working memory note
-    while retaining the most recent `max_history_turns` turns in full detail.
+    Live window for one agent turn.
+    The system message stays byte-for-byte. Older tool rounds leave whole.
+    Recalled ledger turns come back through the ledger, not through a summary.
     """
-    if len(turn_groups) <= max_history_turns:
-        return list(messages)
+    if not messages:
+        return []
 
     system_msg = messages[0]
     user_msg = messages[1]
+    pinned_system = system_msg.get("content")
 
-    recent_groups = turn_groups[-max_history_turns:]
-    compact_summary = scratchpad.format_for_context()
+    recent_groups = [list(group) for group in turn_groups[-max_history_turns:]]
+    while len(recent_groups) > 1:
+        probe = [system_msg, user_msg]
+        for group in recent_groups:
+            probe.extend(group)
+        total_chars = sum(len(str(m.get("content") or "")) for m in probe)
+        if total_chars <= max_context_chars:
+            break
+        recent_groups.pop(0)
 
-    summary_assistant = {
-        "role": "assistant",
-        "content": (
-            f"[ACTIVE WORKING MEMORY & HISTORICAL SCRATCHPAD]\n"
-            f"{compact_summary}\n"
-            f"Earlier {len(turn_groups) - max_history_turns} tool execution cycles completed successfully."
-        ),
-    }
-    summary_user = {
-        "role": "user",
-        "content": "Proceed with the next execution step according to active working memory and objectives.",
-    }
-
-    bounded = [system_msg, user_msg, summary_assistant, summary_user]
+    unloaded = len(turn_groups) - len(recent_groups)
+    bounded: List[Dict[str, Any]] = [system_msg, user_msg]
+    if unloaded:
+        note = scratchpad.format_for_context()
+        bounded.append({
+            "role": "assistant",
+            "content": (
+                f"[UNLOADED TOOL ROUNDS]\n"
+                f"{unloaded} earlier tool rounds left the live window.\n"
+                f"Their text stays on the session ledger for verbatim recall.\n"
+                f"{note}"
+            ),
+        })
+        bounded.append({
+            "role": "user",
+            "content": "Continue from the live tool rounds. Recall ledger turns when a name or path matters.",
+        })
     for group in recent_groups:
         bounded.extend(group)
-
-    total_chars = sum(len(str(m.get("content") or "")) for m in bounded)
-    if total_chars > max_context_chars and len(bounded) > 4:
-        for m in bounded[2:-2]:
-            c = m.get("content")
-            if isinstance(c, str) and len(c) > 4000:
-                m["content"] = c[:2000] + "\n... [TOOL OBSERVATION COMPACTED FOR 128K BUDGET] ...\n" + c[-1000:]
-
+    if pinned_system is not None:
+        bounded[0]["content"] = pinned_system
     return bounded
 
 
@@ -808,7 +820,7 @@ def run_agent_loop(
     ledger: Optional[SessionContextLedger] = None,
     effort: Optional[str] = None,
     dialect: Optional[str] = None,
-    strategy: str = "sliding",
+    strategy: str = "recall",
     on_token: Optional[Callable[[str], None]] = None,
     max_context_chars: Optional[int] = None,
 ) -> str:
@@ -882,21 +894,9 @@ def run_agent_loop(
         effective_sys = f"{effective_sys}\n\n{register}"
 
     original_prompt = prompt
-    if strategy == "retrieve" and ledger.turns:
-        hits = ledger.retrieve_verbatim(ledger.extract_keywords(original_prompt), max_turns=3)
-        retrieved = [str(hit.get("content") or "").strip() for hit in hits]
-        retrieved = [item for item in retrieved if item]
-        if retrieved:
-            prompt = "[RETRIEVED CONTEXT]\n" + "\n".join(retrieved) + "\n\n" + original_prompt
-    elif strategy == "sliding" and ledger.turns:
-        prior_lines: List[str] = []
-        for turn in ledger.turns[-6:]:
-            role = turn.get("role")
-            content = str(turn.get("content") or "").strip()
-            if role in ("user", "assistant") and content and not content.startswith("[IN-FLIGHT"):
-                prior_lines.append(f"{role} : {content[:800]}")
-        if prior_lines:
-            prompt = "[PRIOR TURNS]\n" + "\n".join(prior_lines) + "\n\n" + original_prompt
+    prior = ledger.render_prior(original_prompt, strategy) if ledger.turns else ""
+    if prior:
+        prompt = prior + "\n\n" + original_prompt
 
     sys_text = build_cached_system_prompt(effective_sys)
     messages: List[Dict[str, Any]] = [
@@ -936,7 +936,7 @@ def run_agent_loop(
     route_effort = effort if effort else route.get("effort")
     reasoning = reasoning_fields(route_effort, route.get("reasoning_mode"))
     timeout = completion_timeout(reasoning)
-    history_turns = 1 if strategy == "compact" else max_history_turns
+    history_turns = max_history_turns
     context_chars = 400_000 if max_context_chars is None else max_context_chars
 
     color_on = supports_color()
@@ -1613,6 +1613,7 @@ class HydraReplCompleter:
         "/effort",
         "/heat",
         "/window",
+        "/strategy",
         "/swarm",
         "/auth",
         "/diff",
@@ -1753,7 +1754,8 @@ REPL_COMMAND_HELP: List[Tuple[str, str]] = [
     ("/heat", "sampling heat; off omits temperature"),
     ("/system", "show or set the session system prompt"),
     ("/window", "context window in tokens, or 128k / 1m"),
-    ("/compact", "compact the session ledger now"),
+    ("/strategy", "recall or sliding"),
+    ("/compact", "flush the ledger and unload the live window"),
     ("/retrieve", "pull matching ledger turns by keyword"),
     ("/diff", "colorized git diff of the worktree"),
     ("/undo", "revert the last modified file"),
@@ -1819,7 +1821,7 @@ def run_interactive_agent(
     active_tier = tier
     active_session_id = session_id or f"session_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     active_steer_mode = steer_mode
-    active_dialect = "syntax"
+    active_dialect = "progen"
     active_effort: Optional[str] = None
     boot_route = resolve_route(active_alias)
     active_runner = boot_route.get("runner")
@@ -1829,7 +1831,7 @@ def run_interactive_agent(
     last_gate = {"action": "", "route": ""}
     active_heat: Optional[float] = temperature
     active_window: Optional[int] = None
-    active_strategy = "sliding"
+    active_strategy = "recall"
     active_system_prompt = (
         DEFAULT_AGENT_SYSTEM_PROMPT
         if (not system_prompt or system_prompt == DEFAULT_SYSTEM_PROMPT)
@@ -1993,10 +1995,10 @@ def run_interactive_agent(
                     budget=max_budget,
                     turns=len(turns_history),
                     step_mode=active_steer_mode,
-                    dialect="",
+                    dialect=register_label(active_dialect),
                     effort="",
                     heat="",
-                    strategy="",
+                    strategy=context_label(active_strategy),
                 )
             else:
                 box = render_prompt_box(model=session_model_label(active_alias, active_runner, active_summon), version=__version__, est_tokens=est_tokens, max_budget=max_budget, turns=len(turns_history))
@@ -2368,8 +2370,8 @@ def run_interactive_agent(
             elif cmd == "/dialect":
                 if not arg:
                     sys.stdout.write(f"{c_mid}[Dialect: {active_dialect}. Valid: {', '.join(DIALECTS)}]{c_reset}\n")
-                elif arg.lower() in DIALECTS:
-                    active_dialect = arg.lower()
+                elif arg.lower() in DIALECTS or arg.lower() == "syntax":
+                    active_dialect = "progen" if arg.lower() in ("syntax", "progen") else arg.lower()
                     sys.stdout.write(f"{c_mid}[Dialect set to: {active_dialect}]{c_reset}\n")
                 else:
                     sys.stdout.write(f"{c_mid}[Invalid dialect '{arg}'. Valid: {', '.join(DIALECTS)}]{c_reset}\n")
@@ -2423,22 +2425,22 @@ def run_interactive_agent(
 
             elif cmd == "/strategy":
                 if not arg:
-                    sys.stdout.write(
-                        f"{c_mid}[Context strategy: {active_strategy}. "
-                        f"sliding keeps recent turns. compact folds older turns into the scratchpad. "
-                        f"retrieve pulls matching ledger turns back into the next prompt.]{c_reset}\n"
-                    )
-                elif arg.lower() in CONTEXT_STRATEGIES:
-                    active_strategy = arg.lower()
-                    sys.stdout.write(f"{c_mid}[Context strategy set to: {active_strategy}]{c_reset}\n")
+                    sys.stdout.write(format_context_picker(active_strategy) + "\n")
                 else:
-                    sys.stdout.write(f"{c_mid}[Invalid strategy '{arg}'. Valid: {', '.join(CONTEXT_STRATEGIES)}]{c_reset}\n")
+                    choice = resolve_context_mode(arg)
+                    if choice is None:
+                        sys.stdout.write(f"{c_mid}[Unknown context mode '{arg}'.]{c_reset}\n")
+                        sys.stdout.write(format_context_picker(active_strategy) + "\n")
+                    else:
+                        active_strategy = choice
+                        sys.stdout.write(f"{c_mid}[Context strategy set to: {active_strategy}]{c_reset}\n")
                 sys.stdout.flush()
 
             elif cmd == "/compact":
-                summary = active_ledger.compact_session(max_history_turns=1 if active_strategy == "compact" else 5)
-                active_strategy = "compact"
-                sys.stdout.write(f"{c_mid}[Compacted session. {summary['summary']}]{c_reset}\n")
+                summary = active_ledger.compact_session()
+                active_strategy = "recall"
+                sys.stdout.write(f"{c_mid}[{summary['summary']}]{c_reset}\n")
+                sys.stdout.write(f"{c_mid}[Live window set to recall. Ledger turns stay verbatim.]{c_reset}\n")
                 sys.stdout.flush()
 
             elif cmd == "/retrieve":
@@ -2477,7 +2479,8 @@ def run_interactive_agent(
   /skip            Skip the next tool call in the next agent turn
   /retry [guide]   Retry the previous turn with optional additional guidance
   /context [dump]  Context token count
-  /compact         Fold older turns into the session ledger
+  /strategy [mode] recall searches the ledger and pastes matching turns whole. sliding keeps the last few turns whole
+  /compact         Flush the ledger to disk and unload the live window. Turn text stays verbatim
   /retrieve <words> Show ledger turns matching keywords
   /diff            Display colorized unified git diff of current changes
   /undo [path]     Revert last modified file or specific file via git checkout

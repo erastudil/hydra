@@ -379,7 +379,7 @@ def test_heat_window_and_dialect_parsers():
     assert parse_heat("0.7") == 0.7
     assert parse_window("128k") == 128 * 1024
     assert parse_window("1m") == 1024 * 1024
-    assert "REGISTER: syntax" in dialect_instruction("syntax")
+    assert "REGISTER: progen" in dialect_instruction("syntax")
     with pytest.raises(ValueError):
         parse_heat("9")
 
@@ -435,7 +435,7 @@ def test_repl_session_settings(capsys, tmp_path):
         "/effort high",
         "/heat 0.4",
         "/window 128k",
-        "/strategy compact",
+        "/strategy recall",
         "/status",
         "/exit",
     ])
@@ -446,6 +446,6 @@ def test_repl_session_settings(capsys, tmp_path):
     assert "Effort set to: high" in out
     assert "Sampling heat set to: 0.4" in out
     assert "Context window set to: 131,072 tokens" in out
-    assert "Context strategy set to: compact" in out
+    assert "Context strategy set to: recall" in out
     assert "effort  high" in out
     assert "heat    0.4" in out
