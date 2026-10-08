@@ -142,7 +142,7 @@ CARDS: List[Dict[str, str]] = [
         "cues": "python test tests",
         "comment": (
             "Python tests in this house use pytest. From alice-emap: python -m pytest -q tests. "
-            "A change to the lattice keeps tests/test_alice_decision_model.py green. Hydra is the same runner and takes no third-party packages."
+            "Hydra verification is one command: python scripts/verify.py. The TUI needs prompt_toolkit."
         ),
     },
     {

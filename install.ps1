@@ -13,7 +13,7 @@ if (-not $python -and -not $node) {
 $Root = Join-Path $HOME '.hydra'
 $Bin = Join-Path $Root 'bin'
 $Repo = 'https://raw.githubusercontent.com/erastudil/hydra/main'
-# Every runtime file. tests/test_installers.py fails if this list drifts.
+# Every runtime file. python scripts/verify.py fails if this list drifts.
 $Files = @(
     'bin/hydra',
     'bin/hydra.js',

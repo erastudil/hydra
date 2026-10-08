@@ -22,12 +22,16 @@ This project previously lost real work when agents edited trees locally and neve
 
 ## Installer manifests
 
-`install.sh` and `install.ps1` must list every runtime file under `hydra_cli/` (`.py` / `.json`) plus `bin/hydra` and `bin/hydra.js`. `tests/test_installers.py` fails if the lists drift.
+`install.sh` and `install.ps1` must list every runtime file under `hydra_cli/` (`.py` / `.json`) plus `bin/hydra` and `bin/hydra.js`. `python scripts/verify.py` fails if the lists drift.
 
 ## Verification and Ponytail doctrine
 
 Primary verification gate:
 `python scripts/verify.py`
+
+Install first: `python3 -m pip install -e .` (pulls `prompt_toolkit`). Node.js 18+ is required for the `bin/hydra.js` checks. The gate exits 0 only when every check passes. A platform check that cannot run prints `skip` and does not fail the process.
+
+Add a check: define a function in `scripts/verify.py` and decorate it with `@check`. Call real code or a real subprocess. Raise `Skip("reason")` only for a platform that cannot run it. Do not add files under `tests/`.
 
 Invariants:
 1. Zero fake tests: synthetic mocks asserting mocked return values denote zero truth value; banned universally; verification requires real runnable execution gates.

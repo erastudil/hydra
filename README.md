@@ -210,12 +210,14 @@ Credentials live in `~/.hydra/.env` or system environment:
 | `GITHUB_TOKEN` | Token for GitHub MCP server integration. |
 | `BRAVE_API_KEY` | Key for Brave Search MCP server integration. |
 
-## Tests
+## Verification
 
 ```bash
-python -m pytest tests/
-npm test
+python3 -m pip install -e .
+python scripts/verify.py
 ```
+
+Node.js 18+ is required for the `bin/hydra.js` checks inside that same command.
 
 ## License
 
