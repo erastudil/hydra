@@ -39,7 +39,7 @@ from typing import Callable, Dict, Iterator, List, Optional, Sequence, Set, Tupl
 from hydra_cli.alice_senses import public_https
 from hydra_cli.config import hydra_home
 
-INDEX_VERSION = "5"
+INDEX_VERSION = "6"
 USER_AGENT = "alice-hydra/1.2 (+https://github.com/erastudil/hydra)"
 
 THRESHOLD = float(os.environ.get("ALICE_THRESHOLD", "0.6") or 0.6)
@@ -67,7 +67,9 @@ RARITY_MIN = 0.5
 RARITY_MAX = 9.0
 CUE_WEIGHT = {"who": 2.0, "when": 2.5, "where": 1.5, "count": 2.0, "why": 1.5, "what": 0.5}
 CUE_IN_MASS = {"who", "when", "where", "count", "why"}
-KIND_CAP = {"alias": 5.0, "related": 1.5, "derived": 4.0}
+KIND_GROUP = {"entity": "name", "alias": "name", "about": "name", "related": "related", "derived": "derived"}
+GROUP_CAP = {"name": 5.0, "related": 1.5, "derived": 4.0}
+FINAL_CANDIDATES = 1200
 TIER_BONUS = {"primary": 1.0, "curated": 0.6, "seed": 0.3, "synthesized": 0.0, "speculative": -1.0}
 
 # Same classes as snowgate-alice/mind/whitelist.json. That file merges in when present.
@@ -104,6 +106,7 @@ there these they this those through to too under until up upon us very was wasn 
 when where which while who whom whose why will with won would you your yours yourself yourselves
 tell explain describe define please give show list name kind sort thing things something someone anyone
 know need want mean means meaning called exam quiz homework question answer briefly simple simply really
+many much
 """.split())
 
 WORK_WORDS = set("""
@@ -129,7 +132,7 @@ LEMMA = {
     "spoken": "speak", "brought": "bring", "taught": "teach", "drew": "draw", "drawn": "draw", "grew": "grow",
     "grown": "grow", "rose": "rise", "risen": "rise", "fell": "fall", "fallen": "fall", "struck": "strike",
     "chose": "choose", "chosen": "choose", "stood": "stand", "understood": "understand", "ruled": "rule",
-    "children": "child", "men": "man", "women": "woman", "lives": "life", "wives": "wife", "mice": "mouse",
+    "children": "child", "men": "man", "women": "woman", "wives": "wife", "mice": "mouse",
     "feet": "foot", "teeth": "tooth", "geese": "goose", "data": "datum", "criteria": "criterion",
     "phenomena": "phenomenon",
 }
@@ -141,7 +144,8 @@ SEMANTIC = {
     "die": ["death", "dead"], "death": ["die", "dead"], "dead": ["die", "death"], "born": ["birth"],
     "birth": ["born"], "kill": ["assassinate", "murder"], "assassinate": ["kill"], "begin": ["start"],
     "start": ["begin"], "end": ["finish"], "invent": ["inventor", "invention"], "write": ["author"],
-    "author": ["write"], "rule": ["reign"], "reign": ["rule"],
+    "author": ["write"], "rule": ["reign"], "reign": ["rule"], "live": ["reside", "residence", "home"],
+    "reside": ["live", "residence"], "residence": ["live", "reside"],
 }
 DERIVE_SUFFIXES = ("y", "ion", "ation", "or", "er", "ery", "ment", "al", "ic", "ist", "ism", "ive", "ity", "ance", "ence",
                    "an", "ian")
@@ -175,10 +179,28 @@ RELATIONAL_RE = re.compile(
     r"^(?:what|who|which)\s+(?:is|was|are|were)\s+(?:the|a|an)\s+(?P<head>[\w-]+(?:\s+[\w-]+)?)\s+of\s+(?P<obj>.+)", re.I
 )
 AGENT_RE = re.compile(r"^who\s+(?P<verb>[a-z]+)\s+(?P<obj>.+)", re.I)
+DEFINIENDUM_RE = re.compile(r"^(?:what|who)\s+(?:is|was|are|were)\s+(?:the\s+|a\s+|an\s+)?(.+?)\??$", re.I)
+WORK_NOUNS = r"(?:book|novel|poem|play|treatise|work|essay|painting|portrait|symphony|opera|song|album|film|dialogue|sculpture)"
+COUNT_RE = re.compile(r"^how\s+many\s+(?P<noun>[a-z]+)\b", re.I)
+STRONG_WHERE = re.compile(r"\b(located|situated|lies|lying|based|headquartered|stands|sits)\s+(at|in|on|near|along)\b"
+                          r"|\b(?:born|died|buried)\s+(?:at|in)\s+(?:the\s+)?(?-i:[A-Z])", re.I)
+COPULA = r"(?:is|was|are|were|became|remains|has been|had been|have been|serves as|served as)"
 AUXILIARY = {"is", "was", "were", "are", "did", "does", "do", "has", "had", "have", "will", "can", "could", "would", "should"}
 MANDATORY = {"first", "last", "largest", "smallest", "oldest", "youngest", "tallest", "highest", "lowest", "longest",
              "shortest", "biggest", "second", "third", "fourth", "fifth", "earliest", "latest", "deepest", "fastest"}
 W_SLOT = 3.0
+REQUIRED_CUES = {"when", "where", "count"}
+W_STRONG_WHERE = 3.0
+W_VOTE = 1.0
+W_SUBJECT = 1.5
+MIN_CONCEPT_FAME = 2
+VOTE_CAP = 3.0
+RELATION_NOUNS = {
+    "capital", "president", "author", "founder", "inventor", "leader", "king", "queen", "ruler", "emperor",
+    "population", "currency", "language", "mother", "father", "wife", "husband", "son", "daughter", "brother",
+    "sister", "chancellor", "minister", "governor", "mayor", "director", "owner", "creator", "composer", "painter",
+    "architect", "city", "river", "mountain", "symbol", "flag", "motto", "anthem", "successor", "predecessor",
+}
 PERSON_FRAME = re.compile(
     r"^(?:who\s+(?:is|was|were|are)\s+(?P<a>.+)"
     r"|(?:when|where|how)\s+(?:was|did|were|is)\s+(?P<b>.+?)\s+(?:born|die|died|live|lived|rule|ruled|reign|reigned|buried)\b"
@@ -373,16 +395,27 @@ def _http(url: str, timeout: float = 12.0, limit: int = 3_000_000) -> Optional[T
     if not web_allowed(url):
         return None
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/json;q=0.9,*/*;q=0.5"})
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            final = response.geturl()
-            if not web_allowed(final):
-                return None
-            raw = response.read(limit)
-            charset = response.headers.get_content_charset() or "utf-8"
-            return final, raw.decode(charset, "replace")
-    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
-        return None
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                final = response.geturl()
+                if not web_allowed(final):
+                    return None
+                raw = response.read(limit)
+                charset = response.headers.get_content_charset() or "utf-8"
+                return final, raw.decode(charset, "replace")
+        except urllib.error.HTTPError as exc:
+            if attempt == 0 and exc.code in (429, 500, 502, 503, 504):
+                retry_after = exc.headers.get("Retry-After", "") if exc.headers else ""
+                time.sleep(min(4.0, float(retry_after)) if retry_after.isdigit() else 1.5)
+                continue
+            return None
+        except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
+            if attempt == 0:
+                time.sleep(1.0)
+                continue
+            return None
+    return None
 
 
 def _json(url: str, timeout: float = 12.0) -> Optional[dict]:
@@ -480,14 +513,28 @@ def wd_human_search(query: str, limit: int = 6) -> List[str]:
     return [hit["title"] for hit in hits if re.fullmatch(r"Q\d+", hit.get("title", ""))]
 
 
+MATCH_BONUS = {("label", True): 3.0, ("alias", True): 2.0, ("label", False): 1.0, ("alias", False): 0.0}
+
+
 def wd_label_search(query: str, limit: int = 8) -> List[str]:
-    """Wikidata items whose English label or alias equals the query."""
+    """Wikidata items whose English label or alias begins with the query's words."""
+    return [qid for qid, _ in wd_label_matches(query, limit)]
+
+
+def wd_label_matches(query: str, limit: int = 8) -> List[Tuple[str, float]]:
+    """(item, match bonus): exact label 3, exact alias 2, label prefix 1, alias prefix 0."""
     params = {"action": "wbsearchentities", "search": query, "language": "en", "format": "json",
               "limit": str(limit), "type": "item"}
     data = _json(WD_API + "?" + urllib.parse.urlencode(params))
     wanted = words(query)
-    return [item["id"] for item in (data or {}).get("search") or []
-            if words((item.get("match") or {}).get("text") or "") == wanted]
+    out: List[Tuple[str, float]] = []
+    for item in (data or {}).get("search") or []:
+        match = item.get("match") or {}
+        got = words(match.get("text") or "")
+        if got[: len(wanted)] == wanted:
+            kind = "label" if match.get("type") == "label" else "alias"
+            out.append((item["id"], MATCH_BONUS[(kind, got == wanted)]))
+    return out
 
 
 def wd_entities(ids: Sequence[str]) -> List[Entity]:
@@ -754,6 +801,7 @@ class Hit:
     doc: int = 0
     anchor: float = 0.0
     covered: Set[str] = field(default_factory=set)
+    filler: str = ""
 
 
 class AliceIndex:
@@ -1016,12 +1064,12 @@ class AliceIndex:
     # -- search
 
     def search(self, features: Sequence[Feature], cue: Optional[str], focus: Optional[Feature], limit: int = 8,
-               slot: Optional["Slot"] = None) -> List[Hit]:
+               slot: Optional["Slot"] = None, subjects: Optional[Set[frozenset]] = None) -> List[Hit]:
         with self.lock:
-            return self._search(features, cue, focus, limit, slot)
+            return self._search(features, cue, focus, limit, slot, subjects or set())
 
     def _search(self, features: Sequence[Feature], cue: Optional[str], focus: Optional[Feature], limit: int,
-                slot: Optional["Slot"]) -> List[Hit]:
+                slot: Optional["Slot"], subjects: Set[frozenset]) -> List[Hit]:
         sent_sets: List[Set[int]] = []
         for feature in features:
             rows = self.con.execute("SELECT sent FROM post WHERE term = ?", (feature.term,)).fetchall()
@@ -1052,10 +1100,10 @@ class AliceIndex:
             used: Dict[str, float] = defaultdict(float)
 
             def credit(name: str, feature: Feature, gain: float) -> None:
-                cap = KIND_CAP.get(feature.kind)
-                if cap is not None:
-                    gain = min(gain, cap - used[feature.kind])
-                    used[feature.kind] += max(0.0, gain)
+                group = KIND_GROUP.get(feature.kind)
+                if group is not None:
+                    gain = min(gain, GROUP_CAP[group] - used[group])
+                    used[group] += max(0.0, gain)
                 if gain > 0:
                     parts[name] = round(gain, 3)
                     if feature.root:
@@ -1070,7 +1118,7 @@ class AliceIndex:
                     parts[f"{feature.label} [heading]"] = W_HEADING
             scored.append((sum(parts.values()), sent, parts, covered))
         scored.sort(key=lambda item: -item[0])
-        top = scored[:300]
+        top = scored[:FINAL_CANDIDATES]
 
         hits: List[Hit] = []
         marks = ",".join("?" * len(top))
@@ -1090,7 +1138,7 @@ class AliceIndex:
         anchor_names: Set[str] = set()
         for feature in features:
             if feature.base:
-                for kind in (feature.kind, "context", "coref", "lifespan"):
+                for kind in (feature.kind, "context", "coref", "lifespan", "about"):
                     anchor_names.add(f"{feature.label} [{kind}]")
         if focus is not None:
             anchor_names.add("definition [define]")
@@ -1103,11 +1151,21 @@ class AliceIndex:
             parts = dict(parts)
             covered = set(covered)
             text = row[1]
-            if PRONOUN_START.match(text):
+            lead = row[10] in first_para and row[11] - first_para[row[10]] < LEAD_PARAS
+            if PRONOUN_START.match(text) or lead:
                 heads = {name[: -len(" [heading]")] for name in parts if name.endswith(" [heading]")}
                 for name in list(parts):
                     if name.endswith(" [context]") and name[: -len(" [context]")] in heads:
                         parts[name[: -len(" [context]")] + " [coref]"] = -W_CONTEXT
+                title_terms = set(content(row[7] or ""))
+                named = sum(value for name, value in parts.items() if name.endswith(("[entity]", "[alias]")))
+                for feature in features:
+                    if (feature.kind == "entity" and f"{feature.label} [entity]" not in parts
+                            and set(feature.term.split()) == title_terms):
+                        gain = min(feature.weight, GROUP_CAP["name"] - named)
+                        named += max(0.0, gain)
+                        if gain > 0:
+                            parts[f"{feature.label} [about]"] = round(gain, 3)
             if cue != "where" and LIFESPAN.search(text):
                 for feature in features:
                     if feature.term in LIFE_TERMS and feature.base and f"{feature.label} [{feature.kind}]" not in parts:
@@ -1116,19 +1174,26 @@ class AliceIndex:
                         covered.add(feature.root or feature.term)
             if cue_re and cue_re.search(text):
                 parts[f"cue {cue}"] = CUE_WEIGHT[cue]
+            if cue == "where" and STRONG_WHERE.search(text):
+                parts["cue where"] = W_STRONG_WHERE
             if focus is not None and _defines(text, focus.term):
                 parts["definition [define]"] = focus.weight
-            if slot is not None and _fills(text, slot):
+            filled = _fills(text, slot) if slot is not None else ""
+            if filled:
                 parts[f"slot [{slot.kind}]"] = W_SLOT
             bonus = TIER_BONUS.get(row[8] or "", 0.0)
             if bonus:
                 parts[f"tier {row[8]}"] = bonus
-            if row[10] in first_para and row[11] - first_para[row[10]] < LEAD_PARAS:
+            if lead:
                 parts["lead paragraph"] = W_LEAD
+            if subjects and frozenset(content(row[7] or "")) in subjects:
+                parts["subject page"] = W_SUBJECT
             anchor = round(sum(value for name, value in parts.items() if name in anchor_names), 3)
             hits.append(Hit(sent, round(sum(parts.values()), 3), parts, text, row[2], row[3] or "", row[4] or "",
-                            row[5] or "", row[6] or "", row[7] or "", row[8] or "", row[9] or "", row[10], anchor, covered))
-        hits.sort(key=lambda hit: (-hit.score, len(hit.text)))
+                            row[5] or "", row[6] or "", row[7] or "", row[8] or "", row[9] or "", row[10], anchor, covered,
+                            fold(filled)))
+        _vote(hits)
+        hits.sort(key=lambda hit: (-hit.score, hit.sent))
         return hits[:limit]
 
 
@@ -1139,17 +1204,24 @@ class Slot:
     word: str
     forms: Tuple[str, ...]
     exclude: frozenset
+    required: bool = False
+    obj: frozenset = frozenset()
 
 
 def question_slot(question: str) -> Optional[Slot]:
     text = strip_question(question).strip().rstrip("?")
     exclude = frozenset(content(text))
+    counted = COUNT_RE.match(text)
+    if counted:
+        word = stem(fold(counted.group("noun")))
+        return Slot("count", word, _forms(word), exclude, True)
     relational = RELATIONAL_RE.match(text)
     if relational:
         head = content(relational.group("head"))
         if head:
             word = head[-1]
-            return Slot("relation", word, _forms(word), exclude)
+            obj = frozenset(content(relational.group("obj")))
+            return Slot("relation", word, _forms(word), exclude, word in RELATION_NOUNS, obj)
     agent = AGENT_RE.match(text)
     if agent and agent.group("verb").lower() not in AUXILIARY:
         word = stem(fold(agent.group("verb")))
@@ -1162,28 +1234,58 @@ def _forms(word: str) -> Tuple[str, ...]:
     return tuple(dict.fromkeys([word, *irregular]))
 
 
-def _fills(text: str, slot: Slot) -> bool:
+def _fills(text: str, slot: Slot) -> str:
+    """The value filling the answer slot, or an empty string."""
     forms = "|".join(re.escape(form) for form in slot.forms)
     word = rf"(?:{forms})[a-z]*"
-    filler = r"[\w'’-]{3,}"
+    filler = r"[\w.'’-]{2,}"
+    if slot.kind == "count":
+        number = re.search(rf"(?i:\b(\d[\d,.]*)\s+(?:[a-z-]+\s+)?{word}\b)", text)
+        return number.group(1).rstrip(".,") if number else ""
     if slot.kind == "relation":
-        patterns = [
-            rf"(?i:\b({filler})\s+(?:is|was|are|were|became|remains)\s+(?:[\w'’\"“-]+\s+){{0,4}}?[\"“]?{word}\b)",
-            rf"(?i:\b{word}\b(?:\s+city)?\s*(?:is|was|are|were|,|:)\s+(?:the\s+)?)([A-Z][\w'’-]+)",
-        ]
+        if slot.obj and not _relation_object(text, word, slot.obj):
+            return ""
+        patterns = [rf"(?i:\b({filler})\s+{COPULA}\s+(?:[\w'’\"“-]+\s+){{0,4}}?[\"“]?{word}\b)"]
+        if slot.required:
+            patterns.append(
+                rf"(?i:\b{word}\b)(?:\s+(?:city|of|the|[A-Z][\w.'’-]*)){{0,5}}\s*(?i:{COPULA}|,|:)\s+(?:the\s+)?([A-Z][\w'’-]+)"
+            )
     else:
         past = "|".join(re.escape(form) for form in slot.forms[1:]) or "(?!)"
         acted = rf"(?:{re.escape(slot.word)}e?d|{past})"
         patterns = [
-            rf"(?i:\b{word}\b(?:\s+[\w,'’-]+){{0,6}}?\s+by\s+(?:the\s+)?(?:[a-z]+\s+){{0,3}})([A-Z][\w'’-]+)",
+            rf"(?i:\b(?:{word}|{WORK_NOUNS})\b(?:\s+[\w,'’-]+){{0,6}}?\s+by\s+(?:the\s+)?(?:[a-z]+\s+){{0,3}})([A-Z][\w'’-]+)",
             rf"\b([A-Z][\w'’-]+(?:\s+(?:da|de|von|van)?\s*[A-Z][\w'’-]+)*)\s+(?:[a-z]+\s+){{0,2}}?(?i:{acted})\b",
         ]
     for pattern in patterns:
         for match in re.finditer(pattern, text):
             name = match.group(1)
             if fold(name) not in STOP and stem(fold(name.split()[-1])) not in slot.exclude:
-                return True
-    return False
+                return name.strip(".,")
+    return ""
+
+
+def _vote(hits: List[Hit]) -> None:
+    """Each other distinct sentence that fills the slot with the same value adds W_VOTE, up to VOTE_CAP."""
+    texts: Dict[str, Set[str]] = defaultdict(set)
+    for hit in hits:
+        if hit.filler:
+            texts[hit.filler].add(fold(hit.text)[:140])
+    for hit in hits:
+        others = len(texts.get(hit.filler, ())) - 1 if hit.filler else 0
+        if others > 0:
+            gain = min(VOTE_CAP, W_VOTE * others)
+            hit.parts[f"votes {hit.filler}"] = gain
+            hit.score = round(hit.score + gain, 3)
+            hit.anchor = round(hit.anchor + gain, 3)
+
+
+def _relation_object(text: str, word: str, obj: frozenset) -> bool:
+    """'capital of the state of Texas' answers for Texas; an 'of' phrase after the head must name the asked object."""
+    need = len(obj) if len(obj) <= 2 else math.ceil(len(obj) * 2 / 3)
+    for match in re.finditer(rf"(?i:\b{word}\b)\s+of\s+((?:[\w.'’-]+\s*){{1,6}})", text):
+        return len(set(content(match.group(1))) & obj) >= need
+    return True
 
 
 def _defines(text: str, focus_term: str) -> bool:
@@ -1227,7 +1329,17 @@ def recognize(index: AliceIndex, question: str, extra: Sequence[str], web: bool,
     for size in (3, 2, 1):
         for start in range(0, len(focus) - size + 1):
             grams.append(" ".join(focus[start:start + size]))
-    candidates = [c for c in dict.fromkeys(spans + grams) if c and not c.isdigit()]
+    stripped = strip_question(question).strip()
+    named = DEFINIENDUM_RE.match(stripped)
+    agent = AGENT_RE.match(stripped.rstrip("?"))
+    if named:
+        phrase = words(named.group(1))
+    elif agent and agent.group("verb").lower() not in AUXILIARY:
+        phrase = words(re.sub(r"^(the|a|an)\s+", "", agent.group("obj").strip(), flags=re.I))
+    else:
+        phrase = []
+    whole = [" ".join(phrase)] if 2 <= len(phrase) <= 5 and phrase[0] not in STOP else []
+    candidates = [c for c in dict.fromkeys(spans + whole + grams) if c and not c.isdigit()]
 
     chosen: List[Entity] = []
     covered: Set[str] = set()
@@ -1257,27 +1369,37 @@ def recognize(index: AliceIndex, question: str, extra: Sequence[str], web: bool,
     person_multi = [" ".join(person_words[i:i + n]) for n in (3, 2) for i in range(0, len(person_words) - n + 1)]
     person_single = sorted(dict.fromkeys(person_words), key=lambda w: -index.rarity(stem(w)))
     person_cands = list(dict.fromkeys(spans + person_multi[:2] + person_single))[:6]
-    plan: List[Tuple[Callable[[str], List[str]], List[str]]] = []
+    def human(query: str) -> List[Tuple[str, float]]:
+        return [(qid, 0.0) for qid in wd_human_search(query)]
+
+    plan: List[Tuple[Callable[[str], List[Tuple[str, float]]], List[str]]] = []
     if person_cands and cue != "where":
-        plan.append((wd_human_search, person_cands))
-    plan.append((wd_label_search, ordered))
+        plan.append((human, person_cands))
+    plan.append((wd_label_matches, ordered))
+    bonus: Dict[str, float] = {}
     for search, cands in plan:
-        ordered = cands
         with ThreadPoolExecutor(max_workers=5) as executor:
-            results = list(executor.map(search, ordered))
-        by_cand = [(cand, ids[:5]) for cand, ids in zip(ordered, results)]
-        found = {entity.key: entity for entity in wd_entities(list(dict.fromkeys(q for _, ids in by_cand for q in ids))[:40])}
-        for cand, ids in by_cand:
-            for qid in ids:
+            results = list(executor.map(search, cands))
+        by_cand = [(cand, matches[:5]) for cand, matches in zip(cands, results)]
+        wanted_ids = list(dict.fromkeys(qid for _, matches in by_cand for qid, _ in matches))[:40]
+        found = {entity.key: entity for entity in wd_entities(wanted_ids)}
+        for cand, matches in by_cand:
+            for qid, match_bonus in matches:
                 entity = found.get(qid)
-                if entity and qid not in seen and _names(entity, cand, cand in spans):
-                    seen.add(qid)
-                    pool.append((cand, entity))
+                if not entity or qid in seen:
+                    continue
+                if search is human and not _names(entity, cand, cand in spans):
+                    continue
+                if search is wd_label_matches and entity.fame < MIN_CONCEPT_FAME:
+                    continue
+                seen.add(qid)
+                bonus[qid] = match_bonus
+                pool.append((cand, entity))
         if pool:
             break
     if not pool:
         return chosen[:2], []
-    top = _prefer(pool, context_terms)[0]
+    top = _prefer(pool, context_terms, bonus)[0]
     top_cand = next(cand for cand, entity in pool if entity.key == top.key)
     rivals: List[Entity] = []
     if _overlap(top, top_cand, context_terms) == 0:
@@ -1301,12 +1423,14 @@ def _overlap(entity: Entity, cand: str, terms: Set[str]) -> int:
     return len(set(content(entity.descr)) & (terms - own))
 
 
-def _prefer(pairs: Sequence[Tuple[str, Entity]], terms: Set[str]) -> List[Entity]:
-    """Rank readings: query words the name covers, shared context terms, fame, then exact name."""
-    def rank(item: Tuple[int, Tuple[str, Entity]]) -> Tuple[int, int, int, int, int]:
+def _prefer(pairs: Sequence[Tuple[str, Entity]], terms: Set[str], bonus: Optional[Dict[str, float]] = None) -> List[Entity]:
+    """Rank readings: query words the name covers, shared context terms, then log2 fame plus match bonus."""
+    bonus = bonus or {}
+
+    def rank(item: Tuple[int, Tuple[str, Entity]]) -> Tuple[int, int, float, int]:
         position, (cand, entity) = item
-        exact = 1 if focus_words(entity.label) == cand.split() else 0
-        return (-len(cand.split()), -_overlap(entity, cand, terms), -entity.fame, -exact, position)
+        standing = math.log2(1 + entity.fame) + bonus.get(entity.key, 0.0)
+        return (-len(cand.split()), -_overlap(entity, cand, terms), -standing, position)
     return [entity for _, (_, entity) in sorted(enumerate(pairs), key=rank)]
 
 
@@ -1392,7 +1516,9 @@ def build_features(index: AliceIndex, question: str, extra: Sequence[str], entit
         add(term, kind, weight, False, term)
 
     focus: Optional[Feature] = None
-    if DEFINITIONAL_RE.match(question.strip()) and not RELATIONAL_RE.match(question.strip()):
+    relational = RELATIONAL_RE.match(strip_question(question).strip())
+    relation_head = content(relational.group("head"))[-1:] if relational else []
+    if DEFINITIONAL_RE.match(question.strip()) and not (relation_head and relation_head[0] in RELATION_NOUNS):
         unigrams = [f for f in feats.values() if f.base and " " not in f.term and f.kind == "term"]
         if unigrams:
             rarest = max(unigrams, key=lambda f: f.weight)
@@ -1588,8 +1714,9 @@ def covered_share(hit: Hit, roots: Dict[str, float]) -> float:
     return sum(weight for root, weight in roots.items() if root in hit.covered) / total
 
 
-def _passing(hits: Sequence[Hit], need: float, features: Sequence[Feature]) -> List[Hit]:
-    """Sentences at or above threshold whose anchor and term coverage also hold."""
+def _passing(hits: Sequence[Hit], need: float, features: Sequence[Feature], cue: Optional[str] = None,
+             slot: Optional[Slot] = None) -> List[Hit]:
+    """Sentences at or above threshold whose anchor, term coverage, and answer type also hold."""
     roots = question_roots(features)
     replies = reply_roots(features)
     out: List[Hit] = []
@@ -1604,6 +1731,10 @@ def _passing(hits: Sequence[Hit], need: float, features: Sequence[Feature]) -> L
         asked = covered_share(hit, roots) >= COVER_SHARE and required <= hit.covered
         told = bool(replies) and covered_share(hit, replies) >= COVER_SHARE
         if not (asked or told):
+            continue
+        if cue in REQUIRED_CUES and f"cue {cue}" not in hit.parts:
+            continue
+        if slot is not None and slot.required and f"slot [{slot.kind}]" not in hit.parts:
             continue
         key = fold(hit.text)[:140]
         if key in seen or per_doc[hit.doc] >= 2:
@@ -1631,34 +1762,35 @@ def answer(prompt: str, *, session: str = "default", web: Optional[bool] = None,
     cue = answer_cue(question)
     slot = question_slot(question)
     entities, rivals = recognize(index, question, extra, use_web, cue)
+    subjects = {frozenset(content(entity.label)) for entity in entities if content(entity.label)}
     fetched: List[str] = []
-    features, focus = drop_unknown(index, *build_features(index, question, extra, entities), bool(extra))
-    mass = query_mass(features, focus, cue, slot)
-    need = threshold_for(mass)
-    hits = index.search(features, cue, focus, limit=40, slot=slot)
-    winners = _passing(hits, need, features)
-    only_labels = all("wikidata.org" in hit.url for hit in winners)
-    if use_web and only_labels:
+
+    def article(entity: Entity) -> None:
+        if entity.wiki and not index.has_page(wiki_url(entity.wiki)):
+            page = wp_page(entity.wiki)
+            if page and page.paragraphs:
+                index.add_page(page)
+                fetched.append(page.url)
+
+    def run() -> Tuple[List[Feature], float, float, List[Hit], List[Hit]]:
+        features, focus = drop_unknown(index, *build_features(index, question, extra, entities), bool(extra))
+        mass = query_mass(features, focus, cue, slot)
+        need = threshold_for(mass)
+        hits = index.search(features, cue, focus, limit=40, slot=slot, subjects=subjects)
+        return features, mass, need, hits, _passing(hits, need, features, cue, slot)
+
+    if use_web:
         for entity in entities[:1]:
-            if entity.wiki and not index.has_page(wiki_url(entity.wiki)):
-                page = wp_page(entity.wiki)
-                if page and page.paragraphs:
-                    index.add_page(page)
-                    fetched.append(page.url)
-        if fetched:
-            features, focus = drop_unknown(index, *build_features(index, question, extra, entities), bool(extra))
-            mass = query_mass(features, focus, cue, slot)
-            need = threshold_for(mass)
-            hits = index.search(features, cue, focus, limit=40, slot=slot)
-            winners = _passing(hits, need, features)
+            if entity.origin == "wikidata":
+                article(entity)
+    features, mass, need, hits, winners = run()
     if not winners and use_web:
+        before = len(fetched)
+        for entity in entities[:1]:
+            article(entity)
         fetched += harvest(index, question, extra, entities, cue)
-        if fetched:
-            features, focus = drop_unknown(index, *build_features(index, question, extra, entities), bool(extra))
-            mass = query_mass(features, focus, cue, slot)
-            need = threshold_for(mass)
-            hits = index.search(features, cue, focus, limit=40, slot=slot)
-            winners = _passing(hits, need, features)
+        if len(fetched) > before:
+            features, mass, need, hits, winners = run()
     if winners:
         if extra:
             key = focus_key(question)

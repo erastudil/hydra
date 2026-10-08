@@ -10,9 +10,11 @@ local routes : arithmetic, logic, canon, system commands, and exact recall retur
 
 retrieval index : sqlite at ~/.hydra/alice_index.db; sentences and paragraphs from the easylm stacks, THINKERS.md, and every whitelisted page fetched so far.
 
-relation weights : rare term, phrase, entity, alias, derived form, related term, heading, paragraph context, pronoun coreference, lifespan, definition, answer slot, answer-type cue, lead paragraph, source tier; weights add.
+relation weights : rare term, phrase, entity, alias, derived form, related term, heading, paragraph context, pronoun coreference, aboutness, lifespan, definition, answer slot, slot votes, answer-type cue, lead paragraph, subject page, source tier; weights add; name evidence shares one cap.
 
 threshold : a sentence answers when its weight sum reaches 0.6 of the query mass, the anchor from the question's own relations reaches half the threshold, and covered question-term weight reaches 0.7.
+
+answer type : when, where, and how-many questions require their cue; relation nouns such as capital or president require a filled slot naming the asked object.
 
 whitelist harvest : wikidata names people and things; wikipedia, plato.stanford.edu, and developer.mozilla.org pages enter the index; deny list overrides.
 

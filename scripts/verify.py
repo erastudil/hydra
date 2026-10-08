@@ -1899,6 +1899,11 @@ def alice_retrieval_web():
         assert "1821" in " ".join(hit.text for hit in found.hits), found.text
         assert any("wikipedia.org" in hit.url or "wikidata.org" in hit.url for hit in found.hits)
         assert any(entity.key == "Q517" for entity in index.alias_lookup("napoleon"))
+
+        placed = ar.answer("where is the white house", session="gate-web-2", web=True, index=index)
+        assert placed.action == "answer" and "Pennsylvania Avenue" in placed.hits[0].text, placed.text
+        capital = ar.answer("what is the capital of the united states", session="gate-web-3", web=True, index=index)
+        assert capital.action == "answer" and "Washington" in capital.hits[0].text, capital.text
     finally:
         index.close()
         shutil.rmtree(home, ignore_errors=True)
