@@ -7,8 +7,11 @@ from hydra_cli.config import (
     SWARM_HEADS,
     consume_alias,
     load_dotenv,
+    get_context_window,
+    input_char_budget,
     resolve_model,
     resolve_route,
+    schema_chars,
     is_compound_alias,
 )
 
@@ -213,3 +216,18 @@ def test_build_cached_system_prompt():
     # Already containing header does not duplicate
     p3 = build_cached_system_prompt(p2)
     assert p3.count(header) == 1
+
+
+def test_context_window_follows_summon_alias():
+    assert get_context_window("sol 6.1 high") == 131072
+    assert get_context_window("sol 6.1 high") == get_context_window("openai/gpt-6.1-sol")
+    assert get_context_window("gemini 3.8") == 1000000
+
+
+def test_input_budget_reserves_tool_schema_and_output():
+    tools = [{"type": "function", "function": {"name": "read_file", "description": "x" * 300}}]
+    bare = input_char_budget(8192, None, 1024)
+    fitted = input_char_budget(8192, tools, 1024)
+    assert fitted < bare
+    assert fitted == max(4096, 8192 * 3 - schema_chars(tools) - 1024 * 3)
+    assert schema_chars(tools) > 300

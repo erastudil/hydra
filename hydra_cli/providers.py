@@ -396,11 +396,38 @@ def get_hf_provider() -> Tuple[Dict[str, Any], str]:
 
 
 def get_frontier_providers() -> List[Dict[str, Any]]:
-    """Return configured frontier cloud providers. OpenRouter is tried first."""
+    """Return configured frontier cloud providers in sovereign priority order:
+    1. Hugging Face (top priority if configured and model available)
+    2. CheaperInference (ultra low-cost endpoints)
+    3. Vercel AI Gateway (fast / free endpoints)
+    4. OpenRouter (aggregator fallback)
+    5. Modal (serverless container compute)
+    6. RunPod (serverless GPU compute)
+    """
     providers = []
-    openrouter_key = clean_secret(os.environ.get("OPENROUTER_API_KEY"))
-    vercel_key = gateway_api_key()
 
+    hf = get_huggingface_provider()
+    if hf:
+        providers.append(hf)
+
+    cheaper = get_cheaperinference_provider()
+    if cheaper:
+        providers.append(cheaper)
+
+    vercel_key = gateway_api_key()
+    if vercel_key:
+        gateway_base = os.environ.get("AI_GATEWAY_API_BASE", "https://ai-gateway.vercel.sh/v1").rstrip("/")
+        providers.append({
+            "id": "vercel",
+            "name": "Vercel AI Gateway",
+            "url": f"{gateway_base}/chat/completions",
+            "headers": {
+                "Authorization": f"Bearer {vercel_key}",
+                "Content-Type": "application/json",
+            },
+        })
+
+    openrouter_key = clean_secret(os.environ.get("OPENROUTER_API_KEY"))
     if openrouter_key:
         providers.append({
             "id": "openrouter",
@@ -414,33 +441,13 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
             },
         })
 
-    if vercel_key:
-        gateway_base = os.environ.get("AI_GATEWAY_API_BASE", "https://ai-gateway.vercel.sh/v1").rstrip("/")
-        providers.append({
-            "id": "vercel",
-            "name": "Vercel AI Gateway",
-            "url": f"{gateway_base}/chat/completions",
-            "headers": {
-                "Authorization": f"Bearer {vercel_key}",
-                "Content-Type": "application/json",
-            },
-        })
-
-    cheaper = get_cheaperinference_provider()
-    if cheaper:
-        providers.append(cheaper)
-
-    runpod = get_runpod_provider()
-    if runpod:
-        providers.append(runpod)
-
     modal = get_modal_provider()
     if modal:
         providers.append(modal)
 
-    hf = get_huggingface_provider()
-    if hf:
-        providers.append(hf)
+    runpod = get_runpod_provider()
+    if runpod:
+        providers.append(runpod)
 
     return providers
 
@@ -508,19 +515,36 @@ def _openrouter_free_provider() -> Optional[Dict[str, Any]]:
     }
 
 
+def _vercel_free_provider() -> Optional[Dict[str, Any]]:
+    vercel_key = gateway_api_key()
+    if not vercel_key:
+        return None
+    gateway_base = os.environ.get("AI_GATEWAY_API_BASE", "https://ai-gateway.vercel.sh/v1").rstrip("/")
+    return {
+        "id": "vercel-free",
+        "name": "Vercel AI Gateway Free",
+        "url": f"{gateway_base}/chat/completions",
+        "headers": {
+            "Authorization": f"Bearer {vercel_key}",
+            "Content-Type": "application/json",
+        },
+    }
+
+
 def get_free_candidates(model_override: Optional[str] = None) -> List[Tuple[Dict[str, Any], str]]:
     """Ordered (provider, model) pairs for Free Forge.
 
-    Cloudflare Workers AI goes first when both Cloudflare variables are set. OpenRouter's
-    free models follow, so a Cloudflare failure still gets an answer. An @cf/ override
-    stays on Cloudflare. Any other override goes to OpenRouter first.
+    Cloudflare Workers AI goes first when both Cloudflare variables are set. Vercel AI Gateway
+    and OpenRouter follow. An @cf/ override stays on Cloudflare.
     """
     cloudflare = _cloudflare_provider()
+    vercel = _vercel_free_provider()
     openrouter = _openrouter_free_provider()
-    if not cloudflare and not openrouter:
+    if not cloudflare and not vercel and not openrouter:
         raise CredentialsMissingError(
             "Free Forge requires either:\n"
             "  - CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, or\n"
+            "  - AI_GATEWAY_API_KEY, or\n"
             "  - OPENROUTER_API_KEY\n"
             "For a machine with no cloud key, use: hydra local \"<prompt>\""
         )
@@ -534,6 +558,8 @@ def get_free_candidates(model_override: Optional[str] = None) -> List[Tuple[Dict
         return [(cloudflare, model_override)]
 
     if model_override:
+        if vercel:
+            candidates.append((vercel, model_override))
         if openrouter:
             candidates.append((openrouter, model_override))
         elif cloudflare:
@@ -542,6 +568,8 @@ def get_free_candidates(model_override: Optional[str] = None) -> List[Tuple[Dict
 
     if cloudflare:
         candidates.append((cloudflare, DEFAULT_CLOUDFLARE_MODEL))
+    if vercel:
+        candidates.append((vercel, "alibaba/qwen3.8-27b"))
     if openrouter:
         seen = set()
         for model in [DEFAULT_FREE_MODEL] + list(FREE_MODELS):
@@ -554,6 +582,23 @@ def get_free_candidates(model_override: Optional[str] = None) -> List[Tuple[Dict
 def get_free_provider() -> Tuple[Dict[str, Any], str]:
     """First Free Forge choice. Cloudflare wins when both of its variables are set."""
     return get_free_candidates()[0]
+
+
+def attach_tool_capability(url: str, payload: Dict[str, Any]) -> None:
+    """Keep OpenRouter on an endpoint that accepts the tools field.
+
+    Existing provider routing keys stay in place.
+    """
+    if not payload.get("tools"):
+        return
+    host = (urlparse(url).hostname or url).lower()
+    if "openrouter.ai" not in host:
+        return
+    route = payload.get("provider")
+    if not isinstance(route, dict):
+        payload["provider"] = {"require_parameters": True}
+        return
+    route.setdefault("require_parameters", True)
 
 
 def adapt_model_for_url(url: str, model: str) -> str:

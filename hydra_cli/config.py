@@ -107,12 +107,39 @@ PROVIDER_KEY_NAMES: Dict[str, str] = {
 DEFAULT_CONTEXT_WINDOW = 131072
 CONTEXT_PROFILES: Dict[str, int] = dict(CATALOG.get("context_profiles") or {"default": 131072, "128k": 131072})
 
+# JSON and source tokenize denser than prose. Three characters per token keeps the
+# live window inside the provider window after tool schemas are attached.
+CHARS_PER_TOKEN = 3
+OUTPUT_RESERVE_TOKENS = 8192
+
 
 def get_context_window(model: Optional[str] = None) -> int:
-    """Return context window budget for model, defaulting to 128k (131072)."""
+    """Return context window budget for a model id or summon alias, defaulting to 128k."""
     if not model:
         return DEFAULT_CONTEXT_WINDOW
-    return CONTEXT_PROFILES.get(model, CONTEXT_PROFILES.get("default", DEFAULT_CONTEXT_WINDOW))
+    key = model.strip()
+    spec = (CATALOG.get("aliases") or {}).get(key.lower())
+    if isinstance(spec, dict) and spec.get("model"):
+        key = spec["model"]
+    return CONTEXT_PROFILES.get(key, CONTEXT_PROFILES.get("default", DEFAULT_CONTEXT_WINDOW))
+
+
+def schema_chars(tools: Optional[List[Any]] = None) -> int:
+    """Byte length of the tool schema array that rides beside the messages."""
+    if not tools:
+        return 0
+    return len(json.dumps(tools, ensure_ascii=False, separators=(",", ":"), default=str))
+
+
+def input_char_budget(
+    window_tokens: int,
+    tools: Optional[List[Any]] = None,
+    output_reserve_tokens: int = OUTPUT_RESERVE_TOKENS,
+) -> int:
+    """Character budget for messages after tool schemas and reserved completion tokens."""
+    reserved = schema_chars(tools) + max(0, int(output_reserve_tokens)) * CHARS_PER_TOKEN
+    usable = int(window_tokens) * CHARS_PER_TOKEN - reserved
+    return max(4096, usable)
 
 
 SWARM_HEADS: Dict[str, Dict[str, str]] = {

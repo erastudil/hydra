@@ -9,9 +9,12 @@ from hydra_cli.agent import (
     HierarchicalScratchpad,
     SessionCheckpointer,
     _build_bounded_messages,
+    classify_provider_output,
     print_unified_diff,
+    retry_after_seconds,
     run_agent_loop,
     run_interactive_agent,
+    wire_chars,
 )
 from hydra_cli.providers import ProviderError
 
@@ -258,5 +261,104 @@ def test_bounded_messages_context_budget_compression():
     )
 
     assert bounded[0]["content"] == "SYSTEM PROMPT"
-    assert any(str(m.get("content") or "") == huge_content for m in bounded)
-    assert all("TOOL OBSERVATION COMPACTED" not in str(m.get("content") or "") for m in bounded)
+    assert wire_chars(bounded) <= 10_000
+    assert any("OUTPUT FITS WINDOW" in str(m.get("content") or "") for m in bounded)
+    assert all(str(m.get("content") or "") != huge_content for m in bounded)
+    assert turn_groups[0][1]["content"] == huge_content
+
+
+def test_reasoning_trace_yields_before_tool_output():
+    pad = HierarchicalScratchpad(task="trace")
+    messages = [
+        {"role": "system", "content": "SYSTEM"},
+        {"role": "user", "content": "TASK"},
+    ]
+    tool_text = "TOOL-OUTPUT-" + ("y" * 800)
+    turn_groups = [[
+        {"role": "assistant", "content": "calling", "reasoning_content": "R" * 4000},
+        {"role": "tool", "tool_call_id": "c1", "content": tool_text},
+    ]]
+    bounded = _build_bounded_messages(
+        messages=messages,
+        turn_groups=turn_groups,
+        scratchpad=pad,
+        max_history_turns=2,
+        max_context_chars=2_000,
+    )
+    assert wire_chars(bounded) <= 2_000
+    reasoning = next(m.get("reasoning_content", "") for m in bounded if m.get("role") == "assistant" and m.get("reasoning_content"))
+    tool = next(m["content"] for m in bounded if m.get("role") == "tool")
+    assert "OUTPUT FITS WINDOW" in reasoning
+    assert tool == tool_text
+    assert turn_groups[0][0]["reasoning_content"] == "R" * 4000
+
+
+def test_provider_output_actions():
+    context = classify_provider_output(
+        ProviderError("HTTP 400: Your input exceeds the context window of this model")
+    )
+    inflight = classify_provider_output(
+        ProviderError('HTTP 402 {"reason":"in_flight_budget_exhausted","headers":{"Retry-After":"120"}}')
+    )
+    other = classify_provider_output(ProviderError("HTTP 500 from upstream"))
+    assert context == "shrink"
+    assert inflight == "retry_same"
+    assert other == "failover"
+    assert retry_after_seconds(
+        ProviderError('HTTP 402 {"headers":{"Retry-After":"120"}}')
+    ) == 120.0
+
+
+def test_context_rejection_refits_same_provider(tmp_path):
+    providers = [
+        {"name": "OpenRouter", "url": "https://openrouter.ai/api/v1/chat/completions", "headers": {}},
+        {"name": "Vercel AI Gateway", "url": "https://ai-gateway.vercel.sh/v1/chat/completions", "headers": {}},
+    ]
+    calls = []
+
+    def fetch(url, headers, payload, timeout=120):
+        calls.append(url)
+        if len(calls) == 1:
+            raise ProviderError("HTTP 400: Your input exceeds the context window of this model")
+        return {"choices": [{"message": {"role": "assistant", "content": "fitted"}}]}
+
+    with patch("hydra_cli.agent.hydra_home", return_value=str(tmp_path)), \
+         patch("hydra_cli.agent.get_frontier_providers", return_value=providers), \
+         patch("hydra_cli.agent._fetch_raw_completion", side_effect=fetch):
+        result = run_agent_loop("sol 6.1 high", "short task", session_id="fit-window", cwd=str(tmp_path))
+
+    assert result == "fitted"
+    assert calls == [
+        "https://openrouter.ai/api/v1/chat/completions",
+        "https://openrouter.ai/api/v1/chat/completions",
+    ]
+
+
+def test_inflight_budget_refits_same_provider(tmp_path):
+    providers = [
+        {"name": "OpenRouter", "url": "https://openrouter.ai/api/v1/chat/completions", "headers": {}},
+        {"name": "Vercel AI Gateway", "url": "https://ai-gateway.vercel.sh/v1/chat/completions", "headers": {}},
+    ]
+    calls = []
+
+    def fetch(url, headers, payload, timeout=120):
+        calls.append(url)
+        if len(calls) == 1:
+            raise ProviderError(
+                'HTTP 402 {"error":{"metadata":{"reason":"in_flight_budget_exhausted",'
+                '"headers":{"Retry-After":"120"}}}}'
+            )
+        return {"choices": [{"message": {"role": "assistant", "content": "retried"}}]}
+
+    with patch("hydra_cli.agent.hydra_home", return_value=str(tmp_path)), \
+         patch("hydra_cli.agent.get_frontier_providers", return_value=providers), \
+         patch("hydra_cli.agent._fetch_raw_completion", side_effect=fetch), \
+         patch("hydra_cli.agent.time.sleep") as sleep:
+        result = run_agent_loop("sol 6.1", "short task", session_id="fit-budget", cwd=str(tmp_path))
+
+    assert result == "retried"
+    assert calls == [
+        "https://openrouter.ai/api/v1/chat/completions",
+        "https://openrouter.ai/api/v1/chat/completions",
+    ]
+    sleep.assert_called_once_with(20.0)

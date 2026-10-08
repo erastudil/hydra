@@ -82,8 +82,28 @@ def test_frontier_providers_priority(monkeypatch):
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "vercel-test-key")
     providers = get_frontier_providers()
     assert len(providers) == 2
-    assert providers[0]["name"] == "OpenRouter"
-    assert providers[1]["name"] == "Vercel AI Gateway"
+    assert providers[0]["name"] == "Vercel AI Gateway"
+    assert providers[1]["name"] == "OpenRouter"
+
+
+def test_frontier_providers_full_hierarchy(monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "hf-test")
+    monkeypatch.setenv("CHEAPERINFERENCE_API_KEY", "ci-test")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "vercel-test")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test")
+    monkeypatch.setenv("MODAL_ENDPOINT_URL", "https://modal.test")
+    monkeypatch.setenv("RUNPOD_API_KEY", "rp-test")
+    monkeypatch.setenv("RUNPOD_ENDPOINT_ID", "rp-ep")
+    providers = get_frontier_providers()
+    names = [p["name"] for p in providers]
+    assert names == [
+        "Hugging Face Inference",
+        "CheaperInference",
+        "Vercel AI Gateway",
+        "OpenRouter",
+        "Modal",
+        "RunPod",
+    ]
 
 
 def test_free_provider_cloudflare(monkeypatch):
@@ -217,12 +237,12 @@ def test_frontier_providers_all(monkeypatch):
     providers = get_frontier_providers()
     assert len(providers) == 6
     assert [p["name"] for p in providers] == [
-        "OpenRouter",
-        "Vercel AI Gateway",
-        "CheaperInference",
-        "RunPod",
-        "Modal",
         "Hugging Face Inference",
+        "CheaperInference",
+        "Vercel AI Gateway",
+        "OpenRouter",
+        "Modal",
+        "RunPod",
     ]
 
 
@@ -253,3 +273,24 @@ def test_huggingface_provider_missing(monkeypatch):
     monkeypatch.delenv("HF_ENDPOINT_URL", raising=False)
     monkeypatch.delenv("HF_INFERENCE_BASE", raising=False)
     assert get_huggingface_provider() is None
+
+
+def test_openrouter_tools_require_parameters_keep_existing_route():
+    from hydra_cli.providers import attach_tool_capability
+
+    payload = {
+        "tools": [{"type": "function", "function": {"name": "read_file"}}],
+        "provider": {"order": ["anthropic", "google"], "sort": "throughput"},
+    }
+    attach_tool_capability("https://openrouter.ai/api/v1/chat/completions", payload)
+    assert payload["provider"]["require_parameters"] is True
+    assert payload["provider"]["order"] == ["anthropic", "google"]
+    assert payload["provider"]["sort"] == "throughput"
+
+
+def test_cheaperinference_tools_leave_route_unset():
+    from hydra_cli.providers import attach_tool_capability
+
+    payload = {"tools": [{"type": "function", "function": {"name": "read_file"}}]}
+    attach_tool_capability("https://api.cheaperinference.com/v1/chat/completions", payload)
+    assert "provider" not in payload

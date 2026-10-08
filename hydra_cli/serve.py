@@ -24,6 +24,7 @@ from hydra_cli.providers import (
     ProviderError,
     UsageError,
     adapt_model_for_url,
+    attach_tool_capability,
     completion_timeout,
     ensure_temperature,
     CredentialsMissingError,
@@ -141,6 +142,7 @@ def build_upstream_payload(
         for k, v in extra_fields.items():
             if k not in payload and v is not None:
                 payload[k] = v
+    attach_tool_capability(provider_url, payload)
     return payload
 
 

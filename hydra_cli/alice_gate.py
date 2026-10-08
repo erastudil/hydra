@@ -4,6 +4,7 @@ Order: typo table, vagueness rule, skill index, alice_core.js, then the selected
 """
 
 from dataclasses import dataclass
+import os
 import re
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -242,6 +243,24 @@ def consult(
             return GateDecision(action="ask", route=route, text=note + formatted)
 
     route = str((result or {}).get("route") or "ALICE_UNAVAILABLE")
+
+    no_fallback = (
+        summon_alias.lower().strip() in ("none", "off", "disabled", "alone")
+        or os.environ.get("ALICE_NO_FALLBACK") == "1"
+    )
+    if no_fallback:
+        if result and result.get("answer"):
+            formatted = _format_alice(result)
+            return GateDecision(action="local", route=route, text=note + formatted)
+        ask_text = (
+            note
+            + "modality : [UNKNOWN]\n\n"
+            + "epistemic gap : target proposition unverified in local core memory.\n\n"
+            + "clarifying question : what is the foundational predicate or relation that defines this in your domain?\n\n"
+            + "route : EPISTEMIC_GAP"
+        )
+        return GateDecision(action="ask", route="EPISTEMIC_GAP", text=ask_text)
+
     if result is None:
         miss = "alice_core.js returned no payload. the skill index missed."
     else:

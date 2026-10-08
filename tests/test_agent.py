@@ -7,6 +7,7 @@ from hydra_cli.agent import (
     HierarchicalScratchpad,
     SessionCheckpointer,
     _build_bounded_messages,
+    _consume_completion_body,
     run_agent_loop,
 )
 
@@ -194,3 +195,112 @@ def test_agent_loop_saves_and_resumes_session(tmp_path):
         assert data["session_id"] == "custom_sess_42"
         assert data["state"] == "COMPLETED"
         assert data["final_response"] == "Mission accomplished."
+
+
+def test_stream_assembles_openrouter_tool_call_and_reasoning_details():
+    lines = [
+        b'data: {"choices":[{"delta":{"reasoning_details":[{"index":0,"type":"reasoning.text","text":"look","signature":"partial"}]}}]}',
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]}}]}',
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"path\\":\\"a.md\\"}"}}]}}]}',
+        b'data: {"choices":[{"delta":{"reasoning_details":[{"index":0,"type":"reasoning.text","text":"look at a.md","signature":"sig"}]}}]}',
+        b"data: [DONE]",
+    ]
+    parsed = _consume_completion_body(lines, None, "openrouter")
+    message = parsed["choices"][0]["message"]
+    assert parsed["choices"][0]["finish_reason"] == "tool_calls"
+    assert message["tool_calls"][0]["id"] == "call_1"
+    assert message["tool_calls"][0]["function"]["name"] == "read_file"
+    assert json.loads(message["tool_calls"][0]["function"]["arguments"]) == {"path": "a.md"}
+    assert message["reasoning_details"] == [
+        {"index": 0, "type": "reasoning.text", "text": "look at a.md", "signature": "sig"}
+    ]
+
+
+def test_stream_accepts_object_arguments_and_content_block_tool_use():
+    lines = [
+        b'data: {"choices":[{"delta":{"content":[{"type":"tool_use","id":"toolu_1","name":"list_dir","input":{"path":"."}}]}}]}',
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_9","function":{"name":"grep_search","arguments":{"pattern":"sol"}}}]}}]}',
+        b"data: [DONE]",
+    ]
+    parsed = _consume_completion_body(lines, None, "openrouter")
+    calls = parsed["choices"][0]["message"]["tool_calls"]
+    by_name = {call["function"]["name"]: json.loads(call["function"]["arguments"]) for call in calls}
+    assert by_name["list_dir"] == {"path": "."}
+    assert by_name["grep_search"] == {"pattern": "sol"}
+
+
+def test_openrouter_tool_round_echoes_reasoning_details(tmp_path):
+    providers = [{
+        "name": "OpenRouter",
+        "url": "https://openrouter.ai/api/v1/chat/completions",
+        "headers": {},
+    }]
+    payloads = []
+
+    def fetch(url, headers, payload, timeout=120):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {"choices": [{"message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "list_dir", "arguments": "{\"path\":\".\"}"},
+                }],
+                "reasoning_details": [{
+                    "type": "reasoning.text",
+                    "text": "list the directory",
+                    "signature": "sig",
+                }],
+            }}]}
+        return {"choices": [{"message": {"role": "assistant", "content": "listed", "tool_calls": None}}]}
+
+    with patch("hydra_cli.agent.hydra_home", return_value=str(tmp_path)), \
+         patch("hydra_cli.agent.get_frontier_providers", return_value=providers), \
+         patch("hydra_cli.agent._fetch_raw_completion", side_effect=fetch):
+        result = run_agent_loop("opus 5.5", "list this directory", session_id="tools-or", cwd=str(tmp_path))
+
+    assert result == "listed"
+    assert payloads[0]["provider"]["require_parameters"] is True
+    assert any(tool["function"]["name"] == "list_dir" for tool in payloads[0]["tools"])
+    assistant = next(message for message in payloads[1]["messages"] if message.get("role") == "assistant")
+    assert assistant["reasoning_details"][0]["signature"] == "sig"
+    assert payloads[1]["tools"]
+    assert payloads[1]["provider"]["require_parameters"] is True
+
+
+def test_glm_payload_omits_openrouter_tool_route(tmp_path):
+    providers = [{
+        "id": "cheaperinference",
+        "name": "CheaperInference",
+        "url": "https://api.cheaperinference.com/v1/chat/completions",
+        "headers": {},
+    }]
+    payloads = []
+
+    def fetch(url, headers, payload, timeout=120):
+        payloads.append(payload)
+        if len(payloads) == 1:
+            return {"choices": [{"message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "list_dir", "arguments": "{\"path\":\".\"}"},
+                }],
+                "reasoning_details": [{"type": "reasoning.text", "signature": "sig"}],
+            }}]}
+        return {"choices": [{"message": {"role": "assistant", "content": "listed", "tool_calls": None}}]}
+
+    with patch("hydra_cli.agent.hydra_home", return_value=str(tmp_path)), \
+         patch("hydra_cli.agent.get_frontier_providers", return_value=providers), \
+         patch("hydra_cli.agent._fetch_raw_completion", side_effect=fetch):
+        result = run_agent_loop("glm 5.3", "list this directory", session_id="tools-glm", cwd=str(tmp_path))
+
+    assert result == "listed"
+    assert "provider" not in payloads[0]
+    assistant = next(message for message in payloads[1]["messages"] if message.get("role") == "assistant")
+    assert "reasoning_details" not in assistant
+    assert payloads[1]["tools"]

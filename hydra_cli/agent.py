@@ -23,6 +23,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import uuid
 
+import copy
 import difflib
 import re
 import subprocess
@@ -35,8 +36,10 @@ from hydra_cli.config import (
     DEFAULT_SYSTEM_PROMPT,
     build_cached_system_prompt,
     MODEL_MAP,
+    OUTPUT_RESERVE_TOKENS,
     get_context_window,
     hydra_home,
+    input_char_budget,
     resolve_route,
 )
 from hydra_cli.hands import dispatch_native, native_openai_tools
@@ -50,6 +53,7 @@ from hydra_cli.providers import (
     ProviderError,
     UsageError,
     adapt_model_for_url,
+    attach_tool_capability,
     completion_timeout,
     describe_endpoint,
     detect_local_endpoint,
@@ -568,6 +572,97 @@ class SessionCheckpointer:
             return None
 
 
+_CONTEXT_MARKERS = (
+    "context window",
+    "context length",
+    "maximum context",
+    "context_length_exceeded",
+    "too many tokens",
+    "input exceeds",
+    "exceeds the context",
+    "prompt is too long",
+)
+
+_RETRY_AFTER_RE = re.compile(r"retry-after[\"']?\s*[:=]\s*[\"']?(\d+)", re.IGNORECASE)
+
+
+def wire_chars(messages: List[Dict[str, Any]]) -> int:
+    """Serialized size of the messages that ride in the completion payload."""
+    return sum(len(json.dumps(message, ensure_ascii=False, default=str)) for message in messages)
+
+
+def classify_provider_output(exc: BaseException) -> str:
+    """Map a provider error body to shrink, retry_same, or failover."""
+    text = str(exc).lower()
+    if any(marker in text for marker in _CONTEXT_MARKERS):
+        return "shrink"
+    if "in_flight_budget" in text or "in-flight budget" in text:
+        return "retry_same"
+    return "failover"
+
+
+def retry_after_seconds(exc: BaseException) -> Optional[float]:
+    """Parse a Retry-After hint from a provider error body."""
+    match = _RETRY_AFTER_RE.search(str(exc))
+    if not match:
+        return None
+    return float(match.group(1))
+
+
+def _fit_output_text(text: str, keep: int) -> str:
+    if len(text) <= keep:
+        return text
+    withheld = len(text) - keep
+    return (
+        text[:keep]
+        + f"\n[OUTPUT FITS WINDOW: {withheld} chars withheld. Full text stays on the session ledger.]"
+    )
+
+
+def _shrink_once(messages: List[Dict[str, Any]], frozen: set) -> bool:
+    """Shrink the largest reasoning trace, then the largest tool output."""
+    ranked = []
+    for message in messages:
+        if message.get("role") == "system":
+            continue
+        role = message.get("role")
+        for field in ("reasoning_content", "reasoning", "content"):
+            value = message.get(field)
+            if not isinstance(value, str) or len(value) <= 240:
+                continue
+            key = (id(message), field)
+            if key in frozen:
+                continue
+            if field != "content":
+                priority = 0
+            elif role == "tool":
+                priority = 1
+            else:
+                priority = 2
+            ranked.append((priority, -len(value), key, message, field, value))
+    if not ranked:
+        return False
+    ranked.sort(key=lambda item: (item[0], item[1]))
+    for _priority, _neg, key, message, field, value in ranked:
+        keep = 240 if field != "content" else max(240, len(value) // 2)
+        fitted = _fit_output_text(value, keep)
+        if len(fitted) >= len(value):
+            frozen.add(key)
+            continue
+        message[field] = fitted
+        return True
+    return False
+
+
+def _fit_messages(messages: List[Dict[str, Any]], budget: int) -> None:
+    frozen: set = set()
+    guard = 0
+    while wire_chars(messages) > budget and guard < 64:
+        guard += 1
+        if not _shrink_once(messages, frozen):
+            break
+
+
 def _build_bounded_messages(
     messages: List[Dict[str, Any]],
     turn_groups: List[List[Dict[str, Any]]],
@@ -579,23 +674,26 @@ def _build_bounded_messages(
     Live window for one agent turn.
     The system message stays byte-for-byte. Older tool rounds leave whole.
     Recalled ledger turns come back through the ledger, not through a summary.
+    Tool outputs and reasoning traces shrink until the serialized window fits.
     """
     if not messages:
         return []
 
-    system_msg = messages[0]
-    user_msg = messages[1]
+    system_msg = copy.deepcopy(messages[0])
+    user_msg = copy.deepcopy(messages[1]) if len(messages) > 1 else {"role": "user", "content": ""}
     pinned_system = system_msg.get("content")
 
-    recent_groups = [list(group) for group in turn_groups[-max_history_turns:]]
+    recent_groups = [copy.deepcopy(group) for group in turn_groups[-max_history_turns:]]
     while len(recent_groups) > 1:
         probe = [system_msg, user_msg]
         for group in recent_groups:
             probe.extend(group)
-        total_chars = sum(len(str(m.get("content") or "")) for m in probe)
-        if total_chars <= max_context_chars:
+        if wire_chars(probe) <= max_context_chars:
             break
         recent_groups.pop(0)
+
+    grouped_ids = {id(message) for group in turn_groups for message in group}
+    tail = [copy.deepcopy(message) for message in messages[2:] if id(message) not in grouped_ids]
 
     unloaded = len(turn_groups) - len(recent_groups)
     bounded: List[Dict[str, Any]] = [system_msg, user_msg]
@@ -616,6 +714,8 @@ def _build_bounded_messages(
         })
     for group in recent_groups:
         bounded.extend(group)
+    bounded.extend(tail)
+    _fit_messages(bounded, max_context_chars)
     if pinned_system is not None:
         bounded[0]["content"] = pinned_system
     return bounded
@@ -654,29 +754,110 @@ def _emit_message_content(message: Dict[str, Any], on_token: Optional[Callable[[
         on_token(content)
 
 
+def _append_text(state: Dict[str, Any], text: str, on_token: Optional[Callable[[str], None]]) -> None:
+    if not text:
+        return
+    state["content"].append(text)
+    if on_token:
+        on_token(text)
+
+
+def _absorb_content(state: Dict[str, Any], content: Any, on_token: Optional[Callable[[str], None]]) -> None:
+    if isinstance(content, str):
+        _append_text(state, content, on_token)
+        return
+    if not isinstance(content, list):
+        return
+    for part in content:
+        if isinstance(part, str):
+            _append_text(state, part, on_token)
+            continue
+        if not isinstance(part, dict):
+            continue
+        block_type = str(part.get("type") or "")
+        if block_type in ("tool_use", "tool_call", "function_call"):
+            function = part.get("function") if isinstance(part.get("function"), dict) else {}
+            _merge_tool_call(state, {
+                "id": part.get("id") or part.get("tool_use_id") or function.get("id"),
+                "type": "function",
+                "function": {
+                    "name": part.get("name") or function.get("name") or "",
+                    "arguments": part.get("input", part.get("arguments", function.get("arguments"))),
+                },
+            })
+            continue
+        text = part.get("text") or part.get("content") or ""
+        if isinstance(text, str):
+            _append_text(state, text, on_token)
+
+
+def _tool_slot_index(state: Dict[str, Any], tc: Dict[str, Any]) -> int:
+    if tc.get("index") is not None:
+        return int(tc["index"])
+    tid = tc.get("id")
+    if tid:
+        for idx, slot in state["tools"].items():
+            if slot.get("id") == tid:
+                return int(idx)
+    if state["tools"]:
+        return max(int(idx) for idx in state["tools"])
+    return 0
+
+
+def _merge_tool_call(state: Dict[str, Any], tc: Dict[str, Any]) -> None:
+    if not isinstance(tc, dict):
+        return
+    idx = _tool_slot_index(state, tc)
+    slot = state["tools"].setdefault(idx, {
+        "id": "",
+        "type": "function",
+        "function": {"name": "", "arguments": ""},
+    })
+    if tc.get("id"):
+        slot["id"] = tc["id"]
+    if tc.get("type"):
+        slot["type"] = tc["type"]
+    fn = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+    name = fn.get("name") or tc.get("name") or ""
+    if name:
+        current = slot["function"]["name"]
+        if not current:
+            slot["function"]["name"] = name
+        elif name != current and not current.endswith(name):
+            slot["function"]["name"] = current + name
+    _merge_arguments(slot, fn.get("arguments", tc.get("arguments", tc.get("input"))))
+
+
+def _merge_arguments(slot: Dict[str, Any], arguments: Any) -> None:
+    if arguments is None or arguments == "":
+        return
+    if isinstance(arguments, (dict, list)):
+        slot["function"]["arguments"] = json.dumps(arguments, ensure_ascii=False)
+        return
+    slot["function"]["arguments"] += str(arguments)
+
+
+def _merge_reasoning_details(state: Dict[str, Any], details: Any) -> None:
+    if not isinstance(details, list):
+        return
+    slots = state.setdefault("reasoning_details", {})
+    for position, block in enumerate(details):
+        if not isinstance(block, dict):
+            continue
+        idx = block.get("index", position)
+        slots[idx] = dict(block)
+
+
 def _apply_stream_delta(delta: Dict[str, Any], state: Dict[str, Any], on_token: Optional[Callable[[str], None]]) -> None:
-    content = delta.get("content") or ""
-    if content:
-        state["content"].append(content)
-        if on_token:
-            on_token(content)
-    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+    _absorb_content(state, delta.get("content") or "", on_token)
+    reasoning = delta.get("reasoning_content")
+    if reasoning is None:
+        reasoning = delta.get("reasoning") or ""
     if isinstance(reasoning, str) and reasoning:
         state["reasoning"].append(reasoning)
+    _merge_reasoning_details(state, delta.get("reasoning_details"))
     for tc in delta.get("tool_calls") or []:
-        idx = int(tc.get("index", 0))
-        slot = state["tools"].setdefault(idx, {
-            "id": "",
-            "type": "function",
-            "function": {"name": "", "arguments": ""},
-        })
-        if tc.get("id"):
-            slot["id"] = tc["id"]
-        fn = tc.get("function") or {}
-        if fn.get("name"):
-            slot["function"]["name"] += fn["name"]
-        if fn.get("arguments"):
-            slot["function"]["arguments"] += fn["arguments"]
+        _merge_tool_call(state, tc)
 
 
 def _message_from_stream_state(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -694,6 +875,9 @@ def _message_from_stream_state(state: Dict[str, Any]) -> Dict[str, Any]:
         message["tool_calls"] = calls
     if state["reasoning"]:
         message["reasoning_content"] = "".join(state["reasoning"])
+    details = state.get("reasoning_details") or {}
+    if details:
+        message["reasoning_details"] = [details[idx] for idx in sorted(details, key=lambda item: str(item))]
     return message
 
 
@@ -738,12 +922,19 @@ def _consume_completion_body(resp: Any, on_token: Optional[Callable[[str], None]
             choices = chunk.get("choices") or []
             if not choices:
                 continue
-            delta = choices[0].get("delta") or {}
-            if not delta and choices[0].get("message"):
-                message = choices[0]["message"]
-                _emit_message_content(message, on_token)
-                return {"choices": [{"message": message}]}
-            _apply_stream_delta(delta, state, on_token)
+            choice = choices[0]
+            message = choice.get("message") or {}
+            delta = choice.get("delta") or {}
+            if delta:
+                _apply_stream_delta(delta, state, on_token)
+            elif message:
+                _absorb_content(state, message.get("content") or "", on_token)
+                for tc in message.get("tool_calls") or []:
+                    _merge_tool_call(state, tc)
+                _merge_reasoning_details(state, message.get("reasoning_details"))
+                reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
+                if isinstance(reasoning, str) and reasoning:
+                    state["reasoning"].append(reasoning)
             continue
         buffered.append(line)
     if buffered and not state["content"] and not state["tools"]:
@@ -755,9 +946,10 @@ def _consume_completion_body(resp: Any, on_token: Optional[Callable[[str], None]
                 message = choices[0].get("message") or {}
                 _emit_message_content(message, on_token)
                 return parsed
-    if not saw_done and not state["content"] and not state["tools"] and not state["reasoning"]:
+    if not saw_done and not state["content"] and not state["tools"] and not state["reasoning"] and not state.get("reasoning_details"):
         raise ProviderError(f"Stream from {where} ended before data: [DONE]")
-    return {"choices": [{"message": _message_from_stream_state(state), "finish_reason": "stop"}]}
+    finish = "tool_calls" if state["tools"] else "stop"
+    return {"choices": [{"message": _message_from_stream_state(state), "finish_reason": finish}]}
 
 
 def _fetch_streaming_completion(
@@ -937,7 +1129,12 @@ def run_agent_loop(
     reasoning = reasoning_fields(route_effort, route.get("reasoning_mode"))
     timeout = completion_timeout(reasoning)
     history_turns = max_history_turns
-    context_chars = 400_000 if max_context_chars is None else max_context_chars
+    reserve_tokens = 16384 if (route_effort or "").lower() == "high" else OUTPUT_RESERVE_TOKENS
+    if max_context_chars is None:
+        window_tokens = get_context_window(requested_model)
+    else:
+        window_tokens = max(1024, max_context_chars // 4)
+    context_chars = input_char_budget(window_tokens, tools, reserve_tokens)
 
     color_on = supports_color()
     c_bright = GREEN_BRIGHT if color_on else ""
@@ -951,74 +1148,108 @@ def run_agent_loop(
     use_prompt_tool_adapter = use_prompt_adapter
 
     def complete_turn() -> Dict[str, Any]:
-        nonlocal use_prompt_tool_adapter
+        nonlocal use_prompt_tool_adapter, context_chars
         last_error: Optional[Exception] = None
-        bounded_messages = _build_bounded_messages(
-            messages=messages,
-            turn_groups=turn_groups,
-            scratchpad=checkpointer.scratchpad,
-            max_history_turns=history_turns,
-            max_context_chars=context_chars,
-        )
-        checkpointer.bounded_messages = list(bounded_messages)
 
         for index, provider in enumerate(order):
-            if use_prompt_tool_adapter and tools:
-                effective_messages = adapt_messages_for_prompt_tools(bounded_messages, tools)
-            else:
-                effective_messages = bounded_messages
-
-            payload: Dict[str, Any] = {
-                "model": adapt_model_for_url(provider["url"], requested_model),
-                "messages": effective_messages,
-                "stream": False,
-            }
-            if tools and not use_prompt_tool_adapter:
-                payload["tools"] = tools
-                payload["tool_choice"] = "auto"
-            if reasoning:
-                payload["reasoning"] = reasoning
-            if temperature is not None:
-                payload["temperature"] = temperature
-            if max_tokens is not None:
-                payload["max_tokens"] = max_tokens
-            try:
-                if on_token is not None:
-                    payload["stream"] = True
-                    res_json = _fetch_streaming_completion(
-                        provider["url"],
-                        provider["headers"],
-                        payload,
-                        timeout=timeout,
-                        on_token=on_token,
-                    )
+            attempts = 0
+            while True:
+                bounded_messages = _build_bounded_messages(
+                    messages=messages,
+                    turn_groups=turn_groups,
+                    scratchpad=checkpointer.scratchpad,
+                    max_history_turns=history_turns,
+                    max_context_chars=context_chars,
+                )
+                checkpointer.bounded_messages = list(bounded_messages)
+                if use_prompt_tool_adapter and tools:
+                    effective_messages = adapt_messages_for_prompt_tools(bounded_messages, tools)
                 else:
-                    res_json = _fetch_raw_completion(provider["url"], provider["headers"], payload, timeout=timeout)
-                if not res_json.get("choices"):
-                    raise ProviderError(f"{provider.get('name', 'Provider')} returned an empty choices array.")
-            except UsageError:
-                raise
-            except Exception as exc:
-                last_error = exc
-                if not use_prompt_tool_adapter and tools and is_tool_unsupported_error(exc):
-                    sys.stderr.write(
-                        f"{c_tool_head} Provider '{provider.get('name', 'Provider')}' rejected native tool schema ({redact(exc)}). "
-                        f"Switching to prompt-based tool calling adapter.\n"
-                    )
-                    sys.stderr.flush()
-                    use_prompt_tool_adapter = True
-                    return complete_turn()
+                    effective_messages = bounded_messages
 
-                if index + 1 < len(order):
-                    sys.stderr.write(
-                        f"{c_tool_head} {provider.get('name', 'Provider')} failed ({redact(exc)}). "
-                        f"Trying {order[index + 1].get('name', 'next provider')}.\n"
-                    )
-                    sys.stderr.flush()
-                continue
-            if index:
-                order.insert(0, order.pop(index))
-            return res_json
+                payload: Dict[str, Any] = {
+                    "model": adapt_model_for_url(provider["url"], requested_model),
+                    "messages": effective_messages,
+                    "stream": False,
+                }
+                if tools and not use_prompt_tool_adapter:
+                    payload["tools"] = tools
+                    payload["tool_choice"] = "auto"
+                if reasoning:
+                    payload["reasoning"] = reasoning
+                if temperature is not None:
+                    payload["temperature"] = temperature
+                if max_tokens is not None:
+                    payload["max_tokens"] = max_tokens
+                attach_tool_capability(provider["url"], payload)
+                host = provider["url"].lower()
+                if "openrouter.ai" not in host:
+                    effective_messages = [
+                        {key: value for key, value in message.items() if key != "reasoning_details"}
+                        if isinstance(message, dict) else message
+                        for message in effective_messages
+                    ]
+                    payload["messages"] = effective_messages
+                try:
+                    if on_token is not None:
+                        payload["stream"] = True
+                        res_json = _fetch_streaming_completion(
+                            provider["url"],
+                            provider["headers"],
+                            payload,
+                            timeout=timeout,
+                            on_token=on_token,
+                        )
+                    else:
+                        res_json = _fetch_raw_completion(provider["url"], provider["headers"], payload, timeout=timeout)
+                    if not res_json.get("choices"):
+                        raise ProviderError(f"{provider.get('name', 'Provider')} returned an empty choices array.")
+                except UsageError:
+                    raise
+                except Exception as exc:
+                    last_error = exc
+                    if not use_prompt_tool_adapter and tools and is_tool_unsupported_error(exc):
+                        sys.stderr.write(
+                            f"{c_tool_head} Provider '{provider.get('name', 'Provider')}' rejected native tool schema ({redact(exc)}). "
+                            f"Switching to prompt-based tool calling adapter.\n"
+                        )
+                        sys.stderr.flush()
+                        use_prompt_tool_adapter = True
+                        return complete_turn()
+
+                    action = classify_provider_output(exc)
+                    provider_name = provider.get("name", "Provider")
+                    if action == "shrink" and attempts < 3:
+                        attempts += 1
+                        context_chars = max(4096, context_chars // 2)
+                        sys.stderr.write(
+                            f"{c_tool_head} {provider_name} rejected the payload: context window exceeded. "
+                            f"Fitting the live window to {context_chars} chars and retrying {provider_name}.\n"
+                        )
+                        sys.stderr.flush()
+                        continue
+                    if action == "retry_same" and attempts < 2:
+                        attempts += 1
+                        context_chars = max(4096, context_chars // 2)
+                        wait = min(retry_after_seconds(exc) or 5.0, 20.0)
+                        sys.stderr.write(
+                            f"{c_tool_head} {provider_name} rejected the payload: in-flight credit budget. "
+                            f"Fitting the live window to {context_chars} chars and retrying {provider_name} after {wait:g}s.\n"
+                        )
+                        sys.stderr.flush()
+                        time.sleep(wait)
+                        continue
+
+                    if index + 1 < len(order):
+                        sys.stderr.write(
+                            f"{c_tool_head} {provider_name} failed ({redact(exc)}). "
+                            f"Trying {order[index + 1].get('name', 'next provider')}.\n"
+                        )
+                        sys.stderr.flush()
+                    break
+                if index:
+                    order.insert(0, order.pop(index))
+                return res_json
         checkpointer.transition("ERROR")
         raise ProviderError(redact(f"All configured providers failed for '{requested_model}'. Last error: {last_error}"))
 
@@ -1825,7 +2056,10 @@ def run_interactive_agent(
     active_effort: Optional[str] = None
     boot_route = resolve_route(active_alias)
     active_runner = boot_route.get("runner")
-    active_summon = DEFAULT_AGENT_MODEL if active_runner == "alice" else active_alias
+    if active_runner == "alice" and os.environ.get("ALICE_NO_FALLBACK") == "1":
+        active_summon = "none"
+    else:
+        active_summon = DEFAULT_AGENT_MODEL if active_runner == "alice" else active_alias
     if boot_route.get("effort"):
         active_effort = boot_route["effort"]
     last_gate = {"action": "", "route": ""}
@@ -2296,7 +2530,7 @@ def run_interactive_agent(
                         active_alias = choice
                         if route.get("runner") == "alice":
                             active_runner = "alice"
-                            summon_id = resolve_route(active_summon)["model"]
+                            summon_id = "disabled (standalone)" if active_summon in ("none", "off", "disabled", "alone") else resolve_route(active_summon)["model"]
                             sys.stdout.write(f"{c_mid}[Active model set to: alice]{c_reset}\n")
                             sys.stdout.write(f"{c_mid}[Local brain. Summon model: {summon_id}]{c_reset}\n")
                             sys.stdout.write(
@@ -2313,15 +2547,23 @@ def run_interactive_agent(
 
             elif cmd == "/summon":
                 if not arg:
-                    summon_id = resolve_route(active_summon)["model"]
-                    sys.stdout.write(f"{c_mid}[Summon model: {active_summon} -> {summon_id}]{c_reset}\n")
-                    sys.stdout.write(f"{c_mid}[Usage: /summon <number or alias>]{c_reset}\n")
+                    if active_summon in ("none", "off", "disabled", "alone"):
+                        sys.stdout.write(f"{c_mid}[Summon model: disabled (standalone Alice)]{c_reset}\n")
+                    else:
+                        summon_id = resolve_route(active_summon)["model"]
+                        sys.stdout.write(f"{c_mid}[Summon model: {active_summon} -> {summon_id}]{c_reset}\n")
+                    sys.stdout.write(f"{c_mid}[Usage: /summon <number or alias | none>]{c_reset}\n")
+                elif arg.lower().strip() in ("none", "off", "disabled", "alone"):
+                    active_summon = "none"
+                    sys.stdout.write(
+                        f"{c_mid}[Summon model disabled. Alice operates standalone with zero fallback.]{c_reset}\n"
+                    )
                 else:
                     choice = resolve_model_choice(arg)
                     route = resolve_route(choice) if choice else None
                     if choice is None or (route and route.get("runner") == "alice"):
                         sys.stdout.write(
-                            f"{c_mid}[Summon target '{arg}' refused. Pick an inference alias.]{c_reset}\n"
+                            f"{c_mid}[Summon target '{arg}' refused. Pick an inference alias or 'none'.]{c_reset}\n"
                         )
                     else:
                         active_summon = choice

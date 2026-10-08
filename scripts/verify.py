@@ -146,6 +146,97 @@ def verify_tui_invariants(repo_dir: str) -> None:
     print("tui invariants verification : exit 0.")
 
 
+def verify_provider_priority(repo_dir: str) -> None:
+    sys.path.insert(0, repo_dir)
+    from hydra_cli.providers import get_frontier_providers
+
+    old_env = {k: os.environ.get(k) for k in [
+        "HF_TOKEN", "CHEAPERINFERENCE_API_KEY", "AI_GATEWAY_API_KEY",
+        "OPENROUTER_API_KEY", "MODAL_ENDPOINT_URL", "RUNPOD_API_KEY", "RUNPOD_ENDPOINT_ID"
+    ]}
+    try:
+        os.environ["HF_TOKEN"] = "hf-dummy"
+        os.environ["CHEAPERINFERENCE_API_KEY"] = "ci-dummy"
+        os.environ["AI_GATEWAY_API_KEY"] = "vercel-dummy"
+        os.environ["OPENROUTER_API_KEY"] = "or-dummy"
+        os.environ["MODAL_ENDPOINT_URL"] = "https://modal.dummy"
+        os.environ["RUNPOD_API_KEY"] = "rp-dummy"
+        os.environ["RUNPOD_ENDPOINT_ID"] = "pod-dummy"
+
+        providers = get_frontier_providers()
+        names = [p["name"] for p in providers]
+        assert names == [
+            "Hugging Face Inference",
+            "CheaperInference",
+            "Vercel AI Gateway",
+            "OpenRouter",
+            "Modal",
+            "RunPod",
+        ], f"Provider priority mismatch: {names}"
+    finally:
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    print("provider priority verification : exit 0.")
+
+
+def verify_alice_core(repo_dir: str) -> None:
+    sys.path.insert(0, repo_dir)
+    from hydra_cli.alice_runner import evaluate_with_alice, find_alice_core, find_node_binary
+
+    assert find_node_binary() is not None, "Node.js binary not discoverable"
+    assert find_alice_core() is not None, "alice_core.js not discoverable"
+
+    # 1. Deterministic evaluation (arithmetic)
+    eval_math = evaluate_with_alice("2 + 2")
+    assert eval_math is not None, "Alice math evaluation failed"
+    assert eval_math.get("route") == "DETERMINISTIC_EVAL", f"Expected DETERMINISTIC_EVAL, got {eval_math.get('route')}"
+    assert "4" in str(eval_math.get("answer")), f"Expected 4 in answer, got {eval_math.get('answer')}"
+
+    # 2. Philosophical canon inquiry
+    eval_canon = evaluate_with_alice("navigate uncertainty")
+    assert eval_canon is not None, "Alice canon evaluation failed"
+    assert eval_canon.get("route") == "PHILOSOPHICAL_CANON", f"Expected PHILOSOPHICAL_CANON, got {eval_canon.get('route')}"
+    assert "Socrates" in str(eval_canon.get("answer")), f"Expected Socrates in canon advice, got {eval_canon.get('answer')}"
+
+    # 3. Epistemic gap inquiry with citation
+    eval_gap = evaluate_with_alice("hello alice. how are you doing today?")
+    assert eval_gap is not None, "Alice epistemic gap evaluation failed"
+    assert eval_gap.get("route") == "EPISTEMIC_GAP", f"Expected EPISTEMIC_GAP, got {eval_gap.get('route')}"
+    assert len(eval_gap.get("candidates", [])) > 0, "Expected candidate citations in epistemic gap"
+
+    # 4. Progen P018 invariant check (zero copula across stream)
+    progen = eval_gap.get("progenStream", "")
+    assert progen, "Expected non-empty progenStream"
+    for line in progen.splitlines():
+        line_clean = line.strip()
+        if not line_clean or line_clean.startswith("["):
+            continue
+        if ":" in line_clean:
+            _, comment = line_clean.split(":", 1)
+            words = comment.strip().split()
+            if words:
+                assert words[0].lower() not in ("is", "are", "was", "were"), f"P018 copula violation: {line_clean}"
+
+    print("alice core verification : exit 0.")
+
+
+def verify_alice_standalone_gate(repo_dir: str) -> None:
+    sys.path.insert(0, repo_dir)
+    from hydra_cli.alice_gate import consult
+
+    for query in ["hello alice. how are you doing today?", "2 + 2", "refactor the parser module"]:
+        dec = consult(query, summon_alias="none")
+        assert dec.action in ("local", "ask"), f"Query '{query}' produced action '{dec.action}', expected local or ask"
+        assert dec.action != "summon", f"Query '{query}' must not summon in standalone mode"
+        assert dec.text, f"Query '{query}' produced empty text"
+
+    print("alice standalone gate verification : exit 0.")
+
+
 def main() -> int:
     t0 = time.perf_counter()
     _banner()
@@ -156,6 +247,9 @@ def main() -> int:
     verify_cli_subprocesses(repo_dir)
     verify_agent_repl(repo_dir)
     verify_tui_invariants(repo_dir)
+    verify_provider_priority(repo_dir)
+    verify_alice_core(repo_dir)
+    verify_alice_standalone_gate(repo_dir)
 
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
     print(f"\nhydra gate status : pass.")
