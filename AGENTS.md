@@ -22,7 +22,7 @@ This project previously lost real work when agents edited trees locally and neve
 
 ## Installer manifests
 
-`install.sh` and `install.ps1` must list every runtime file under `hydra_cli/` (`.py` / `.json`) plus `bin/hydra` and `bin/hydra.js`. `python scripts/verify.py` fails if the lists drift.
+`install.sh` and `install.ps1` must list every runtime file under `hydra_cli/` (`.py`, `.json`, `.jsonl`, and `skills/*.md`) plus `bin/hydra` and `bin/hydra.js`. `python scripts/verify.py` fails if the lists drift.
 
 ## Verification and Ponytail doctrine
 
