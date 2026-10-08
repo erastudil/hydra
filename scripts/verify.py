@@ -145,11 +145,14 @@ def run_cli(args, stdin=None, timeout=20, extra_env=None):
 def _runtime_files():
     names = ["bin/hydra", "bin/hydra.js"]
     cli = os.path.join(REPO, "hydra_cli")
-    for name in sorted(os.listdir(cli)):
-        path = os.path.join(cli, name)
-        if os.path.isfile(path) and name.endswith((".py", ".json")):
-            names.append(f"hydra_cli/{name}")
-    return names
+    suffixes = (".py", ".json", ".jsonl", ".md")
+    for dirpath, dirnames, filenames in os.walk(cli):
+        dirnames[:] = [d for d in sorted(dirnames) if d != "__pycache__"]
+        for name in filenames:
+            if name.endswith(suffixes):
+                rel = os.path.relpath(os.path.join(dirpath, name), REPO).replace(os.sep, "/")
+                names.append(rel)
+    return names[:2] + sorted(names[2:])
 
 
 def _quoted_files(text, pattern):
@@ -213,6 +216,21 @@ def manifests():
         )
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == f"hydra {__version__}"
+        loaded = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from hydra_cli.hands import load_cards; from hydra_cli.alice_gate import load_skills; "
+                "cards = load_cards(); skills = load_skills(); "
+                "assert cards and skills, (len(cards), len(skills))",
+            ],
+            cwd=dest,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert loaded.returncode == 0, loaded.stderr or loaded.stdout
 
 
 @check
