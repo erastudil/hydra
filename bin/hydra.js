@@ -5,6 +5,7 @@
  * Zero external dependencies. Model aliases come from hydra_cli/catalog.json.
  */
 
+const { spawnSync } = require('child_process');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
@@ -12,6 +13,22 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { URL } = require('url');
+
+/** Interactive slash-command REPL lives in Python (`hydra_cli/repl.py`). */
+function launchPythonRepl(extraArgs) {
+  const pythonBin = path.join(__dirname, 'hydra');
+  const py = process.platform === 'win32' ? 'python' : 'python3';
+  const args = [pythonBin, 'chat', ...(extraArgs || [])];
+  const result = spawnSync(py, args, { stdio: 'inherit', env: process.env });
+  if (result.error && result.error.code === 'ENOENT') {
+    process.stderr.write(
+      '[ERROR] Interactive chat/tui needs Python 3 (hydra_cli/repl.py).\n' +
+      '        Install Python or run: python3 bin/hydra chat\n'
+    );
+    return 1;
+  }
+  return result.status == null ? 1 : result.status;
+}
 
 function loadCatalog() {
   const candidates = [
@@ -39,6 +56,44 @@ function cleanSecret(value) {
   const text = String(value || '').trim();
   if (text.includes('\n') || text.includes('\r')) return '';
   return text;
+}
+
+function sanitizeStreamText(text) {
+  if (!text) return '';
+  let out = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '');
+  out = out.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '');
+  out = out.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
+  out = out.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+  return out;
+}
+
+function createTokenStreamWriter(stream = process.stdout, intervalMs = 16, maxBuffer = 64) {
+  let buf = '';
+  let lastFlush = 0;
+  let emitted = false;
+  const flush = () => {
+    if (!buf) return;
+    stream.write(buf);
+    buf = '';
+    lastFlush = Date.now();
+  };
+  return {
+    get emitted() { return emitted; },
+    write(chunk) {
+      const clean = sanitizeStreamText(chunk);
+      if (!clean) return;
+      buf += clean;
+      emitted = true;
+      const now = Date.now();
+      if (clean.includes('\n') || buf.length >= maxBuffer || (now - lastFlush) >= intervalMs) {
+        flush();
+      }
+    },
+    finish(trailingNewline = true) {
+      flush();
+      if (trailingNewline) stream.write('\n');
+    },
+  };
 }
 
 function gatewayKey() {
@@ -336,6 +391,7 @@ function streamRequest(endpointUrl, headers, payload, onChunk, timeoutMs) {
       res.setEncoding('utf8');
       let buffer = '';
       let sawDone = false;
+      let sawToken = false;
       res.on('data', (chunk) => {
         buffer += chunk;
         const lines = buffer.split('\n');
@@ -355,10 +411,19 @@ function streamRequest(endpointUrl, headers, payload, onChunk, timeoutMs) {
               req.destroy();
               return;
             }
-            const delta = parsed.choices && parsed.choices[0] && parsed.choices[0].delta
-              ? parsed.choices[0].delta.content || ''
-              : '';
-            if (delta) onChunk(delta);
+            const choice = parsed.choices && parsed.choices[0] ? parsed.choices[0] : null;
+            const deltaObj = choice && choice.delta ? choice.delta : null;
+            let delta = '';
+            if (deltaObj) {
+              if (typeof deltaObj.content === 'string') delta = deltaObj.content;
+              else if (typeof deltaObj.text === 'string') delta = deltaObj.text;
+            } else if (choice && typeof choice.text === 'string') {
+              delta = choice.text;
+            }
+            if (delta) {
+              sawToken = true;
+              onChunk(delta);
+            }
           } catch (_) {}
         }
       });
@@ -366,7 +431,7 @@ function streamRequest(endpointUrl, headers, payload, onChunk, timeoutMs) {
       res.on('aborted', () => fail(new Error('response aborted')));
       res.on('end', () => {
         if (settled) return;
-        if (!sawDone) {
+        if (!sawDone && !sawToken) {
           fail(new Error('stream ended before data: [DONE]'));
           return;
         }
@@ -706,40 +771,39 @@ async function runSwarm(task, selectedRoles, customModel, jsonMode, temperature,
 
 const GREEN_PHOSPHOR = process.stdout.isTTY && !process.env.NO_COLOR ? '\x1b[38;5;46m' : '';
 const GREEN_MID = process.stdout.isTTY && !process.env.NO_COLOR ? '\x1b[38;5;40m' : '';
+const GREEN_BOLD = process.stdout.isTTY && !process.env.NO_COLOR ? '\x1b[1;38;5;46m' : '';
 const COLOR_RESET = process.stdout.isTTY && !process.env.NO_COLOR ? '\x1b[0m' : '';
 
-const HYDRA_7_HEADS_ART = `
-            [1]        [2]        [3]        [4]        [5]        [6]        [7]
-           HERMES       PI      ARCHITECT  SOVEREIGN   CODER     AUDITOR   SYNTHESIS
-          (\\___/)    (\\___/)    (\\___/)    <(\\___/)>   (\\___/)    (\\___/)    (\\___/)
-          /0   0\\    /o   o\\    /^   ^\\    { 0   0 }   /^   ^\\    /o   o\\    /0   0\\
-         ( ==Y== )  ( ==v== )  ( ==w== )  (  ==X==  ) ( ==w== )  ( ==v== )  ( ==Y== )
-          )     (    )     (    )     (   / )     ( \\  )     (    )     (    )     (
-         /       \\  /       \\  /       \\ ( /       \\ )/       \\  /       \\  /       \\
-        /   | |   \\/   | |   \\/   | |   \\ V   | |   V /   | |   \\/   | |   \\/   | |   \\
-       |    | |        | |        | |    |    | |   |   | |        | |        | |    |
-       \\    \\ \\       / /        / /     |    | |   |    \\ \\        \\ \\       / /    /
-        \\    \\ \\_____/ /        / /      \\    | |   /     \\ \\________\\ \\_____/ /    /
-         \\    \\_______/        / /        \\___/ \\__/       \\_______/  \\_______/    /
-          \\                   / /          |       |        \\                     /
-           '.               .' /           |  VII  |         \\                  .'
-             '.           .'  /            |       |          \\               .'
-               '---------'   /             /_______\\           \\   '---------'
-                            /             /         \\           \\
-                           (             /   HYDRA   \\           )
-                            '._________.'|   CORE    |'._________.'
-                                         \\           /
-                                          '---------'
+const HYDRA_TUI_3_HEADS = `
+                         __====-_          _-====__
+                   _--~~~       ~~--_  _--~~       ~~~--_
+                _-~                       ~~              ~-_
+              .~     (\\___/)   (\\___/)   (\\___/)            ~.
+             /      ( 0   0 ) ( o   o ) ( 0   0 )             \\
+            |        \\  =  /   \\  v  /   \\  =  /               |
+            |         '--'      '--'      '--'                 |
+             \\        .-------------------------------.       /
+              ~-._     \\                             /    _.-~
+                  \`--.  \\         H Y D R A         /  .--'
+                      \`'--..___________________..--'\`
 `;
 
-const HELP_BANNER = `${GREEN_MID}${HYDRA_7_HEADS_ART}${COLOR_RESET}
+const HYDRA_WORDMARK = `
   ___ ___            .___
  /   |   \\___.__.  __| _/___________
 /    ~    <   |  | / __ |\\_  __ \\__  \\
 \\    Y    /\\___  |/ /_/ | |  | \\// __ \\_
  \\___|_  / / ____|\\____ | |__|  (____  /
        \\/  \\/          \\/            \\/
-      Sovereign Multi-Headed AI Shell · v${VERSION} (Node.js)
+`;
+
+const HELP_BANNER = `${GREEN_BOLD || GREEN_MID}  ___ ___            .___
+ /   |   \\___.__.  __| _/___________
+/    ~    <   |  | / __ |\\_  __ \\__  \\
+\\    Y    /\\___  |/ /_/ | |  | \\// __ \\_
+ \\___|_  / / ____|\\____ | |__|  (____  /
+       \\/  \\/          \\/            \\/${COLOR_RESET}
+${GREEN_PHOSPHOR}      Sovereign Multi-Headed AI Shell · v${VERSION} (Node.js)${COLOR_RESET}
 
 USAGE:
     hydra <model-alias> "<prompt>"       # Direct frontier model summoning
@@ -750,7 +814,8 @@ USAGE:
     hydra <alias> --mcp "<prompt>"       # Tool-augmented execution loop
     hydra serve [--port 7777]            # Sovereign OpenAI Gateway for Hermes and Pi
     hydra mcp list                       # List configured community MCP servers & tools
-    hydra banner                         # Display 7-headed Sovereign Hydra in terminal green
+    hydra banner                         # Display 3-head TUI Hydra + title wordmark
+    hydra / hydra chat / hydra tui       # Interactive REPL with slash commands (Python)
     hydra setup                          # Interactive setup & app/agent integration guide
     cat file.txt | hydra <alias>         # The pipe is the prompt
     cat file.txt | hydra <alias> - "instruction"
@@ -822,15 +887,22 @@ Docs & Source: https://github.com/erastudil/hydra
 `);
 }
 
-function printModels() {
+function printModels(verbose = false) {
   console.log(`\n--- Hydra Registered Models & Aliases (v${VERSION}) ---`);
   for (const alias of Object.keys(MODEL_MAP).sort()) {
-    const route = resolveRoute(alias);
-    const extra = [
-      route.effort ? `effort=${route.effort}` : '',
-      route.reasoningMode ? `mode=${route.reasoningMode}` : '',
-    ].filter(Boolean).join(' ');
-    console.log(`  ${alias.padEnd(20)} -> ${route.model}${extra ? ` (${extra})` : ''}`);
+    if (verbose) {
+      const route = resolveRoute(alias);
+      const extra = [
+        route.effort ? `effort=${route.effort}` : '',
+        route.reasoningMode ? `mode=${route.reasoningMode}` : '',
+      ].filter(Boolean).join(' ');
+      console.log(`  ${alias.padEnd(18)}  ${route.model}${extra ? ` (${extra})` : ''}`);
+    } else {
+      console.log(`  ${alias}`);
+    }
+  }
+  if (!verbose) {
+    console.log('\n  Tip: hydra --list-models --verbose  # show resolved model ids');
   }
   console.log('');
 }
@@ -860,11 +932,12 @@ async function summon(options) {
         reasoningMode: options.reasoningMode,
       });
       if (options.stream && !options.jsonMode) {
+        const writer = createTokenStreamWriter();
         await streamRequest(provider.url, provider.headers, payload, (chunk) => {
           emitted = true;
-          process.stdout.write(chunk);
+          writer.write(chunk);
         }, completionTimeoutMs(options.effort, options.reasoningMode));
-        process.stdout.write('\n');
+        writer.finish(true);
         return 0;
       }
       const text = await requestJson(
@@ -909,15 +982,24 @@ async function main() {
     return 0;
   }
   if (early === 'banner' || early === '--banner') {
-    console.log(`${GREEN_PHOSPHOR}${HYDRA_7_HEADS_ART}${COLOR_RESET}\n  ___ ___            .___\n /   |   \\___.__.  __| _/___________\n/    ~    <   |  | / __ |\\_  __ \\__  \\\n\\    Y    /\\___  |/ /_/ | |  | \\// __ \\_\n \\___|_  / / ____|\\____ | |__|  (____  /\n       \\/  \\/          \\/            \\/\n      Sovereign Multi-Headed AI Shell · v${VERSION} (Node.js)\n`);
+    // One splash: 3-head TUI art + classic wordmark + single tagline.
+    console.log(
+      `${GREEN_MID}${HYDRA_TUI_3_HEADS}${COLOR_RESET}` +
+      `${GREEN_BOLD}${HYDRA_WORDMARK}${COLOR_RESET}` +
+      `${GREEN_PHOSPHOR}      Sovereign Multi-Headed AI Shell · v${VERSION} (Node.js)${COLOR_RESET}\n`
+    );
     return 0;
+  }
+  if (early === 'chat' || early === 'tui' || early === 'repl' || early === 'interactive') {
+    return launchPythonRepl(rawArgs.slice(1));
   }
   if (early === 'setup' || early === 'guide' || early === '--setup' || early === '--guide') {
     printSetupGuide();
     return 0;
   }
   if (early === '--list-models' || early === 'list-models' || early === 'models') {
-    printModels();
+    const verbose = rawArgs.slice(1).some((flag) => flag === '--verbose' || flag === '-V' || flag === '--show-ids');
+    printModels(verbose);
     return 0;
   }
 
@@ -925,6 +1007,9 @@ async function main() {
   if (!rawArgs.length) {
     const piped = await readStdin();
     if (!piped) {
+      if (process.stdin.isTTY && process.stdout.isTTY) {
+        return launchPythonRepl([]);
+      }
       console.log(HELP_BANNER);
       return 0;
     }
@@ -1031,11 +1116,12 @@ async function main() {
           maxTokens,
         });
         if (stream && !jsonMode) {
+          const writer = createTokenStreamWriter();
           await streamRequest(provider.url, provider.headers, payload, (chunk) => {
             emitted = true;
-            process.stdout.write(chunk);
+            writer.write(chunk);
           }, 180000);
-          process.stdout.write('\n');
+          writer.finish(true);
         } else {
           const text = await requestJson(provider.url, provider.headers, payload, 180000);
           if (jsonMode) {
@@ -1068,10 +1154,12 @@ async function main() {
       maxTokens,
     });
     if (stream && !jsonMode) {
-      await streamRequest(local.url, local.headers || { 'Content-Type': 'application/json' }, payload, (chunk) => {
-        process.stdout.write(chunk);
-      }, 180000);
-      process.stdout.write('\n');
+      const writer = createTokenStreamWriter();
+          await streamRequest(local.url, local.headers || { 'Content-Type': 'application/json' }, payload, (chunk) => {
+            emitted = true;
+            writer.write(chunk);
+          }, 180000);
+          writer.finish(true);
     } else {
       const text = await requestJson(local.url, { 'Content-Type': 'application/json' }, payload, 180000);
       if (jsonMode) {
@@ -1118,6 +1206,8 @@ module.exports = {
   getFreeCandidates,
   providersForModel,
   redact,
+  sanitizeStreamText,
+  createTokenStreamWriter,
 };
 
 if (require.main === module) {

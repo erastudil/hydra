@@ -101,6 +101,7 @@ PROVIDER_KEY_NAMES: Dict[str, str] = {
     "cheaperinference": "CHEAPERINFERENCE_API_KEY",
     "runpod": "RUNPOD_API_KEY",
     "modal": "MODAL_ENDPOINT_URL",
+    "huggingface": "HF_TOKEN",
 }
 
 DEFAULT_CONTEXT_WINDOW = 131072

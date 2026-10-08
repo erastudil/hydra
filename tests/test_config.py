@@ -70,9 +70,10 @@ def test_free_models_exist():
 
 def test_removed_dead_aliases():
     # These model ids exist on neither OpenRouter nor the Vercel AI Gateway.
-    for alias in ("sonnet 3.7", "grok 2", "qwen 3b", "kolibri"):
+    for alias in ("sonnet 3.7", "grok 2", "qwen 3b", "kolibri", "alice-emap"):
         assert alias not in MODEL_MAP
     assert "Aleph-Alpha/Kolibri-1" not in MODEL_MAP.values()
+    assert "Bluebarrels/alice-emap-adapter" not in MODEL_MAP.values()
 
 
 def test_single_provider_models_are_marked():
@@ -80,8 +81,16 @@ def test_single_provider_models_are_marked():
     assert resolve_route("sol 6.1 fast")["providers"] == ["vercel"]
     assert resolve_route("glm")["providers"] == ["cheaperinference"]
     assert resolve_route("sonnet 5.5")["providers"] == []
+    assert resolve_route("llama 3.1 8b")["providers"] == ["huggingface"]
     # Raw model ids pick up the same limits.
     assert resolve_route("openai/gpt-6.1-sol-fast")["providers"] == ["vercel"]
+
+
+def test_current_gateway_aliases():
+    assert resolve_model("sol 5.6") == "openai/gpt-5.6-sol"
+    assert resolve_model("gpt-5.6") == "openai/gpt-5.6-sol"
+    assert resolve_model("muse spark 1.3") == "meta/muse-spark-1.3"
+    assert resolve_route("sol 5.6 pro")["reasoning_mode"] == "pro"
 
 
 def test_swarm_heads_defaults():

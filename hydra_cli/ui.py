@@ -21,6 +21,7 @@ GREEN_DIM = "\033[38;5;28m"
 GREEN_BOLD = "\033[1;38;5;46m"
 RESET = "\033[0m"
 
+# Classic title wordmark — keep this; it is the brand signal under the TUI art.
 HYDRA_LOGO_ASCII = r'''
   ___ ___            .___              
  /   |   \___.__.  __| _/___________   
@@ -91,6 +92,31 @@ HYDRA_WORDMARK = (
     "██║  ██║   ██║   ██████╔╝██║  ██║██║  ██║\n"
     "╚═╝  ╚═╝   ╚═╝   ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝"
 )
+
+# Revised 3-head TUI splash kept for compatibility
+HYDRA_TUI_3_HEADS = r"""
+                         __====-_          _-====__
+                   _--~~~       ~~--_  _--~~       ~~~--_
+                _-~                       ~~              ~-_
+              .~     (\___/)   (\___/)   (\___/)            ~.
+             /      ( 0   0 ) ( o   o ) ( 0   0 )             \
+            |        \  =  /   \  v  /   \  =  /               |
+            |         '--'      '--'      '--'                 |
+             \        .-------------------------------.       /
+              ~-._     \                             /    _.-~
+                  `--.  \         H Y D R A         /  .--'
+                      `'--..___________________..--'`
+"""
+
+HYDRA_TUI_3_HEADS_COMPACT = r"""
+              (\___/)   (\___/)   (\___/)
+              ( 0 0 )   ( o o )   ( 0 0 )
+               \ = /     \ v /     \ = /
+                '-'       '-'       '-'
+             .-----------------------------.
+             |            HYDRA            |
+             '-----------------------------'
+"""
 
 HYDRA_7_HEADS_DETAILED = HYDRA_ART_LARGE
 HYDRA_7_HEADS_MONSTER = HYDRA_ART_MEDIUM
@@ -298,6 +324,16 @@ def _banner_parts(detailed: bool, version: str, columns: int, rows: int, mode: i
     else:
         tagline = tag_pad + tagline_plain
     return art_lines, mark, tagline
+
+
+def get_help_header(version: Optional[str] = None) -> str:
+    """Compact wordmark used above help/usage. No creature art."""
+    version = version or __version__
+    header = HYDRA_LOGO_ASCII.rstrip()
+    tagline = f"      Sovereign Multi-Headed AI Shell · v{version}"
+    if supports_color():
+        return f"{GREEN_BOLD}{header}{RESET}\n{GREEN_BRIGHT}{tagline}{RESET}\n"
+    return f"{header}\n{tagline}\n"
 
 
 def get_terminal_banner(detailed: bool = True, version: Optional[str] = None,

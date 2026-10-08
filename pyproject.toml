@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hydra-ai-cli"
-version = "1.2.1"
+version = "1.2.2"
 description = "Sovereign multi-headed AI summoning CLI. Direct frontier models, zero-cost Free Forge routing, local inference, and multi-agent swarm fan-out."
 readme = "README.md"
 authors = [
@@ -44,8 +44,8 @@ Repository = "https://github.com/erastudil/hydra"
 include = ["hydra_cli*"]
 
 [tool.setuptools.package-data]
-hydra_cli = ["catalog.json", "mcp_servers.default.json", "skills/*.md"]
+hydra_cli = ["catalog.json", "mcp_servers.default.json", "data/*.jsonl", "skills/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--basetemp=.pytest_tmp"
+

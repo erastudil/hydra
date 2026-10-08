@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="hydra-ai-cli",
-    version="1.2.1",
+    version="1.2.2",
     description="Sovereign multi-headed AI summoning CLI.",
     long_description=open("README.md", encoding="utf-8").read() if __import__("os").path.exists("README.md") else "",
     long_description_content_type="text/markdown",

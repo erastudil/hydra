@@ -7,6 +7,7 @@ Supports tier routing (free, local, paid) and agentic tool-augmented execution l
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import os
 import sys
 import time
 from typing import Any, Dict, List, Optional
@@ -240,17 +241,25 @@ def run_single_head(
     )
 
 
-def _print_head(result: SwarmResult) -> None:
+def _print_head(result: SwarmResult, *, verbose: bool = False) -> None:
     icon = HEAD_ICONS.get(_base_role(result.role), "[HEAD]")
     border = "=" * 64
-    route = result.model
-    if result.served_model and result.served_model != result.model:
-        route = f"{result.model} -> {result.served_model}"
-    if result.provider:
-        route = f"{route} via {result.provider}"
-    cost = f" · ${result.cost:.4f}" if result.cost is not None else ""
+    # Prefer the head title; full model ids only when verbose or HYDRA_VERBOSE=1.
+    show_ids = verbose or os.environ.get("HYDRA_VERBOSE", "").strip() in ("1", "true", "yes")
+    meta_bits = []
+    if show_ids:
+        route = result.model
+        if result.served_model and result.served_model != result.model:
+            route = f"{result.model} -> {result.served_model}"
+        meta_bits.append(route)
+    if result.provider and show_ids:
+        meta_bits.append(f"via {result.provider}")
+    meta_bits.append(f"{result.duration_sec:.1f}s")
+    if result.cost is not None:
+        meta_bits.append(f"${result.cost:.4f}")
+    meta = " · ".join(meta_bits)
     sys.stdout.write(f"\n{border}\n")
-    sys.stdout.write(f"{icon} [HEAD: {result.title.upper()}] · {route} ({result.duration_sec:.1f}s){cost}\n")
+    sys.stdout.write(f"{icon} [HEAD: {result.title.upper()}] · {meta}\n")
     if result.fallbacks and not result.error:
         sys.stdout.write(f"    after failures: {'; '.join(result.fallbacks)}\n")
     sys.stdout.write(f"{border}\n\n")

@@ -371,9 +371,16 @@ def test_swarm_reports_provider_model_and_cost(capsys):
     assert res.to_dict()["provider"] == "Vercel AI Gateway"
     _print_head(res)
     out = capsys.readouterr().out
-    assert "via Vercel AI Gateway" in out
+    # Default human view: head title + cost; full model/provider ids only when verbose.
+    assert "[HEAD: IMPLEMENTER]" in out
     assert "$0.0123" in out
     assert "OpenRouter: HTTP 402" in out
+    assert "via Vercel AI Gateway" not in out
+    assert "anthropic/claude-sonnet-5.5" not in out
+    _print_head(res, verbose=True)
+    verbose_out = capsys.readouterr().out
+    assert "via Vercel AI Gateway" in verbose_out
+    assert "anthropic/claude-sonnet-5.5" in verbose_out
 
 
 # ---------------------------------------------------------------------------
@@ -416,6 +423,7 @@ def test_banner_has_one_tagline(monkeypatch):
     banner = get_terminal_banner()
     assert banner.count("Sovereign Multi-Headed AI Shell") == 1
     assert f"v{__version__}" in banner
+    assert "HERMES" not in banner
 
 
 def test_default_mcp_config_has_no_deprecated_packages_and_keeps_sqlite_in_hydra_home():

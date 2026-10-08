@@ -1,4 +1,4 @@
-﻿"""
+"""
 Autonomous ReAct agent execution loop with MCP tool calling, native coding tools, and multi-turn state.
 Zero external dependencies.
 """
@@ -33,6 +33,7 @@ from hydra_cli.config import (
     hydra_home,
     resolve_route,
 )
+from hydra_cli.hands import dispatch_native, native_openai_tools
 from hydra_cli.tool_adapter import (
     adapt_messages_for_prompt_tools,
     extract_tool_calls,
@@ -880,6 +881,7 @@ def run_agent_loop(
     tools: List[Dict[str, Any]] = []
     if native_reg:
         tools.extend(native_reg.get_openai_tools())
+    tools.extend(native_openai_tools())
     if mcp_reg:
         tools.extend(mcp_reg.get_openai_tools())
 
@@ -1338,6 +1340,9 @@ def run_agent_loop(
                 ]
 
             def _dispatch_tool_action() -> Tuple[Any, bool]:
+                native = dispatch_native(fn_name, args if isinstance(args, dict) else {})
+                if native is not None:
+                    return native, False
                 if native_reg and native_reg.has_tool(fn_name):
                     tool_context = {
                         "subagent_depth": subagent_depth,
