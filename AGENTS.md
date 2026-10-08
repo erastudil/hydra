@@ -24,6 +24,12 @@ This project previously lost real work when agents edited trees locally and neve
 
 `install.sh` and `install.ps1` must list every runtime file under `hydra_cli/` (`.py` / `.json`) plus `bin/hydra` and `bin/hydra.js`. `tests/test_installers.py` fails if the lists drift.
 
-## Tests before claiming done
+## Verification and Ponytail doctrine
 
-Prefer: `python3 -m pytest tests/test_display.py tests/test_cli.py tests/test_installers.py tests/test_fixes.py -q` (plus any tests for modules you touched).
+Primary verification gate:
+`python scripts/verify.py`
+
+Invariants:
+1. Zero fake tests: synthetic mocks asserting mocked return values denote zero truth value; banned universally; verification requires real runnable execution gates.
+2. Zero stubs / zero placeholders: either code executes with real subprocesses/interfaces returning exit code 0 or it does not enter main.
+3. Ponytail Wu Wei: pull all complexity into single-grip deterministic runners; reject sprawling mock catalogs and multi-file test suites.

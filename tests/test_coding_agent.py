@@ -320,7 +320,7 @@ def test_model_alice_resolves_to_glm_flash():
     assert route["runner"] == "alice"
     assert model_status_label("alice") == "alice -> glm-5.3-flash"
     from hydra_cli.agent import session_model_label
-    assert session_model_label("alice", "alice", "glm 5.3 flash") == "alice | summon glm-5.3-flash"
+    assert session_model_label("alice", "alice", "glm 5.3 flash") == "alice"
 
 
 def test_repl_model_alice_reports_glm_flash(capsys, tmp_path):
@@ -358,6 +358,20 @@ def test_documents_agents_names_progen_first():
     rules = detect_project_rules(r"C:\Users\jpm05\Documents")
     assert rules.index("PROGEN READ FIRST: progen_invariants.md") < rules.index("PROGEN READ FIRST: SKILL.md")
     assert rules.index("PROGEN READ FIRST: SKILL.md") < rules.index("[PROJECT CONTEXT & RULES: AGENTS.md]")
+
+
+def test_effort_and_heat_pickers():
+    from hydra_cli.agent import format_effort_picker, format_heat_picker, resolve_effort_choice
+
+    assert resolve_effort_choice("3") == "high"
+    assert resolve_effort_choice("max") == "max"
+    assert resolve_effort_choice("9") is None
+    effort = format_effort_picker("high")
+    assert "> 3  high" in effort
+    heat = format_heat_picker(None)
+    assert "> off" in heat
+    heat = format_heat_picker(0.7)
+    assert "> 0.7" in heat
 
 
 def test_heat_window_and_dialect_parsers():
@@ -433,4 +447,5 @@ def test_repl_session_settings(capsys, tmp_path):
     assert "Sampling heat set to: 0.4" in out
     assert "Context window set to: 131,072 tokens" in out
     assert "Context strategy set to: compact" in out
-    assert "Strategy     : compact" in out
+    assert "effort  high" in out
+    assert "heat    0.4" in out

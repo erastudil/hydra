@@ -211,23 +211,10 @@ def _win32_scroll_viewport(lines: int) -> bool:
 
 
 def scroll_terminal_history(lines: int) -> bool:
-    """Scroll the host terminal's history viewport. Negative lines look further up."""
+    """Scroll the host terminal's history viewport when the console API supports it."""
     if lines == 0:
         return False
-    if _win32_scroll_viewport(lines):
-        return True
-    # VT hosts that still deliver wheel events while mouse tracking is on:
-    # SU / SD move the viewport contents. Prefer Win32 above when available.
-    try:
-        stream = getattr(sys, "__stdout__", None) or sys.stdout
-        if lines < 0:
-            stream.write(f"\x1b[{abs(lines)}S")
-        else:
-            stream.write(f"\x1b[{lines}T")
-        stream.flush()
-        return True
-    except Exception:
-        return False
+    return _win32_scroll_viewport(lines)
 
 
 class _PromptControl(BufferControl):
@@ -527,6 +514,16 @@ def reflow_rows_above_cursor(screen: Any, cursor_x: int, cursor_y: int, new_widt
 class _ReflowSafeApplication(Application):
     """Application whose resize erase also clears rows the terminal created by rewrapping the old frame."""
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        orig_report = self.renderer.report_absolute_cursor_row
+
+        def _report(row: int) -> None:
+            orig_report(row)
+            self.invalidate()
+
+        self.renderer.report_absolute_cursor_row = _report
+
     def _on_resize(self) -> None:
         renderer = self.renderer
         screen = getattr(renderer, "_last_screen", None)
@@ -567,13 +564,22 @@ class HydraTUI:
         pt_output: Any = None,
         bridge_stdout: bool = True,
         clipboard: Optional[Clipboard] = None,
+        mouse_support: Optional[bool] = None,
     ) -> None:
         self.commands = list(commands)
         self._complete_fn = complete
+        if pt_input is None and os.name == "nt":
+            from hydra_cli.win_console import console_input
+
+            pt_input = console_input()
         self._pt_input = pt_input
         self._pt_output = pt_output
         self._bridge_stdout = bridge_stdout
         self._clipboard = clipboard if clipboard is not None else _SystemClipboard()
+        if mouse_support is None:
+            self._mouse_support = os.environ.get("HYDRA_MOUSE", "").strip().lower() in ("1", "true", "yes", "on")
+        else:
+            self._mouse_support = bool(mouse_support)
         self.model = ""
         self.tier = ""
         self.dialect = ""
@@ -1184,14 +1190,11 @@ class HydraTUI:
         return [(border, g["tl"] + g["h"])] + title
 
     def _top_right(self) -> Fragments:
-        g = self._g
-        parts = [p for p in (self.model, self.tier, self.dialect, self.effort, self.heat, self.strategy) if p]
-        if not parts:
+        label = (self.model or "").strip()
+        if not label:
             return []
-        sep = " " + g["dot"] + " "
-        label = " " + sep.join(parts) + " "
         room = max(0, self._width() - 30)
-        return [("class:dim", _trim(label, room)), (self._border_style(), g["h"])]
+        return [("class:dim", _trim(" " + label + " ", room)), (self._border_style(), self._g["h"])]
 
     def _status(self) -> Fragments:
         g = self._g
@@ -1269,10 +1272,7 @@ class HydraTUI:
             elif state == "rec":
                 hints = [("ctrl+space", "stop + transcribe"), ("esc", "cancel")]
             else:
-                hints = [("esc", "interrupt"), ("ctrl+c", "copy"), ("ctrl+v", "paste"),
-                         (g["enter"], "send"), ("ctrl+space", "dictate"),
-                         (("ctrl+" if os.name == "nt" else "alt+") + g["enter"], "newline"),
-                         ("/help", "commands")]
+                hints = [(g["enter"], "send"), ("ctrl+space", "dictate"), ("/", "commands")]
             left = [("", " ")]
             budget = width - _frag_width(right) - 2
             for key, label in hints:
@@ -1309,7 +1309,7 @@ class HydraTUI:
             self._pin_prompt()
             self._buffer.insert_text("\n")
 
-        @kb.add("c-space")
+        @kb.add("c-space", eager=True)
         def _dictate(event: Any) -> None:
             self._pin_prompt()
             self._toggle_dictation()
@@ -1386,8 +1386,10 @@ class HydraTUI:
             Window(char=g["h"], height=1, style=border),
             Window(width=1, height=1, char=g["br"], style=border),
         ])
+        spacer = Window(dont_extend_height=False)
         root = _WheelRoot(
             [
+                spacer,
                 Window(FormattedTextControl(self._status), height=1),
                 top,
                 middle,
@@ -1430,7 +1432,7 @@ class HydraTUI:
             key_bindings=merge_key_bindings([load_key_bindings(), kb]),
             style=style,
             full_screen=False,
-            mouse_support=True,
+            mouse_support=self._mouse_support,
             clipboard=self._clipboard,
             erase_when_done=True,
             color_depth=depth,

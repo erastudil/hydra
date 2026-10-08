@@ -100,9 +100,9 @@ class Recorder:
         if reason:
             raise DictationError(reason)
         import sounddevice as sd
-        from hydra_cli.voice import SileroVADDetector
+        from hydra_cli.voice import EnergyVAD
 
-        self._vad = SileroVADDetector(
+        self._vad = EnergyVAD(
             sample_rate=SAMPLE_RATE,
             frame_size_ms=FRAME_MS,
             energy_threshold=0.012,

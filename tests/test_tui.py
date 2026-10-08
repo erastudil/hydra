@@ -265,6 +265,28 @@ def test_reflow_estimate_counts_rows_split_by_a_narrower_window():
     assert reflow_rows_above_cursor(screen, 4, 2, 0) == 0
 
 
+def test_chrome_shows_the_alias_alone():
+    with create_pipe_input() as pipe:
+        tui = _make_tui(pipe, 120)
+        tui.update_status(
+            model="opus 5.5",
+            tier="frontier",
+            dialect="syntax",
+            effort="high",
+            heat="heat 0.7",
+            strategy="sliding",
+        )
+        rows = _render(tui, 120)
+        top = next(row for row in rows if "opus 5.5" in row or row.strip())
+        frame = "\n".join(rows)
+        assert "opus 5.5" in frame
+        assert "syntax" not in frame
+        assert "sliding" not in frame
+        assert "frontier" not in frame
+        assert "0.7" not in frame
+        assert top
+
+
 def test_footer_shows_slash_suggestions():
     with create_pipe_input() as pipe:
         tui = _make_tui(pipe, 120)
@@ -401,7 +423,16 @@ def test_escape_interrupts_and_clipboard_replaces_ctrl_c():
             clipboard=board,
         )
         tui._app = tui._build_app()
-        assert tui._app.mouse_support()
+        assert not tui._app.mouse_support()
+        tui_mouse = HydraTUI(
+            commands=REPL_COMMAND_HELP,
+            pt_input=pipe,
+            pt_output=SizedOutput(80),
+            bridge_stdout=False,
+            clipboard=board,
+            mouse_support=True,
+        )
+        assert tui_mouse._build_app().mouse_support()
         tui._waiting = "main"
         tui._buffer.text = "draft"
         tui._on_interrupt()
@@ -580,3 +611,24 @@ def test_write_token_flushes_each_partial():
         tui.write_token("hel")
         tui.write_token("lo")
     assert chunks == ["hel", "<flush>", "lo", "<flush>"]
+
+
+def test_prompt_pins_to_bottom_when_window_maximized():
+    with create_pipe_input() as pipe:
+        tui = _make_tui(pipe, 80)
+        app = tui._app
+        container = app.layout.container
+
+        async def check():
+            with set_app(app):
+                pref = container.preferred_height(80, 50).preferred
+                assert pref <= 6
+
+                screen = Screen()
+                container.write_to_screen(screen, MouseHandlers(), WritePosition(0, 0, 80, 50), "", False, None)
+                visible = screen.visible_windows_to_write_positions
+                footer_pos = max(pos.ypos for pos in visible.values())
+                assert footer_pos == 49
+
+        asyncio.run(check())
+

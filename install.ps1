@@ -49,7 +49,8 @@ $Files = @(
     'hydra_cli/tool_adapter.py',
     'hydra_cli/tui.py',
     'hydra_cli/ui.py',
-    'hydra_cli/voice.py'
+    'hydra_cli/voice.py',
+    'hydra_cli/win_console.py'
 )
 
 Write-Host "==> Installing Hydra into $Root"

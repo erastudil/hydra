@@ -67,15 +67,10 @@ from hydra_cli.speculative import (
 )
 from hydra_cli.ui import print_banner
 from hydra_cli.voice import (
-    AudioChunk,
     AudioStreamBuffer,
-    KokoroTTSClient,
-    LatencyBreakdown,
-    SileroVADDetector,
+    EnergyVAD,
     VADFrameResult,
     VADState,
-    VoicePipelineBenchmark,
-    execute_voice_command,
 )
 
 __all__ = [
@@ -125,14 +120,9 @@ __all__ = [
     "SpeculativeEngine",
     "SpeculativeResult",
     "speculative_complete",
-    "SileroVADDetector",
+    "EnergyVAD",
     "VADState",
     "VADFrameResult",
     "AudioStreamBuffer",
-    "KokoroTTSClient",
-    "AudioChunk",
-    "VoicePipelineBenchmark",
-    "LatencyBreakdown",
-    "execute_voice_command",
     "__version__",
 ]

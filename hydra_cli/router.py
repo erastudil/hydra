@@ -72,8 +72,6 @@ USAGE:
     hydra serve [--port 7777]            # Sovereign OpenAI Gateway for Hermes and Pi
     hydra mcp list                       # List configured community MCP servers & tools
     hydra sandbox run "<cmd>"            # Isolated zero-trust command execution
-    hydra voice benchmark                # Sub-500ms real-time voice latency budget trace
-    hydra voice stream                   # Chunked streaming TTS & early audio playback
     hydra banner                         # Display 3-head TUI Hydra + title wordmark
     hydra / hydra chat / hydra tui       # Interactive REPL with slash commands
     hydra setup                          # Interactive setup & app/agent integration guide
@@ -347,9 +345,6 @@ def route_command(argv: List[str]) -> int:
         return execute_hands_command(argv[1:])
     if argv and argv[0] in ("sandbox", "--sandbox"):
         return execute_sandbox_command(argv[1:])
-    if argv and argv[0] in ('voice', '--voice'):
-        from hydra_cli.voice import execute_voice_command
-        return execute_voice_command(argv[1:])
     if argv and argv[0] in ("serve", "--serve"):
         host = "127.0.0.1"
         port = 7777
@@ -504,7 +499,7 @@ def route_command(argv: List[str]) -> int:
             idx += 1
 
     cmd_lower = command_or_alias.lower().strip()
-    effective_prompt = compose_prompt(prompt_tokens)
+    effective_prompt = " ".join(prompt_tokens).strip() if interactive_mode else compose_prompt(prompt_tokens)
 
     if personality:
         try:
@@ -589,9 +584,6 @@ def route_command(argv: List[str]) -> int:
                 max_tokens=max_tokens,
                 json_mode=json_mode,
             )
-        elif cmd_lower == "voice":
-            from hydra_cli.voice import execute_voice_command
-            return execute_voice_command(remaining)
         elif cmd_lower == "swarm":
             return execute_swarm_mode(
                 task=effective_prompt,

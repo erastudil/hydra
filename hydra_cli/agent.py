@@ -246,10 +246,11 @@ COMMAND_TYPOS = {
 
 
 def session_model_label(alias: str, runner: Optional[str], summon: str) -> str:
-    """Session label. Alice names the local brain and the summon model separately."""
+    """Chrome label. The alias alone. Provider ids belong in the /model picker."""
+    del summon
     if runner == "alice":
-        return f"alice | summon {resolve_route(summon)['model']}"
-    return model_status_label(alias)
+        return "alice"
+    return alias
 
 
 def resolve_model_choice(arg: str) -> Optional[str]:
@@ -266,6 +267,53 @@ def resolve_model_choice(arg: str) -> Optional[str]:
     if text in MODEL_MAP:
         return text
     return None
+
+
+def resolve_effort_choice(arg: str) -> Optional[str]:
+    """Map a picker number or effort name to a level. Unknown input returns None."""
+    text = " ".join(arg.strip().lower().split())
+    if text.isdigit():
+        index = int(text)
+        if 1 <= index <= len(EFFORT_LEVELS):
+            return EFFORT_LEVELS[index - 1]
+        return None
+    if text in EFFORT_LEVELS:
+        return text
+    return None
+
+
+HEAT_PRESETS: List[Tuple[str, str]] = [
+    ("off", "omit temperature"),
+    ("0", "deterministic"),
+    ("0.2", "tight"),
+    ("0.7", "balanced"),
+    ("1", "open"),
+]
+
+
+def format_effort_picker(active: Optional[str]) -> str:
+    """Numbered effort list. The marker names the active level."""
+    lines = ["effort :"]
+    for index, name in enumerate(EFFORT_LEVELS, 1):
+        mark = ">" if name == active else " "
+        lines.append(f"{mark} {index}  {name}")
+    lines.append(f"current : {active or 'route default'}")
+    lines.append("select : /effort <number or level>")
+    lines.append("clear : /effort off")
+    return "\n".join(lines)
+
+
+def format_heat_picker(active: Optional[float]) -> str:
+    """Heat presets. The marker names the active value."""
+    lines = ["heat :"]
+    for token, note in HEAT_PRESETS:
+        value = parse_heat(token)
+        mark = ">" if value == active else " "
+        lines.append(f"{mark} {token:<4} {note}")
+    label = "off" if active is None else f"{active:g}"
+    lines.append(f"current : {label}")
+    lines.append("select : /heat <value or off>")
+    return "\n".join(lines)
 
 
 def format_model_picker(active_alias: str, active_summon: str) -> str:
@@ -1562,11 +1610,9 @@ class HydraReplCompleter:
         "/retry",
         "/skip",
         "/context",
-        "/dialect",
         "/effort",
         "/heat",
         "/window",
-        "/strategy",
         "/swarm",
         "/auth",
         "/diff",
@@ -1691,8 +1737,8 @@ def setup_readline_completer(completer: Optional[HydraReplCompleter] = None) -> 
 
 
 REPL_COMMAND_HELP: List[Tuple[str, str]] = [
-    ("/model", "numbered alias picker; sets the brain"),
-    ("/models", "alias for /model picker"),
+    ("/model", "alias picker; provider id listed here"),
+    ("/models", "same picker as /model"),
     ("/banner", "reprint the hydra splash once"),
     ("/summon", "inference alias Alice calls on a gap"),
     ("/stack", "live paths for hydra, alice, easylm, progen"),
@@ -1703,12 +1749,10 @@ REPL_COMMAND_HELP: List[Tuple[str, str]] = [
     ("/skip", "skip the next tool call"),
     ("/retry", "retry the previous turn with guidance"),
     ("/context", "context token usage; dump shows the payload"),
-    ("/dialect", "register: syntax, instruct, gfc, slack"),
     ("/effort", "reasoning effort: low, medium, high, xhigh, max"),
     ("/heat", "sampling heat; off omits temperature"),
     ("/system", "show or set the session system prompt"),
     ("/window", "context window in tokens, or 128k / 1m"),
-    ("/strategy", "context strategy: sliding, compact, retrieve"),
     ("/compact", "compact the session ledger now"),
     ("/retrieve", "pull matching ledger turns by keyword"),
     ("/diff", "colorized git diff of the worktree"),
@@ -1800,13 +1844,12 @@ def run_interactive_agent(
 
     tui = _create_tui()
     if tui is not None:
-        from hydra_cli.ui import glyph, play_launch_banner
+        from hydra_cli.ui import play_launch_banner
 
-        dot = glyph("dot")
         play_launch_banner(
             version=__version__,
             info=[
-                ("model", f"{session_model_label(active_alias, active_runner, active_summon)} {dot} {active_tier or 'frontier'}"),
+                ("model", session_model_label(active_alias, active_runner, active_summon)),
                 ("cwd", target_cwd),
                 ("rules", rules_label),
                 ("session", active_session_id),
@@ -1818,7 +1861,7 @@ def run_interactive_agent(
     else:
         sys.stdout.write(f"\n{c_head}================================================================================{c_reset}\n")
         sys.stdout.write(f"  {c_bright}HYDRA CODING AGENT{c_reset} // Sovereign Autonomous Shell (v{__version__})\n")
-        sys.stdout.write(f"  Model: {c_mid}{session_model_label(active_alias, active_runner, active_summon)}{c_reset} | Tier: {c_mid}{active_tier or 'frontier'}{c_reset} | CWD: {target_cwd}\n")
+        sys.stdout.write(f"  Model: {c_mid}{session_model_label(active_alias, active_runner, active_summon)}{c_reset} | CWD: {target_cwd}\n")
         sys.stdout.write(f"  Project Rules: {rules_label}\n")
         sys.stdout.write(f"  Type {c_bright}/help{c_reset} for slash commands or enter your instruction to begin.\n")
         sys.stdout.write(f"{c_head}================================================================================{c_reset}\n\n")
@@ -1945,15 +1988,15 @@ def run_interactive_agent(
             if tui is not None:
                 tui.update_status(
                     model=session_model_label(active_alias, active_runner, active_summon),
-                    tier=active_tier or "frontier",
+                    tier="",
                     tokens=est_tokens,
                     budget=max_budget,
                     turns=len(turns_history),
                     step_mode=active_steer_mode,
-                    dialect=active_dialect,
-                    effort=active_effort or "",
-                    heat="" if active_heat is None else f"heat {active_heat:g}",
-                    strategy=active_strategy,
+                    dialect="",
+                    effort="",
+                    heat="",
+                    strategy="",
                 )
             else:
                 box = render_prompt_box(model=session_model_label(active_alias, active_runner, active_summon), version=__version__, est_tokens=est_tokens, max_budget=max_budget, turns=len(turns_history))
@@ -1976,6 +2019,8 @@ def run_interactive_agent(
                 try:
                     line = input('')
                 except (EOFError, StopIteration):
+                    sys.stdout.write(f"\n{c_mid}Exiting Hydra agent session.{c_reset}\n")
+                    sys.stdout.flush()
                     break
                 
             line = clean_pasted_text(line).strip()
@@ -2098,12 +2143,10 @@ def run_interactive_agent(
                 est_tokens = total_chars // 4
                 max_budget = active_window or get_context_window(_budget_alias())
                 pct = (est_tokens / max_budget) * 100
-                heat_label = "omitted" if active_heat is None else f"{active_heat:g}"
+                heat_label = "off" if active_heat is None else f"{active_heat:g}"
                 sys.stdout.write(f"\n{c_head}--- Active Session Context Size ---{c_reset}\n")
                 sys.stdout.write(f"  Estimated Tokens : ~{est_tokens:,} / {max_budget:,} ({pct:.2f}%)\n")
                 sys.stdout.write(f"  Context Window   : {max_budget:,} tokens\n")
-                sys.stdout.write(f"  Strategy         : {active_strategy}\n")
-                sys.stdout.write(f"  Dialect          : {active_dialect}\n")
                 sys.stdout.write(f"  Effort           : {active_effort or 'route default'}\n")
                 sys.stdout.write(f"  Sampling Heat    : {heat_label}\n")
                 sys.stdout.write(f"  Turns Count      : {len(turns_history)}\n")
@@ -2221,23 +2264,16 @@ def run_interactive_agent(
                 sys.stdout.flush()
 
             elif cmd == "/status":
-                sys.stdout.write(f"\n{c_head}--- Hydra Agent Status ---{c_reset}\n")
-                sys.stdout.write(f"  Active Model : {session_model_label(active_alias, active_runner, active_summon)}\n")
-                sys.stdout.write(f"  Brain        : {active_runner or 'direct'}\n")
-                sys.stdout.write(f"  Summon       : {active_summon} -> {resolve_route(active_summon)['model']}\n")
-                sys.stdout.write(f"  Active Tier  : {active_tier or 'frontier (paid)'}\n")
-                heat_label = "omitted" if active_heat is None else f"{active_heat:g}"
+                heat_label = "off" if active_heat is None else f"{active_heat:g}"
                 window_label = active_window or get_context_window(_budget_alias())
-                sys.stdout.write(f"  Active Steer : {'enabled' if active_steer_mode else 'disabled'}\n")
-                sys.stdout.write(f"  Dialect      : {active_dialect}\n")
-                sys.stdout.write(f"  Effort       : {active_effort or 'route default'}\n")
-                sys.stdout.write(f"  Heat         : {heat_label}\n")
-                sys.stdout.write(f"  Window       : {window_label:,} tokens\n")
-                sys.stdout.write(f"  Strategy     : {active_strategy}\n")
-                sys.stdout.write(f"  Session ID   : {active_session_id}\n")
-                sys.stdout.write(f"  Turns Count  : {len(turns_history)}\n")
-                sys.stdout.write(f"  Working Dir  : {target_cwd}\n")
-                sys.stdout.write(f"  Project Rules: {rules_label}\n\n")
+                sys.stdout.write(f"\n{c_head}--- Hydra ---{c_reset}\n")
+                sys.stdout.write(f"  alias   {session_model_label(active_alias, active_runner, active_summon)}\n")
+                sys.stdout.write(f"  effort  {active_effort or 'route default'}\n")
+                sys.stdout.write(f"  heat    {heat_label}\n")
+                sys.stdout.write(f"  window  {window_label:,} tokens\n")
+                sys.stdout.write(f"  steer   {'on' if active_steer_mode else 'off'}\n")
+                sys.stdout.write(f"  turns   {len(turns_history)}\n")
+                sys.stdout.write(f"  cwd     {target_cwd}\n\n")
                 sys.stdout.flush()
 
             elif cmd == "/model":
@@ -2341,28 +2377,31 @@ def run_interactive_agent(
 
             elif cmd == "/effort":
                 if not arg:
-                    sys.stdout.write(f"{c_mid}[Effort: {active_effort or 'route default'}. Valid: {', '.join(EFFORT_LEVELS)}]{c_reset}\n")
+                    sys.stdout.write(format_effort_picker(active_effort) + "\n")
                 elif arg.lower() in ("off", "none", "default"):
                     active_effort = None
                     sys.stdout.write(f"{c_mid}[Effort set to route default]{c_reset}\n")
-                elif arg.lower() in EFFORT_LEVELS:
-                    active_effort = arg.lower()
-                    sys.stdout.write(f"{c_mid}[Effort set to: {active_effort}]{c_reset}\n")
                 else:
-                    sys.stdout.write(f"{c_mid}[Invalid effort '{arg}'. Valid: {', '.join(EFFORT_LEVELS)}]{c_reset}\n")
+                    choice = resolve_effort_choice(arg)
+                    if choice is None:
+                        sys.stdout.write(f"{c_mid}[Unknown effort '{arg}'.]{c_reset}\n")
+                        sys.stdout.write(format_effort_picker(active_effort) + "\n")
+                    else:
+                        active_effort = choice
+                        sys.stdout.write(f"{c_mid}[Effort set to: {active_effort}]{c_reset}\n")
                 sys.stdout.flush()
 
             elif cmd == "/heat":
                 if not arg:
-                    label = "omitted" if active_heat is None else f"{active_heat:g}"
-                    sys.stdout.write(f"{c_mid}[Sampling heat: {label}]{c_reset}\n")
+                    sys.stdout.write(format_heat_picker(active_heat) + "\n")
                 else:
                     try:
                         active_heat = parse_heat(arg)
                     except ValueError as exc:
                         sys.stdout.write(f"{c_mid}[{exc}]{c_reset}\n")
+                        sys.stdout.write(format_heat_picker(active_heat) + "\n")
                     else:
-                        label = "omitted" if active_heat is None else f"{active_heat:g}"
+                        label = "off" if active_heat is None else f"{active_heat:g}"
                         sys.stdout.write(f"{c_mid}[Sampling heat set to: {label}]{c_reset}\n")
                 sys.stdout.flush()
 
@@ -2421,8 +2460,13 @@ def run_interactive_agent(
             elif cmd in ("/help", "/h", "?"):
                 sys.stdout.write(f"""
 {c_head}HYDRA CODING AGENT SLASH COMMANDS:{c_reset}
-  /model [n|alias] Numbered alias picker. Sets the brain. Alice searches locally first
-  /models          Alias for the /model picker
+  /model [n|alias] Alias picker. The provider id appears only in this list
+  /models          Same picker
+  /effort [n|level] Reasoning effort: low, medium, high, xhigh, max. off clears it
+  /heat [value]    Sampling heat from 0 to 2. off omits temperature
+  /status          Alias, effort, heat, window, and working directory
+  /system [text]   Show, set, or reset the session system prompt
+  /window [size]   Context window in tokens, or 128k / 1m
   /banner          Reprint the hydra splash once (does not change the look)
   /summon [alias]  Inference alias Alice calls when local search misses
   /stack           Live paths for hydra, alice, easylm, and progen
@@ -2432,14 +2476,8 @@ def run_interactive_agent(
   /steer [opts]    Toggle or set step-by-step confirmation mode (on/off/status)
   /skip            Skip the next tool call in the next agent turn
   /retry [guide]   Retry the previous turn with optional additional guidance
-  /context [dump]  Display context token usage and inspect bounded messages
-  /dialect [name]  Register: syntax, instruct, gfc, slack
-  /effort [level]  Reasoning effort: low, medium, high, xhigh, max
-  /heat [value]    Sampling heat from 0 to 2; off omits temperature
-  /system [text]   Show, set, or reset the session system prompt
-  /window [size]   Context window in tokens, or 128k / 1m
-  /strategy [name] Context strategy: sliding, compact, retrieve
-  /compact         Compact the ledger and switch strategy to compact
+  /context [dump]  Context token count
+  /compact         Fold older turns into the session ledger
   /retrieve <words> Show ledger turns matching keywords
   /diff            Display colorized unified git diff of current changes
   /undo [path]     Revert last modified file or specific file via git checkout
@@ -2447,7 +2485,6 @@ def run_interactive_agent(
   /swarm <task>    Execute parallel specialist swarm across Architect, Coder, Auditor
   /tokens          Alias for /context
   /history         View turn-by-turn prompt and outcome history for active session
-  /status          Display comprehensive session, rules, model, and tier status
   /clear           Reset active session memory and initialize a new ledger
   /new             Reset active session memory and initialize a new ledger
   /help, /h, ?     Display this slash command reference guide
