@@ -3323,6 +3323,61 @@ def prefix_isolation_contracts():
 
 
 @check
+def kv_fingerprint_contracts():
+    from hydra_cli.providers import (
+        KvCacheFingerprinter,
+        fingerprint_kv_cache,
+        match_kv_prefix,
+        get_default_kv_fingerprinter,
+    )
+
+    fingerprinter = KvCacheFingerprinter(block_size=16)
+
+    prompt1 = [
+        {"role": "system", "content": "You are Hydra sovereign agent."},
+        {"role": "user", "content": "Explain theoretical physics."},
+    ]
+    prompt2 = [
+        {"role": "system", "content": "You are Hydra sovereign agent."},
+        {"role": "user", "content": "Explain astrophysics and cosmology."},
+    ]
+
+    fp1 = fingerprinter.fingerprint_messages(prompt1)
+    assert fp1["blocks_count"] >= 2
+    assert fp1["total_tokens"] > 0
+    assert fp1["root_fingerprint"] != ""
+
+    fingerprinter.register(fp1)
+
+    match1 = fingerprinter.match_prefix(prompt1)
+    assert match1["is_full_hit"] is True
+    assert match1["hit_ratio"] == 1.0
+    assert match1["matched_blocks"] == fp1["blocks_count"]
+
+    match2 = fingerprinter.match_prefix(prompt2)
+    assert match2["matched_blocks"] >= 1
+    assert match2["matched_tokens"] > 0
+    assert 0.0 < match2["hit_ratio"] < 1.0
+
+    prompt3 = [
+        {"role": "system", "content": "Completely novel unrelated instructions."},
+        {"role": "user", "content": "Compute matrix determinants."},
+    ]
+    match3 = fingerprinter.match_prefix(prompt3)
+    assert match3["matched_blocks"] == 0
+    assert match3["matched_tokens"] == 0
+    assert match3["hit_ratio"] == 0.0
+
+    fp_helper = fingerprint_kv_cache(prompt1, block_size=16)
+    assert fp_helper["root_fingerprint"] == fp1["root_fingerprint"]
+
+    default_fp = get_default_kv_fingerprinter()
+    default_fp.register(fp1)
+    matched_default = match_kv_prefix(prompt2, block_size=16)
+    assert matched_default["matched_blocks"] >= 1
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

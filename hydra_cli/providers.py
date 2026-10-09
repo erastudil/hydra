@@ -818,6 +818,123 @@ def attach_prefix_isolation(
         payload["_cache_prefix_tokens"] = isolated["prefix_tokens"]
 
 
+
+
+class KvCacheFingerprinter:
+    """Computes block-level and cumulative KV cache fingerprints for token caching efficiency."""
+
+    def __init__(self, block_size: int = 32):
+        self.block_size = block_size
+        self._cache_index: Dict[str, Dict[str, Any]] = {}
+
+    def _tokenize(self, text: str) -> List[str]:
+        return re.findall(r"\w+|[^\w\s]", text, re.UNICODE)
+
+    def fingerprint_messages(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Generate deterministic block-level and cumulative KV fingerprints for messages."""
+        if not messages:
+            return {
+                "root_fingerprint": "",
+                "blocks_count": 0,
+                "total_tokens": 0,
+                "blocks": [],
+            }
+
+        tokens = []
+        for m in messages:
+            role = str(m.get("role", ""))
+            content = str(m.get("content", ""))
+            tokens.extend(["<|im_start|>", role, "\n"])
+            tokens.extend(self._tokenize(content))
+            tokens.extend(["\n", "<|im_end|>", "\n"])
+
+        total_tokens = len(tokens)
+        blocks = []
+        cumulative_hash = hashlib.sha256(b"kv_init").hexdigest()
+
+        for idx in range(0, total_tokens, self.block_size):
+            chunk = tokens[idx : idx + self.block_size]
+            chunk_raw = " ".join(chunk).encode("utf-8")
+            block_hash = hashlib.sha256(chunk_raw).hexdigest()[:16]
+
+            combined = f"{cumulative_hash}:{block_hash}".encode("utf-8")
+            cumulative_hash = hashlib.sha256(combined).hexdigest()[:16]
+
+            blocks.append({
+                "block_index": len(blocks),
+                "tokens_count": len(chunk),
+                "block_hash": block_hash,
+                "cumulative_fingerprint": cumulative_hash,
+            })
+
+        root_fingerprint = cumulative_hash if blocks else ""
+
+        return {
+            "root_fingerprint": root_fingerprint,
+            "blocks_count": len(blocks),
+            "total_tokens": total_tokens,
+            "blocks": blocks,
+        }
+
+    def register(self, fingerprint_result: Dict[str, Any]) -> None:
+        """Register block fingerprints into local cache index."""
+        for b in fingerprint_result.get("blocks", []):
+            cum_fp = b["cumulative_fingerprint"]
+            self._cache_index[cum_fp] = {
+                "block_index": b["block_index"],
+                "tokens_count": b["tokens_count"],
+            }
+
+    def match_prefix(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Match longest common KV prefix against registered cache index."""
+        fp_res = self.fingerprint_messages(messages)
+        matched_blocks = 0
+        matched_tokens = 0
+
+        for b in fp_res["blocks"]:
+            cum_fp = b["cumulative_fingerprint"]
+            if cum_fp in self._cache_index:
+                matched_blocks += 1
+                matched_tokens += b["tokens_count"]
+            else:
+                break
+
+        total = fp_res["total_tokens"]
+        ratio = round((matched_tokens / total), 4) if total > 0 else 0.0
+
+        return {
+            "root_fingerprint": fp_res["root_fingerprint"],
+            "total_blocks": fp_res["blocks_count"],
+            "total_tokens": total,
+            "matched_blocks": matched_blocks,
+            "matched_tokens": matched_tokens,
+            "hit_ratio": ratio,
+            "is_full_hit": matched_tokens == total and total > 0,
+        }
+
+
+_DEFAULT_KV_FINGERPRINTER = KvCacheFingerprinter()
+
+
+def get_default_kv_fingerprinter() -> KvCacheFingerprinter:
+    """Return module-level default KV cache fingerprinter."""
+    return _DEFAULT_KV_FINGERPRINTER
+
+
+def fingerprint_kv_cache(messages: List[Dict[str, Any]], block_size: int = 32) -> Dict[str, Any]:
+    """Generate block-level and root KV cache fingerprints for a message list."""
+    fingerprinter = KvCacheFingerprinter(block_size=block_size)
+    return fingerprinter.fingerprint_messages(messages)
+
+
+def match_kv_prefix(messages: List[Dict[str, Any]], block_size: int = 32) -> Dict[str, Any]:
+    """Match messages against module-level KV cache index and report matched prefix tokens."""
+    fingerprinter = get_default_kv_fingerprinter()
+    if block_size != fingerprinter.block_size:
+        fingerprinter.block_size = block_size
+    return fingerprinter.match_prefix(messages)
+
+
 def adapt_model_for_url(url: str, model: str) -> str:
     """Translate provider namespaces. Unknown ids pass through unchanged."""
     parsed = urlparse(url)
