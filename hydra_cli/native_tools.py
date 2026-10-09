@@ -6,6 +6,7 @@ grep_search, find_files, run_command, invoke_subagent, and swarm_fanout.
 
 import ast
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -1854,6 +1855,127 @@ class AstArgCountGuard:
 
 
 
+
+
+class AstStructuralDedup:
+    """AST visitor detecting duplicate and isomorphic code structures across functions."""
+
+    def __init__(
+        self,
+        min_statements: int = 2,
+        normalize_identifiers: bool = False,
+        ignore_docstrings: bool = True,
+    ):
+        self.min_statements = min_statements
+        self.normalize_identifiers = normalize_identifiers
+        self.ignore_docstrings = ignore_docstrings
+
+    def _extract_body_signature(self, fn_node: ast.AST) -> Tuple[str, int]:
+        var_map: Dict[str, str] = {}
+
+        class Normalizer(ast.NodeTransformer):
+            def __init__(self, normalize_vars: bool):
+                self.normalize_vars = normalize_vars
+
+            def visit_Name(self, n: ast.Name) -> ast.AST:
+                if self.normalize_vars:
+                    if n.id not in var_map:
+                        var_map[n.id] = f"_var_{len(var_map)}"
+                    return ast.Name(id=var_map[n.id], ctx=n.ctx)
+                return n
+
+            def visit_Expr(self, n: ast.Expr) -> Optional[ast.AST]:
+                if isinstance(getattr(n, "value", None), ast.Constant) and isinstance(n.value.value, str):
+                    return None
+                return self.generic_visit(n)
+
+        normalizer = Normalizer(self.normalize_identifiers)
+        stmts = []
+        body = getattr(fn_node, "body", [])
+        if self.ignore_docstrings and body:
+            first = body[0]
+            if isinstance(first, ast.Expr) and isinstance(getattr(first, "value", None), ast.Constant) and isinstance(first.value.value, str):
+                body = body[1:]
+
+        for s in body:
+            if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            transformed = normalizer.visit(ast.fix_missing_locations(s))
+            if transformed is not None:
+                stmts.append(transformed)
+
+        if len(stmts) < self.min_statements:
+            return "", len(stmts)
+
+        dumps = [ast.dump(s, annotate_fields=False, include_attributes=False) for s in stmts]
+        combined = "\n".join(dumps)
+        sig_hash = hashlib.sha256(combined.encode("utf-8")).hexdigest()[:12]
+        return sig_hash, len(stmts)
+
+    def analyze_source(self, source: str) -> Dict[str, Any]:
+        """Analyze Python source code for duplicated and isomorphic function bodies."""
+        code = source.replace("\r\n", "\n")
+        if code.startswith("\ufeff"):
+            code = code[1:]
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        def find_functions(node: ast.AST, prefix: str = "") -> List[Tuple[str, ast.AST]]:
+            items: List[Tuple[str, ast.AST]] = []
+            for child in getattr(node, "body", []):
+                if isinstance(child, ast.ClassDef):
+                    items.extend(find_functions(child, prefix=f"{prefix}{child.name}."))
+                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    fn_name = f"{prefix}{child.name}"
+                    items.append((fn_name, child))
+                    items.extend(find_functions(child, prefix=f"{fn_name}."))
+            return items
+
+        discovered = find_functions(tree)
+        buckets: Dict[str, List[Dict[str, Any]]] = {}
+        total_functions = len(discovered)
+
+        for fn_name, fn_node in discovered:
+            sig_hash, stmt_count = self._extract_body_signature(fn_node)
+            if not sig_hash:
+                continue
+            if sig_hash not in buckets:
+                buckets[sig_hash] = []
+            buckets[sig_hash].append({
+                "name": fn_name,
+                "lineno": fn_node.lineno,
+                "end_lineno": getattr(fn_node, "end_lineno", fn_node.lineno),
+                "statements": stmt_count,
+            })
+
+        duplicate_groups = []
+        for sig_hash, fn_list in buckets.items():
+            if len(fn_list) > 1:
+                names = [f["name"] for f in fn_list]
+                duplicate_groups.append({
+                    "signature": sig_hash,
+                    "statements": fn_list[0]["statements"],
+                    "functions_count": len(fn_list),
+                    "functions": fn_list,
+                    "message": f"Duplicate structural AST detected across {len(fn_list)} functions: {', '.join(names)}.",
+                })
+
+        duplicate_groups.sort(key=lambda g: (-g["statements"], -g["functions_count"], g["functions"][0]["lineno"]))
+
+        return {
+            "isError": False,
+            "total_functions": total_functions,
+            "duplicate_groups_count": len(duplicate_groups),
+            "duplicate_functions_count": sum(g["functions_count"] for g in duplicate_groups),
+            "duplicate_groups": duplicate_groups,
+            "clean": len(duplicate_groups) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -1937,6 +2059,10 @@ class NativeToolRegistry:
             "guard_arg_count": self.check_arg_count,
             "arg_count_guard": self.check_arg_count,
             "lint_arg_count": self.check_arg_count,
+            "find_structural_duplicates": self.find_structural_duplicates,
+            "dedup_structural": self.find_structural_duplicates,
+            "structural_dedup": self.find_structural_duplicates,
+            "detect_code_clones": self.find_structural_duplicates,
         }
 
     @property
@@ -3364,6 +3490,119 @@ class NativeToolRegistry:
             "clean": total_violations == 0,
         }
 
+    def find_structural_duplicates(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        min_statements: int = 2,
+        normalize_identifiers: bool = False,
+        ignore_docstrings: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Detect duplicate and isomorphic AST structures across Python functions and files.
+        Supports single source strings, individual files, or recursive directory scans.
+        """
+        dedup = AstStructuralDedup(
+            min_statements=min_statements,
+            normalize_identifiers=normalize_identifiers,
+            ignore_docstrings=ignore_docstrings,
+        )
+
+        if source is not None:
+            return dedup.analyze_source(source)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = dedup.analyze_source(content)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan across all files
+        files_scanned = 0
+        total_functions = 0
+        buckets: Dict[str, List[Dict[str, Any]]] = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                try:
+                    tree = ast.parse(file_code)
+                except Exception:
+                    continue
+
+                rel_p = os.path.relpath(file_path, target_path)
+
+                def find_functions(node: ast.AST, prefix: str = "") -> List[Tuple[str, ast.AST]]:
+                    items: List[Tuple[str, ast.AST]] = []
+                    for child in getattr(node, "body", []):
+                        if isinstance(child, ast.ClassDef):
+                            items.extend(find_functions(child, prefix=f"{prefix}{child.name}."))
+                        elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            fn_name = f"{prefix}{child.name}"
+                            items.append((fn_name, child))
+                            items.extend(find_functions(child, prefix=f"{fn_name}."))
+                    return items
+
+                discovered = find_functions(tree)
+                total_functions += len(discovered)
+                for fn_name, fn_node in discovered:
+                    sig_hash, stmt_count = dedup._extract_body_signature(fn_node)
+                    if not sig_hash:
+                        continue
+                    if sig_hash not in buckets:
+                        buckets[sig_hash] = []
+                    buckets[sig_hash].append({
+                        "file": rel_p,
+                        "name": fn_name,
+                        "lineno": fn_node.lineno,
+                        "end_lineno": getattr(fn_node, "end_lineno", fn_node.lineno),
+                        "statements": stmt_count,
+                    })
+
+        duplicate_groups = []
+        for sig_hash, fn_list in buckets.items():
+            if len(fn_list) > 1:
+                labels = [f"{f.get('file', '')}:{f['name']}" for f in fn_list]
+                duplicate_groups.append({
+                    "signature": sig_hash,
+                    "statements": fn_list[0]["statements"],
+                    "functions_count": len(fn_list),
+                    "functions": fn_list,
+                    "message": f"Duplicate structural AST detected across {len(fn_list)} functions: {', '.join(labels)}.",
+                })
+
+        duplicate_groups.sort(key=lambda g: (-g["statements"], -g["functions_count"], g["functions"][0]["lineno"]))
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_functions": total_functions,
+            "duplicate_groups_count": len(duplicate_groups),
+            "duplicate_functions_count": sum(g["functions_count"] for g in duplicate_groups),
+            "duplicate_groups": duplicate_groups,
+            "clean": len(duplicate_groups) == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -3665,6 +3904,38 @@ class NativeToolRegistry:
                             "min_coverage": {
                                 "type": "number",
                                 "description": "Minimum type coverage percentage threshold. Default 0.0.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "find_structural_duplicates",
+                    "description": "Detect duplicate and isomorphic AST structures across Python functions and files.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to inspect. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to inspect.",
+                            },
+                            "min_statements": {
+                                "type": "integer",
+                                "description": "Minimum statements per function to qualify for comparison. Default 2.",
+                            },
+                            "normalize_identifiers": {
+                                "type": "boolean",
+                                "description": "Whether to normalize local variable names to detect isomorphic clones. Default false.",
+                            },
+                            "ignore_docstrings": {
+                                "type": "boolean",
+                                "description": "Whether to ignore docstrings during structural comparison. Default true.",
                             },
                         },
                     },

@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and len(names) == 25
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and len(names) == 26
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -3047,6 +3047,70 @@ def ast_arg_count_guard_contracts():
         alias_res = reg.dispatch("arg_count_guard", {"source": "def ok_fn(x, y):\n    return x * y\n", "max_args": 3})
         assert not alias_res["isError"]
         assert alias_res["clean"] is True
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+@check
+def ast_structural_dedup_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstStructuralDedup, NativeToolRegistry
+
+    sample_code = (
+        "def func_a(x):\n"
+        "    y = x + 1\n"
+        "    return y * 2\n\n"
+        "def func_b(x):\n"
+        "    y = x + 1\n"
+        "    return y * 2\n\n"
+        "def func_c(a):\n"
+        "    b = a + 1\n"
+        "    return b * 2\n\n"
+        "def unique_fn(z):\n"
+        "    return z ** 3\n"
+    )
+
+    exact_dedup = AstStructuralDedup(min_statements=2, normalize_identifiers=False)
+    res_exact = exact_dedup.analyze_source(sample_code)
+    assert not res_exact["isError"]
+    assert res_exact["total_functions"] == 4
+    assert res_exact["duplicate_groups_count"] == 1
+    assert res_exact["duplicate_functions_count"] == 2
+    exact_group = res_exact["duplicate_groups"][0]
+    names_exact = {f["name"] for f in exact_group["functions"]}
+    assert names_exact == {"func_a", "func_b"}
+
+    norm_dedup = AstStructuralDedup(min_statements=2, normalize_identifiers=True)
+    res_norm = norm_dedup.analyze_source(sample_code)
+    assert not res_norm["isError"]
+    assert res_norm["duplicate_groups_count"] == 1
+    assert res_norm["duplicate_functions_count"] == 3
+    norm_group = res_norm["duplicate_groups"][0]
+    names_norm = {f["name"] for f in norm_group["functions"]}
+    assert names_norm == {"func_a", "func_b", "func_c"}
+
+    reg = NativeToolRegistry()
+    assert reg.has_tool("find_structural_duplicates")
+    assert reg.has_tool("dedup_structural")
+    assert reg.has_tool("structural_dedup")
+    assert reg.has_tool("detect_code_clones")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "find_structural_duplicates" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(sample_code)
+        tmp_file = f.name
+    try:
+        f_res = reg.dispatch("find_structural_duplicates", {"path": tmp_file, "min_statements": 2})
+        assert not f_res["isError"]
+        assert f_res["duplicate_groups_count"] == 1
+
+        alias_res = reg.dispatch("structural_dedup", {"source": sample_code, "normalize_identifiers": True})
+        assert not alias_res["isError"]
+        assert alias_res["duplicate_functions_count"] == 3
     finally:
         if os.path.exists(tmp_file):
             os.remove(tmp_file)
