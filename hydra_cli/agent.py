@@ -1469,6 +1469,204 @@ def reset_buffer_isolation() -> None:
     _DEFAULT_BUFFER_MANAGER.reset()
 
 
+class ContextStateQuantizer:
+    """Discretizes continuous and verbose execution states into compact representations."""
+
+    STATUS_MAP = {
+        "running": "RUN",
+        "in_progress": "RUN",
+        "executing": "RUN",
+        "pending": "WAIT",
+        "queued": "WAIT",
+        "idle": "IDLE",
+        "completed": "DONE",
+        "success": "DONE",
+        "verified_passing": "PASS",
+        "pass": "PASS",
+        "failed": "FAIL",
+        "error": "ERR",
+        "blocked": "HALT",
+        "cancelled": "ABORT",
+    }
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset quantizer state and telemetry metrics."""
+        self._quantized_count: int = 0
+        self._chars_saved: int = 0
+
+    def quantize_status(self, status: str) -> str:
+        """Map raw status string to discrete canonical state code."""
+        if not status:
+            return "UNKNOWN"
+        normalized = status.strip().lower().replace("-", "_").replace(" ", "_")
+        return self.STATUS_MAP.get(normalized, normalized.upper()[:8])
+
+    def quantize_tokens(self, count: int) -> str:
+        """Quantize token counts into discrete logarithmic bucket labels."""
+        if count <= 0:
+            return "0T"
+        if count < 100:
+            return "<100T"
+        if count < 500:
+            return "<500T"
+        if count < 1000:
+            return "<1KT"
+        if count < 4000:
+            return "<4KT"
+        if count < 8000:
+            return "<8KT"
+        if count < 16000:
+            return "<16KT"
+        if count < 32000:
+            return "<32KT"
+        if count < 64000:
+            return "<64KT"
+        if count < 128000:
+            return "<128KT"
+        return ">=128KT"
+
+    def quantize_latency(self, latency_ms: float) -> str:
+        """Quantize execution latency milliseconds into discrete bucket labels."""
+        if latency_ms < 0:
+            return "0MS"
+        if latency_ms < 10:
+            return "<10MS"
+        if latency_ms < 50:
+            return "<50MS"
+        if latency_ms < 200:
+            return "<200MS"
+        if latency_ms < 1000:
+            return "<1S"
+        if latency_ms < 5000:
+            return "<5S"
+        if latency_ms < 15000:
+            return "<15S"
+        if latency_ms < 60000:
+            return "<1M"
+        return ">=1M"
+
+    def quantize_ratio(self, ratio: float) -> str:
+        """Quantize continuous ratio between zero and one into discrete tier percentage."""
+        clamped = max(0.0, min(1.0, float(ratio)))
+        if clamped < 0.25:
+            return "Q1_LOW"
+        if clamped < 0.50:
+            return "Q2_MED"
+        if clamped < 0.75:
+            return "Q3_HIGH"
+        return "Q4_MAX"
+
+    def quantize_message(self, message: Dict[str, Any], max_content_chars: int = 120) -> Dict[str, Any]:
+        """Quantize single message into discrete compact representation."""
+        self._quantized_count += 1
+        role = message.get("role", "unknown")
+        content = message.get("content", "")
+
+        original_size = len(str(content))
+        if isinstance(content, str) and len(content) > max_content_chars:
+            head = content[:max_content_chars // 2]
+            tail = content[-(max_content_chars // 2):]
+            quantized_content = f"{head}...[OMITTED]...{tail}"
+        else:
+            quantized_content = content
+
+        quantized_msg: Dict[str, Any] = {
+            "role": role,
+            "content": quantized_content,
+        }
+
+        if "tool_calls" in message:
+            quantized_msg["tool_calls_count"] = len(message["tool_calls"])
+        if "name" in message:
+            quantized_msg["name"] = message["name"]
+        if "state" in message:
+            quantized_msg["state"] = self.quantize_status(str(message["state"]))
+
+        new_size = len(str(quantized_content))
+        if original_size > new_size:
+            self._chars_saved += (original_size - new_size)
+
+        return quantized_msg
+
+    def quantize_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        max_content_chars: int = 120,
+    ) -> List[Dict[str, Any]]:
+        """Quantize list of messages across conversation history."""
+        return [self.quantize_message(m, max_content_chars=max_content_chars) for m in messages]
+
+    def quantize_state_vector(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Compress complex agent state dictionary into discrete quantized state vector."""
+        raw_status = str(state.get("status", state.get("state", "UNKNOWN")))
+        tokens = int(state.get("tokens", state.get("token_count", 0)))
+        latency = float(state.get("latency_ms", state.get("elapsed_ms", 0.0)))
+        cache_ratio = float(state.get("cache_hit_ratio", state.get("hit_rate", 0.0)))
+
+        return {
+            "state_code": self.quantize_status(raw_status),
+            "tokens_bucket": self.quantize_tokens(tokens),
+            "latency_bucket": self.quantize_latency(latency),
+            "cache_tier": self.quantize_ratio(cache_ratio),
+            "turns_count": int(state.get("turns_count", state.get("turns", 0))),
+        }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return state quantization telemetry counters."""
+        return {
+            "quantized_units": self._quantized_count,
+            "chars_saved": self._chars_saved,
+        }
+
+
+_DEFAULT_STATE_QUANTIZER = ContextStateQuantizer()
+
+
+def get_default_state_quantizer() -> ContextStateQuantizer:
+    """Return default singleton context state quantizer."""
+    return _DEFAULT_STATE_QUANTIZER
+
+
+def quantize_session_state(status: str) -> str:
+    """Map raw status string to discrete canonical state code."""
+    return _DEFAULT_STATE_QUANTIZER.quantize_status(status)
+
+
+def quantize_metric_value(metric_type: str, value: Any) -> str:
+    """Quantize numerical metric value into discrete bucket label."""
+    if metric_type in ("tokens", "token_count"):
+        return _DEFAULT_STATE_QUANTIZER.quantize_tokens(int(value))
+    if metric_type in ("latency", "latency_ms", "elapsed_ms"):
+        return _DEFAULT_STATE_QUANTIZER.quantize_latency(float(value))
+    if metric_type in ("ratio", "hit_rate", "rate"):
+        return _DEFAULT_STATE_QUANTIZER.quantize_ratio(float(value))
+    return str(value)
+
+
+def quantize_agent_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Compress complex agent state dictionary into discrete quantized state vector."""
+    return _DEFAULT_STATE_QUANTIZER.quantize_state_vector(state)
+
+
+def quantize_messages_state(
+    messages: List[Dict[str, Any]],
+    max_content_chars: int = 120,
+) -> List[Dict[str, Any]]:
+    """Quantize list of messages across conversation history."""
+    return _DEFAULT_STATE_QUANTIZER.quantize_messages(
+        messages=messages,
+        max_content_chars=max_content_chars,
+    )
+
+
+def reset_state_quantizer() -> None:
+    """Reset global context state quantizer state."""
+    _DEFAULT_STATE_QUANTIZER.reset()
+
+
 _CONTEXT_MARKERS = (
     "context window",
     "context length",

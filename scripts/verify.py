@@ -4479,6 +4479,82 @@ def buffer_isolation_contracts():
 
 
 @check
+def state_quantization_contracts():
+    from hydra_cli.agent import (
+        ContextStateQuantizer,
+        get_default_state_quantizer,
+        quantize_session_state,
+        quantize_metric_value,
+        quantize_agent_state,
+        quantize_messages_state,
+        reset_state_quantizer,
+    )
+
+    reset_state_quantizer()
+
+    # 1. Status quantization
+    assert quantize_session_state("running") == "RUN"
+    assert quantize_session_state("IN_PROGRESS") == "RUN"
+    assert quantize_session_state("completed") == "DONE"
+    assert quantize_session_state("verified_passing") == "PASS"
+    assert quantize_session_state("failed") == "FAIL"
+    assert quantize_session_state("error") == "ERR"
+    assert quantize_session_state("cancelled") == "ABORT"
+    assert quantize_session_state("custom_flag") == "CUSTOM_F"
+
+    # 2. Metric bucket quantization
+    assert quantize_metric_value("tokens", 0) == "0T"
+    assert quantize_metric_value("tokens", 85) == "<100T"
+    assert quantize_metric_value("tokens", 3500) == "<4KT"
+    assert quantize_metric_value("tokens", 150000) == ">=128KT"
+
+    assert quantize_metric_value("latency", 5.2) == "<10MS"
+    assert quantize_metric_value("latency", 450.0) == "<1S"
+    assert quantize_metric_value("latency", 65000.0) == ">=1M"
+
+    assert quantize_metric_value("ratio", 0.15) == "Q1_LOW"
+    assert quantize_metric_value("ratio", 0.40) == "Q2_MED"
+    assert quantize_metric_value("ratio", 0.70) == "Q3_HIGH"
+    assert quantize_metric_value("ratio", 0.95) == "Q4_MAX"
+
+    # 3. Message quantization
+    msgs = [
+        {"role": "system", "content": "You are Hydra engine."},
+        {"role": "user", "content": "X" * 300},
+        {"role": "assistant", "content": "Short response", "state": "running"},
+    ]
+    quantized_msgs = quantize_messages_state(msgs, max_content_chars=80)
+    assert len(quantized_msgs) == 3
+    assert quantized_msgs[0]["content"] == "You are Hydra engine."
+    assert "...[OMITTED]..." in quantized_msgs[1]["content"]
+    assert len(quantized_msgs[1]["content"]) < 100
+    assert quantized_msgs[2]["state"] == "RUN"
+
+    # 4. State vector compression
+    agent_state = {
+        "status": "verified_passing",
+        "token_count": 3200,
+        "elapsed_ms": 120.0,
+        "cache_hit_ratio": 0.88,
+        "turns_count": 5,
+    }
+    svec = quantize_agent_state(agent_state)
+    assert svec["state_code"] == "PASS"
+    assert svec["tokens_bucket"] == "<4KT"
+    assert svec["latency_bucket"] == "<200MS"
+    assert svec["cache_tier"] == "Q4_MAX"
+    assert svec["turns_count"] == 5
+
+    # 5. Metrics
+    q_inst = get_default_state_quantizer()
+    met = q_inst.get_metrics()
+    assert met["quantized_units"] == 3
+    assert met["chars_saved"] > 0
+
+    reset_state_quantizer()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
