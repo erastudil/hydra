@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and len(names) == 17
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and len(names) == 18
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -2495,6 +2495,95 @@ def ast_unused_var_cleaner_contracts():
         with open(tmp_file, "r", encoding="utf-8") as rf:
             disk_code = rf.read()
         assert "_temp = a + b  # calculate sum" in disk_code
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+@check
+def ast_docstring_linter_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstDocstringLinter, NativeToolRegistry
+
+    linter = AstDocstringLinter()
+
+    sample = (
+        "class Service:\n"
+        '    """Service client coordinator."""\n'
+        "    def run(self):\n"
+        '        """Execute service lifecycle."""\n'
+        "        return True\n\n"
+        "    def stop(self):\n"
+        "        return False\n\n"
+        "    def _cleanup(self):\n"
+        "        return None\n\n"
+        "def compute(x):\n"
+        '    """Is a calculation routine."""\n'
+        "    return x * 2\n\n"
+        "def add(a, b):\n"
+        "    return a + b\n"
+    )
+
+    res = linter.analyze_source(sample)
+    assert not res["isError"]
+    assert res["total_definitions"] == 5
+    assert res["documented_count"] == 3
+    assert res["undocumented_count"] == 2
+    assert res["coverage_pct"] == 60.0
+    assert res["violations_count"] == 3
+    assert res["clean"] is False
+
+    kinds = {v["kind"] for v in res["violations"]}
+    assert "missing_docstring" in kinds
+    assert "leading_copula" in kinds
+
+    clean_sample = (
+        "class Handler:\n"
+        '    """Process incoming requests."""\n'
+        "    def handle(self, payload: dict) -> bool:\n"
+        '        """Forward validated payload."""\n'
+        "        return True\n"
+    )
+    clean_res = linter.analyze_source(clean_sample)
+    assert not clean_res["isError"]
+    assert clean_res["total_definitions"] == 2
+    assert clean_res["documented_count"] == 2
+    assert clean_res["coverage_pct"] == 100.0
+    assert clean_res["violations_count"] == 0
+    assert clean_res["clean"] is True
+
+    empty_sample = (
+        "def dummy():\n"
+        '    """   """\n'
+        "    return 1\n"
+    )
+    empty_res = linter.analyze_source(empty_sample)
+    assert not empty_res["isError"]
+    assert empty_res["violations_count"] == 1
+    assert empty_res["violations"][0]["kind"] == "empty_docstring"
+
+    mod_linter = AstDocstringLinter(check_modules=True)
+    mod_res = mod_linter.analyze_source(sample)
+    assert not mod_res["isError"]
+    assert any(v["name"] == "<module>" and v["kind"] == "missing_docstring" for v in mod_res["violations"])
+
+    reg = NativeToolRegistry()
+    assert reg.has_tool("lint_docstrings")
+    assert reg.has_tool("check_docstrings")
+    assert reg.has_tool("docstring_linter")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "lint_docstrings" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(clean_sample)
+        tmp_file = f.name
+    try:
+        f_res = reg.dispatch("lint_docstrings", {"path": tmp_file})
+        assert not f_res["isError"]
+        assert f_res["clean"] is True
+        assert f_res["coverage_pct"] == 100.0
     finally:
         if os.path.exists(tmp_file):
             os.remove(tmp_file)

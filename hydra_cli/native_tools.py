@@ -720,6 +720,161 @@ class AstUnusedVarCleaner:
 
 
 
+class AstDocstringLinter:
+    """AST visitor evaluating docstring presence, formatting, and dialect invariants."""
+
+    def __init__(
+        self,
+        check_functions: bool = True,
+        check_classes: bool = True,
+        check_modules: bool = False,
+        ignore_private: bool = True,
+        require_zero_copula: bool = True,
+        check_parentheticals: bool = False,
+        min_coverage: float = 0.0,
+    ):
+        self.check_functions = check_functions
+        self.check_classes = check_classes
+        self.check_modules = check_modules
+        self.ignore_private = ignore_private
+        self.require_zero_copula = require_zero_copula
+        self.check_parentheticals = check_parentheticals
+        self.min_coverage = min_coverage
+
+    def _lint_docstring_content(
+        self,
+        name: str,
+        def_type: str,
+        lineno: int,
+        doc: str,
+        violations: List[Dict[str, Any]],
+    ) -> None:
+        stripped = doc.strip()
+        if not stripped:
+            violations.append({
+                "name": name,
+                "type": def_type,
+                "lineno": lineno,
+                "kind": "empty_docstring",
+                "message": f"{def_type.capitalize()} '{name}' has empty or whitespace docstring.",
+            })
+            return
+
+        if self.require_zero_copula:
+            first_word = stripped.split()[0].lower().rstrip(".,:;")
+            if first_word in ("is", "are", "was", "were"):
+                violations.append({
+                    "name": name,
+                    "type": def_type,
+                    "lineno": lineno,
+                    "kind": "leading_copula",
+                    "message": f"{def_type.capitalize()} '{name}' docstring starts with leading copula '{first_word}'.",
+                })
+
+        if self.check_parentheticals and "(" in doc and ")" in doc:
+            violations.append({
+                "name": name,
+                "type": def_type,
+                "lineno": lineno,
+                "kind": "parenthetical_in_prose",
+                "message": f"{def_type.capitalize()} '{name}' docstring contains parenthetical in prose.",
+            })
+
+    def analyze_source(self, source: str) -> Dict[str, Any]:
+        """Analyze Python source for missing or non-compliant docstrings."""
+        code = source.replace("\r\n", "\n")
+        if code.startswith("\ufeff"):
+            code = code[1:]
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        definitions: List[Dict[str, Any]] = []
+        violations: List[Dict[str, Any]] = []
+
+        if self.check_modules:
+            doc = ast.get_docstring(tree)
+            if doc is None:
+                definitions.append({"name": "<module>", "type": "module", "lineno": 1, "has_doc": False})
+                violations.append({
+                    "name": "<module>",
+                    "type": "module",
+                    "lineno": 1,
+                    "kind": "missing_docstring",
+                    "message": "Module missing docstring.",
+                })
+            else:
+                has_content = bool(doc.strip())
+                definitions.append({"name": "<module>", "type": "module", "lineno": 1, "has_doc": has_content})
+                self._lint_docstring_content("<module>", "module", 1, doc, violations)
+
+        def walk_definitions(node: ast.AST, prefix: str = "") -> None:
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.ClassDef):
+                    cls_name = f"{prefix}{child.name}"
+                    if not (self.ignore_private and child.name.startswith("_")):
+                        if self.check_classes:
+                            doc = ast.get_docstring(child)
+                            if doc is None:
+                                definitions.append({"name": cls_name, "type": "class", "lineno": child.lineno, "has_doc": False})
+                                violations.append({
+                                    "name": cls_name,
+                                    "type": "class",
+                                    "lineno": child.lineno,
+                                    "kind": "missing_docstring",
+                                    "message": f"Class '{cls_name}' missing docstring.",
+                                })
+                            else:
+                                has_content = bool(doc.strip())
+                                definitions.append({"name": cls_name, "type": "class", "lineno": child.lineno, "has_doc": has_content})
+                                self._lint_docstring_content(cls_name, "class", child.lineno, doc, violations)
+                    walk_definitions(child, prefix=f"{cls_name}.")
+                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    fn_name = f"{prefix}{child.name}"
+                    if not (self.ignore_private and child.name.startswith("_")):
+                        if self.check_functions:
+                            doc = ast.get_docstring(child)
+                            if doc is None:
+                                definitions.append({"name": fn_name, "type": "function", "lineno": child.lineno, "has_doc": False})
+                                violations.append({
+                                    "name": fn_name,
+                                    "type": "function",
+                                    "lineno": child.lineno,
+                                    "kind": "missing_docstring",
+                                    "message": f"Function '{fn_name}' missing docstring.",
+                                })
+                            else:
+                                has_content = bool(doc.strip())
+                                definitions.append({"name": fn_name, "type": "function", "lineno": child.lineno, "has_doc": has_content})
+                                self._lint_docstring_content(fn_name, "function", child.lineno, doc, violations)
+                    walk_definitions(child, prefix=f"{fn_name}.")
+
+        walk_definitions(tree)
+
+        documented_count = sum(1 for d in definitions if d["has_doc"])
+        total_count = len(definitions)
+        undocumented_count = total_count - documented_count
+        coverage_pct = round((documented_count / total_count) * 100, 1) if total_count > 0 else 100.0
+
+        violations.sort(key=lambda v: (v["lineno"], v["name"]))
+        meets_threshold = coverage_pct >= self.min_coverage
+
+        return {
+            "isError": False,
+            "total_definitions": total_count,
+            "documented_count": documented_count,
+            "undocumented_count": undocumented_count,
+            "coverage_pct": coverage_pct,
+            "violations_count": len(violations),
+            "violations": violations,
+            "meets_threshold": meets_threshold,
+            "clean": len(violations) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -779,6 +934,9 @@ class NativeToolRegistry:
             "clean_unused_variables": self.clean_unused_variables,
             "find_unused_variables": self.clean_unused_variables,
             "unused_var_cleaner": self.clean_unused_variables,
+            "lint_docstrings": self.lint_docstrings,
+            "check_docstrings": self.lint_docstrings,
+            "docstring_linter": self.lint_docstrings,
         }
 
     @property
@@ -1538,6 +1696,107 @@ class NativeToolRegistry:
             "clean": total_unused == 0,
         }
 
+    def lint_docstrings(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        check_functions: bool = True,
+        check_classes: bool = True,
+        check_modules: bool = False,
+        ignore_private: bool = True,
+        require_zero_copula: bool = True,
+        check_parentheticals: bool = False,
+        min_coverage: float = 0.0,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate docstring presence, coverage, and dialect formatting invariants.
+        Inspects functions, classes, and modules for documentation conformance.
+        """
+        linter = AstDocstringLinter(
+            check_functions=check_functions,
+            check_classes=check_classes,
+            check_modules=check_modules,
+            ignore_private=ignore_private,
+            require_zero_copula=require_zero_copula,
+            check_parentheticals=check_parentheticals,
+            min_coverage=min_coverage,
+        )
+
+        if source is not None:
+            return linter.analyze_source(source)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = linter.analyze_source(content)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        total_defs = 0
+        total_docs = 0
+        total_undocs = 0
+        all_violations = []
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = linter.analyze_source(file_code)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                file_metrics[rel_p] = {
+                    "total_definitions": rep["total_definitions"],
+                    "coverage_pct": rep["coverage_pct"],
+                    "violations_count": rep["violations_count"],
+                }
+                total_defs += rep["total_definitions"]
+                total_docs += rep["documented_count"]
+                total_undocs += rep["undocumented_count"]
+                for item in rep["violations"]:
+                    item_copy = dict(item)
+                    item_copy["file"] = rel_p
+                    all_violations.append(item_copy)
+
+        overall_cov = round((total_docs / total_defs) * 100, 1) if total_defs > 0 else 100.0
+        meets_threshold = overall_cov >= min_coverage
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_definitions": total_defs,
+            "documented_count": total_docs,
+            "undocumented_count": total_undocs,
+            "overall_coverage_pct": overall_cov,
+            "total_violations": len(all_violations),
+            "meets_threshold": meets_threshold,
+            "files_with_violations": sum(1 for m in file_metrics.values() if m["violations_count"] > 0),
+            "summary": file_metrics,
+            "violations": all_violations,
+            "clean": len(all_violations) == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -1839,6 +2098,50 @@ class NativeToolRegistry:
                             "min_coverage": {
                                 "type": "number",
                                 "description": "Minimum type coverage percentage threshold. Default 0.0.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "lint_docstrings",
+                    "description": "Lint Python docstring presence, coverage, and dialect formatting invariants across files or code snippets.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to inspect. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to inspect.",
+                            },
+                            "check_functions": {
+                                "type": "boolean",
+                                "description": "Whether to check function and method docstrings. Default true.",
+                            },
+                            "check_classes": {
+                                "type": "boolean",
+                                "description": "Whether to check class docstrings. Default true.",
+                            },
+                            "check_modules": {
+                                "type": "boolean",
+                                "description": "Whether to check module docstrings. Default false.",
+                            },
+                            "ignore_private": {
+                                "type": "boolean",
+                                "description": "Whether to ignore private definitions starting with underscore. Default true.",
+                            },
+                            "require_zero_copula": {
+                                "type": "boolean",
+                                "description": "Whether to enforce zero leading copula invariant P018 in docstrings. Default true.",
+                            },
+                            "min_coverage": {
+                                "type": "number",
+                                "description": "Minimum acceptable docstring coverage percentage. Default 0.0.",
                             },
                         },
                     },
