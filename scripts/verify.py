@@ -5329,6 +5329,151 @@ def mcp_manifest_cache_contracts():
 
 
 @check
+def mcp_concurrent_dispatch_contracts():
+    import time
+    from hydra_cli.mcp import (
+        McpConcurrentDispatcher,
+        McpDispatchResult,
+        McpNamespaceRouter,
+        McpToolCall,
+        dispatch_concurrent,
+        get_default_concurrent_dispatcher,
+        normalize_tool_call,
+        reset_concurrent_dispatcher,
+        reset_namespace_router,
+    )
+
+    reset_namespace_router()
+    reset_concurrent_dispatcher()
+
+    # 1. Tool call normalization
+    c1 = normalize_tool_call(McpToolCall("ns__tool", {"a": 1}, "id1", 10.0))
+    assert c1.tool_name == "ns__tool" and c1.arguments == {"a": 1} and c1.call_id == "id1" and c1.timeout == 10.0
+
+    c2 = normalize_tool_call({"name": "ns__tool", "arguments": {"b": 2}, "id": "id2", "timeout": 5.0})
+    assert c2.tool_name == "ns__tool" and c2.arguments == {"b": 2} and c2.call_id == "id2" and c2.timeout == 5.0
+
+    c3 = normalize_tool_call(("ns__tool", {"c": 3}, "id3", 2.0))
+    assert c3.tool_name == "ns__tool" and c3.arguments == {"c": 3} and c3.call_id == "id3" and c3.timeout == 2.0
+
+    c4 = normalize_tool_call("ns__bare")
+    assert c4.tool_name == "ns__bare" and c4.arguments == {}
+
+    # 2. Result envelope format
+    res_env = McpDispatchResult("ns__tool", "id1", "ns", {"a": 1}, "ok", None, "success", 0.01)
+    assert res_env.is_success is True and res_env.is_error is False
+    d = res_env.to_dict()
+    assert d["status"] == "success" and d["result"] == "ok"
+
+    # 3. Mock clients and concurrent dispatch
+    class ClientMock:
+        def __init__(self, tag, delay=0.0):
+            self.tag = tag
+            self.delay = delay
+
+        def call_tool(self, tool_name, arguments, timeout=None):
+            if self.delay > 0:
+                time.sleep(self.delay)
+            return {"tag": self.tag, "tool": tool_name, "val": arguments.get("v")}
+
+    class ErrorMock:
+        def call_tool(self, tool_name, arguments, timeout=None):
+            raise RuntimeError("simulated client failure")
+
+    router = McpNamespaceRouter()
+    router.register_client("alpha", ClientMock("A", delay=0.04), aliases=["a1", "a2"])
+    router.register_client("beta", ClientMock("B", delay=0.04), aliases=["b1"])
+    router.register_client("err", ErrorMock())
+    router.register_client("slow", ClientMock("S", delay=0.2))
+
+    dispatcher = McpConcurrentDispatcher(router=router, max_workers=4)
+
+    # 4. Concurrent execution and latency reduction
+    calls = [
+        {"name": "alpha__run", "arguments": {"v": 1}},
+        {"name": "beta__run", "arguments": {"v": 2}},
+        {"name": "a1__run", "arguments": {"v": 3}},
+        {"name": "b1__run", "arguments": {"v": 4}},
+    ]
+    t0 = time.perf_counter()
+    results = dispatcher.dispatch_batch(calls, max_workers=4)
+    t_elapsed = time.perf_counter() - t0
+
+    assert len(results) == 4
+    assert t_elapsed < 0.16
+    for i, r in enumerate(results):
+        assert r.is_success is True
+        assert r.status == "success"
+        assert r.result["val"] == i + 1
+
+    # 5. Partial failure isolation
+    mixed_calls = [
+        {"name": "alpha__run", "arguments": {"v": 10}},
+        {"name": "err__broken", "arguments": {}},
+        {"name": "beta__run", "arguments": {"v": 20}},
+    ]
+    mixed_res = dispatcher.dispatch_batch(mixed_calls, fail_fast=False)
+    assert len(mixed_res) == 3
+    assert mixed_res[0].is_success is True
+    assert mixed_res[1].is_error is True
+    assert "simulated client failure" in mixed_res[1].error
+    assert mixed_res[2].is_success is True
+
+    # 6. Fail fast cancellation
+    fail_fast_calls = [
+        {"name": "err__broken", "arguments": {}},
+        {"name": "slow__long1", "arguments": {}},
+        {"name": "slow__long2", "arguments": {}},
+    ]
+    ff_res = dispatcher.dispatch_batch(fail_fast_calls, fail_fast=True)
+    assert len(ff_res) == 3
+    assert ff_res[0].status == "error"
+    statuses = [r.status for r in ff_res]
+    assert "cancelled" in statuses or "error" in statuses
+
+    # 7. Timeout enforcement
+    slow_calls = [{"name": "slow__op", "arguments": {}, "timeout": 0.04}]
+    slow_res = dispatcher.dispatch_batch(slow_calls, timeout=0.04)
+    assert len(slow_res) == 1
+    assert slow_res[0].status == "timeout"
+    assert slow_res[0].is_error is True
+
+    # 8. Router dispatch concurrent integration
+    r_res = router.dispatch_concurrent([
+        {"name": "alpha__direct", "arguments": {"v": 100}},
+        {"name": "b1__direct", "arguments": {"v": 200}},
+    ])
+    assert len(r_res) == 2
+    assert r_res[0].result["val"] == 100
+    assert r_res[1].result["val"] == 200
+
+    # 9. Telemetry metrics and reset
+    met = dispatcher.get_metrics()
+    assert met["total_batches"] >= 4
+    assert met["total_calls"] >= 10
+    assert met["successful_calls"] >= 6
+    assert met["failed_calls"] >= 2
+    assert met["peak_concurrency"] >= 4
+    assert met["total_duration_sec"] > 0
+
+    dispatcher.reset_metrics()
+    clean_met = dispatcher.get_metrics()
+    assert clean_met["total_batches"] == 0
+    assert clean_met["total_calls"] == 0
+
+    # 10. Default singleton and top level helper
+    reset_concurrent_dispatcher()
+    default_disp = get_default_concurrent_dispatcher()
+    assert default_disp is not None
+    helper_res = dispatch_concurrent([{"name": "alpha__top", "arguments": {"v": 7}}], router=router)
+    assert len(helper_res) == 1
+    assert helper_res[0].result["val"] == 7
+
+    reset_namespace_router()
+    reset_concurrent_dispatcher()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

@@ -13,7 +13,9 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+import concurrent.futures
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 from hydra_cli._version import __version__
 
@@ -273,6 +275,7 @@ class McpNamespaceRouter:
         self,
         qualified_tool_name: str,
         arguments: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> Any:
         """Route tool execution through namespace router."""
         self._dispatch_count += 1
@@ -282,8 +285,34 @@ class McpNamespaceRouter:
         if not client:
             raise KeyError(f"Unknown MCP namespace '{ns}'")
         if hasattr(client, "call_tool"):
+            if timeout is not None:
+                try:
+                    return client.call_tool(tool_name, arguments or {}, timeout=timeout)
+                except TypeError:
+                    return client.call_tool(tool_name, arguments or {})
             return client.call_tool(tool_name, arguments or {})
         raise RuntimeError(f"Client for namespace '{ns}' does not implement call_tool")
+
+    def dispatch_concurrent(
+        self,
+        calls: Sequence[Any],
+        max_workers: Optional[int] = None,
+        timeout: Optional[float] = None,
+        fail_fast: bool = False,
+    ) -> List["McpDispatchResult"]:
+        """Dispatch batch of tool calls concurrently across registered namespaces."""
+        dispatcher = McpConcurrentDispatcher(
+            router=self,
+            max_workers=max_workers or 8,
+            default_timeout=timeout,
+        )
+        return dispatcher.dispatch_batch(
+            calls,
+            router=self,
+            max_workers=max_workers,
+            timeout=timeout,
+            fail_fast=fail_fast,
+        )
 
     def register_lazy_client(
         self,
@@ -341,6 +370,368 @@ def get_default_namespace_router() -> McpNamespaceRouter:
 def reset_namespace_router() -> None:
     """Reset global MCP namespace router state."""
     _DEFAULT_NAMESPACE_ROUTER.reset()
+
+
+@dataclass
+class McpToolCall:
+    """Specification of individual tool call for concurrent or sequential dispatch."""
+
+    tool_name: str
+    arguments: Optional[Dict[str, Any]] = None
+    call_id: Optional[str] = None
+    timeout: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.arguments is None:
+            self.arguments = {}
+
+
+def normalize_tool_call(call: Any) -> McpToolCall:
+    """Normalize arbitrary tool call specification into typed McpToolCall."""
+    if isinstance(call, McpToolCall):
+        return call
+    if isinstance(call, dict):
+        name = call.get("tool_name") or call.get("name") or call.get("tool") or ""
+        arguments = call.get("arguments") or call.get("args") or {}
+        call_id = call.get("call_id") or call.get("id")
+        timeout = call.get("timeout")
+        return McpToolCall(
+            tool_name=str(name),
+            arguments=dict(arguments) if isinstance(arguments, dict) else {},
+            call_id=str(call_id) if call_id is not None else None,
+            timeout=float(timeout) if timeout is not None else None,
+        )
+    if isinstance(call, (list, tuple)):
+        name = str(call[0]) if len(call) > 0 else ""
+        arguments = call[1] if len(call) > 1 and isinstance(call[1], dict) else {}
+        call_id = str(call[2]) if len(call) > 2 and call[2] is not None else None
+        timeout = float(call[3]) if len(call) > 3 and call[3] is not None else None
+        return McpToolCall(
+            tool_name=name,
+            arguments=dict(arguments),
+            call_id=call_id,
+            timeout=timeout,
+        )
+    return McpToolCall(tool_name=str(call), arguments={})
+
+
+@dataclass
+class McpDispatchResult:
+    """Result envelope capturing outcome, timing, and error state of tool dispatch."""
+
+    tool_name: str
+    call_id: Optional[str] = None
+    namespace: str = ""
+    arguments: Dict[str, Any] = field(default_factory=dict)
+    result: Any = None
+    error: Optional[str] = None
+    status: str = "success"
+    duration_sec: float = 0.0
+
+    @property
+    def is_success(self) -> bool:
+        """Return True when dispatch succeeded without error."""
+        return self.status == "success"
+
+    @property
+    def is_error(self) -> bool:
+        """Return True when dispatch failed or encountered error."""
+        return self.status in ("error", "timeout", "cancelled")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert result envelope into standard dictionary."""
+        return {
+            "tool_name": self.tool_name,
+            "call_id": self.call_id,
+            "namespace": self.namespace,
+            "arguments": self.arguments,
+            "result": self.result,
+            "error": self.error,
+            "status": self.status,
+            "duration_sec": self.duration_sec,
+        }
+
+
+class McpConcurrentDispatcher:
+    """Concurrent dispatcher executing parallel MCP tool calls across namespaces."""
+
+    def __init__(
+        self,
+        router: Optional[McpNamespaceRouter] = None,
+        max_workers: int = 8,
+        default_timeout: Optional[float] = None,
+    ) -> None:
+        self.router = router
+        self.max_workers = max(1, int(max_workers))
+        self.default_timeout = default_timeout
+        self._lock = threading.RLock()
+        self._metrics: Dict[str, Any] = {
+            "total_batches": 0,
+            "total_calls": 0,
+            "successful_calls": 0,
+            "failed_calls": 0,
+            "timeout_calls": 0,
+            "cancelled_calls": 0,
+            "peak_concurrency": 0,
+            "total_duration_sec": 0.0,
+        }
+
+    def _execute_single(
+        self,
+        call: McpToolCall,
+        router: McpNamespaceRouter,
+        timeout_override: Optional[float] = None,
+    ) -> McpDispatchResult:
+        """Execute single tool call under timeout guard and record execution duration."""
+        sep = getattr(router, "separator", DEFAULT_NAMESPACE_SEPARATOR)
+        ns, _ = parse_qualified_tool_name(call.tool_name, sep)
+        start_time = time.perf_counter()
+        effective_timeout = (
+            call.timeout
+            if call.timeout is not None
+            else (timeout_override if timeout_override is not None else self.default_timeout)
+        )
+
+        try:
+            output = router.dispatch(call.tool_name, call.arguments, timeout=effective_timeout)
+            duration = round(time.perf_counter() - start_time, 4)
+            return McpDispatchResult(
+                tool_name=call.tool_name,
+                call_id=call.call_id,
+                namespace=ns,
+                arguments=call.arguments or {},
+                result=output,
+                error=None,
+                status="success",
+                duration_sec=duration,
+            )
+        except TimeoutError as exc:
+            duration = round(time.perf_counter() - start_time, 4)
+            return McpDispatchResult(
+                tool_name=call.tool_name,
+                call_id=call.call_id,
+                namespace=ns,
+                arguments=call.arguments or {},
+                result=None,
+                error=f"Timeout: {exc}",
+                status="timeout",
+                duration_sec=duration,
+            )
+        except Exception as exc:
+            duration = round(time.perf_counter() - start_time, 4)
+            err_msg = str(exc)
+            status = "timeout" if "timeout" in err_msg.lower() else "error"
+            return McpDispatchResult(
+                tool_name=call.tool_name,
+                call_id=call.call_id,
+                namespace=ns,
+                arguments=call.arguments or {},
+                result=None,
+                error=err_msg,
+                status=status,
+                duration_sec=duration,
+            )
+
+    def dispatch_batch(
+        self,
+        calls: Sequence[Any],
+        router: Optional[McpNamespaceRouter] = None,
+        max_workers: Optional[int] = None,
+        timeout: Optional[float] = None,
+        fail_fast: bool = False,
+    ) -> List[McpDispatchResult]:
+        """Execute batch of tool calls concurrently while preserving submission sequence."""
+        if not calls:
+            return []
+
+        effective_router = router or self.router or get_default_namespace_router()
+        normalized_calls = [normalize_tool_call(c) for c in calls]
+        pool_size = min(len(normalized_calls), max(1, max_workers or self.max_workers))
+
+        with self._lock:
+            self._metrics["total_batches"] += 1
+            self._metrics["total_calls"] += len(normalized_calls)
+            if pool_size > self._metrics["peak_concurrency"]:
+                self._metrics["peak_concurrency"] = pool_size
+
+        batch_start = time.perf_counter()
+        results: List[Optional[McpDispatchResult]] = [None] * len(normalized_calls)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as executor:
+            futures_map: Dict[concurrent.futures.Future, Tuple[int, McpToolCall]] = {
+                executor.submit(self._execute_single, call, effective_router, timeout): (idx, call)
+                for idx, call in enumerate(normalized_calls)
+            }
+
+            if fail_fast:
+                try:
+                    for fut in concurrent.futures.as_completed(futures_map.keys(), timeout=timeout):
+                        idx, call = futures_map[fut]
+                        try:
+                            res = fut.result()
+                        except Exception as exc:
+                            ns, _ = parse_qualified_tool_name(call.tool_name, effective_router.separator)
+                            res = McpDispatchResult(
+                                tool_name=call.tool_name,
+                                call_id=call.call_id,
+                                namespace=ns,
+                                arguments=call.arguments or {},
+                                result=None,
+                                error=str(exc),
+                                status="error",
+                                duration_sec=0.0,
+                            )
+                        results[idx] = res
+
+                        if res.status in ("error", "timeout"):
+                            for other_fut, (other_idx, other_call) in futures_map.items():
+                                if other_fut != fut and not other_fut.done():
+                                    other_fut.cancel()
+                                    if results[other_idx] is None:
+                                        ns_other, _ = parse_qualified_tool_name(
+                                            other_call.tool_name, effective_router.separator
+                                        )
+                                        results[other_idx] = McpDispatchResult(
+                                            tool_name=other_call.tool_name,
+                                            call_id=other_call.call_id,
+                                            namespace=ns_other,
+                                            arguments=other_call.arguments or {},
+                                            result=None,
+                                            error="Execution cancelled due to fail_fast trigger",
+                                            status="cancelled",
+                                            duration_sec=0.0,
+                                        )
+                            break
+                except concurrent.futures.TimeoutError:
+                    for fut, (idx, call) in futures_map.items():
+                        if results[idx] is None:
+                            ns, _ = parse_qualified_tool_name(call.tool_name, effective_router.separator)
+                            results[idx] = McpDispatchResult(
+                                tool_name=call.tool_name,
+                                call_id=call.call_id,
+                                namespace=ns,
+                                arguments=call.arguments or {},
+                                result=None,
+                                error="Batch execution timed out",
+                                status="timeout",
+                                duration_sec=round(time.perf_counter() - batch_start, 4),
+                            )
+            else:
+                for fut, (idx, call) in futures_map.items():
+                    call_timeout = (
+                        call.timeout
+                        if call.timeout is not None
+                        else (timeout if timeout is not None else self.default_timeout)
+                    )
+                    try:
+                        res = fut.result(timeout=call_timeout)
+                    except concurrent.futures.TimeoutError:
+                        ns, _ = parse_qualified_tool_name(call.tool_name, effective_router.separator)
+                        res = McpDispatchResult(
+                            tool_name=call.tool_name,
+                            call_id=call.call_id,
+                            namespace=ns,
+                            arguments=call.arguments or {},
+                            result=None,
+                            error="Batch execution timed out",
+                            status="timeout",
+                            duration_sec=round(time.perf_counter() - batch_start, 4),
+                        )
+                    except Exception as exc:
+                        ns, _ = parse_qualified_tool_name(call.tool_name, effective_router.separator)
+                        res = McpDispatchResult(
+                            tool_name=call.tool_name,
+                            call_id=call.call_id,
+                            namespace=ns,
+                            arguments=call.arguments or {},
+                            result=None,
+                            error=str(exc),
+                            status="error",
+                            duration_sec=0.0,
+                        )
+                    results[idx] = res
+
+        final_results: List[McpDispatchResult] = []
+        for idx, item in enumerate(results):
+            if item is None:
+                call = normalized_calls[idx]
+                ns, _ = parse_qualified_tool_name(call.tool_name, effective_router.separator)
+                final_results.append(
+                    McpDispatchResult(
+                        tool_name=call.tool_name,
+                        call_id=call.call_id,
+                        namespace=ns,
+                        arguments=call.arguments or {},
+                        result=None,
+                        error="Execution unfulfilled",
+                        status="cancelled",
+                        duration_sec=0.0,
+                    )
+                )
+            else:
+                final_results.append(item)
+
+        batch_duration = round(time.perf_counter() - batch_start, 4)
+        with self._lock:
+            for r in final_results:
+                if r.status == "success":
+                    self._metrics["successful_calls"] += 1
+                elif r.status == "timeout":
+                    self._metrics["timeout_calls"] += 1
+                    self._metrics["failed_calls"] += 1
+                elif r.status == "cancelled":
+                    self._metrics["cancelled_calls"] += 1
+                else:
+                    self._metrics["failed_calls"] += 1
+            self._metrics["total_duration_sec"] = round(
+                self._metrics["total_duration_sec"] + batch_duration, 4
+            )
+
+        return final_results
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return snapshot copy of dispatcher execution metrics."""
+        with self._lock:
+            return dict(self._metrics)
+
+    def reset_metrics(self) -> None:
+        """Reset dispatcher metrics to initial zero values."""
+        with self._lock:
+            for key in self._metrics:
+                if isinstance(self._metrics[key], (int, float)):
+                    self._metrics[key] = 0 if isinstance(self._metrics[key], int) else 0.0
+
+
+_DEFAULT_CONCURRENT_DISPATCHER = McpConcurrentDispatcher()
+
+
+def get_default_concurrent_dispatcher() -> McpConcurrentDispatcher:
+    """Return default singleton concurrent dispatcher."""
+    return _DEFAULT_CONCURRENT_DISPATCHER
+
+
+def reset_concurrent_dispatcher() -> None:
+    """Reset global concurrent dispatcher singleton state and metrics."""
+    global _DEFAULT_CONCURRENT_DISPATCHER
+    _DEFAULT_CONCURRENT_DISPATCHER = McpConcurrentDispatcher()
+
+
+def dispatch_concurrent(
+    calls: Sequence[Any],
+    router: Optional[McpNamespaceRouter] = None,
+    max_workers: int = 8,
+    timeout: Optional[float] = None,
+    fail_fast: bool = False,
+) -> List[McpDispatchResult]:
+    """Dispatch batch of tool calls concurrently via default dispatcher."""
+    dispatcher = get_default_concurrent_dispatcher()
+    return dispatcher.dispatch_batch(
+        calls,
+        router=router,
+        max_workers=max_workers,
+        timeout=timeout,
+        fail_fast=fail_fast,
+    )
 
 
 class McpHeartbeatMonitor:
