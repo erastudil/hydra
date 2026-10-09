@@ -848,6 +848,12 @@ class PrefixIsolationManager:
 
         isolated_messages.extend(dynamic_msgs)
 
+        template_id = None
+        template_hash = None
+        if messages and isinstance(messages[0], dict):
+            template_id = messages[0].get("_template_id")
+            template_hash = messages[0].get("_template_hash")
+
         return {
             "messages": isolated_messages,
             "prefix_messages": prefix_msgs,
@@ -856,6 +862,8 @@ class PrefixIsolationManager:
             "prefix_tokens": prefix_tokens,
             "is_isolated": len(prefix_msgs) > 0,
             "cache_hit_count": self._prefix_hits.get(prefix_hash, 0) if prefix_hash else 0,
+            "template_id": template_id,
+            "template_hash": template_hash,
         }
 
 
@@ -901,6 +909,10 @@ def attach_prefix_isolation(
     if isolated["prefix_hash"]:
         payload["_cache_prefix_hash"] = isolated["prefix_hash"]
         payload["_cache_prefix_tokens"] = isolated["prefix_tokens"]
+    if isolated.get("template_hash"):
+        payload["_template_hash"] = isolated["template_hash"]
+    if isolated.get("template_id"):
+        payload["_template_id"] = isolated["template_id"]
 
 
 
@@ -1152,6 +1164,166 @@ def reset_cache_hit_telemetry() -> None:
 def extract_cache_tokens_from_usage(usage: Dict[str, Any]) -> Tuple[int, int]:
     """Extract cached prompt tokens and total prompt tokens across provider formats."""
     return CacheHitTelemetry.extract_cache_tokens(usage)
+
+
+class TemplateHasher:
+    """Track deterministic template hashes, skeletons, and slot bindings for prompt caching."""
+
+    SLOT_PATTERN = re.compile(r"\{\{([a-zA-Z0-9_]+)\}\}|\{([a-zA-Z0-9_]+)\}|<([a-zA-Z0-9_]+)>|\[([a-zA-Z0-9_]+)\]")
+
+    def __init__(self) -> None:
+        self._registry: Dict[str, Dict[str, Any]] = {}
+        self._skeleton_index: Dict[str, str] = {}
+
+    def extract_slots(self, template: str) -> List[str]:
+        """Extract variable slot identifiers from template string in occurrence order."""
+        if not template:
+            return []
+        slots: List[str] = []
+        for match in self.SLOT_PATTERN.finditer(template):
+            slot = match.group(1) or match.group(2) or match.group(3) or match.group(4)
+            if slot and slot not in slots:
+                slots.append(slot)
+        return slots
+
+    def get_skeleton(self, template: str) -> str:
+        """Generate canonical skeleton string with normalized slot placeholders."""
+        if not template:
+            return ""
+        normalized = self.SLOT_PATTERN.sub("{{_SLOT_}}", template)
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    def compute_hash(self, template: str, length: int = 16) -> str:
+        """Compute deterministic hex digest of template content."""
+        if not template:
+            return ""
+        digest = hashlib.sha256(template.strip().encode("utf-8")).hexdigest()
+        return digest[:length] if length > 0 else digest
+
+    def compute_skeleton_hash(self, template: str, length: int = 16) -> str:
+        """Compute structural hash of template skeleton invariant to slot identifier names."""
+        skeleton = self.get_skeleton(template)
+        if not skeleton:
+            return ""
+        digest = hashlib.sha256(skeleton.encode("utf-8")).hexdigest()
+        return digest[:length] if length > 0 else digest
+
+    def register_template(self, template_id: str, template: str) -> Dict[str, Any]:
+        """Register named template in template catalog with structural metadata."""
+        template_hash = self.compute_hash(template)
+        skeleton_hash = self.compute_skeleton_hash(template)
+        slots = self.extract_slots(template)
+        record = {
+            "template_id": template_id,
+            "template": template,
+            "template_hash": template_hash,
+            "skeleton_hash": skeleton_hash,
+            "slots": slots,
+            "slot_count": len(slots),
+            "length": len(template),
+        }
+        self._registry[template_id] = record
+        self._skeleton_index[skeleton_hash] = template_id
+        return record
+
+    def get_template(self, template_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve registered template entry by identifier."""
+        return self._registry.get(template_id)
+
+    def find_by_skeleton_hash(self, skeleton_hash: str) -> Optional[Dict[str, Any]]:
+        """Find registered template matching given skeleton hash."""
+        tid = self._skeleton_index.get(skeleton_hash)
+        return self._registry.get(tid) if tid else None
+
+    def render(self, template: str, params: Dict[str, Any]) -> str:
+        """Render template replacing slot placeholders with provided parameter values."""
+        if not template:
+            return ""
+
+        def _replacer(m: re.Match) -> str:
+            key = m.group(1) or m.group(2) or m.group(3) or m.group(4)
+            if key in params:
+                return str(params[key])
+            return m.group(0)
+
+        return self.SLOT_PATTERN.sub(_replacer, template)
+
+    def render_and_hash(self, template: str, params: Dict[str, Any]) -> Tuple[str, str]:
+        """Render template and compute associated template hash."""
+        rendered = self.render(template, params)
+        template_hash = self.compute_hash(template)
+        return rendered, template_hash
+
+    def attach_metadata(
+        self,
+        messages: List[Dict[str, Any]],
+        template_id: str,
+        template: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Annotate messages list with template identifier and template hash metadata."""
+        if not messages:
+            return []
+        tmpl = template
+        if not tmpl and template_id in self._registry:
+            tmpl = self._registry[template_id]["template"]
+        tmpl_hash = self.compute_hash(tmpl) if tmpl else ""
+
+        enriched: List[Dict[str, Any]] = []
+        for idx, msg in enumerate(messages):
+            new_msg = dict(msg)
+            if idx == 0:
+                new_msg["_template_id"] = template_id
+                if tmpl_hash:
+                    new_msg["_template_hash"] = tmpl_hash
+            enriched.append(new_msg)
+        return enriched
+
+
+_DEFAULT_TEMPLATE_HASHER = TemplateHasher()
+
+
+def get_default_template_hasher() -> TemplateHasher:
+    """Return default singleton template hasher instance."""
+    return _DEFAULT_TEMPLATE_HASHER
+
+
+def compute_template_hash(template: str, length: int = 16) -> str:
+    """Compute deterministic hex digest of template content."""
+    return _DEFAULT_TEMPLATE_HASHER.compute_hash(template, length=length)
+
+
+def compute_skeleton_hash(template: str, length: int = 16) -> str:
+    """Compute structural hash of template skeleton invariant to slot identifier names."""
+    return _DEFAULT_TEMPLATE_HASHER.compute_skeleton_hash(template, length=length)
+
+
+def extract_template_slots(template: str) -> List[str]:
+    """Extract variable slot identifiers from template string."""
+    return _DEFAULT_TEMPLATE_HASHER.extract_slots(template)
+
+
+def render_template_with_hash(template: str, params: Dict[str, Any]) -> Tuple[str, str]:
+    """Render template replacing slot placeholders and return rendered text with template hash."""
+    return _DEFAULT_TEMPLATE_HASHER.render_and_hash(template, params)
+
+
+def register_cache_template(template_id: str, template: str) -> Dict[str, Any]:
+    """Register named template in global template registry."""
+    return _DEFAULT_TEMPLATE_HASHER.register_template(template_id, template)
+
+
+def get_cache_template(template_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve registered template entry from global template registry."""
+    return _DEFAULT_TEMPLATE_HASHER.get_template(template_id)
+
+
+def attach_template_metadata(
+    messages: List[Dict[str, Any]],
+    template_id: str,
+    template: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Annotate messages list with template identifier and template hash metadata."""
+    return _DEFAULT_TEMPLATE_HASHER.attach_metadata(messages, template_id, template=template)
 
 
 def adapt_model_for_url(url: str, model: str) -> str:

@@ -3477,6 +3477,65 @@ def cache_hit_telemetry_contracts():
 
 
 @check
+def template_hash_contracts():
+    from hydra_cli.providers import (
+        TemplateHasher,
+        compute_template_hash,
+        compute_skeleton_hash,
+        extract_template_slots,
+        render_template_with_hash,
+        register_cache_template,
+        get_cache_template,
+        attach_template_metadata,
+        isolate_cache_prefix,
+        attach_prefix_isolation,
+    )
+
+    # 1. Slot extraction across template syntax styles
+    t1 = "role: {role}\ntask: <task_name>\nlevel: [priority]"
+    t2 = "role: {{role}}\ntask: {{action}}\nlevel: {{urgency}}"
+
+    slots1 = extract_template_slots(t1)
+    assert slots1 == ["role", "task_name", "priority"]
+    assert extract_template_slots(t2) == ["role", "action", "urgency"]
+
+    # 2. Skeleton invariance and hashing
+    sk1 = compute_skeleton_hash(t1)
+    sk2 = compute_skeleton_hash(t2)
+    assert sk1 == sk2
+    assert compute_template_hash(t1) != compute_template_hash(t2)
+
+    # 3. Registry and retrieval
+    reg = register_cache_template("agent_prompt", t1)
+    assert reg["template_id"] == "agent_prompt"
+    assert reg["slot_count"] == 3
+    assert get_cache_template("agent_prompt") is not None
+
+    # 4. Rendering with hash calculation
+    rendered, th = render_template_with_hash(t1, {"role": "coder", "task_name": "ast", "priority": "high"})
+    assert "role: coder" in rendered
+    assert "task: ast" in rendered
+    assert "level: high" in rendered
+    assert th == compute_template_hash(t1)
+
+    # 5. Metadata annotation and prefix isolation integration
+    msgs = [{"role": "system", "content": rendered}, {"role": "user", "content": "hi"}]
+    annotated = attach_template_metadata(msgs, "agent_prompt")
+    assert annotated[0]["_template_id"] == "agent_prompt"
+    assert annotated[0]["_template_hash"] == th
+    assert "_template_id" not in annotated[1]
+
+    iso = isolate_cache_prefix(annotated)
+    assert iso["template_id"] == "agent_prompt"
+    assert iso["template_hash"] == th
+
+    payload = {"messages": annotated}
+    attach_prefix_isolation(payload)
+    assert payload.get("_template_id") == "agent_prompt"
+    assert payload.get("_template_hash") == th
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
