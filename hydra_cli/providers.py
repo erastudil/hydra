@@ -2510,6 +2510,174 @@ def reset_cache_savings_auditor() -> None:
     _DEFAULT_CACHE_SAVINGS_AUDITOR.reset()
 
 
+class PromptPoolManager:
+    """Manage prompt pooling by shared prefix hash to maximize prompt cache warming efficiency."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset manager state and clear registered pools."""
+        self._pools: Dict[str, Dict[str, Any]] = {}
+        self._total_pooled: int = 0
+        self._total_drained: int = 0
+
+    @staticmethod
+    def _extract_prefix_hash(messages: List[Dict[str, Any]]) -> Tuple[str, int]:
+        prefix_items = []
+        for m in messages:
+            if m.get("role") in ("system", "developer"):
+                prefix_items.append(f"{m.get('role')}:{m.get('content')}")
+            else:
+                break
+        if not prefix_items and messages:
+            prefix_items.append(f"{messages[0].get('role')}:{messages[0].get('content')}")
+
+        raw = "\n---\n".join(prefix_items).encode("utf-8")
+        h = hashlib.sha256(raw).hexdigest()[:16]
+        toks = max(1, len(raw) // 4)
+        return h, toks
+
+    def register_to_pool(
+        self,
+        prompt_id: str,
+        messages: List[Dict[str, Any]],
+        pool_id: Optional[str] = None,
+        priority: int = 1,
+    ) -> Dict[str, Any]:
+        """Register prompt request into matching or designated prefix pool."""
+        prefix_hash, prefix_tokens = self._extract_prefix_hash(messages)
+        pid = pool_id or f"pool_{prefix_hash}"
+
+        if pid not in self._pools:
+            self._pools[pid] = {
+                "pool_id": pid,
+                "prefix_hash": prefix_hash,
+                "prefix_tokens": prefix_tokens,
+                "prompts": [],
+                "created_prompts_count": 0,
+            }
+
+        item = {
+            "prompt_id": prompt_id,
+            "messages": [dict(m) for m in messages],
+            "priority": priority,
+            "prefix_hash": prefix_hash,
+        }
+        self._pools[pid]["prompts"].append(item)
+        self._pools[pid]["created_prompts_count"] += 1
+        self._total_pooled += 1
+
+        return {
+            "pool_id": pid,
+            "prompt_id": prompt_id,
+            "prefix_hash": prefix_hash,
+            "queued_in_pool": len(self._pools[pid]["prompts"]),
+        }
+
+    def auto_pool(self, prompt_items: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        """Partition list of prompt requests into pools grouped by static prefix hash."""
+        pools: Dict[str, List[Dict[str, Any]]] = {}
+        for item in prompt_items:
+            msgs = item.get("messages", [])
+            pid = item.get("prompt_id") or f"p_{len(pools)}"
+            prio = item.get("priority", 1)
+            reg = self.register_to_pool(pid, msgs, priority=prio)
+            pool_key = reg["pool_id"]
+            if pool_key not in pools:
+                pools[pool_key] = []
+            pools[pool_key].append(item)
+        return pools
+
+    def drain_pool(self, pool_id: str) -> List[Dict[str, Any]]:
+        """Retrieve member prompts from pool and mark pool drained."""
+        if pool_id not in self._pools:
+            return []
+        items = list(self._pools[pool_id]["prompts"])
+        self._pools[pool_id]["prompts"] = []
+        self._total_drained += len(items)
+        return items
+
+    def get_pool(self, pool_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve details for specific prompt pool."""
+        if pool_id not in self._pools:
+            return None
+        rec = dict(self._pools[pool_id])
+        rec["prompts"] = list(rec["prompts"])
+        rec["active_count"] = len(rec["prompts"])
+        return rec
+
+    def list_pools(self) -> List[Dict[str, Any]]:
+        """Return list of all registered pool metadata."""
+        out = []
+        for pid, p in self._pools.items():
+            out.append({
+                "pool_id": pid,
+                "prefix_hash": p["prefix_hash"],
+                "active_count": len(p["prompts"]),
+                "total_created": p["created_prompts_count"],
+            })
+        return out
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregate metrics across all prompt pools."""
+        active = sum(len(p["prompts"]) for p in self._pools.values())
+        return {
+            "total_pools": len(self._pools),
+            "total_pooled": self._total_pooled,
+            "total_drained": self._total_drained,
+            "active_queued": active,
+        }
+
+
+_DEFAULT_PROMPT_POOL_MANAGER = PromptPoolManager()
+
+
+def get_default_prompt_pool_manager() -> PromptPoolManager:
+    """Return default singleton prompt pool manager instance."""
+    return _DEFAULT_PROMPT_POOL_MANAGER
+
+
+def pool_prompts_by_prefix(prompts: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Partition prompt requests into pools grouped by common prefix hash."""
+    return _DEFAULT_PROMPT_POOL_MANAGER.auto_pool(prompts)
+
+
+def register_prompt_pool(
+    prompt_id: str,
+    messages: List[Dict[str, Any]],
+    pool_id: Optional[str] = None,
+    priority: int = 1,
+) -> Dict[str, Any]:
+    """Register individual prompt request into prefix pool."""
+    return _DEFAULT_PROMPT_POOL_MANAGER.register_to_pool(
+        prompt_id,
+        messages,
+        pool_id=pool_id,
+        priority=priority,
+    )
+
+
+def drain_prompt_pool(pool_id: str) -> List[Dict[str, Any]]:
+    """Extract queued prompts from designated pool for batched dispatch."""
+    return _DEFAULT_PROMPT_POOL_MANAGER.drain_pool(pool_id)
+
+
+def get_prompt_pool(pool_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve details for specific prompt pool."""
+    return _DEFAULT_PROMPT_POOL_MANAGER.get_pool(pool_id)
+
+
+def get_prompt_pool_metrics() -> Dict[str, Any]:
+    """Retrieve summary metrics of global prompt pooling subsystem."""
+    return _DEFAULT_PROMPT_POOL_MANAGER.get_metrics()
+
+
+def reset_prompt_pool_manager() -> None:
+    """Reset global prompt pool manager state."""
+    _DEFAULT_PROMPT_POOL_MANAGER.reset()
+
+
 def adapt_model_for_url(url: str, model: str) -> str:
     """Translate provider namespaces. Unknown ids pass through unchanged."""
     parsed = urlparse(url)

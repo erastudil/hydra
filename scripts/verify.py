@@ -3862,6 +3862,51 @@ def prefix_normalize_contracts():
 
 
 @check
+def prompt_pooling_contracts():
+    from hydra_cli.providers import (
+        PromptPoolManager,
+        pool_prompts_by_prefix,
+        register_prompt_pool,
+        drain_prompt_pool,
+        get_prompt_pool,
+        get_prompt_pool_metrics,
+        reset_prompt_pool_manager,
+    )
+
+    reset_prompt_pool_manager()
+
+    shared_system = "You are Hydra open swarm auditor. Rules invariant."
+    prompt_a = [{"role": "system", "content": shared_system}, {"role": "user", "content": "Audit 1"}]
+    prompt_b = [{"role": "system", "content": shared_system}, {"role": "user", "content": "Audit 2"}]
+    prompt_c = [{"role": "system", "content": "Different system instructions."}, {"role": "user", "content": "Other"}]
+
+    # 1. Register individual
+    r1 = register_prompt_pool("task_1", prompt_a)
+    r2 = register_prompt_pool("task_2", prompt_b)
+    r3 = register_prompt_pool("task_3", prompt_c)
+
+    assert r1["pool_id"] == r2["pool_id"]
+    assert r1["pool_id"] != r3["pool_id"]
+
+    # 2. Inspect pool
+    pool_a = get_prompt_pool(r1["pool_id"])
+    assert pool_a is not None
+    assert pool_a["active_count"] == 2
+
+    metrics = get_prompt_pool_metrics()
+    assert metrics["total_pools"] == 2
+    assert metrics["total_pooled"] == 3
+    assert metrics["active_queued"] == 3
+
+    # 3. Drain pool
+    drained = drain_prompt_pool(r1["pool_id"])
+    assert len(drained) == 2
+    assert get_prompt_pool(r1["pool_id"])["active_count"] == 0
+
+    reset_prompt_pool_manager()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
