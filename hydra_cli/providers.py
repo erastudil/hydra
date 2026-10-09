@@ -3404,6 +3404,237 @@ def reset_cache_efficiency_reporter() -> None:
     _DEFAULT_CACHE_EFFICIENCY_REPORTER.reset()
 
 
+class KVCheckpointManager:
+    """Manage immutable prompt KV cache checkpoints for multi-turn conversational branching and rollbacks."""
+
+    def __init__(self, max_checkpoints: int = 50) -> None:
+        self.max_checkpoints = max_checkpoints
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal checkpoint catalog and operational counters."""
+        self._checkpoints: Dict[str, Dict[str, Any]] = {}
+        self._save_count: int = 0
+        self._restore_count: int = 0
+
+    def save_checkpoint(
+        self,
+        checkpoint_id: str,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Freeze prompt messages and KV fingerprint into immutable checkpoint."""
+        now = timestamp if timestamp is not None else time.time()
+        import copy
+        copied_messages = [copy.deepcopy(m) for m in messages]
+        copied_tools = [copy.deepcopy(t) for t in tools] if tools else None
+
+        fp = fingerprint_kv_cache(copied_messages)
+        tool_hash = hash_tools(copied_tools) if copied_tools else ""
+
+        entry = {
+            "checkpoint_id": checkpoint_id,
+            "created_at": now,
+            "message_count": len(copied_messages),
+            "messages": copied_messages,
+            "tools": copied_tools,
+            "tool_hash": tool_hash,
+            "root_fingerprint": fp.get("root_fingerprint", ""),
+            "blocks_count": fp.get("blocks_count", 0),
+            "total_tokens": fp.get("total_tokens", 0),
+            "metadata": dict(metadata or {}),
+        }
+
+        if len(self._checkpoints) >= self.max_checkpoints and checkpoint_id not in self._checkpoints:
+            oldest_id = min(self._checkpoints, key=lambda k: self._checkpoints[k]["created_at"])
+            del self._checkpoints[oldest_id]
+
+        self._checkpoints[checkpoint_id] = entry
+        self._save_count += 1
+        return self._format_descriptor(entry)
+
+    def restore_checkpoint(self, checkpoint_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve frozen prompt messages and checkpoint metadata."""
+        if checkpoint_id not in self._checkpoints:
+            return None
+        self._restore_count += 1
+        import copy
+        entry = self._checkpoints[checkpoint_id]
+        return {
+            "checkpoint_id": checkpoint_id,
+            "created_at": entry["created_at"],
+            "messages": [copy.deepcopy(m) for m in entry["messages"]],
+            "tools": [copy.deepcopy(t) for t in entry["tools"]] if entry["tools"] else None,
+            "root_fingerprint": entry["root_fingerprint"],
+            "total_tokens": entry["total_tokens"],
+            "metadata": dict(entry["metadata"]),
+        }
+
+    def diff_checkpoint(
+        self,
+        checkpoint_id: str,
+        current_messages: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Compute delta tokens and verify prefix preservation against target checkpoint."""
+        if checkpoint_id not in self._checkpoints:
+            return {
+                "checkpoint_id": checkpoint_id,
+                "found": False,
+                "prefix_preserved": False,
+            }
+
+        chk = self._checkpoints[checkpoint_id]
+        chk_msgs = chk["messages"]
+
+        preserved = True
+        if len(current_messages) < len(chk_msgs):
+            preserved = False
+        else:
+            for idx in range(len(chk_msgs)):
+                b_m = chk_msgs[idx]
+                c_m = current_messages[idx]
+                if b_m.get("role") != c_m.get("role") or b_m.get("content") != c_m.get("content"):
+                    preserved = False
+                    break
+
+        curr_fp = fingerprint_kv_cache(current_messages)
+        curr_tokens = curr_fp.get("total_tokens", 0)
+        chk_tokens = chk["total_tokens"]
+
+        return {
+            "checkpoint_id": checkpoint_id,
+            "found": True,
+            "prefix_preserved": preserved,
+            "checkpoint_message_count": len(chk_msgs),
+            "current_message_count": len(current_messages),
+            "delta_message_count": len(current_messages) - len(chk_msgs),
+            "checkpoint_tokens": chk_tokens,
+            "current_tokens": curr_tokens,
+            "delta_tokens": max(0, curr_tokens - chk_tokens),
+            "root_fingerprint": chk["root_fingerprint"],
+        }
+
+    def list_checkpoints(self) -> List[Dict[str, Any]]:
+        """Return list of registered checkpoint descriptors."""
+        return [self._format_descriptor(e) for e in self._checkpoints.values()]
+
+    def delete_checkpoint(self, checkpoint_id: str) -> bool:
+        """Remove target checkpoint from catalog."""
+        if checkpoint_id in self._checkpoints:
+            del self._checkpoints[checkpoint_id]
+            return True
+        return False
+
+    def prune_checkpoints(
+        self,
+        max_checkpoints: int = 10,
+        max_age_seconds: float = 3600.0,
+        current_time: Optional[float] = None,
+    ) -> int:
+        """Prune expired or surplus checkpoints to enforce capacity invariants."""
+        now = current_time if current_time is not None else time.time()
+        pruned = 0
+
+        for cid in list(self._checkpoints.keys()):
+            if (now - self._checkpoints[cid]["created_at"]) > max_age_seconds:
+                del self._checkpoints[cid]
+                pruned += 1
+
+        if len(self._checkpoints) > max_checkpoints:
+            sorted_cids = sorted(self._checkpoints.keys(), key=lambda k: self._checkpoints[k]["created_at"])
+            excess = len(self._checkpoints) - max_checkpoints
+            for cid in sorted_cids[:excess]:
+                del self._checkpoints[cid]
+                pruned += 1
+
+        return pruned
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregate checkpoint usage metrics."""
+        return {
+            "active_checkpoints": len(self._checkpoints),
+            "save_count": self._save_count,
+            "restore_count": self._restore_count,
+        }
+
+    @staticmethod
+    def _format_descriptor(entry: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "checkpoint_id": entry["checkpoint_id"],
+            "created_at": entry["created_at"],
+            "message_count": entry["message_count"],
+            "has_tools": entry["tools"] is not None,
+            "root_fingerprint": entry["root_fingerprint"],
+            "total_tokens": entry["total_tokens"],
+            "metadata": dict(entry["metadata"]),
+        }
+
+
+_DEFAULT_KV_CHECKPOINT_MANAGER = KVCheckpointManager()
+
+
+def get_default_kv_checkpoint_manager() -> KVCheckpointManager:
+    """Return default singleton KV checkpoint manager instance."""
+    return _DEFAULT_KV_CHECKPOINT_MANAGER
+
+
+def save_kv_checkpoint(
+    checkpoint_id: str,
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    timestamp: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Save immutable prompt checkpoint with KV cache fingerprint."""
+    return _DEFAULT_KV_CHECKPOINT_MANAGER.save_checkpoint(
+        checkpoint_id,
+        messages,
+        tools=tools,
+        metadata=metadata,
+        timestamp=timestamp,
+    )
+
+
+def restore_kv_checkpoint(checkpoint_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve frozen messages from registered checkpoint."""
+    return _DEFAULT_KV_CHECKPOINT_MANAGER.restore_checkpoint(checkpoint_id)
+
+
+def diff_kv_checkpoint(checkpoint_id: str, current_messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Compare candidate messages against recorded KV checkpoint."""
+    return _DEFAULT_KV_CHECKPOINT_MANAGER.diff_checkpoint(checkpoint_id, current_messages)
+
+
+def list_kv_checkpoints() -> List[Dict[str, Any]]:
+    """List active registered KV checkpoints."""
+    return _DEFAULT_KV_CHECKPOINT_MANAGER.list_checkpoints()
+
+
+def delete_kv_checkpoint(checkpoint_id: str) -> bool:
+    """Delete designated KV checkpoint from catalog."""
+    return _DEFAULT_KV_CHECKPOINT_MANAGER.delete_checkpoint(checkpoint_id)
+
+
+def prune_kv_checkpoints(
+    max_checkpoints: int = 10,
+    max_age_seconds: float = 3600.0,
+    current_time: Optional[float] = None,
+) -> int:
+    """Prune stale or excess KV checkpoints."""
+    return _DEFAULT_KV_CHECKPOINT_MANAGER.prune_checkpoints(
+        max_checkpoints=max_checkpoints,
+        max_age_seconds=max_age_seconds,
+        current_time=current_time,
+    )
+
+
+def reset_kv_checkpoint_manager() -> None:
+    """Reset global KV checkpoint manager state."""
+    _DEFAULT_KV_CHECKPOINT_MANAGER.reset()
+
+
 def adapt_model_for_url(url: str, model: str) -> str:
     """Translate provider namespaces. Unknown ids pass through unchanged."""
     parsed = urlparse(url)

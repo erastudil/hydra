@@ -4135,6 +4135,58 @@ def cache_efficiency_report_contracts():
 
 
 @check
+def kv_checkpoint_contracts():
+    from hydra_cli.providers import (
+        KVCheckpointManager,
+        save_kv_checkpoint,
+        restore_kv_checkpoint,
+        diff_kv_checkpoint,
+        list_kv_checkpoints,
+        delete_kv_checkpoint,
+        prune_kv_checkpoints,
+        get_default_kv_checkpoint_manager,
+        reset_kv_checkpoint_manager,
+    )
+
+    reset_kv_checkpoint_manager()
+
+    m1 = [{"role": "system", "content": "You are Hydra."}, {"role": "user", "content": "Start task"}]
+
+    # 1. Save checkpoint
+    desc = save_kv_checkpoint("chk_1", m1, metadata={"phase": "init"}, timestamp=100.0)
+    assert desc["checkpoint_id"] == "chk_1"
+    assert desc["message_count"] == 2
+    assert len(desc["root_fingerprint"]) > 0
+
+    # 2. Restore checkpoint
+    restored = restore_kv_checkpoint("chk_1")
+    assert restored is not None
+    assert len(restored["messages"]) == 2
+    assert restored["metadata"]["phase"] == "init"
+
+    # 3. Diff against clean descendant continuation
+    m2 = m1 + [{"role": "assistant", "content": "Proceeding"}, {"role": "user", "content": "Next"}]
+    diff_clean = diff_kv_checkpoint("chk_1", m2)
+    assert diff_clean["prefix_preserved"] is True
+    assert diff_clean["delta_message_count"] == 2
+    assert diff_clean["delta_tokens"] > 0
+
+    # 4. Diff against diverged prompt
+    m_diverged = [{"role": "system", "content": "Changed prompt"}] + m1[1:]
+    diff_div = diff_kv_checkpoint("chk_1", m_diverged)
+    assert diff_div["prefix_preserved"] is False
+
+    # 5. List and prune
+    chk_list = list_kv_checkpoints()
+    assert len(chk_list) == 1
+    pruned = prune_kv_checkpoints(max_checkpoints=0, max_age_seconds=10.0, current_time=200.0)
+    assert pruned == 1
+    assert len(list_kv_checkpoints()) == 0
+
+    reset_kv_checkpoint_manager()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
