@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and len(names) == 14
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and len(names) == 15
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -2284,6 +2284,76 @@ def p013_detector_contracts():
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
+
+
+@check
+def ast_complexity_meter_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstComplexityMeter, NativeToolRegistry
+
+    meter = AstComplexityMeter(threshold=3)
+
+    sample = (
+        "def simple_add(a, b):\n"
+        "    return a + b\n\n"
+        "def branching_flow(x, y, z):\n"
+        "    if x and y:\n"
+        "        for i in range(10):\n"
+        "            if z:\n"
+        "                return i\n"
+        "    elif z:\n"
+        "        return -1\n"
+        "    return 0\n"
+    )
+
+    res = meter.analyze_source(sample)
+    assert not res["isError"]
+    assert res["total_functions"] == 2
+    assert res["functions"][0]["name"] == "simple_add"
+    assert res["functions"][0]["complexity"] == 1
+    assert res["functions"][0]["max_nesting_depth"] == 0
+    assert res["functions"][0]["is_high_complexity"] is False
+
+    assert res["functions"][1]["name"] == "branching_flow"
+    assert res["functions"][1]["complexity"] == 6
+    assert res["functions"][1]["max_nesting_depth"] == 3
+    assert res["functions"][1]["is_high_complexity"] is True
+    assert res["high_complexity_count"] == 1
+
+    # Class method tracking
+    class_sample = (
+        "class Worker:\n"
+        "    def run(self, flag):\n"
+        "        if flag:\n"
+        "            return 1\n"
+        "        return 0\n"
+    )
+    c_res = meter.analyze_source(class_sample)
+    assert not c_res["isError"]
+    assert c_res["total_functions"] == 1
+    assert c_res["functions"][0]["name"] == "Worker.run"
+    assert c_res["functions"][0]["complexity"] == 2
+
+    # NativeToolRegistry integration
+    reg = NativeToolRegistry()
+    assert reg.has_tool("measure_complexity")
+    assert reg.has_tool("complexity_meter")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "measure_complexity" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(sample)
+        tmp_file = f.name
+    try:
+        f_res = reg.dispatch("measure_complexity", {"path": tmp_file, "threshold": 3})
+        assert not f_res["isError"]
+        assert f_res["total_functions"] == 2
+        assert f_res["max_complexity"] == 6
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
 
 
 @check

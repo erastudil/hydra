@@ -353,6 +353,111 @@ class P013StubDetector:
 
 
 
+class AstComplexityMeter:
+    """AST visitor calculating cyclomatic complexity, nesting depth, and function metrics."""
+
+    def __init__(self, threshold: int = 10):
+        self.threshold = threshold
+
+    def analyze_source(self, source: str) -> Dict[str, Any]:
+        """Analyze Python source code and return structured complexity metrics."""
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        functions: List[Dict[str, Any]] = []
+
+        def find_functions(node: ast.AST, prefix: str = "") -> List[Tuple[str, ast.AST]]:
+            items: List[Tuple[str, ast.AST]] = []
+            for child in getattr(node, "body", []):
+                if isinstance(child, ast.ClassDef):
+                    new_prefix = f"{prefix}{child.name}."
+                    items.extend(find_functions(child, prefix=new_prefix))
+                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    fn_name = f"{prefix}{child.name}"
+                    items.append((fn_name, child))
+                    nested_prefix = f"{prefix}{child.name}."
+                    items.extend(find_functions(child, prefix=nested_prefix))
+            return items
+
+        discovered = find_functions(tree)
+
+        for fn_name, fn_node in discovered:
+            lineno = fn_node.lineno
+            end_lineno = getattr(fn_node, "end_lineno", lineno)
+            lines_count = end_lineno - lineno + 1
+
+            complexity = 1
+            max_depth = 0
+
+            def walk_body(subnode: ast.AST, current_depth: int) -> None:
+                nonlocal complexity, max_depth
+                if current_depth > max_depth:
+                    max_depth = current_depth
+
+                for child in ast.iter_child_nodes(subnode):
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        continue
+
+                    is_branch = False
+                    is_scope = False
+
+                    if isinstance(child, (ast.If, ast.IfExp)):
+                        complexity += 1
+                        is_branch = True
+                    elif isinstance(child, (ast.For, ast.AsyncFor, ast.While)):
+                        complexity += 1
+                        is_branch = True
+                    elif isinstance(child, ast.ExceptHandler):
+                        complexity += 1
+                        is_branch = True
+                    elif isinstance(child, ast.BoolOp):
+                        complexity += len(child.values) - 1
+                    elif isinstance(child, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                        for gen in child.generators:
+                            complexity += len(gen.ifs)
+                    elif hasattr(ast, "match_case") and isinstance(child, ast.match_case):
+                        complexity += 1
+                        is_branch = True
+
+                    if isinstance(child, (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.With, ast.AsyncWith)):
+                        is_scope = True
+
+                    next_depth = current_depth + (1 if is_scope else 0)
+                    walk_body(child, next_depth)
+
+            walk_body(fn_node, 0)
+
+            functions.append({
+                "name": fn_name,
+                "lineno": lineno,
+                "end_lineno": end_lineno,
+                "lines_count": lines_count,
+                "complexity": complexity,
+                "max_nesting_depth": max_depth,
+                "is_high_complexity": complexity > self.threshold,
+            })
+
+        functions.sort(key=lambda f: (f["lineno"], f["name"]))
+        total_complexity = sum(f["complexity"] for f in functions)
+        avg_complexity = round(total_complexity / len(functions), 2) if functions else 0.0
+        max_c = max((f["complexity"] for f in functions), default=0)
+        high_c = [f for f in functions if f["is_high_complexity"]]
+
+        return {
+            "isError": False,
+            "total_functions": len(functions),
+            "total_complexity": total_complexity,
+            "average_complexity": avg_complexity,
+            "max_complexity": max_c,
+            "high_complexity_count": len(high_c),
+            "high_complexity_functions": high_c,
+            "functions": functions,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -405,6 +510,8 @@ class NativeToolRegistry:
             "sort_imports": self.sort_imports,
             "detect_p013": self.detect_p013,
             "detect_stubs": self.detect_p013,
+            "measure_complexity": self.measure_complexity,
+            "complexity_meter": self.measure_complexity,
         }
 
     @property
@@ -890,6 +997,89 @@ class NativeToolRegistry:
             "clean": len(all_violations) == 0,
         }
 
+    def measure_complexity(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        threshold: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        Measure Cyclomatic Complexity and nesting depth for Python source code or directory.
+        Returns function-level breakdown and flags functions exceeding threshold.
+        """
+        meter = AstComplexityMeter(threshold=threshold)
+
+        if source is not None:
+            return meter.analyze_source(source)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = meter.analyze_source(content)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        all_functions = []
+        high_complexity_all = []
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = meter.analyze_source(file_code)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                file_metrics[rel_p] = {
+                    "functions_count": rep["total_functions"],
+                    "total_complexity": rep["total_complexity"],
+                    "average_complexity": rep["average_complexity"],
+                    "max_complexity": rep["max_complexity"],
+                }
+                for fn in rep["functions"]:
+                    fn_copy = dict(fn)
+                    fn_copy["file"] = rel_p
+                    all_functions.append(fn_copy)
+                    if fn["is_high_complexity"]:
+                        high_complexity_all.append(fn_copy)
+
+        total_c = sum(fn["complexity"] for fn in all_functions)
+        avg_c = round(total_c / len(all_functions), 2) if all_functions else 0.0
+        max_c = max((fn["complexity"] for fn in all_functions), default=0)
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_functions": len(all_functions),
+            "total_complexity": total_c,
+            "average_complexity": avg_c,
+            "max_complexity": max_c,
+            "high_complexity_count": len(high_complexity_all),
+            "high_complexity_functions": high_complexity_all,
+            "file_metrics": file_metrics,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -1143,6 +1333,30 @@ class NativeToolRegistry:
                             "check_mocks": {
                                 "type": "boolean",
                                 "description": "Whether to detect banned synthetic mock imports. Default true.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "measure_complexity",
+                    "description": "Calculate Cyclomatic Complexity, nesting depth, and line counts for Python functions, methods, files, or directories.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to analyze. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to analyze.",
+                            },
+                            "threshold": {
+                                "type": "integer",
+                                "description": "Cyclomatic complexity threshold for flagging high-complexity functions. Default 10.",
                             },
                         },
                     },
