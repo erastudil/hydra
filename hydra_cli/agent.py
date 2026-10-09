@@ -572,6 +572,119 @@ class SessionCheckpointer:
             return None
 
 
+PROGEN_REANCHOR_DIRECTIVE = (
+    "reanchor : context compaction event detected; dialect invariant enforced.\n\n"
+    "dialect : progen syntax.\n\n"
+    "unit structure : exactly one topic : comment per line.\n\n"
+    "statement delimiter : exactly one blank line between topic : comment statements.\n\n"
+    "predication P018 : never emit leading copulas is, are, was, were in comments; assert raw predicates directly.\n\n"
+    "tell P001 : never emit parentheticals in running prose.\n\n"
+    "tell P004 : never emit contrast dualism; assert positive operational state directly.\n\n"
+    "tell P005 : never emit conversational hooks or open-ended prompts at turn ends.\n\n"
+    "tell P006 : never emit recap headers or conclusion summaries.\n\n"
+    "state vectors : declare operational intent using canonical heads intention, requirement, course of action, end result, reason, demand, compliance.\n\n"
+    "truth : exit code zero is passing; unverified assertion carries zero truth value."
+)
+
+
+def build_progen_reanchor_block(unloaded_rounds: int = 0) -> str:
+    """Format canonical Progen re-anchor directive to prevent dialect drift."""
+    if unloaded_rounds > 0:
+        header = f"unloaded tool rounds : {unloaded_rounds}.\n\n"
+    else:
+        header = ""
+    return header + PROGEN_REANCHOR_DIRECTIVE
+
+
+def build_progen_reanchor_message(unloaded_rounds: int = 0, role: str = "system") -> Dict[str, str]:
+    """Construct message dictionary containing Progen re-anchor directive."""
+    return {
+        "role": role,
+        "content": build_progen_reanchor_block(unloaded_rounds=unloaded_rounds),
+    }
+
+
+def apply_progen_reanchor(
+    messages: List[Dict[str, Any]],
+    unloaded_rounds: int = 0,
+    role: str = "system",
+) -> List[Dict[str, Any]]:
+    """Inject Progen re-anchor message after compaction or context pruning."""
+    reanchor_msg = build_progen_reanchor_message(unloaded_rounds=unloaded_rounds, role=role)
+    reanchored = [copy.deepcopy(m) for m in messages]
+    for m in reanchored:
+        if "reanchor : context compaction event detected" in str(m.get("content", "")):
+            return reanchored
+    if reanchored and reanchored[0].get("role") in ("system", "developer"):
+        reanchored.insert(1, reanchor_msg)
+    else:
+        reanchored.insert(0, reanchor_msg)
+    return reanchored
+
+
+class ProgenReanchorController:
+    """Manage Progen syntax re-anchoring across compaction cycles and turn pruning."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal compaction registry and re-anchor event counters."""
+        self._session_compactions: Dict[str, int] = {}
+        self._total_reanchors: int = 0
+
+    def record_compaction(self, session_id: str, unloaded_rounds: int = 0) -> Dict[str, Any]:
+        """Record compaction event for session and increment compaction count."""
+        count = self._session_compactions.get(session_id, 0) + 1
+        self._session_compactions[session_id] = count
+        self._total_reanchors += 1
+        return {
+            "session_id": session_id,
+            "compaction_count": count,
+            "unloaded_rounds": unloaded_rounds,
+            "reanchor_directive": build_progen_reanchor_block(unloaded_rounds=unloaded_rounds),
+        }
+
+    def has_compacted(self, session_id: str) -> bool:
+        """Check whether session has undergone context compaction."""
+        return self._session_compactions.get(session_id, 0) > 0
+
+    def get_compaction_count(self, session_id: str) -> int:
+        """Return number of recorded compactions for session."""
+        return self._session_compactions.get(session_id, 0)
+
+    def reanchor_messages(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+        unloaded_rounds: int = 0,
+        role: str = "system",
+    ) -> List[Dict[str, Any]]:
+        """Apply Progen re-anchor directive to compacted session messages."""
+        self.record_compaction(session_id, unloaded_rounds=unloaded_rounds)
+        return apply_progen_reanchor(messages, unloaded_rounds=unloaded_rounds, role=role)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregate re-anchoring metrics."""
+        return {
+            "tracked_sessions": len(self._session_compactions),
+            "total_reanchors": self._total_reanchors,
+        }
+
+
+_DEFAULT_PROGEN_REANCHOR_CONTROLLER = ProgenReanchorController()
+
+
+def get_default_progen_reanchor_controller() -> ProgenReanchorController:
+    """Return default singleton Progen re-anchor controller instance."""
+    return _DEFAULT_PROGEN_REANCHOR_CONTROLLER
+
+
+def reset_progen_reanchor_controller() -> None:
+    """Reset global Progen re-anchor controller state."""
+    _DEFAULT_PROGEN_REANCHOR_CONTROLLER.reset()
+
+
 _CONTEXT_MARKERS = (
     "context window",
     "context length",
@@ -730,9 +843,13 @@ def _build_bounded_messages(
                 f"{note}"
             ),
         })
+        reanchor_block = build_progen_reanchor_block(unloaded_rounds=unloaded)
         bounded.append({
             "role": "user",
-            "content": "Continue from the live tool rounds. Recall ledger turns when a name or path matters.",
+            "content": (
+                "Continue from the live tool rounds. Recall ledger turns when a name or path matters.\n\n"
+                f"{reanchor_block}"
+            ),
         })
     for group in recent_groups:
         bounded.extend(group)
@@ -2706,6 +2823,10 @@ def run_interactive_agent(
             elif cmd == "/compact":
                 summary = active_ledger.compact_session()
                 active_strategy = "recall"
+                get_default_progen_reanchor_controller().record_compaction(
+                    active_session_id,
+                    unloaded_rounds=summary.get("turns_pruned", 0),
+                )
                 sys.stdout.write(f"{c_mid}[{summary['summary']}]{c_reset}\n")
                 sys.stdout.write(f"{c_mid}[Live window set to recall. Ledger turns stay verbatim.]{c_reset}\n")
                 sys.stdout.flush()

@@ -4187,6 +4187,59 @@ def kv_checkpoint_contracts():
 
 
 @check
+def progen_reanchor_contracts():
+    from hydra_cli.agent import (
+        PROGEN_REANCHOR_DIRECTIVE,
+        build_progen_reanchor_block,
+        build_progen_reanchor_message,
+        apply_progen_reanchor,
+        ProgenReanchorController,
+        get_default_progen_reanchor_controller,
+        reset_progen_reanchor_controller,
+    )
+
+    reset_progen_reanchor_controller()
+
+    # 1. Format reanchor block
+    block = build_progen_reanchor_block(unloaded_rounds=3)
+    assert "unloaded tool rounds : 3." in block
+    assert "dialect : progen syntax." in block
+    assert "predication P018 : never emit leading copulas" in block
+
+    # 2. Build structured reanchor message
+    msg = build_progen_reanchor_message(unloaded_rounds=0)
+    assert msg["role"] == "system"
+    assert "reanchor : context compaction event detected" in msg["content"]
+
+    # 3. Apply reanchor to messages
+    orig_msgs = [
+        {"role": "system", "content": "You are Hydra."},
+        {"role": "user", "content": "Execute task."},
+    ]
+    reanchored = apply_progen_reanchor(orig_msgs, unloaded_rounds=2)
+    assert len(reanchored) == 3
+    assert reanchored[1]["role"] == "system"
+    assert "unloaded tool rounds : 2." in reanchored[1]["content"]
+
+    # 4. Check idempotent application
+    idem = apply_progen_reanchor(reanchored, unloaded_rounds=2)
+    assert len(idem) == 3
+
+    # 5. Controller session compaction tracking
+    ctrl = get_default_progen_reanchor_controller()
+    assert not ctrl.has_compacted("session_1")
+    ctrl.reanchor_messages("session_1", orig_msgs, unloaded_rounds=1)
+    assert ctrl.has_compacted("session_1")
+    assert ctrl.get_compaction_count("session_1") == 1
+
+    metrics = ctrl.get_metrics()
+    assert metrics["tracked_sessions"] == 1
+    assert metrics["total_reanchors"] == 1
+
+    reset_progen_reanchor_controller()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
