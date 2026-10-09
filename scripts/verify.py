@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and len(names) == 11
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and len(names) == 12
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -1914,6 +1914,200 @@ def alice_retrieval_web():
     finally:
         index.close()
         shutil.rmtree(home, ignore_errors=True)
+
+
+@check
+def open_swarm_and_catalog():
+    from hydra_cli.config import (
+        resolve_route,
+        resolve_model,
+        model_providers,
+        SWARM_COMBOS,
+    )
+    from hydra_cli.providers import adapt_model_for_url
+    from hydra_cli.swarm import _head_config
+
+    assert resolve_model("glm 5.3 flash") == "glm-5.3-flash"
+    assert resolve_model("deepseek 4.1 flash") == "deepseek-4.1-flash"
+    assert resolve_model("mimo 2.6 flash") == "mimo-2.6-flash"
+    assert resolve_model("open swarm") == "glm-5.3-flash"
+
+    route_os = resolve_route("open swarm")
+    assert route_os["model"] == "glm-5.3-flash"
+    assert route_os["swarm"] == "open swarm"
+    assert "cheaperinference" in route_os["providers"]
+
+    assert model_providers("glm 5.3 flash") == ["cheaperinference", "openrouter"]
+    assert model_providers("deepseek 4.1 flash") == ["cheaperinference", "openrouter"]
+    assert model_providers("mimo 2.6 flash") == ["cheaperinference"]
+
+    ci_url = "https://api.cheaperinference.com/v1/chat/completions"
+    or_url = "https://openrouter.ai/api/v1/chat/completions"
+
+    assert adapt_model_for_url(ci_url, "glm-5.3-flash") == "glm-5.3-flash"
+    assert adapt_model_for_url(ci_url, "deepseek-4.1-flash") == "deepseek-4.1-flash"
+    assert adapt_model_for_url(ci_url, "mimo-2.6-flash") == "mimo-2.6-flash"
+    assert adapt_model_for_url(ci_url, "z-ai/glm-5.3-flash") == "glm-5.3-flash"
+    assert adapt_model_for_url(ci_url, "deepseek/deepseek-4.1-flash") == "deepseek-4.1-flash"
+
+    assert adapt_model_for_url(or_url, "glm-5.3-flash") == "z-ai/glm-5.3-flash"
+    assert adapt_model_for_url(or_url, "deepseek-4.1-flash") == "deepseek/deepseek-4.1-flash"
+
+    assert "open swarm" in SWARM_COMBOS
+    combo = SWARM_COMBOS["open swarm"]
+    assert combo["models"]["architect"] == "glm 5.3 flash"
+    assert combo["models"]["coder"] == "deepseek 4.1 flash"
+    assert combo["models"]["auditor"] == "mimo 2.6 flash"
+
+    assert _head_config("open_architect", None)["model"] == "glm-5.3-flash"
+    assert _head_config("open_coder", None)["model"] == "deepseek-4.1-flash"
+    assert _head_config("open_auditor", None)["model"] == "mimo-2.6-flash"
+    assert _head_config("architect:deepseek 4.1 flash", None)["model"] == "deepseek-4.1-flash"
+
+
+@check
+def cheaperinference_balance_circuit_breaker():
+    from hydra_cli.providers import (
+        check_cheaperinference_balance_guard,
+        CHEAPERINFERENCE_BALANCE_FLOOR,
+        ProviderError,
+    )
+    from hydra_cli.swarm import execute_swarm
+
+    assert CHEAPERINFERENCE_BALANCE_FLOOR == 2.00
+
+    with isolated(env={"CHEAPERINFERENCE_CREDIT_BALANCE": "1.50"}):
+        passed, bal, reason = check_cheaperinference_balance_guard()
+        assert not passed
+        assert bal == 1.50
+        assert "circuit breaker" in reason and "$1.50" in reason and "$2.00 floor" in reason
+
+    with isolated(env={"CHEAPERINFERENCE_CREDIT_BALANCE": "2.00"}):
+        passed, bal, reason = check_cheaperinference_balance_guard()
+        assert not passed
+        assert bal == 2.00
+        assert "circuit breaker" in reason
+
+    with isolated(env={"CHEAPERINFERENCE_CREDIT_BALANCE": "3.50"}):
+        passed, bal, reason = check_cheaperinference_balance_guard()
+        assert passed
+        assert bal == 3.50
+        assert "above $2.00 floor" in reason
+
+    with isolated(env={
+        "OPENROUTER_API_KEY": "sk-or-test-gateway-key-123456",
+        "CHEAPERINFERENCE_API_KEY": "ci-test-key-gate",
+        "CHEAPERINFERENCE_CREDIT_BALANCE": "1.80",
+    }):
+        try:
+            execute_swarm("Audit architecture", heads=["open swarm"], json_output=True)
+            assert False, "Swarm dispatch should have halted under $2.00 balance floor"
+        except ProviderError as exc:
+            assert "circuit breaker" in str(exc)
+            assert "$1.80" in str(exc)
+
+
+@check
+def context_management_bounding_and_compaction():
+    import tempfile, shutil
+    from hydra_cli.context import SessionContextLedger
+    from hydra_cli.agent import _build_bounded_messages, HierarchicalScratchpad, wire_chars
+
+    home = tempfile.mkdtemp(prefix="gate-context-")
+    try:
+        with isolated(home=home):
+            ledger = SessionContextLedger(session_id="compaction_gate")
+            ledger.append_turn("system", "SYSTEM_INVARIANT: preserve truth exit 0")
+            for i in range(8):
+                ledger.append_turn(
+                    "assistant" if i % 2 else "user",
+                    f"Turn message {i}: " + ("data " * 100)
+                )
+
+            report = ledger.compact_session(max_history_turns=3)
+            assert report["turns_on_disk"] == 9
+            assert report["turns_pruned"] == 5
+            assert report["turns_retained"] == 4
+            assert len(ledger.turns) == 4
+            assert ledger.turns[0]["role"] == "system"
+
+            messages = [
+                {"role": "system", "content": "You are Hydra systems engineer."},
+                {"role": "user", "content": "Analyze code."},
+            ]
+            turn_groups = [
+                [
+                    {"role": "assistant", "content": "Let me read the file.", "tool_calls": [{"id": f"c_{i}", "function": {"name": "read_file"}}]},
+                    {"role": "tool", "tool_call_id": f"c_{i}", "content": "LARGE_OUTPUT_PAYLOAD: " + ("x" * 2000)},
+                ]
+                for i in range(6)
+            ]
+            scratchpad = HierarchicalScratchpad(task="Analyze code")
+            bounded = _build_bounded_messages(
+                messages=messages,
+                turn_groups=turn_groups,
+                scratchpad=scratchpad,
+                max_history_turns=3,
+                max_context_chars=3000,
+            )
+            assert wire_chars(bounded) <= 3000
+            assert bounded[0]["role"] == "system"
+            assert bounded[0]["content"] == "You are Hydra systems engineer."
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+@check
+def playwright_tool_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import NativeToolRegistry
+    from hydra_cli.browser import PLAYWRIGHT_AVAILABLE
+
+    reg = NativeToolRegistry()
+    assert reg.has_tool("browser_action")
+    assert reg.has_tool("browse")
+    assert reg.has_tool("click")
+    assert reg.has_tool("type_text")
+    assert reg.has_tool("screenshot")
+    assert reg.has_tool("extract_content")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "browser_action" in tool_names
+
+    schema = next(t["function"] for t in openai_tools if t["function"]["name"] == "browser_action")
+    assert "browse" in schema["parameters"]["properties"]["action"]["enum"]
+    assert "click" in schema["parameters"]["properties"]["action"]["enum"]
+    assert "type" in schema["parameters"]["properties"]["action"]["enum"]
+    assert "screenshot" in schema["parameters"]["properties"]["action"]["enum"]
+    assert "extract_content" in schema["parameters"]["properties"]["action"]["enum"]
+
+    if PLAYWRIGHT_AVAILABLE:
+        with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False) as f:
+            f.write("<html><head><title>Playwright Gate</title></head><body><h1>Hydra Verified</h1><button id='action-btn'>Proceed</button></body></html>")
+            html_path = f.name
+        try:
+            norm_url = f"file:///{html_path.replace(os.sep, '/')}"
+            nav_res = reg.dispatch("browser_action", {"action": "browse", "url": norm_url})
+            assert nav_res["isError"] is False
+            assert nav_res["result"]["title"] == "Playwright Gate"
+
+            ext_res = reg.dispatch("browser_action", {"action": "extract_content"})
+            assert ext_res["isError"] is False
+            assert "Hydra Verified" in ext_res["result"]["content"]
+
+            clk_res = reg.dispatch("browser_action", {"action": "click", "selector": "#action-btn"})
+            assert clk_res["isError"] is False
+
+            cls_res = reg.dispatch("browser_action", {"action": "close"})
+            assert cls_res["isError"] is False
+        finally:
+            if os.path.exists(html_path):
+                os.remove(html_path)
+    else:
+        res = reg.dispatch("browser_action", {"action": "browse", "url": "https://example.com"})
+        assert res["isError"] is True
+        assert "Playwright uninstalled" in res["error"]
 
 
 @check

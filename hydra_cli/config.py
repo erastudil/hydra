@@ -142,9 +142,11 @@ def input_char_budget(
     return max(4096, usable)
 
 
-SWARM_HEADS: Dict[str, Dict[str, str]] = {
+SWARM_HEADS: Dict[str, Dict[str, Any]] = {
     role: dict(spec) for role, spec in CATALOG["swarm"].items()
 }
+
+SWARM_COMBOS: Dict[str, Dict[str, Any]] = dict(CATALOG.get("swarm_combos") or {})
 
 
 _SENSITIVE_SUFFIXES = (
@@ -239,12 +241,13 @@ def resolve_route(alias: str) -> Dict[str, Any]:
     cleaned = alias.strip().lower()
     spec = CATALOG["aliases"].get(cleaned)
     if not spec:
-        return {"model": alias, "effort": None, "reasoning_mode": None, "runner": None, "providers": model_providers(alias)}
+        return {"model": alias, "effort": None, "reasoning_mode": None, "runner": None, "swarm": None, "providers": model_providers(alias)}
     return {
         "model": spec["model"],
         "effort": spec.get("effort"),
         "reasoning_mode": spec.get("reasoning_mode"),
         "runner": spec.get("runner"),
+        "swarm": spec.get("swarm"),
         "providers": model_providers(spec["model"]),
     }
 

@@ -267,6 +267,26 @@
     "alice": {
       "model": "glm-5.3-flash",
       "runner": "alice"
+    },
+    "deepseek 4.1 flash": {
+      "model": "deepseek-4.1-flash"
+    },
+    "deepseek-4.1-flash": {
+      "model": "deepseek-4.1-flash"
+    },
+    "mimo 2.6 flash": {
+      "model": "mimo-2.6-flash"
+    },
+    "mimo-2.6-flash": {
+      "model": "mimo-2.6-flash"
+    },
+    "open swarm": {
+      "model": "glm-5.3-flash",
+      "swarm": "open swarm"
+    },
+    "open-swarm": {
+      "model": "glm-5.3-flash",
+      "swarm": "open swarm"
     }
   },
   "model_providers": {
@@ -304,6 +324,20 @@
     ],
     "meta-llama/Llama-3.1-8B-Instruct": [
       "huggingface"
+    ],
+    "deepseek-4.1-flash": [
+      "cheaperinference",
+      "openrouter"
+    ],
+    "deepseek 4.1 flash": [
+      "cheaperinference",
+      "openrouter"
+    ],
+    "mimo-2.6-flash": [
+      "cheaperinference"
+    ],
+    "mimo 2.6 flash": [
+      "cheaperinference"
     ]
   },
   "swarm": {
@@ -335,6 +369,37 @@
       "model": "glm-5.3-flash",
       "runner": "alice",
       "system": "You are Alice, sovereign cognitive reasoning agent. Enforce Progen syntax, Tractatus logic, and Kantian categories."
+    },
+    "open swarm": {
+      "title": "Open Swarm",
+      "heads": [
+        "architect",
+        "coder",
+        "auditor"
+      ],
+      "models": {
+        "architect": "glm 5.3 flash",
+        "coder": "deepseek 4.1 flash",
+        "auditor": "mimo 2.6 flash"
+      }
+    },
+    "open_architect": {
+      "title": "Open Swarm Architect",
+      "model": "glm-5.3-flash",
+      "provider": "cheaperinference",
+      "system": "You are the Open Swarm Lead Architect. Analyze the requirements, state invariants, data flows, and architectural failure modes. Produce a minimal, robust architecture design in Progen syntax."
+    },
+    "open_coder": {
+      "title": "Open Swarm Implementer",
+      "model": "deepseek-4.1-flash",
+      "provider": "cheaperinference",
+      "system": "You are the Open Swarm Principal Software Engineer. Provide complete, executable, clean implementation code adhering strictly to zero-dependency principles and production standards."
+    },
+    "open_auditor": {
+      "title": "Open Swarm Inspector",
+      "model": "mimo-2.6-flash",
+      "provider": "cheaperinference",
+      "system": "You are the Open Swarm Security & Performance Inspector. Audit the proposed design and code for edge cases, resource leaks, security vulnerabilities, and verification gates."
     }
   },
   "default_hf_model": "meta-llama/Llama-3.1-8B-Instruct",
@@ -348,8 +413,26 @@
     "anthropic/claude-opus-5.5": 200000,
     "openai/gpt-6.1-sol": 131072,
     "meta-llama/llama-3.3-70b-instruct": 131072,
-    "google/gemini-3.8-flash": 1000000
+    "google/gemini-3.8-flash": 1000000,
+    "glm-5.3-flash": 131072,
+    "deepseek-4.1-flash": 131072,
+    "mimo-2.6-flash": 131072
   },
   "default_orchestrator_model": "glm 5.3 flash",
-  "default_agent_model": "glm 5.3 flash"
+  "default_agent_model": "glm 5.3 flash",
+  "swarm_combos": {
+    "open swarm": {
+      "title": "Open Swarm",
+      "heads": [
+        "architect",
+        "coder",
+        "auditor"
+      ],
+      "models": {
+        "architect": "glm 5.3 flash",
+        "coder": "deepseek 4.1 flash",
+        "auditor": "mimo 2.6 flash"
+      }
+    }
+  }
 }

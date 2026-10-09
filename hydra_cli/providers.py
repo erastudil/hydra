@@ -306,6 +306,89 @@ def get_cheaperinference_provider() -> Optional[Dict[str, Any]]:
     }
 
 
+CHEAPERINFERENCE_BALANCE_FLOOR = 2.00
+
+
+def get_cheaperinference_balance(
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    timeout: float = 3.0,
+) -> Optional[float]:
+    """Query CheaperInference credit balance via environment or lightweight HTTP probe.
+
+    Returns float balance in USD, or None when offline or unconfigured.
+    """
+    env_override = os.environ.get("CHEAPERINFERENCE_CREDIT_BALANCE", "").strip()
+    if env_override:
+        try:
+            return float(env_override)
+        except ValueError:
+            pass
+
+    key = clean_secret(api_key or os.environ.get("CHEAPERINFERENCE_API_KEY"))
+    if not key:
+        return None
+
+    base = (base_url or os.environ.get("CHEAPERINFERENCE_API_BASE", "https://api.cheaperinference.com/v1")).strip().rstrip("/")
+    if base.endswith("/v1"):
+        root_base = base
+    else:
+        root_base = f"{base}/v1"
+
+    probe_urls = [
+        f"{root_base}/user/balance",
+        f"{root_base}/balance",
+        f"{root_base}/dashboard/billing/credit_grants",
+    ]
+
+    for url in probe_urls:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"Authorization": f"Bearer {key}", "User-Agent": "Hydra-Balance"},
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    raw = resp.read().decode("utf-8")
+                    data = json.loads(raw)
+                    for field in ("balance", "credit", "credits", "total_available"):
+                        if field in data and isinstance(data[field], (int, float)):
+                            return float(data[field])
+                    if "data" in data and isinstance(data["data"], dict):
+                        inner = data["data"]
+                        for field in ("balance", "credit", "credits", "total_available"):
+                            if field in inner and isinstance(inner[field], (int, float)):
+                                return float(inner[field])
+        except Exception:
+            continue
+
+    return None
+
+
+def check_cheaperinference_balance_guard(
+    threshold: float = CHEAPERINFERENCE_BALANCE_FLOOR,
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> Tuple[bool, Optional[float], str]:
+    """Verify CheaperInference balance exceeds minimum floor before expensive swarm dispatch.
+
+    Emits circuit breaker trip when credit balance drops to or below threshold.
+    """
+    balance = get_cheaperinference_balance(api_key=api_key, base_url=base_url)
+    if balance is None:
+        return True, None, "balance unverified; proceed under default quota"
+
+    if balance <= threshold:
+        return (
+            False,
+            balance,
+            f"circuit breaker : CheaperInference balance ${balance:.2f} at or below ${threshold:.2f} floor; swarm dispatch halted; dirty worktree preserved.",
+        )
+
+    return True, balance, f"CheaperInference balance ${balance:.2f} above ${threshold:.2f} floor." 
+
+
 def get_runpod_provider() -> Optional[Dict[str, Any]]:
     """Return RunPod provider dict when credentials/endpoints are present."""
     key = clean_secret(os.environ.get("RUNPOD_API_KEY"))
@@ -624,6 +707,8 @@ def adapt_model_for_url(url: str, model: str) -> str:
             return "meta-llama/" + model[len("meta/"):]
         if model.startswith("glm-"):
             return "z-ai/" + model
+        if model.startswith("deepseek-"):
+            return "deepseek/" + model
     elif "cheaperinference.com" in host or "cheaperinference" in host:
         if "/" in model:
             return model.split("/", 1)[1]

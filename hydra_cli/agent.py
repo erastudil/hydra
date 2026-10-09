@@ -644,7 +644,12 @@ def _shrink_once(messages: List[Dict[str, Any]], frozen: set) -> bool:
         return False
     ranked.sort(key=lambda item: (item[0], item[1]))
     for _priority, _neg, key, message, field, value in ranked:
-        keep = 240 if field != "content" else max(240, len(value) // 2)
+        if field != "content":
+            keep = 240
+        elif role == "tool":
+            keep = min(1200, max(240, len(value) // 3))
+        else:
+            keep = max(240, len(value) // 2)
         fitted = _fit_output_text(value, keep)
         if len(fitted) >= len(value):
             frozen.add(key)
@@ -657,10 +662,27 @@ def _shrink_once(messages: List[Dict[str, Any]], frozen: set) -> bool:
 def _fit_messages(messages: List[Dict[str, Any]], budget: int) -> None:
     frozen: set = set()
     guard = 0
-    while wire_chars(messages) > budget and guard < 64:
+    while wire_chars(messages) > budget and guard < 128:
         guard += 1
         if not _shrink_once(messages, frozen):
             break
+
+    if wire_chars(messages) > budget:
+        for message in messages:
+            if message.get("role") == "tool":
+                content = message.get("content")
+                if isinstance(content, str) and len(content) > 300:
+                    message["content"] = _fit_output_text(content, 240)
+            if wire_chars(messages) <= budget:
+                break
+
+    if wire_chars(messages) > budget:
+        idx = 2
+        while len(messages) > 3 and wire_chars(messages) > budget:
+            if idx < len(messages) - 1:
+                messages.pop(idx)
+            else:
+                break
 
 
 def _build_bounded_messages(
@@ -718,6 +740,8 @@ def _build_bounded_messages(
     _fit_messages(bounded, max_context_chars)
     if pinned_system is not None:
         bounded[0]["content"] = pinned_system
+    if wire_chars(bounded) > max_context_chars and len(bounded) > 1:
+        _fit_messages(bounded[1:], max(4096, max_context_chars - len(str(pinned_system or ""))))
     return bounded
 
 

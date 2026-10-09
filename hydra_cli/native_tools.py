@@ -67,6 +67,12 @@ class NativeToolRegistry:
             "swarm_fanout": self.swarm_fanout,
             "compact_context": self.compact_context,
             "retrieve_context": self.retrieve_context,
+            "browser_action": self.browser_action,
+            "browse": self.browse,
+            "click": self.click,
+            "type_text": self.type_text,
+            "screenshot": self.screenshot,
+            "extract_content": self.extract_content,
         }
 
     @property
@@ -380,6 +386,46 @@ class NativeToolRegistry:
             return {"isError": True, "error": "No active SessionContextLedger to retrieve from"}
         return self.ledger.retrieve_verbatim(keywords, max_turns)
 
+    def browser_action(
+        self,
+        action: str,
+        url: Optional[str] = None,
+        selector: Optional[str] = None,
+        text: Optional[str] = None,
+        path: Optional[str] = None,
+        full_page: bool = False,
+    ) -> Any:
+        """Execute Playwright browser automation action (browse, click, type, screenshot, extract_content, close)."""
+        from hydra_cli.browser import dispatch_browser_action
+        return dispatch_browser_action(
+            action=action,
+            url=url,
+            selector=selector,
+            text=text,
+            path=path,
+            full_page=full_page,
+        )
+
+    def browse(self, url: str) -> Any:
+        """Navigate to a URL using Playwright browser."""
+        return self.browser_action(action="browse", url=url)
+
+    def click(self, selector: str) -> Any:
+        """Click an element matching selector using Playwright browser."""
+        return self.browser_action(action="click", selector=selector)
+
+    def type_text(self, selector: str, text: str) -> Any:
+        """Type text into an element matching selector using Playwright browser."""
+        return self.browser_action(action="type", selector=selector, text=text)
+
+    def screenshot(self, path: Optional[str] = None, full_page: bool = False) -> Any:
+        """Capture screenshot of current browser page using Playwright browser."""
+        return self.browser_action(action="screenshot", path=path, full_page=full_page)
+
+    def extract_content(self, selector: Optional[str] = None) -> Any:
+        """Extract text content from browser page or element using Playwright browser."""
+        return self.browser_action(action="extract_content", selector=selector)
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -557,6 +603,29 @@ class NativeToolRegistry:
                         "required": ["task"],
                     },
                 },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "browser_action",
+                    "description": "Execute Playwright browser automation (browse web pages, click elements, type input, capture screenshots, and extract text content).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["browse", "click", "type", "screenshot", "extract_content", "close"],
+                                "description": "Browser action to execute."
+                            },
+                            "url": {"type": "string", "description": "Target webpage URL (required for 'browse')."},
+                            "selector": {"type": "string", "description": "CSS or text selector (for 'click', 'type', 'extract_content')."},
+                            "text": {"type": "string", "description": "Text to enter into element (for 'type')."},
+                            "path": {"type": "string", "description": "Local file path to save screenshot (for 'screenshot')."},
+                            "full_page": {"type": "boolean", "description": "Whether to capture full scrollable page (for 'screenshot')."}
+                        },
+                        "required": ["action"]
+                    }
+                }
             },
         ]
 

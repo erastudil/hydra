@@ -1,4 +1,5 @@
-﻿import json
+import copy
+import json
 import re
 from typing import Dict, List, Any, Optional, Tuple
 from pathlib import Path
@@ -165,22 +166,72 @@ class SessionContextLedger:
             f.write(json.dumps(turn) + "\n")
 
     def compact_session(self, max_history_turns: int = 5) -> Dict[str, Any]:
-        """Flush the ledger to disk. Turn text stays verbatim. Nothing is summarized away."""
-        del max_history_turns
+        """Compact active session turns while writing full verbatim history to disk."""
+        total_on_disk = len(self.turns)
         with open(self.dump_path, "w", encoding="utf-8") as f:
             json.dump(self.turns, f, indent=2)
+
+        pinned_indices = set(self._pinned())
+        pinned_turns = [copy.deepcopy(self.turns[i]) for i in sorted(pinned_indices)]
+
+        unpinned_turns = [
+            (idx, turn) for idx, turn in enumerate(self.turns) if idx not in pinned_indices
+        ]
+
+        pruned_records: List[Dict[str, Any]] = []
+        if max_history_turns > 0 and len(unpinned_turns) > max_history_turns:
+            excess_count = len(unpinned_turns) - max_history_turns
+            pruned_pairs = unpinned_turns[:excess_count]
+            retained_unpinned = [turn for _, turn in unpinned_turns[excess_count:]]
+            for idx, turn in pruned_pairs:
+                role = turn.get("role", "turn")
+                content = str(turn.get("content") or "")
+                snippet = content[:120].strip() if content else "[tool round]"
+                pruned_records.append({
+                    "turn_index": idx,
+                    "role": role,
+                    "summary": snippet,
+                })
+        else:
+            retained_unpinned = [turn for _, turn in unpinned_turns]
+
+        for turn in retained_unpinned:
+            content = turn.get("content")
+            if isinstance(content, str) and len(content) > 10000:
+                withheld = len(content) - 4000
+                turn["content"] = content[:4000] + f"\n[OUTPUT PRUNED: {withheld} chars on disk ledger]"
+            if turn.get("tool_results"):
+                for tr in turn["tool_results"]:
+                    res = tr.get("result")
+                    if isinstance(res, str) and len(res) > 10000:
+                        tr["result"] = res[:4000] + f"\n[TOOL RESULT PRUNED: {len(res) - 4000} chars on disk]"
+
+        rebuilt = []
+        for t in self.turns:
+            if t in pinned_turns or t in retained_unpinned:
+                rebuilt.append(t)
+        self.turns = rebuilt if rebuilt else (pinned_turns + retained_unpinned)
+
+        self.index = {}
+        for turn in self.turns:
+            self._index_turn(turn)
+
+        pruned_count = len(pruned_records)
         summary = (
-            "topic: session ledger\n"
-            f"state: verbatim on disk\n"
-            f"path: {self.ledger_path}\n"
-            f"turns: {len(self.turns)}\n"
-            "live: unloaded\n"
-            "instructions: pinned outside the ledger"
+            "topic : session ledger\n\n"
+            "state : verbatim on disk\n\n"
+            f"path : {self.ledger_path}\n\n"
+            f"turns_on_disk : {total_on_disk}\n\n"
+            f"turns_retained : {len(self.turns)}\n\n"
+            f"turns_pruned : {pruned_count}\n\n"
+            "instructions : pinned outside the ledger"
         )
         return {
             "summary": summary,
-            "pruned_messages": [],
-            "turns_on_disk": len(self.turns),
+            "pruned_messages": pruned_records,
+            "turns_on_disk": total_on_disk,
+            "turns_retained": len(self.turns),
+            "turns_pruned": pruned_count,
             "ledger": str(self.ledger_path),
         }
 
@@ -211,27 +262,43 @@ class SessionContextLedger:
         chosen = chosen[: max_turns + len(self._pinned())]
         return [self.turns[idx] for idx in sorted(set(chosen))]
 
-    def render_prior(self, prompt: str, mode: Optional[str] = None) -> str:
-        """Live prefix for the next prompt. Recalled turns are copied whole."""
+    def render_prior(self, prompt: str, mode: Optional[str] = None, max_chars: int = 100000) -> str:
+        """Live prefix for the next prompt. Recalled turns bounded to prevent prompt prefix bloat."""
         key = normalize_context_mode(mode)
         if key == "sliding":
             lines = []
             for turn in self.turns[-4:]:
                 role = turn.get("role")
                 content = str(turn.get("content") or "")
+                if "[PRIOR TURNS]" in content:
+                    content = content.split("[PRIOR TURNS]")[-1].lstrip("\r\n")
+                if "[RETRIEVED CONTEXT]" in content:
+                    content = content.split("[RETRIEVED CONTEXT]")[-1].lstrip("\r\n")
                 if role in ("user", "assistant") and content.strip() and not content.startswith("[IN-FLIGHT"):
                     lines.append(f"{role} : {content}")
             if not lines:
                 return ""
-            return "[PRIOR TURNS]\n" + "\n".join(lines)
+            rendered = "[PRIOR TURNS]\n" + "\n".join(lines)
+            return rendered[:max_chars]
+
         hits = self.retrieve_verbatim(self.extract_keywords(prompt), max_turns=4)
         bodies = []
         for hit in hits:
             content = str(hit.get("content") or "")
             if not content.strip():
-                continue
+                if hit.get("tool_results"):
+                    results = hit["tool_results"]
+                    summary = ", ".join(r.get("name", "tool") for r in results[:3])
+                    content = f"[tool executed: {summary}]"
+                else:
+                    continue
+            if "[PRIOR TURNS]" in content:
+                content = content.split("[PRIOR TURNS]")[-1].lstrip("\r\n")
+            if "[RETRIEVED CONTEXT]" in content:
+                content = content.split("[RETRIEVED CONTEXT]")[-1].lstrip("\r\n")
             role = hit.get("role") or "turn"
             bodies.append(f"{role} : {content}")
         if not bodies:
             return ""
-        return "[RETRIEVED CONTEXT]\n" + "\n".join(bodies)
+        rendered = "[RETRIEVED CONTEXT]\n" + "\n".join(bodies)
+        return rendered[:max_chars]

@@ -29,6 +29,7 @@ $Files = @(
     'hydra_cli/alice_runner.py',
     'hydra_cli/alice_senses.py',
     'hydra_cli/auth.py',
+    'hydra_cli/browser.py',
     'hydra_cli/catalog.json',
     'hydra_cli/cli.py',
     'hydra_cli/config.py',

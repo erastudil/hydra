@@ -273,10 +273,15 @@ def _print_head(result: SwarmResult, *, verbose: bool = False) -> None:
 def _head_config(role: str, custom_model: Optional[str]) -> Dict[str, str]:
     runner = None
     clean_role = role
+    override_model = None
     if ":" in role:
-        base_role, runner = role.split(":", 1)
+        base_role, sub = role.split(":", 1)
         clean_role = base_role.strip().lower()
-        runner = runner.strip().lower()
+        sub = sub.strip().lower()
+        if sub in ("hermes", "pi", "alice"):
+            runner = sub
+        else:
+            override_model = resolve_model(sub)
     elif role.lower() in ("hermes", "pi"):
         runner = role.lower()
         clean_role = role.lower()
@@ -289,6 +294,8 @@ def _head_config(role: str, custom_model: Optional[str]) -> Dict[str, str]:
     if runner:
         cfg["runner"] = runner
         cfg["title"] = f"{cfg.get('title', clean_role.capitalize())} ({runner})"
+    if override_model:
+        cfg["model"] = override_model
     if custom_model:
         cfg["model"] = custom_model
         cfg.pop("effort", None)
@@ -381,10 +388,33 @@ def execute_swarm(
             )
 
     requested = heads or ["architect", "coder", "auditor"]
+    if len(requested) == 1 and requested[0].lower().strip() in ("open swarm", "open-swarm", "open_swarm"):
+        requested = ["open_architect", "open_coder", "open_auditor"]
+
     explicit_synth = "synthesizer" in requested
     worker_roles = [role for role in requested if role != "synthesizer"]
     if not worker_roles:
         worker_roles = ["architect", "coder", "auditor"]
+
+    if resolved_tier not in ("free", "local"):
+        from hydra_cli.config import model_providers
+        from hydra_cli.providers import check_cheaperinference_balance_guard
+
+        uses_ci = False
+        for r in worker_roles:
+            hcfg = _head_config(r, custom_model)
+            hmodel = hcfg.get("model", "")
+            hprovs = model_providers(hmodel)
+            if "cheaperinference" in hprovs or (not hprovs and any(p.get("id") == "cheaperinference" for p in providers)):
+                uses_ci = True
+                break
+        if uses_ci:
+            passed, balance, reason = check_cheaperinference_balance_guard()
+            if not passed:
+                if not json_output:
+                    sys.stderr.write(f"\n[HYDRA SWARM] {reason}\n")
+                    sys.stderr.flush()
+                raise ProviderError(reason)
 
     review_roles = [role for role in worker_roles if _base_role(role) in REVIEW_ROLES]
     first_roles = [role for role in worker_roles if role not in review_roles]
