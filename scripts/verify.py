@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and len(names) == 22
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and len(names) == 23
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -2830,6 +2830,65 @@ def ast_p014_metaphor_contracts():
         assert not f_res["isError"]
         assert f_res["violations_count"] == 4
         assert f_res["clean"] is False
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+@check
+def ast_state_vector_linter_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstStateVectorLinter, NativeToolRegistry
+
+    linter = AstStateVectorLinter()
+
+    sample = (
+        "state vector intention : execute discrete kaizen improvement.\n\n"
+        "state vector requirement : is verified balance floor.\n"
+        "state vector course of action : pop next task (with subagent).\n\n"
+        "state vector invalid head : perform unmapped operation.\n"
+    )
+
+    res = linter.analyze_source(sample)
+    assert not res["isError"]
+    assert res["total_vectors"] == 4
+    assert res["violations_count"] == 4
+    assert res["clean"] is False
+
+    kinds = {v["kind"] for v in res["violations"]}
+    assert "leading_copula" in kinds
+    assert "missing_blank_delimiter" in kinds
+    assert "parenthetical_in_prose" in kinds
+    assert "invalid_head" in kinds
+
+    clean_sample = (
+        "state vector intention : implement state vector linter.\n\n"
+        "state vector requirement : verified balance floor.\n\n"
+        "state vector course of action : execute discrete kaizen improvement.\n\n"
+        "state vector end result : pass all verification tests with exit status 0.\n"
+    )
+    clean_res = linter.analyze_source(clean_sample)
+    assert not clean_res["isError"]
+    assert clean_res["total_vectors"] == 4
+    assert clean_res["violations_count"] == 0
+    assert clean_res["clean"] is True
+
+    reg = NativeToolRegistry()
+    assert reg.has_tool("lint_state_vectors")
+    assert reg.has_tool("check_state_vectors")
+    assert reg.has_tool("state_vector_linter")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "lint_state_vectors" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as f:
+        f.write(clean_sample)
+        tmp_file = f.name
+    try:
+        f_res = reg.dispatch("lint_state_vectors", {"path": tmp_file})
+        assert not f_res["isError"]
+        assert f_res["clean"] is True
     finally:
         if os.path.exists(tmp_file):
             os.remove(tmp_file)

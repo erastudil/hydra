@@ -1471,6 +1471,109 @@ class AstP014MetaphorDetector:
 
 
 
+class AstStateVectorLinter:
+    """Linter evaluating Progen state vectors for canonical heads, zero copula, and delimiters."""
+
+    CANONICAL_HEADS = {
+        "state vector intention",
+        "intention",
+        "state vector requirement",
+        "requirement",
+        "state vector course of action",
+        "course of action",
+        "state vector end result",
+        "end result",
+        "state vector reason",
+        "reason",
+        "state vector demand",
+        "demand",
+        "state vector compliance",
+        "compliance",
+    }
+
+    COPULAS = ("is", "are", "was", "were")
+
+    def __init__(self, require_canonical_heads: bool = True):
+        self.require_canonical_heads = require_canonical_heads
+
+    def analyze_source(self, source: str) -> Dict[str, Any]:
+        """Analyze text, markdown, or code for Progen state vector conformance."""
+        lines = source.replace("\r\n", "\n").split("\n")
+        violations: List[Dict[str, Any]] = []
+        vectors: List[Dict[str, Any]] = []
+
+        last_statement_line = -1
+
+        for idx, line in enumerate(lines, start=1):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                stripped = stripped.lstrip("#").strip()
+            if stripped.startswith('"""') or stripped.startswith("'''"):
+                stripped = stripped.strip("\"'")
+
+            if not stripped:
+                continue
+
+            if ":" in stripped:
+                parts = stripped.split(":", 1)
+                topic = parts[0].strip().lower()
+                comment = parts[1].strip()
+
+                is_state_vector = topic.startswith("state vector") or topic in self.CANONICAL_HEADS
+
+                if is_state_vector:
+                    vectors.append({
+                        "lineno": idx,
+                        "topic": topic,
+                        "comment": comment,
+                    })
+
+                    if last_statement_line != -1 and idx == last_statement_line + 1:
+                        violations.append({
+                            "lineno": idx,
+                            "topic": topic,
+                            "kind": "missing_blank_delimiter",
+                            "message": f"State vector at line {idx} missing preceding single blank line delimiter.",
+                        })
+
+                    if self.require_canonical_heads and topic not in self.CANONICAL_HEADS:
+                        violations.append({
+                            "lineno": idx,
+                            "topic": topic,
+                            "kind": "invalid_head",
+                            "message": f"Non-canonical state vector head '{topic}'.",
+                        })
+
+                    first_word = comment.split()[0].lower().rstrip(".,:;") if comment.split() else ""
+                    if first_word in self.COPULAS:
+                        violations.append({
+                            "lineno": idx,
+                            "topic": topic,
+                            "kind": "leading_copula",
+                            "message": f"State vector '{topic}' starts with leading copula '{first_word}'.",
+                        })
+
+                    if "(" in comment and ")" in comment:
+                        if not re.search(r"\[.*?\]\(.*?\)", comment):
+                            violations.append({
+                                "lineno": idx,
+                                "topic": topic,
+                                "kind": "parenthetical_in_prose",
+                                "message": f"State vector '{topic}' contains parenthetical in running prose.",
+                            })
+
+                    last_statement_line = idx
+
+        return {
+            "isError": False,
+            "total_vectors": len(vectors),
+            "violations_count": len(violations),
+            "violations": violations,
+            "clean": len(violations) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -1544,6 +1647,9 @@ class NativeToolRegistry:
             "detect_p014": self.detect_p014,
             "ban_p014_metaphors": self.detect_p014,
             "check_p014": self.detect_p014,
+            "lint_state_vectors": self.lint_state_vectors,
+            "check_state_vectors": self.lint_state_vectors,
+            "state_vector_linter": self.lint_state_vectors,
         }
 
     @property
@@ -2721,6 +2827,84 @@ class NativeToolRegistry:
             "clean": total_violations == 0,
         }
 
+    def lint_state_vectors(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        require_canonical_heads: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate Progen state vector blocks for canonical heads, single blank line delimiters, and zero copula.
+        Supports inspecting Python source files, markdown specifications, prompt templates, and logs.
+        """
+        linter = AstStateVectorLinter(require_canonical_heads=require_canonical_heads)
+
+        if source is not None:
+            return linter.analyze_source(source)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = linter.analyze_source(content)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        total_vectors = 0
+        total_violations = 0
+        all_violations = []
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not any(filename.endswith(ext) for ext in (".py", ".md", ".prg", ".jsonl", ".txt")):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = linter.analyze_source(file_code)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                if rep["total_vectors"] > 0:
+                    file_metrics[rel_p] = {
+                        "vectors": rep["total_vectors"],
+                        "violations": rep["violations_count"],
+                    }
+                    total_vectors += rep["total_vectors"]
+                    total_violations += rep["violations_count"]
+                    for item in rep["violations"]:
+                        item_copy = dict(item)
+                        item_copy["file"] = rel_p
+                        all_violations.append(item_copy)
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_vectors": total_vectors,
+            "total_violations": total_violations,
+            "files_with_violations": sum(1 for m in file_metrics.values() if m["violations"] > 0),
+            "summary": file_metrics,
+            "violations": all_violations,
+            "clean": total_violations == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -3022,6 +3206,30 @@ class NativeToolRegistry:
                             "min_coverage": {
                                 "type": "number",
                                 "description": "Minimum type coverage percentage threshold. Default 0.0.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "lint_state_vectors",
+                    "description": "Evaluate Progen state vector blocks for canonical heads, single blank line delimiters, and zero copula.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to inspect. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw text or source code string to inspect.",
+                            },
+                            "require_canonical_heads": {
+                                "type": "boolean",
+                                "description": "Whether to require canonical state vector heads. Default true.",
                             },
                         },
                     },
