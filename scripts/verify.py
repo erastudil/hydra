@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and len(names) == 23
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and len(names) == 24
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -2889,6 +2889,96 @@ def ast_state_vector_linter_contracts():
         f_res = reg.dispatch("lint_state_vectors", {"path": tmp_file})
         assert not f_res["isError"]
         assert f_res["clean"] is True
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+@check
+def ast_function_length_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstFunctionLengthAnalyzer, NativeToolRegistry
+
+    analyzer = AstFunctionLengthAnalyzer(max_lines=10, max_statements=5)
+
+    sample_short = (
+        "def short_func(x):\n"
+        "    \"\"\"\n"
+        "    Short docstring.\n"
+        "    \"\"\"\n"
+        "    y = x + 1\n"
+        "    return y\n"
+    )
+
+    res_short = analyzer.analyze_source(sample_short)
+    assert not res_short["isError"]
+    assert res_short["total_functions"] == 1
+    assert res_short["violations_count"] == 0
+    assert res_short["clean"] is True
+    fn_info = res_short["functions"][0]
+    assert fn_info["name"] == "short_func"
+    assert fn_info["effective_lines"] == 3
+    assert fn_info["statements"] == 2
+
+    # Overlength lines and statements
+    sample_long_lines = (
+        "def long_lines_func():\n"
+        + "".join(f"    a{i} = {i}\n" for i in range(12))
+        + "    return a0\n"
+    )
+    res_long = analyzer.analyze_source(sample_long_lines)
+    assert not res_long["isError"]
+    assert res_long["total_functions"] == 1
+    assert res_long["violations_count"] >= 1
+    assert res_long["clean"] is False
+    kinds = {v["kind"] for v in res_long["violations"]}
+    assert "excessive_lines" in kinds
+    assert "excessive_statements" in kinds
+
+    # Test class methods and async functions
+    sample_class = (
+        "class Pipeline:\n"
+        "    async def process_async(self, data):\n"
+        "        \"\"\"Async process data.\"\"\"\n"
+        "        res = await fetch(data)\n"
+        "        return res\n\n"
+        "    def sync_run(self):\n"
+        "        return 42\n"
+    )
+    res_class = analyzer.analyze_source(sample_class)
+    assert not res_class["isError"]
+    assert res_class["total_functions"] == 2
+    fn_names = [f["name"] for f in res_class["functions"]]
+    assert "Pipeline.process_async" in fn_names
+    assert "Pipeline.sync_run" in fn_names
+
+    # Test docstring toggle
+    analyzer_no_ignore = AstFunctionLengthAnalyzer(max_lines=4, ignore_docstrings=False)
+    res_no_ignore = analyzer_no_ignore.analyze_source(sample_short)
+    assert res_no_ignore["violations_count"] == 1
+    assert res_no_ignore["violations"][0]["kind"] == "excessive_lines"
+
+    # Registry tool invocation and alias checks
+    reg = NativeToolRegistry()
+    assert reg.has_tool("check_function_length")
+    assert reg.has_tool("analyze_function_length")
+    assert reg.has_tool("function_length_checker")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "check_function_length" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(sample_short)
+        tmp_file = f.name
+    try:
+        f_res = reg.dispatch("check_function_length", {"path": tmp_file, "max_lines": 10})
+        assert not f_res["isError"]
+        assert f_res["clean"] is True
+
+        alias_res = reg.dispatch("analyze_function_length", {"source": sample_short, "max_lines": 10})
+        assert not alias_res["isError"]
+        assert alias_res["clean"] is True
     finally:
         if os.path.exists(tmp_file):
             os.remove(tmp_file)

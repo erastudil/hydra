@@ -1574,6 +1574,146 @@ class AstStateVectorLinter:
 
 
 
+
+
+class AstFunctionLengthAnalyzer:
+    """AST visitor measuring function physical lines, logical statements, and docstring overhead."""
+
+    def __init__(
+        self,
+        max_lines: int = 50,
+        max_statements: int = 30,
+        ignore_docstrings: bool = True,
+        ignore_comments: bool = False,
+    ):
+        self.max_lines = max_lines
+        self.max_statements = max_statements
+        self.ignore_docstrings = ignore_docstrings
+        self.ignore_comments = ignore_comments
+
+    def analyze_source(self, source: str) -> Dict[str, Any]:
+        """Analyze Python source code and evaluate function physical lines and statement limits."""
+        code = source.replace("\r\n", "\n")
+        if code.startswith("\ufeff"):
+            code = code[1:]
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        source_lines = code.split("\n")
+
+        def find_functions(node: ast.AST, prefix: str = "") -> List[Tuple[str, ast.AST]]:
+            items: List[Tuple[str, ast.AST]] = []
+            for child in getattr(node, "body", []):
+                if isinstance(child, ast.ClassDef):
+                    items.extend(find_functions(child, prefix=f"{prefix}{child.name}."))
+                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    fn_name = f"{prefix}{child.name}"
+                    items.append((fn_name, child))
+                    items.extend(find_functions(child, prefix=f"{fn_name}."))
+            return items
+
+        discovered = find_functions(tree)
+        functions: List[Dict[str, Any]] = []
+        violations: List[Dict[str, Any]] = []
+
+        for fn_name, fn_node in discovered:
+            lineno = fn_node.lineno
+            end_lineno = getattr(fn_node, "end_lineno", lineno)
+            total_lines = end_lineno - lineno + 1
+
+            fn_lines = source_lines[lineno - 1 : end_lineno]
+            comment_lines = sum(1 for l in fn_lines if l.strip().startswith("#"))
+
+            doc_node = None
+            docstring_lines = 0
+            if getattr(fn_node, "body", []):
+                first_stmt = fn_node.body[0]
+                if (
+                    isinstance(first_stmt, ast.Expr)
+                    and isinstance(getattr(first_stmt, "value", None), ast.Constant)
+                    and isinstance(first_stmt.value.value, str)
+                ):
+                    doc_node = first_stmt
+                    doc_start = doc_node.lineno
+                    doc_end = getattr(doc_node, "end_lineno", doc_start)
+                    docstring_lines = doc_end - doc_start + 1
+
+            def count_statements(scope_node: ast.AST) -> int:
+                count = 0
+                for child in ast.iter_child_nodes(scope_node):
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        count += 1
+                        continue
+                    if isinstance(child, ast.stmt):
+                        if self.ignore_docstrings and child is doc_node:
+                            continue
+                        count += 1
+                    count += count_statements(child)
+                return count
+
+            stmt_count = count_statements(fn_node)
+
+            effective_lines = total_lines
+            if self.ignore_docstrings:
+                effective_lines -= docstring_lines
+            if self.ignore_comments:
+                effective_lines -= comment_lines
+            effective_lines = max(1, effective_lines)
+
+            over_lines = effective_lines > self.max_lines
+            over_statements = stmt_count > self.max_statements
+
+            if over_lines:
+                violations.append({
+                    "kind": "excessive_lines",
+                    "name": fn_name,
+                    "lineno": lineno,
+                    "end_lineno": end_lineno,
+                    "value": effective_lines,
+                    "threshold": self.max_lines,
+                    "message": f"Function '{fn_name}' length {effective_lines} lines exceeds limit {self.max_lines}.",
+                })
+
+            if over_statements:
+                violations.append({
+                    "kind": "excessive_statements",
+                    "name": fn_name,
+                    "lineno": lineno,
+                    "end_lineno": end_lineno,
+                    "value": stmt_count,
+                    "threshold": self.max_statements,
+                    "message": f"Function '{fn_name}' statement count {stmt_count} exceeds limit {self.max_statements}.",
+                })
+
+            functions.append({
+                "name": fn_name,
+                "lineno": lineno,
+                "end_lineno": end_lineno,
+                "total_lines": total_lines,
+                "effective_lines": effective_lines,
+                "docstring_lines": docstring_lines,
+                "comment_lines": comment_lines,
+                "statements": stmt_count,
+                "over_lines": over_lines,
+                "over_statements": over_statements,
+            })
+
+        violations.sort(key=lambda item: (item["lineno"], item["name"], item["kind"]))
+
+        return {
+            "isError": False,
+            "total_functions": len(functions),
+            "violations_count": len(violations),
+            "violations": violations,
+            "functions": functions,
+            "clean": len(violations) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -1650,6 +1790,9 @@ class NativeToolRegistry:
             "lint_state_vectors": self.lint_state_vectors,
             "check_state_vectors": self.lint_state_vectors,
             "state_vector_linter": self.lint_state_vectors,
+            "check_function_length": self.check_function_length,
+            "analyze_function_length": self.check_function_length,
+            "function_length_checker": self.check_function_length,
         }
 
     @property
@@ -2905,6 +3048,91 @@ class NativeToolRegistry:
             "clean": total_violations == 0,
         }
 
+    def check_function_length(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        max_lines: int = 50,
+        max_statements: int = 30,
+        ignore_docstrings: bool = True,
+        ignore_comments: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Analyze Python functions and methods for physical length and statement count limits.
+        Supports inspecting files, raw source code, or recursive workspace directory scanning.
+        """
+        analyzer = AstFunctionLengthAnalyzer(
+            max_lines=max_lines,
+            max_statements=max_statements,
+            ignore_docstrings=ignore_docstrings,
+            ignore_comments=ignore_comments,
+        )
+
+        if source is not None:
+            return analyzer.analyze_source(source)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = analyzer.analyze_source(content)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        total_functions = 0
+        total_violations = 0
+        all_violations = []
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = analyzer.analyze_source(file_code)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                total_functions += rep["total_functions"]
+                if rep["violations_count"] > 0:
+                    file_metrics[rel_p] = {
+                        "functions": rep["total_functions"],
+                        "violations": rep["violations_count"],
+                    }
+                    total_violations += rep["violations_count"]
+                    for item in rep["violations"]:
+                        item_copy = dict(item)
+                        item_copy["file"] = rel_p
+                        all_violations.append(item_copy)
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_functions": total_functions,
+            "total_violations": total_violations,
+            "summary": file_metrics,
+            "violations": all_violations,
+            "clean": total_violations == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -3206,6 +3434,42 @@ class NativeToolRegistry:
                             "min_coverage": {
                                 "type": "number",
                                 "description": "Minimum type coverage percentage threshold. Default 0.0.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "check_function_length",
+                    "description": "Analyze Python functions and methods for physical length and statement count limits.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to inspect. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to inspect.",
+                            },
+                            "max_lines": {
+                                "type": "integer",
+                                "description": "Maximum allowed physical lines per function. Default 50.",
+                            },
+                            "max_statements": {
+                                "type": "integer",
+                                "description": "Maximum allowed statements per function. Default 30.",
+                            },
+                            "ignore_docstrings": {
+                                "type": "boolean",
+                                "description": "Whether to deduct docstring lines from total length. Default true.",
+                            },
+                            "ignore_comments": {
+                                "type": "boolean",
+                                "description": "Whether to deduct comment lines from total length. Default false.",
                             },
                         },
                     },
