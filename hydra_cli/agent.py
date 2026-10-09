@@ -2143,6 +2143,7 @@ def run_interactive_agent(
                 summon_alias=active_summon,
                 has_referent=prior is not None,
                 prior=prior,
+                session=active_session_id,
             )
             last_gate["action"] = decision.action
             last_gate["route"] = decision.route

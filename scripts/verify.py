@@ -1832,6 +1832,84 @@ def context_recall():
 
 
 @check
+def alice_retrieval_stacks():
+    from hydra_cli import alice_retrieve as ar
+    from hydra_cli.alice_gate import consult
+
+    home = tempfile.mkdtemp(prefix="alice-index-")
+    index = ar.AliceIndex(os.path.join(home, "alice_index.db"))
+    try:
+        assert index.ensure_built() is True and index.ensure_built() is False
+        assert index.sentence_count() > 1000
+
+        found = ar.answer("what is the code of hammurabi", session="gate-a", web=False, index=index)
+        assert found.action == "answer", found.text
+        lead = found.hits[0]
+        assert "babylonian" in lead.text.lower()
+        assert abs(lead.score - sum(lead.parts.values())) < 1e-6
+        assert found.threshold == ar.threshold_for(found.mass) and lead.score >= found.threshold
+        assert "weight :" in found.text and "route : RETRIEVAL_ANSWER" in found.text
+
+        dated = ar.answer("when did the thirty years war end", session="gate-b", web=False, index=index)
+        assert dated.action == "answer" and "1648" in dated.hits[0].text, dated.text
+
+        miss = ar.answer("who was zqxvort the unwritten", session="gate-c", web=False, index=index)
+        assert miss.action == "ask" and "clarifying question :" in miss.text, miss.text
+        assert ar.is_followup("a lighthouse keeper", "gate-c")
+        second = ar.answer("a lighthouse keeper", session="gate-c", web=False, index=index)
+        assert second.action == "ask", second.text
+        third = ar.answer("from norway", session="gate-c", web=False, index=index)
+        assert third.action == "gap" and "DONT_KNOW" in third.text, third.text
+        assert not ar.has_pending("gate-c")
+
+        assert ar.is_inquiry("who was napoleon") and not ar.is_inquiry("explain the failure")
+        assert not ar.is_inquiry("what does line 40 of agent.py do")
+        assert ar.stem("died") == ar.stem("die") and ar.stem("speed") == "speed"
+        assert ar.web_allowed("https://en.wikipedia.org/wiki/Napoleon")
+        assert not ar.web_allowed("https://quizlet.com/x") and not ar.web_allowed("https://127.0.0.1/")
+
+        with isolated(env={"HYDRA_HOME": home, "ALICE_WEB": "0"}):
+            decision = consult(
+                "what is the code of hammurabi",
+                summon_alias="none",
+                evaluator=lambda prompt: {"route": "EPISTEMIC_GAP", "answer": "SHOULD_NOT_LEAK"},
+                session="gate-d",
+            )
+            assert decision.action == "local" and decision.route == "RETRIEVAL_ANSWER", decision.text
+            assert "SHOULD_NOT_LEAK" not in decision.text
+    finally:
+        index.close()
+        if ar._DEFAULT is not None and str(ar._DEFAULT.path).startswith(home):
+            ar._DEFAULT.close()
+            ar._DEFAULT = None
+        shutil.rmtree(home, ignore_errors=True)
+
+
+@check
+def alice_retrieval_web():
+    from hydra_cli import alice_retrieve as ar
+
+    if not ar.web_reachable():
+        raise Skip("wikipedia unreachable")
+    home = tempfile.mkdtemp(prefix="alice-web-")
+    index = ar.AliceIndex(os.path.join(home, "alice_index.db"))
+    try:
+        found = ar.answer("when did napoleon die", session="gate-web", web=True, index=index)
+        assert found.action == "answer", found.text
+        assert "1821" in " ".join(hit.text for hit in found.hits), found.text
+        assert any("wikipedia.org" in hit.url or "wikidata.org" in hit.url for hit in found.hits)
+        assert any(entity.key == "Q517" for entity in index.alias_lookup("napoleon"))
+
+        placed = ar.answer("where is the white house", session="gate-web-2", web=True, index=index)
+        assert placed.action == "answer" and "Pennsylvania Avenue" in placed.hits[0].text, placed.text
+        capital = ar.answer("what is the capital of the united states", session="gate-web-3", web=True, index=index)
+        assert capital.action == "answer" and "Washington" in capital.hits[0].text, capital.text
+    finally:
+        index.close()
+        shutil.rmtree(home, ignore_errors=True)
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
