@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and len(names) == 12
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and len(names) == 13
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -2108,6 +2108,95 @@ def playwright_tool_contracts():
         res = reg.dispatch("browser_action", {"action": "browse", "url": "https://example.com"})
         assert res["isError"] is True
         assert "Playwright uninstalled" in res["error"]
+
+
+@check
+def ast_import_sorter_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstImportSorter, NativeToolRegistry
+
+    sorter = AstImportSorter()
+    sample = (
+        "#!/usr/bin/env python3\n"
+        "# -*- coding: utf-8 -*-\n"
+        '"""Module docstring."""\n'
+        "\n"
+        "from typing import Tuple, List, Dict, Any\n"
+        "import sys\n"
+        "from __future__ import annotations\n"
+        "import os\n"
+        "from typing import Optional\n"
+        "from hydra_cli.config import load_dotenv\n"
+        "import requests\n"
+        "\n"
+        "x = 100\n"
+    )
+
+    r1 = sorter.sort_source(sample)
+    assert not r1["isError"]
+    assert r1["changed"] is True
+    assert r1["imports_count"] == 7
+
+    sorted_text = r1["sorted_code"]
+    assert "from __future__ import annotations" in sorted_text
+    assert "import os\nimport sys" in sorted_text
+    assert "from typing import Any, Dict, List, Optional, Tuple" in sorted_text
+    assert "import requests" in sorted_text
+    assert "from hydra_cli.config import load_dotenv" in sorted_text
+
+    # Idempotency
+    r2 = sorter.sort_source(sorted_text)
+    assert not r2["isError"]
+    assert r2["changed"] is False
+    assert r2["sorted_code"] == sorted_text
+
+    # Multi-line wrapping
+    short_sorter = AstImportSorter(max_line_length=40)
+    r3 = short_sorter.sort_source("from typing import Any, Dict, List, Optional, Tuple, Callable\n\nx = 1\n")
+    assert not r3["isError"]
+    assert "(\n    Any,\n    Callable," in r3["sorted_code"]
+
+    # Inline comment preservation
+    r4 = sorter.sort_source("import sys\nimport os  # system path\nimport requests  # api client\n\nx = 1\n")
+    assert not r4["isError"]
+    assert "import os  # system path" in r4["sorted_code"]
+    assert "import requests  # api client" in r4["sorted_code"]
+
+    # NativeToolRegistry integration
+    reg = NativeToolRegistry()
+    assert reg.has_tool("sort_imports")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "sort_imports" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write("import sys\nimport os\n\ny = 2\n")
+        tmp_path = f.name
+
+    try:
+        reg_res = reg.dispatch("sort_imports", {"path": tmp_path, "in_place": True})
+        assert not reg_res["isError"]
+        assert reg_res["changed"] is True
+        with open(tmp_path, "r", encoding="utf-8") as rf:
+            disk_txt = rf.read()
+        assert disk_txt == "import os\nimport sys\n\ny = 2\n"
+
+        reg_res2 = reg.dispatch("sort_imports", {"path": tmp_path, "in_place": True})
+        assert not reg_res2["isError"]
+        assert reg_res2["changed"] is False
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    # Error handling
+    syn_res = reg.dispatch("sort_imports", {"source": "import os\ndef invalid(\n"})
+    assert syn_res["isError"] is True
+    assert "SyntaxError" in syn_res["error"]
+
+    miss_res = reg.dispatch("sort_imports", {"path": "nonexistent_file_abc.py"})
+    assert miss_res["isError"] is True
+    assert "File not found" in miss_res["error"]
 
 
 @check

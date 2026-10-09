@@ -4,6 +4,7 @@ Provides zero-dependency built-in tools: read_file, write_file, edit_file, list_
 grep_search, find_files, run_command, invoke_subagent, and swarm_fanout.
 """
 
+import ast
 import fnmatch
 import json
 import os
@@ -22,6 +23,193 @@ def _format_size(size_bytes: int) -> str:
         return f"{size_bytes / 1024:.1f} KB"
     else:
         return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+_DEFAULT_STDLIB_MODULES = frozenset({
+    "abc", "argparse", "ast", "asyncio", "base64", "collections", "concurrent",
+    "contextlib", "copy", "csv", "dataclasses", "datetime", "decimal", "difflib",
+    "enum", "errno", "fnmatch", "functools", "gc", "glob", "gzip", "hashlib",
+    "heapq", "hmac", "html", "http", "importlib", "inspect", "io", "itertools",
+    "json", "logging", "math", "mimetypes", "multiprocessing", "numbers", "operator",
+    "os", "pathlib", "pickle", "platform", "pprint", "queue", "random", "re",
+    "shutil", "signal", "socket", "sqlite3", "ssl", "stat", "string", "struct",
+    "subprocess", "sys", "tempfile", "textwrap", "threading", "time", "traceback",
+    "types", "typing", "unittest", "urllib", "uuid", "warnings", "weakref", "zipfile",
+})
+
+
+class AstImportSorter:
+    """AST-driven Python import organizer and sorter."""
+
+    DEFAULT_MAX_LINE_LENGTH = 88
+
+    FUTURE = 0
+    STDLIB = 1
+    THIRDPARTY = 2
+    FIRSTPARTY = 3
+
+    def __init__(
+        self,
+        max_line_length: int = DEFAULT_MAX_LINE_LENGTH,
+        known_first_party: Optional[List[str]] = None,
+    ):
+        self.max_line_length = max_line_length
+        self.known_first_party = set(known_first_party or [])
+        self.known_first_party.update({"hydra", "hydra_cli"})
+
+    def classify_module(self, module: Optional[str], level: int = 0) -> int:
+        """Classify module import into section group: future, stdlib, thirdparty, or firstparty."""
+        if level > 0 or not module:
+            return self.FIRSTPARTY
+        top = module.split(".")[0]
+        if top == "__future__":
+            return self.FUTURE
+        if top in self.known_first_party:
+            return self.FIRSTPARTY
+        stdlib_names = getattr(sys, "stdlib_module_names", _DEFAULT_STDLIB_MODULES)
+        if top in stdlib_names:
+            return self.STDLIB
+        return self.THIRDPARTY
+
+    def sort_source(self, source: str) -> Dict[str, Any]:
+        """Parse source code, sort and group top-level imports, and return formatted result."""
+        newline = "\r\n" if "\r\n" in source else "\n"
+        code = source.replace("\r\n", "\n")
+        has_bom = code.startswith("\ufeff")
+        if has_bom:
+            code = code[1:]
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        first_import_idx = None
+        for i, node in enumerate(tree.body):
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                first_import_idx = i
+                break
+
+        if first_import_idx is None:
+            return {
+                "isError": False,
+                "changed": False,
+                "sorted_code": source,
+                "imports_count": 0,
+            }
+
+        import_nodes = []
+        for node in tree.body[first_import_idx:]:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                import_nodes.append(node)
+            else:
+                break
+
+        code_lines = code.split("\n")
+        first_line = import_nodes[0].lineno
+        last_line = import_nodes[-1].end_lineno
+
+        groups: Dict[int, Dict[str, Any]] = {
+            self.FUTURE: {"imports": [], "froms": {}},
+            self.STDLIB: {"imports": [], "froms": {}},
+            self.THIRDPARTY: {"imports": [], "froms": {}},
+            self.FIRSTPARTY: {"imports": [], "froms": {}},
+        }
+
+        for node in import_nodes:
+            comment = ""
+            if node.lineno == node.end_lineno:
+                orig_line = code_lines[node.lineno - 1]
+                if "#" in orig_line:
+                    comment = orig_line[orig_line.find("#"):].strip()
+
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    grp = self.classify_module(alias.name, level=0)
+                    groups[grp]["imports"].append((alias.name, alias.asname, comment))
+            elif isinstance(node, ast.ImportFrom):
+                grp = self.classify_module(node.module, level=node.level)
+                mod_key = (node.level, node.module or "", comment)
+                if mod_key not in groups[grp]["froms"]:
+                    groups[grp]["froms"][mod_key] = set()
+                for alias in node.names:
+                    groups[grp]["froms"][mod_key].add((alias.name, alias.asname))
+
+        group_blocks = []
+        for g_idx in (self.FUTURE, self.STDLIB, self.THIRDPARTY, self.FIRSTPARTY):
+            g_data = groups[g_idx]
+            lines = []
+            uniq_imports = sorted(
+                set(g_data["imports"]),
+                key=lambda x: (x[0].lower(), (x[1] or "").lower()),
+            )
+            for name, asname, comment in uniq_imports:
+                stmt = f"import {name} as {asname}" if asname else f"import {name}"
+                if comment:
+                    stmt = f"{stmt}  {comment}"
+                lines.append(stmt)
+
+            sorted_mod_keys = sorted(
+                g_data["froms"].keys(),
+                key=lambda k: ("." * k[0] + k[1]).lower(),
+            )
+            for level, mod, comment in sorted_mod_keys:
+                dots = "." * level
+                prefix = f"from {dots}{mod} import "
+                names = sorted(
+                    g_data["froms"][(level, mod, comment)],
+                    key=lambda x: (x[0].lower(), (x[1] or "").lower()),
+                )
+                syms = [f"{n} as {a}" if a else n for n, a in names]
+                one_line = prefix + ", ".join(syms)
+                if comment:
+                    one_line = f"{one_line}  {comment}"
+
+                if len(one_line) <= self.max_line_length:
+                    lines.append(one_line)
+                else:
+                    multi = [prefix + "("]
+                    for s in syms:
+                        multi.append(f"    {s},")
+                    if comment:
+                        multi.append(f")  {comment}")
+                    else:
+                        multi.append(")")
+                    lines.append("\n".join(multi))
+
+            if lines:
+                group_blocks.append("\n".join(lines))
+
+        sorted_imports_text = "\n\n".join(group_blocks)
+        preamble_lines = code_lines[:first_line - 1]
+        preamble_text = "\n".join(preamble_lines).rstrip("\n")
+
+        remainder_lines = code_lines[last_line:]
+        remainder_text = "\n".join(remainder_lines).strip("\n")
+
+        pieces = []
+        if preamble_text:
+            pieces.append(preamble_text)
+        pieces.append(sorted_imports_text)
+        if remainder_text:
+            pieces.append(remainder_text)
+
+        joined = "\n\n".join(pieces)
+        if source.endswith("\n"):
+            joined += "\n"
+
+        if newline == "\r\n":
+            joined = joined.replace("\n", "\r\n")
+        if has_bom:
+            joined = "\ufeff" + joined
+
+        changed = (joined != source)
+        return {
+            "isError": False,
+            "changed": changed,
+            "sorted_code": joined,
+            "imports_count": len(import_nodes),
+        }
 
 
 class NativeToolRegistry:
@@ -73,6 +261,7 @@ class NativeToolRegistry:
             "type_text": self.type_text,
             "screenshot": self.screenshot,
             "extract_content": self.extract_content,
+            "sort_imports": self.sort_imports,
         }
 
     @property
@@ -426,6 +615,63 @@ class NativeToolRegistry:
         """Extract text content from browser page or element using Playwright browser."""
         return self.browser_action(action="extract_content", selector=selector)
 
+    def sort_imports(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        in_place: bool = True,
+        known_first_party: Optional[List[str]] = None,
+        max_line_length: int = 88,
+    ) -> Dict[str, Any]:
+        """
+        Organize and sort Python imports using AST parsing.
+        Groups into __future__, standard library, third-party, and first-party blocks.
+        Merges redundant from-imports and sorts symbols alphabetically.
+        """
+        if not path and source is None:
+            return {"isError": True, "error": "Either 'path' or 'source' must be provided"}
+
+        sorter = AstImportSorter(
+            max_line_length=max_line_length,
+            known_first_party=known_first_party,
+        )
+
+        if source is not None:
+            return sorter.sort_source(source)
+
+        abs_path = os.path.abspath(os.path.join(self.cwd, path))
+        if not os.path.exists(abs_path):
+            return {"isError": True, "error": f"File not found: {path}"}
+        if os.path.isdir(abs_path):
+            return {"isError": True, "error": f"Path is a directory, not a file: {path}"}
+
+        try:
+            with open(abs_path, "r", encoding="utf-8-sig") as f:
+                content = f.read()
+        except Exception as exc:
+            return {"isError": True, "error": f"Failed reading file: {exc}"}
+
+        res = sorter.sort_source(content)
+        if res.get("isError"):
+            return res
+
+        res["path"] = abs_path
+        if in_place and res["changed"]:
+            tmp_path = abs_path + f".tmp.{uuid.uuid4().hex[:8]}"
+            try:
+                with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+                    f.write(res["sorted_code"])
+                os.replace(tmp_path, abs_path)
+            except Exception as exc:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+                return {"isError": True, "error": f"Failed writing sorted file: {exc}"}
+
+        return res
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -626,6 +872,35 @@ class NativeToolRegistry:
                         "required": ["action"]
                     }
                 }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "sort_imports",
+                    "description": "Organize and sort Python imports using AST analysis. Groups into __future__, stdlib, third-party, and first-party sections with alphabetical symbol sorting.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Relative or absolute file path to the Python file to sort.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Raw Python source code string to sort if path not provided.",
+                            },
+                            "in_place": {
+                                "type": "boolean",
+                                "description": "Whether to rewrite the file in place. Default true.",
+                            },
+                            "known_first_party": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional list of first-party package names.",
+                            },
+                        },
+                    },
+                },
             },
         ]
 
