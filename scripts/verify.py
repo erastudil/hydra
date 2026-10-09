@@ -3689,6 +3689,56 @@ def turn_separation_contracts():
 
 
 @check
+def expiration_monitor_contracts():
+    from hydra_cli.providers import (
+        CacheExpirationMonitor,
+        record_cache_expiration,
+        is_cache_expired,
+        get_cache_remaining_ttl,
+        get_cache_expiration_status,
+        prune_expired_cache_records,
+        reset_cache_expiration_monitor,
+        attach_prefix_isolation,
+    )
+
+    reset_cache_expiration_monitor()
+
+    t0 = 1000.0
+    # 1. Record access with custom timestamp
+    e1 = record_cache_expiration("hash_alpha", provider="anthropic", timestamp=t0)
+    assert e1["ttl"] == 300.0
+    assert e1["expires_at"] == 1300.0
+    assert e1["hit_count"] == 1
+
+    # 2. Check TTL at t0 + 100
+    assert is_cache_expired("hash_alpha", current_time=t0 + 100) is False
+    assert get_cache_remaining_ttl("hash_alpha", current_time=t0 + 100) == 200.0
+
+    # 3. Renew lease on hit
+    e1_renew = record_cache_expiration("hash_alpha", provider="anthropic", timestamp=t0 + 100)
+    assert e1_renew["expires_at"] == 1400.0
+    assert e1_renew["hit_count"] == 2
+
+    # 4. Check expired state
+    assert is_cache_expired("hash_alpha", current_time=t0 + 401) is True
+    assert get_cache_remaining_ttl("hash_alpha", current_time=t0 + 401) == 0.0
+
+    # 5. Prune
+    evicted = prune_expired_cache_records(current_time=t0 + 401)
+    assert evicted == 1
+    assert get_cache_expiration_status("hash_alpha")["found"] is False
+
+    # 6. Integration in attach_prefix_isolation
+    msgs = [{"role": "system", "content": "You are Hydra engine."}, {"role": "user", "content": "hello"}]
+    payload = {"messages": [m.copy() for m in msgs]}
+    attach_prefix_isolation(payload, url="https://api.anthropic.com/v1/messages")
+    assert "_cache_expiration" in payload
+    assert payload["_cache_expiration"]["provider"] == "https://api.anthropic.com/v1/messages"
+
+    reset_cache_expiration_monitor()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

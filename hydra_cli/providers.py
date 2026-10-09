@@ -915,6 +915,7 @@ def attach_prefix_isolation(
     if isolated["prefix_hash"]:
         payload["_cache_prefix_hash"] = isolated["prefix_hash"]
         payload["_cache_prefix_tokens"] = isolated["prefix_tokens"]
+        payload["_cache_expiration"] = record_cache_expiration(isolated["prefix_hash"], provider=url or "generic")
     if isolated.get("template_hash"):
         payload["_template_hash"] = isolated["template_hash"]
     if isolated.get("template_id"):
@@ -1857,6 +1858,183 @@ def get_turn_prefix_hashes(messages: List[Dict[str, Any]]) -> List[str]:
 def validate_chat_turn_sequence(messages: List[Dict[str, Any]]) -> Tuple[bool, List[str]]:
     """Validate dialogue turn sequencing and report detected structural issues."""
     return _DEFAULT_TURN_SEPARATOR.validate_sequence(messages)
+
+
+class CacheExpirationMonitor:
+    """Monitor prompt cache time-to-live expiration and track active cache lease lifetimes."""
+
+    DEFAULT_TTLS: Dict[str, float] = {
+        "anthropic": 300.0,
+        "openai": 600.0,
+        "deepseek": 300.0,
+        "openrouter": 300.0,
+        "generic": 300.0,
+    }
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset monitor tracking state and clear recorded cache entries."""
+        self._entries: Dict[str, Dict[str, Any]] = {}
+
+    def get_default_ttl(self, provider: str) -> float:
+        """Resolve default expiration time-to-live seconds for provider."""
+        prov_key = provider.lower()
+        for key in ("anthropic", "openai", "deepseek", "openrouter"):
+            if key in prov_key:
+                return self.DEFAULT_TTLS[key]
+        return self.DEFAULT_TTLS["generic"]
+
+    def record_access(
+        self,
+        cache_key: str,
+        provider: str = "generic",
+        ttl_seconds: Optional[float] = None,
+        timestamp: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Record cache entry access and update expiration lease timestamp."""
+        now = timestamp if timestamp is not None else time.time()
+        ttl = ttl_seconds if ttl_seconds is not None else self.get_default_ttl(provider)
+
+        if cache_key in self._entries:
+            entry = self._entries[cache_key]
+            entry["hit_count"] += 1
+            entry["last_accessed"] = now
+            entry["ttl"] = ttl
+            entry["expires_at"] = now + ttl
+            entry["provider"] = provider
+        else:
+            entry = {
+                "cache_key": cache_key,
+                "provider": provider,
+                "created_at": now,
+                "last_accessed": now,
+                "ttl": ttl,
+                "expires_at": now + ttl,
+                "hit_count": 1,
+            }
+            self._entries[cache_key] = entry
+
+        return dict(entry)
+
+    def is_expired(self, cache_key: str, current_time: Optional[float] = None) -> bool:
+        """Check whether recorded cache entry has expired."""
+        if cache_key not in self._entries:
+            return True
+        now = current_time if current_time is not None else time.time()
+        return now >= self._entries[cache_key]["expires_at"]
+
+    def get_remaining_ttl(self, cache_key: str, current_time: Optional[float] = None) -> float:
+        """Compute remaining time-to-live seconds before entry expiration."""
+        if cache_key not in self._entries:
+            return 0.0
+        now = current_time if current_time is not None else time.time()
+        remaining = self._entries[cache_key]["expires_at"] - now
+        return max(0.0, round(remaining, 2))
+
+    def get_status(self, cache_key: str, current_time: Optional[float] = None) -> Dict[str, Any]:
+        """Retrieve comprehensive expiration telemetry for cache entry."""
+        if cache_key not in self._entries:
+            return {
+                "cache_key": cache_key,
+                "found": False,
+                "is_expired": True,
+                "remaining_ttl": 0.0,
+            }
+
+        entry = self._entries[cache_key]
+        now = current_time if current_time is not None else time.time()
+        rem = max(0.0, round(entry["expires_at"] - now, 2))
+        is_exp = now >= entry["expires_at"]
+
+        return {
+            "cache_key": cache_key,
+            "found": True,
+            "provider": entry["provider"],
+            "is_expired": is_exp,
+            "is_active": not is_exp,
+            "remaining_ttl": rem,
+            "elapsed": round(now - entry["last_accessed"], 2),
+            "ttl": entry["ttl"],
+            "hit_count": entry["hit_count"],
+        }
+
+    def get_expiring_soon(
+        self,
+        threshold_seconds: float = 60.0,
+        current_time: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Identify cache entries approaching expiration within threshold seconds."""
+        now = current_time if current_time is not None else time.time()
+        results: List[Dict[str, Any]] = []
+
+        for key, entry in self._entries.items():
+            rem = entry["expires_at"] - now
+            if 0 < rem <= threshold_seconds:
+                results.append({
+                    "cache_key": key,
+                    "provider": entry["provider"],
+                    "remaining_ttl": round(rem, 2),
+                })
+
+        return results
+
+    def prune_expired(self, current_time: Optional[float] = None) -> int:
+        """Prune expired cache entries and return count of evicted entries."""
+        now = current_time if current_time is not None else time.time()
+        expired_keys = [k for k, v in self._entries.items() if now >= v["expires_at"]]
+        for k in expired_keys:
+            del self._entries[k]
+        return len(expired_keys)
+
+
+_DEFAULT_CACHE_EXPIRATION_MONITOR = CacheExpirationMonitor()
+
+
+def get_default_expiration_monitor() -> CacheExpirationMonitor:
+    """Return default singleton cache expiration monitor instance."""
+    return _DEFAULT_CACHE_EXPIRATION_MONITOR
+
+
+def record_cache_expiration(
+    cache_key: str,
+    provider: str = "generic",
+    ttl_seconds: Optional[float] = None,
+    timestamp: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Record cache entry access and update expiration lease timestamp."""
+    return _DEFAULT_CACHE_EXPIRATION_MONITOR.record_access(
+        cache_key,
+        provider=provider,
+        ttl_seconds=ttl_seconds,
+        timestamp=timestamp,
+    )
+
+
+def is_cache_expired(cache_key: str, current_time: Optional[float] = None) -> bool:
+    """Check whether recorded cache entry has expired."""
+    return _DEFAULT_CACHE_EXPIRATION_MONITOR.is_expired(cache_key, current_time=current_time)
+
+
+def get_cache_remaining_ttl(cache_key: str, current_time: Optional[float] = None) -> float:
+    """Compute remaining time-to-live seconds before entry expiration."""
+    return _DEFAULT_CACHE_EXPIRATION_MONITOR.get_remaining_ttl(cache_key, current_time=current_time)
+
+
+def get_cache_expiration_status(cache_key: str, current_time: Optional[float] = None) -> Dict[str, Any]:
+    """Retrieve comprehensive expiration telemetry for cache entry."""
+    return _DEFAULT_CACHE_EXPIRATION_MONITOR.get_status(cache_key, current_time=current_time)
+
+
+def prune_expired_cache_records(current_time: Optional[float] = None) -> int:
+    """Prune expired cache entries and return count of evicted entries."""
+    return _DEFAULT_CACHE_EXPIRATION_MONITOR.prune_expired(current_time=current_time)
+
+
+def reset_cache_expiration_monitor() -> None:
+    """Reset global cache expiration monitor state."""
+    _DEFAULT_CACHE_EXPIRATION_MONITOR.reset()
 
 
 def adapt_model_for_url(url: str, model: str) -> str:
