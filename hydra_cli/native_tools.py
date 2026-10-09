@@ -212,6 +212,147 @@ class AstImportSorter:
         }
 
 
+class P013StubDetector:
+    """AST visitor detecting P013 placeholder and stub violations in Python source code."""
+
+    EXEMPT_DECORATORS = frozenset({
+        "abstractmethod",
+        "overload",
+        "abstractproperty",
+    })
+
+    TODO_PATTERN = re.compile(
+        r"#\s*(TODO|FIXME|STUB|PLACEHOLDER|NOT\s*IMPLEMENTED|XXX)\b",
+        re.IGNORECASE,
+    )
+
+    def __init__(self, check_comments: bool = True, check_mocks: bool = True):
+        self.check_comments = check_comments
+        self.check_mocks = check_mocks
+
+    def _is_exempt(self, node: ast.AST) -> bool:
+        for dec in getattr(node, "decorator_list", []):
+            if isinstance(dec, ast.Name) and dec.id in self.EXEMPT_DECORATORS:
+                return True
+            if isinstance(dec, ast.Attribute) and dec.attr in self.EXEMPT_DECORATORS:
+                return True
+            if isinstance(dec, ast.Call):
+                func = dec.func
+                if isinstance(func, ast.Name) and func.id in self.EXEMPT_DECORATORS:
+                    return True
+                if isinstance(func, ast.Attribute) and func.attr in self.EXEMPT_DECORATORS:
+                    return True
+        return False
+
+    def detect(self, source: str) -> Dict[str, Any]:
+        """Scan source code for P013 violations and return structured report."""
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        violations: List[Dict[str, Any]] = []
+
+        for node in ast.walk(tree):
+            if self.check_mocks:
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        if alias.name.startswith("unittest.mock") or alias.name == "mock":
+                            violations.append({
+                                "type": "banned_synthetic_mock",
+                                "name": alias.name,
+                                "lineno": node.lineno,
+                                "message": f"Synthetic mock import '{alias.name}' banned under zero-fake-test invariant.",
+                            })
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module and (node.module.startswith("unittest.mock") or node.module == "mock"):
+                        for alias in node.names:
+                            violations.append({
+                                "type": "banned_synthetic_mock",
+                                "name": f"{node.module}.{alias.name}",
+                                "lineno": node.lineno,
+                                "message": f"Synthetic mock import '{node.module}.{alias.name}' banned under zero-fake-test invariant.",
+                            })
+
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if self._is_exempt(node):
+                    continue
+
+                non_doc = []
+                for s in node.body:
+                    if isinstance(s, ast.Expr):
+                        val = getattr(s, "value", None)
+                        if isinstance(val, (ast.Constant, getattr(ast, "Str", type(None)))):
+                            raw_val = getattr(val, "value", getattr(val, "s", None))
+                            if isinstance(raw_val, str):
+                                continue
+                    non_doc.append(s)
+
+                if len(non_doc) == 0:
+                    violations.append({
+                        "type": "docstring_only",
+                        "name": node.name,
+                        "lineno": node.lineno,
+                        "message": f"Function '{node.name}' contains docstring without implementation.",
+                    })
+                elif len(non_doc) == 1:
+                    stmt = non_doc[0]
+                    if isinstance(stmt, ast.Pass):
+                        violations.append({
+                            "type": "empty_function",
+                            "name": node.name,
+                            "lineno": node.lineno,
+                            "message": f"Function '{node.name}' contains only 'pass' stub.",
+                        })
+                    elif isinstance(stmt, ast.Expr):
+                        val = getattr(stmt, "value", None)
+                        if (isinstance(val, ast.Constant) and val.value is Ellipsis) or isinstance(val, getattr(ast, "Ellipsis", type(None))):
+                            violations.append({
+                                "type": "ellipsis_stub",
+                                "name": node.name,
+                                "lineno": node.lineno,
+                                "message": f"Function '{node.name}' contains only ellipsis '...' stub.",
+                            })
+
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Raise) and sub.exc:
+                        exc_id = None
+                        if isinstance(sub.exc, ast.Name):
+                            exc_id = sub.exc.id
+                        elif isinstance(sub.exc, ast.Call):
+                            if isinstance(sub.exc.func, ast.Name):
+                                exc_id = sub.exc.func.id
+                            elif isinstance(sub.exc.func, ast.Attribute):
+                                exc_id = sub.exc.func.attr
+                        if exc_id in ("NotImplementedError", "NotImplemented"):
+                            violations.append({
+                                "type": "not_implemented",
+                                "name": node.name,
+                                "lineno": sub.lineno,
+                                "message": f"Function '{node.name}' raises '{exc_id}' placeholder.",
+                            })
+
+        if self.check_comments:
+            for idx, line in enumerate(source.splitlines(), start=1):
+                match = self.TODO_PATTERN.search(line)
+                if match:
+                    violations.append({
+                        "type": "stub_comment",
+                        "name": match.group(0),
+                        "lineno": idx,
+                        "message": f"Stub comment '{match.group(0)}' detected on line {idx}.",
+                    })
+
+        violations.sort(key=lambda x: (x["lineno"], x["type"]))
+        return {
+            "isError": False,
+            "violations_count": len(violations),
+            "violations": violations,
+            "clean": len(violations) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -262,6 +403,8 @@ class NativeToolRegistry:
             "screenshot": self.screenshot,
             "extract_content": self.extract_content,
             "sort_imports": self.sort_imports,
+            "detect_p013": self.detect_p013,
+            "detect_stubs": self.detect_p013,
         }
 
     @property
@@ -672,6 +815,81 @@ class NativeToolRegistry:
 
         return res
 
+    def detect_p013(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        check_comments: bool = True,
+        check_mocks: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Scan Python source code or directories for P013 stub violations.
+        Detects empty functions, ellipsis stubs, NotImplementedError, docstring-only bodies,
+        TODO comments, and banned synthetic mocks.
+        """
+        detector = P013StubDetector(
+            check_comments=check_comments,
+            check_mocks=check_mocks,
+        )
+
+        if source is not None:
+            return detector.detect(source)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = detector.detect(content)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan
+        all_violations = []
+        files_scanned = 0
+        file_summaries = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                report = detector.detect(file_code)
+                if report.get("isError"):
+                    continue
+                if report["violations_count"] > 0:
+                    rel_p = os.path.relpath(file_path, target_path)
+                    file_summaries[rel_p] = report["violations_count"]
+                    for v in report["violations"]:
+                        v_copy = dict(v)
+                        v_copy["file"] = rel_p
+                        all_violations.append(v_copy)
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "violations_count": len(all_violations),
+            "files_with_violations": len(file_summaries),
+            "summary": file_summaries,
+            "violations": all_violations,
+            "clean": len(all_violations) == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -897,6 +1115,34 @@ class NativeToolRegistry:
                                 "type": "array",
                                 "items": {"type": "string"},
                                 "description": "Optional list of first-party package names.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "detect_p013",
+                    "description": "Scan Python source code or directories for P013 stub violations: empty functions, ellipsis stubs, NotImplementedError, docstring-only bodies, TODO comments, and synthetic mocks.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to scan. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to scan.",
+                            },
+                            "check_comments": {
+                                "type": "boolean",
+                                "description": "Whether to detect TODO and FIXME comments. Default true.",
+                            },
+                            "check_mocks": {
+                                "type": "boolean",
+                                "description": "Whether to detect banned synthetic mock imports. Default true.",
                             },
                         },
                     },

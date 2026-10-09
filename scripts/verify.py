@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and len(names) == 13
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and len(names) == 14
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -2197,6 +2197,93 @@ def ast_import_sorter_contracts():
     miss_res = reg.dispatch("sort_imports", {"path": "nonexistent_file_abc.py"})
     assert miss_res["isError"] is True
     assert "File not found" in miss_res["error"]
+
+
+@check
+def p013_detector_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import P013StubDetector, NativeToolRegistry
+
+    detector = P013StubDetector()
+
+    # Empty function body
+    r1 = detector.detect("def stub_fn():\n    pass\n")
+    assert not r1["isError"]
+    assert r1["violations_count"] == 1
+    assert r1["violations"][0]["type"] == "empty_function"
+    assert r1["clean"] is False
+
+    # Ellipsis stub
+    r2 = detector.detect("def ellip_fn():\n    ...\n")
+    assert not r2["isError"]
+    assert r2["violations_count"] == 1
+    assert r2["violations"][0]["type"] == "ellipsis_stub"
+
+    # NotImplementedError stub
+    r3 = detector.detect("def not_impl():\n    raise NotImplementedError('to do')\n")
+    assert not r3["isError"]
+    assert r3["violations_count"] == 1
+    assert r3["violations"][0]["type"] == "not_implemented"
+
+    # Docstring-only body
+    r4 = detector.detect('def doc_only():\n    """Only docstring."""\n')
+    assert not r4["isError"]
+    assert r4["violations_count"] == 1
+    assert r4["violations"][0]["type"] == "docstring_only"
+
+    # Stub comment detection
+    r5 = detector.detect("x = 1  # TODO: clean this up\n")
+    assert not r5["isError"]
+    assert r5["violations_count"] == 1
+    assert r5["violations"][0]["type"] == "stub_comment"
+
+    # Banned synthetic mock import
+    r6 = detector.detect("import unittest.mock\n")
+    assert not r6["isError"]
+    assert r6["violations_count"] == 1
+    assert r6["violations"][0]["type"] == "banned_synthetic_mock"
+
+    # Abstract method exemption
+    exempt_code = (
+        "from abc import abstractmethod\n"
+        "class Interface:\n"
+        "    @abstractmethod\n"
+        "    def method(self):\n"
+        '        """Interface contract."""\n'
+        "        pass\n"
+    )
+    r7 = detector.detect(exempt_code)
+    assert not r7["isError"]
+    assert r7["violations_count"] == 0
+    assert r7["clean"] is True
+
+    # Clean complete function
+    clean_code = "def add(a: int, b: int) -> int:\n    return a + b\n"
+    r8 = detector.detect(clean_code)
+    assert not r8["isError"]
+    assert r8["violations_count"] == 0
+    assert r8["clean"] is True
+
+    # NativeToolRegistry integration
+    reg = NativeToolRegistry()
+    assert reg.has_tool("detect_p013")
+    assert reg.has_tool("detect_stubs")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "detect_p013" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write("def dummy():\n    pass\n")
+        tmp_path = f.name
+    try:
+        f_res = reg.dispatch("detect_p013", {"path": tmp_path})
+        assert not f_res["isError"]
+        assert f_res["violations_count"] == 1
+        assert f_res["clean"] is False
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 @check
