@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and len(names) == 27
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and len(names) == 28
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -3184,6 +3184,76 @@ def ast_narrow_exceptions_contracts():
         alias_res = reg.dispatch("narrow_exceptions_guard", {"source": sample_bad, "ban_bare_except": True})
         assert not alias_res["isError"]
         assert alias_res["violations_count"] == 4
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+@check
+def ast_fstring_modernizer_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstFstringModernizer, NativeToolRegistry
+
+    sample_legacy = (
+        "def format_data(user, count, age):\n"
+        "    msg1 = 'Hello %s, count %d' % (user, count)\n"
+        "    msg2 = 'Age: {}'.format(age)\n"
+        "    msg3 = 'Named: {user}'.format(user=user)\n"
+        "    return msg1, msg2, msg3\n"
+    )
+
+    modernizer = AstFstringModernizer()
+    res = modernizer.modernize_source(sample_legacy, auto_fix=False)
+    assert not res["isError"]
+    assert res["candidates_count"] == 3
+    assert res["clean"] is False
+    assert res["changed"] is False
+
+    kinds = {c["kind"] for c in res["candidates"]}
+    assert "percent_format" in kinds
+    assert "dot_format" in kinds
+
+    # Test auto_fix
+    res_fixed = modernizer.modernize_source(sample_legacy, auto_fix=True)
+    assert res_fixed["changed"] is True
+    fixed_code = res_fixed["modernized_code"]
+    assert "f\"Hello {user}, count {count}\"" in fixed_code or "f'Hello {user}, count {count}'" in fixed_code
+    assert "f\"Age: {age}\"" in fixed_code or "f'Age: {age}'" in fixed_code
+
+    sample_clean = (
+        "def clean_data(user):\n"
+        "    return f'User: {user}'\n"
+    )
+    res_clean = modernizer.modernize_source(sample_clean)
+    assert not res_clean["isError"]
+    assert res_clean["candidates_count"] == 0
+    assert res_clean["clean"] is True
+
+    reg = NativeToolRegistry()
+    assert reg.has_tool("modernize_fstrings")
+    assert reg.has_tool("fstring_modernizer")
+    assert reg.has_tool("lint_fstrings")
+    assert reg.has_tool("check_fstrings")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "modernize_fstrings" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(sample_legacy)
+        tmp_file = f.name
+    try:
+        f_res = reg.dispatch("modernize_fstrings", {"path": tmp_file, "auto_fix": True, "in_place": True})
+        assert not f_res["isError"]
+        assert f_res["changed"] is True
+
+        with open(tmp_file, "r", encoding="utf-8") as rf:
+            re_read = rf.read()
+        assert "format(" not in re_read
+
+        alias_res = reg.dispatch("fstring_modernizer", {"source": sample_clean})
+        assert not alias_res["isError"]
+        assert alias_res["clean"] is True
     finally:
         if os.path.exists(tmp_file):
             os.remove(tmp_file)

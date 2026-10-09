@@ -2082,6 +2082,162 @@ class AstNarrowExceptionsGuard:
 
 
 
+
+
+class AstFstringModernizer:
+    """AST visitor detecting legacy string formatting and modernizing to Python f-strings."""
+
+    def __init__(self, check_percent: bool = True, check_dot_format: bool = True):
+        self.check_percent = check_percent
+        self.check_dot_format = check_dot_format
+
+    def _convert_percent(self, template_str: str, args_code: List[str]) -> Optional[str]:
+        pattern = re.compile(r"%([sdrf])")
+        matches = pattern.findall(template_str)
+        if len(matches) == len(args_code):
+            idx = 0
+            def repl(m: Any) -> str:
+                nonlocal idx
+                spec = m.group(1)
+                arg = args_code[idx]
+                idx += 1
+                if spec == "r":
+                    return "{" + arg + "!r}"
+                return "{" + arg + "}"
+            res = pattern.sub(repl, template_str)
+            if '"' in res and "'" not in res:
+                return f"f'{res}'"
+            return f'f"{res}"'
+        return None
+
+    def _convert_dot_format(self, template_str: str, args_code: List[str], kwargs_code: Dict[str, str]) -> Optional[str]:
+        out = template_str
+        if "{}" in out:
+            parts = out.split("{}")
+            if len(parts) - 1 == len(args_code):
+                res = parts[0]
+                for idx, part in enumerate(parts[1:]):
+                    res += "{" + args_code[idx] + "}" + part
+                if '"' in res and "'" not in res:
+                    return f"f'{res}'"
+                return f'f"{res}"'
+
+        matches = re.findall(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}", out)
+        if matches and all(m in kwargs_code for m in matches):
+            res = out
+            for m in matches:
+                res = res.replace(f"{{{m}}}", "{" + kwargs_code[m] + "}")
+            if '"' in res and "'" not in res:
+                return f"f'{res}'"
+            return f'f"{res}"'
+        return None
+
+    def modernize_source(self, source: str, auto_fix: bool = False) -> Dict[str, Any]:
+        """Analyze Python source for legacy % and .format() string formatting and optionally modernize."""
+        newline = "\r\n" if "\r\n" in source else "\n"
+        code = source.replace("\r\n", "\n")
+        has_bom = code.startswith("\ufeff")
+        if has_bom:
+            code = code[1:]
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        items: List[Dict[str, Any]] = []
+        replacements: List[Tuple[int, int, int, int, str]] = []
+
+        for node in ast.walk(tree):
+            if self.check_percent and isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+                if isinstance(node.left, ast.Constant) and isinstance(node.left.value, str):
+                    template = node.left.value
+                    if isinstance(node.right, ast.Tuple):
+                        args = [ast.unparse(e) for e in node.right.elts]
+                    else:
+                        args = [ast.unparse(node.right)]
+                    suggested = self._convert_percent(template, args)
+                    sl = node.lineno
+                    sc = node.col_offset
+                    el = getattr(node, "end_lineno", sl)
+                    ec = getattr(node, "end_col_offset", sc)
+                    item = {
+                        "kind": "percent_format",
+                        "lineno": sl,
+                        "col_offset": sc,
+                        "end_lineno": el,
+                        "end_col_offset": ec,
+                        "template": template,
+                        "suggested_fstring": suggested,
+                        "message": f"Legacy %-formatting on line {sl}; prefer f-string.",
+                    }
+                    items.append(item)
+                    if suggested and sl == el:
+                        replacements.append((sl, sc, el, ec, suggested))
+
+            elif self.check_dot_format and isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Attribute) and node.func.attr == "format":
+                    if isinstance(node.func.value, ast.Constant) and isinstance(node.func.value.value, str):
+                        template = node.func.value.value
+                        args = [ast.unparse(a) for a in node.args]
+                        kwargs = {kw.arg: ast.unparse(kw.value) for kw in node.keywords if kw.arg}
+                        suggested = self._convert_dot_format(template, args, kwargs)
+                        sl = node.lineno
+                        sc = node.col_offset
+                        el = getattr(node, "end_lineno", sl)
+                        ec = getattr(node, "end_col_offset", sc)
+                        item = {
+                            "kind": "dot_format",
+                            "lineno": sl,
+                            "col_offset": sc,
+                            "end_lineno": el,
+                            "end_col_offset": ec,
+                            "template": template,
+                            "suggested_fstring": suggested,
+                            "message": f"Legacy str.format() call on line {sl}; prefer f-string.",
+                        }
+                        items.append(item)
+                        if suggested and sl == el:
+                            replacements.append((sl, sc, el, ec, suggested))
+
+        items.sort(key=lambda x: (x["lineno"], x["col_offset"], x["kind"]))
+
+        if not auto_fix or not replacements:
+            return {
+                "isError": False,
+                "candidates_count": len(items),
+                "candidates": items,
+                "changed": False,
+                "modernized_code": source,
+                "clean": len(items) == 0,
+            }
+
+        code_lines = code.split("\n")
+        work_lines = list(code_lines)
+        replacements.sort(key=lambda r: (r[0], r[1]), reverse=True)
+
+        for sl, sc, el, ec, rep_str in replacements:
+            if sl == el and 1 <= sl <= len(work_lines):
+                line = work_lines[sl - 1]
+                work_lines[sl - 1] = line[:sc] + rep_str + line[ec:]
+
+        cleaned = "\n".join(work_lines)
+        if newline == "\r\n":
+            cleaned = cleaned.replace("\n", "\r\n")
+        if has_bom:
+            cleaned = "\ufeff" + cleaned
+
+        return {
+            "isError": False,
+            "candidates_count": len(items),
+            "candidates": items,
+            "changed": (cleaned != source),
+            "modernized_code": cleaned,
+            "clean": len(items) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -2173,6 +2329,10 @@ class NativeToolRegistry:
             "lint_narrow_exceptions": self.check_narrow_exceptions,
             "narrow_exceptions_guard": self.check_narrow_exceptions,
             "narrow_exceptions": self.check_narrow_exceptions,
+            "modernize_fstrings": self.modernize_fstrings,
+            "fstring_modernizer": self.modernize_fstrings,
+            "lint_fstrings": self.modernize_fstrings,
+            "check_fstrings": self.modernize_fstrings,
         }
 
     @property
@@ -3798,6 +3958,101 @@ class NativeToolRegistry:
             "clean": total_violations == 0,
         }
 
+    def modernize_fstrings(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        auto_fix: bool = False,
+        in_place: bool = False,
+        check_percent: bool = True,
+        check_dot_format: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Scan Python code for legacy % and .format() string formatting and optionally modernize to f-strings.
+        Supports single source strings, individual files, or recursive directory scans.
+        """
+        modernizer = AstFstringModernizer(
+            check_percent=check_percent,
+            check_dot_format=check_dot_format,
+        )
+
+        if source is not None:
+            return modernizer.modernize_source(source, auto_fix=auto_fix)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = modernizer.modernize_source(content, auto_fix=auto_fix)
+            if res.get("isError"):
+                return res
+            if auto_fix and in_place and res.get("changed"):
+                try:
+                    with open(target_path, "w", encoding="utf-8") as f:
+                        f.write(res["modernized_code"])
+                except Exception as exc:
+                    return {"isError": True, "error": f"Failed writing modernized file: {exc}"}
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        total_candidates = 0
+        total_modified = 0
+        all_candidates = []
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = modernizer.modernize_source(file_code, auto_fix=auto_fix)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                total_candidates += rep["candidates_count"]
+                if rep["candidates_count"] > 0:
+                    file_metrics[rel_p] = {
+                        "candidates": rep["candidates_count"],
+                        "changed": rep["changed"],
+                    }
+                    for item in rep["candidates"]:
+                        item_copy = dict(item)
+                        item_copy["file"] = rel_p
+                        all_candidates.append(item_copy)
+                    if auto_fix and in_place and rep["changed"]:
+                        try:
+                            with open(file_path, "w", encoding="utf-8") as f:
+                                f.write(rep["modernized_code"])
+                            total_modified += 1
+                        except Exception:
+                            pass
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_candidates": total_candidates,
+            "total_modified": total_modified,
+            "summary": file_metrics,
+            "candidates": all_candidates,
+            "clean": total_candidates == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -4099,6 +4354,42 @@ class NativeToolRegistry:
                             "min_coverage": {
                                 "type": "number",
                                 "description": "Minimum type coverage percentage threshold. Default 0.0.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "modernize_fstrings",
+                    "description": "Scan Python code for legacy % and .format() formatting and optionally modernize to f-strings.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to inspect. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to inspect.",
+                            },
+                            "auto_fix": {
+                                "type": "boolean",
+                                "description": "Whether to convert legacy string formatting to f-strings. Default false.",
+                            },
+                            "in_place": {
+                                "type": "boolean",
+                                "description": "Whether to rewrite target file in place when auto_fix is true. Default false.",
+                            },
+                            "check_percent": {
+                                "type": "boolean",
+                                "description": "Whether to inspect %-formatting. Default true.",
+                            },
+                            "check_dot_format": {
+                                "type": "boolean",
+                                "description": "Whether to inspect .format() calls. Default true.",
                             },
                         },
                     },
