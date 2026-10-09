@@ -4034,6 +4034,63 @@ def tool_caching_contracts():
 
 
 @check
+def cache_breakage_contracts():
+    from hydra_cli.providers import (
+        CacheBreakageDetector,
+        detect_prompt_cache_breakage,
+        record_session_prefix,
+        check_session_cache_breakage,
+        get_cache_breakage_metrics,
+        reset_cache_breakage_detector,
+    )
+
+    reset_cache_breakage_detector()
+
+    m1 = [{"role": "system", "content": "You are Hydra."}, {"role": "user", "content": "Hi"}]
+    m2 = [{"role": "system", "content": "You are Hydra."}, {"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello"}]
+    m_broken = [{"role": "system", "content": "You are Gemini."}, {"role": "user", "content": "Hi"}]
+    m_role_broken = [{"role": "developer", "content": "You are Hydra."}, {"role": "user", "content": "Hi"}]
+
+    # 1. Detect clean continuation
+    d1 = detect_prompt_cache_breakage(m1, m2)
+    assert d1["breakage_detected"] is False
+    assert d1["common_prefix_length"] == 2
+
+    # 2. Detect content breakage
+    d2 = detect_prompt_cache_breakage(m1, m_broken)
+    assert d2["breakage_detected"] is True
+    assert d2["breakage_type"] == "message_content"
+    assert d2["breakage_index"] == 0
+
+    # 3. Detect role breakage
+    d3 = detect_prompt_cache_breakage(m1, m_role_broken)
+    assert d3["breakage_detected"] is True
+    assert d3["breakage_type"] == "message_role"
+
+    # 4. Session tracking
+    res_init = check_session_cache_breakage("sess_1", m1)
+    assert res_init["first_turn"] is True
+    assert res_init["breakage_detected"] is False
+
+    res_cont = check_session_cache_breakage("sess_1", m2)
+    assert res_cont["first_turn"] is False
+    assert res_cont["breakage_detected"] is False
+
+    res_diverge = check_session_cache_breakage("sess_1", m_broken)
+    assert res_diverge["breakage_detected"] is True
+    assert res_diverge["breakage_type"] == "message_content"
+
+    # 5. Check metrics and reset
+    met = get_cache_breakage_metrics()
+    assert met["registered_sessions"] == 1
+    assert met["breakage_events"] == 1
+    assert met["clean_continuations"] == 1
+
+    reset_cache_breakage_detector()
+    assert get_cache_breakage_metrics()["registered_sessions"] == 0
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

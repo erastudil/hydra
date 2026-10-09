@@ -3040,6 +3040,247 @@ def reset_tool_cache_manager() -> None:
     _DEFAULT_TOOL_CACHE_MANAGER.reset()
 
 
+class CacheBreakageDetector:
+    """Detect and classify prompt prefix divergences that break prompt cache reuse."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset breakage detector history and telemetry counters."""
+        self._sessions: Dict[str, Dict[str, Any]] = {}
+        self._breakage_events: int = 0
+        self._breakage_by_type: Dict[str, int] = {
+            "message_content": 0,
+            "message_role": 0,
+            "message_count": 0,
+            "tool_definition": 0,
+            "tool_count": 0,
+        }
+        self._clean_continuations: int = 0
+
+    @staticmethod
+    def _normalize_content(content: Any) -> str:
+        """Normalize message content to string representation."""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return json.dumps(content, sort_keys=True)
+        return str(content)
+
+    def detect_breakage(
+        self,
+        baseline_messages: List[Dict[str, Any]],
+        candidate_messages: List[Dict[str, Any]],
+        baseline_tools: Optional[List[Dict[str, Any]]] = None,
+        candidate_tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Identify first divergence point between baseline and candidate prompt prefixes."""
+        b_tools = baseline_tools or []
+        c_tools = candidate_tools or []
+        if len(b_tools) != len(c_tools):
+            return {
+                "breakage_detected": True,
+                "breakage_index": -1,
+                "breakage_type": "tool_count",
+                "common_prefix_length": 0,
+                "divergence_detail": {
+                    "expected_count": len(b_tools),
+                    "actual_count": len(c_tools),
+                },
+            }
+
+        if b_tools and c_tools:
+            b_hash = hash_tools(b_tools)
+            c_hash = hash_tools(c_tools)
+            if b_hash != c_hash:
+                return {
+                    "breakage_detected": True,
+                    "breakage_index": -1,
+                    "breakage_type": "tool_definition",
+                    "common_prefix_length": 0,
+                    "divergence_detail": {
+                        "expected_hash": b_hash,
+                        "actual_hash": c_hash,
+                    },
+                }
+
+        common_len = 0
+        min_len = min(len(baseline_messages), len(candidate_messages))
+
+        for idx in range(min_len):
+            b_msg = baseline_messages[idx]
+            c_msg = candidate_messages[idx]
+
+            b_role = b_msg.get("role")
+            c_role = c_msg.get("role")
+            if b_role != c_role:
+                return {
+                    "breakage_detected": True,
+                    "breakage_index": idx,
+                    "breakage_type": "message_role",
+                    "common_prefix_length": common_len,
+                    "divergence_detail": {
+                        "expected_role": b_role,
+                        "actual_role": c_role,
+                    },
+                }
+
+            b_content = self._normalize_content(b_msg.get("content", ""))
+            c_content = self._normalize_content(c_msg.get("content", ""))
+            if b_content != c_content:
+                return {
+                    "breakage_detected": True,
+                    "breakage_index": idx,
+                    "breakage_type": "message_content",
+                    "common_prefix_length": common_len,
+                    "divergence_detail": {
+                        "expected_snippet": b_content[:80],
+                        "actual_snippet": c_content[:80],
+                    },
+                }
+
+            common_len += 1
+
+        if len(candidate_messages) < len(baseline_messages):
+            return {
+                "breakage_detected": True,
+                "breakage_index": min_len,
+                "breakage_type": "message_count",
+                "common_prefix_length": common_len,
+                "divergence_detail": {
+                    "expected_min_count": len(baseline_messages),
+                    "actual_count": len(candidate_messages),
+                },
+            }
+
+        return {
+            "breakage_detected": False,
+            "breakage_index": None,
+            "breakage_type": "none",
+            "common_prefix_length": common_len,
+            "divergence_detail": {},
+        }
+
+    def register_session(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Register initial or updated baseline prompt prefix for session."""
+        self._sessions[session_id] = {
+            "messages": [dict(m) for m in messages],
+            "tools": [dict(t) for t in tools] if tools else None,
+            "turn_count": self._sessions.get(session_id, {}).get("turn_count", 0) + 1,
+        }
+
+    def check_session(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        update_on_clean: bool = True,
+    ) -> Dict[str, Any]:
+        """Evaluate whether incoming prompt messages maintain cache prefix continuity."""
+        if session_id not in self._sessions:
+            self.register_session(session_id, messages, tools)
+            return {
+                "session_id": session_id,
+                "first_turn": True,
+                "breakage_detected": False,
+                "breakage_type": "none",
+                "common_prefix_length": len(messages),
+            }
+
+        baseline = self._sessions[session_id]
+        res = self.detect_breakage(
+            baseline["messages"],
+            messages,
+            baseline_tools=baseline["tools"],
+            candidate_tools=tools,
+        )
+        res["session_id"] = session_id
+        res["first_turn"] = False
+
+        if res["breakage_detected"]:
+            self._breakage_events += 1
+            b_type = res["breakage_type"]
+            self._breakage_by_type[b_type] = self._breakage_by_type.get(b_type, 0) + 1
+        else:
+            self._clean_continuations += 1
+            if update_on_clean:
+                self.register_session(session_id, messages, tools)
+
+        return res
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregate cache breakage telemetry metrics."""
+        return {
+            "registered_sessions": len(self._sessions),
+            "breakage_events": self._breakage_events,
+            "breakage_by_type": dict(self._breakage_by_type),
+            "clean_continuations": self._clean_continuations,
+        }
+
+
+_DEFAULT_CACHE_BREAKAGE_DETECTOR = CacheBreakageDetector()
+
+
+def get_default_cache_breakage_detector() -> CacheBreakageDetector:
+    """Return default singleton cache breakage detector instance."""
+    return _DEFAULT_CACHE_BREAKAGE_DETECTOR
+
+
+def detect_prompt_cache_breakage(
+    baseline_messages: List[Dict[str, Any]],
+    candidate_messages: List[Dict[str, Any]],
+    baseline_tools: Optional[List[Dict[str, Any]]] = None,
+    candidate_tools: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Identify divergence point between baseline and candidate prompt messages."""
+    return _DEFAULT_CACHE_BREAKAGE_DETECTOR.detect_breakage(
+        baseline_messages,
+        candidate_messages,
+        baseline_tools=baseline_tools,
+        candidate_tools=candidate_tools,
+    )
+
+
+def record_session_prefix(
+    session_id: str,
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """Store baseline prompt prefix for designated session."""
+    _DEFAULT_CACHE_BREAKAGE_DETECTOR.register_session(session_id, messages, tools=tools)
+
+
+def check_session_cache_breakage(
+    session_id: str,
+    messages: List[Dict[str, Any]],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    update_on_clean: bool = True,
+) -> Dict[str, Any]:
+    """Check session prompt messages for cache prefix breakage."""
+    return _DEFAULT_CACHE_BREAKAGE_DETECTOR.check_session(
+        session_id,
+        messages,
+        tools=tools,
+        update_on_clean=update_on_clean,
+    )
+
+
+def get_cache_breakage_metrics() -> Dict[str, Any]:
+    """Retrieve aggregate cache breakage metrics."""
+    return _DEFAULT_CACHE_BREAKAGE_DETECTOR.get_metrics()
+
+
+def reset_cache_breakage_detector() -> None:
+    """Reset global cache breakage detector state."""
+    _DEFAULT_CACHE_BREAKAGE_DETECTOR.reset()
+
+
 def adapt_model_for_url(url: str, model: str) -> str:
     """Translate provider namespaces. Unknown ids pass through unchanged."""
     parsed = urlparse(url)
