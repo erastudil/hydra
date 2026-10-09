@@ -89,6 +89,117 @@ def should_use_shell(command: str, platform: Optional[str] = None) -> bool:
     return True
 
 
+class McpHeartbeatMonitor:
+    """Background monitor emitting periodic ping keepalives to an MCP client."""
+
+    def __init__(
+        self,
+        client: Any,
+        interval: float = 30.0,
+        timeout: float = 5.0,
+        max_consecutive_failures: int = 3,
+        on_failure: Optional[Any] = None,
+    ) -> None:
+        self.client = client
+        self.interval = float(interval)
+        self.timeout = float(timeout)
+        self.max_consecutive_failures = int(max_consecutive_failures)
+        self.on_failure = on_failure
+
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+
+        self.last_ping_time: Optional[float] = None
+        self.last_ping_latency_ms: Optional[float] = None
+        self.consecutive_failures: int = 0
+        self.total_pings: int = 0
+        self.total_failures: int = 0
+
+    @property
+    def is_running(self) -> bool:
+        """Return boolean status indicating if monitor loop is active."""
+        return self._running and self._thread is not None and self._thread.is_alive()
+
+    @property
+    def is_healthy(self) -> bool:
+        """Return boolean status indicating if client passed recent heartbeats."""
+        return self.consecutive_failures < self.max_consecutive_failures
+
+    def start(self) -> None:
+        """Start background heartbeat thread."""
+        if self._running:
+            return
+        self._running = True
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop background heartbeat thread and join."""
+        if not self._running:
+            return
+        self._running = False
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive() and self._thread is not threading.current_thread():
+            self._thread.join(timeout=1.0)
+        self._thread = None
+
+    def execute_ping(self) -> bool:
+        """Execute single synchronous ping check and update health metrics."""
+        self.total_pings += 1
+        start_time = time.monotonic()
+        try:
+            if hasattr(self.client, "ping"):
+                success = bool(self.client.ping(timeout=self.timeout))
+            else:
+                success = False
+        except Exception:
+            success = False
+
+        latency = (time.monotonic() - start_time) * 1000.0
+        self.last_ping_time = time.time()
+        self.last_ping_latency_ms = latency
+
+        if success:
+            self.consecutive_failures = 0
+            return True
+        else:
+            self.consecutive_failures += 1
+            self.total_failures += 1
+            if self.consecutive_failures >= self.max_consecutive_failures and self.on_failure:
+                try:
+                    self.on_failure(self.client)
+                except Exception:
+                    pass
+            return False
+
+    def _run_loop(self) -> None:
+        """Internal background loop executing periodic pings."""
+        while self._running and not self._stop_event.is_set():
+            if self._stop_event.wait(timeout=self.interval):
+                break
+            if not self._running:
+                break
+            is_client_active = getattr(self.client, "is_running", True)
+            if is_client_active:
+                self.execute_ping()
+
+    def get_status(self) -> Dict[str, Any]:
+        """Return current health and telemetry status dictionary."""
+        return {
+            "is_running": self.is_running,
+            "is_healthy": self.is_healthy,
+            "interval": self.interval,
+            "timeout": self.timeout,
+            "consecutive_failures": self.consecutive_failures,
+            "total_pings": self.total_pings,
+            "total_failures": self.total_failures,
+            "last_ping_time": self.last_ping_time,
+            "last_ping_latency_ms": self.last_ping_latency_ms,
+        }
+
+
 class McpSubprocessClient:
     """
     MCP stdio subprocess client implementing JSON-RPC 2.0.
@@ -127,6 +238,7 @@ class McpSubprocessClient:
 
         self.server_info: Dict[str, Any] = {}
         self.server_capabilities: Dict[str, Any] = {}
+        self._heartbeat_monitor: Optional[McpHeartbeatMonitor] = None
 
     @property
     def is_running(self) -> bool:
@@ -319,6 +431,52 @@ class McpSubprocessClient:
             return result
         return []
 
+    def ping(self, timeout: Optional[float] = None) -> bool:
+        """Send MCP JSON-RPC ping request and verify server responds."""
+        if not self.is_running:
+            return False
+        try:
+            self._send_rpc("ping", {}, timeout=timeout or 5.0)
+            return True
+        except RuntimeError as e:
+            if "MCP RPC Error" in str(e):
+                return True
+            return False
+        except Exception:
+            return False
+
+    def start_heartbeat(
+        self,
+        interval: float = 30.0,
+        timeout: float = 5.0,
+        max_consecutive_failures: int = 3,
+        on_failure: Optional[Any] = None,
+    ) -> McpHeartbeatMonitor:
+        """Start background heartbeat keepalive monitor for server connection."""
+        if self._heartbeat_monitor and self._heartbeat_monitor.is_running:
+            return self._heartbeat_monitor
+        self._heartbeat_monitor = McpHeartbeatMonitor(
+            client=self,
+            interval=interval,
+            timeout=timeout,
+            max_consecutive_failures=max_consecutive_failures,
+            on_failure=on_failure,
+        )
+        self._heartbeat_monitor.start()
+        return self._heartbeat_monitor
+
+    def stop_heartbeat(self) -> None:
+        """Stop active background heartbeat monitor."""
+        if self._heartbeat_monitor:
+            self._heartbeat_monitor.stop()
+            self._heartbeat_monitor = None
+
+    def heartbeat_status(self) -> Optional[Dict[str, Any]]:
+        """Return status telemetry of active heartbeat monitor."""
+        if self._heartbeat_monitor:
+            return self._heartbeat_monitor.get_status()
+        return None
+
     def call_tool(self, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
         """Call a specific tool on the MCP server with the provided arguments."""
         params = {
@@ -333,6 +491,12 @@ class McpSubprocessClient:
             if self._closed:
                 return
             self._closed = True
+            if self._heartbeat_monitor:
+                try:
+                    self._heartbeat_monitor.stop()
+                except Exception:
+                    pass
+                self._heartbeat_monitor = None
             proc = self._process
             self._process = None
 

@@ -48,7 +48,7 @@ from hydra_cli.config import (
     IMMUTABLE_AGENT_INVARIANTS,
     build_cached_system_prompt,
 )
-from hydra_cli.mcp import McpSubprocessClient
+from hydra_cli.mcp import McpHeartbeatMonitor, McpSubprocessClient
 from hydra_cli.mcp_registry import McpRegistry
 from hydra_cli.native_tools import NativeToolRegistry
 from hydra_cli.providers import complete
@@ -115,6 +115,7 @@ __all__ = [
     "AliceOrchestrator",
     "AliceWorker",
     "McpSubprocessClient",
+    "McpHeartbeatMonitor",
     "McpRegistry",
     "print_banner",
     "SpeculativeEngine",

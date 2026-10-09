@@ -4839,6 +4839,78 @@ def preamble_masking_contracts():
 
 
 @check
+def mcp_heartbeat_keepalive_contracts():
+    from hydra_cli.mcp import McpHeartbeatMonitor, McpSubprocessClient
+
+    # 1. Heartbeat monitor lifecycle with responsive target
+    class HealthyTarget:
+        def __init__(self):
+            self.is_running = True
+            self.pings = 0
+
+        def ping(self, timeout=5.0):
+            self.pings += 1
+            return True
+
+    healthy = HealthyTarget()
+    monitor = McpHeartbeatMonitor(healthy, interval=0.04, timeout=1.0)
+    assert monitor.is_running is False
+    assert monitor.is_healthy is True
+
+    # Synchronous execution
+    assert monitor.execute_ping() is True
+    assert monitor.total_pings == 1
+    assert monitor.consecutive_failures == 0
+    assert monitor.last_ping_latency_ms is not None
+
+    # Thread loop execution
+    monitor.start()
+    assert monitor.is_running is True
+    time.sleep(0.12)
+    monitor.stop()
+    assert monitor.is_running is False
+    assert monitor.total_pings >= 2
+
+    # 2. Heartbeat monitor failure tracking and callback
+    failed_instances = []
+
+    class FailingTarget:
+        def __init__(self):
+            self.is_running = True
+
+        def ping(self, timeout=5.0):
+            return False
+
+    failing = FailingTarget()
+    fail_monitor = McpHeartbeatMonitor(
+        failing,
+        interval=0.02,
+        timeout=1.0,
+        max_consecutive_failures=2,
+        on_failure=lambda target: failed_instances.append(target),
+    )
+
+    assert fail_monitor.execute_ping() is False
+    assert fail_monitor.is_healthy is True
+    assert fail_monitor.execute_ping() is False
+    assert fail_monitor.is_healthy is False
+    assert len(failed_instances) == 1
+
+    status = fail_monitor.get_status()
+    assert status["is_healthy"] is False
+    assert status["total_failures"] == 2
+    assert status["consecutive_failures"] == 2
+
+    # 3. Subprocess client integration
+    client = McpSubprocessClient("python", ["-c", "import sys; sys.exit(0)"])
+    assert client.ping() is False
+    hb = client.start_heartbeat(interval=0.05)
+    assert client.heartbeat_status() is not None
+    client.stop_heartbeat()
+    assert client.heartbeat_status() is None
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
