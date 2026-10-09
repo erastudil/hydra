@@ -11,7 +11,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from hydra_cli._version import __version__
 
@@ -87,6 +87,152 @@ def should_use_shell(command: str, platform: Optional[str] = None) -> bool:
     if ext in (".exe", ".cmd"):
         return False
     return True
+
+
+DEFAULT_NAMESPACE_SEPARATOR = "__"
+
+
+def parse_qualified_tool_name(
+    qualified_name: str,
+    separator: str = DEFAULT_NAMESPACE_SEPARATOR,
+) -> Tuple[str, str]:
+    """Parse qualified tool name into namespace and raw tool name tuple."""
+    if not qualified_name or separator not in qualified_name:
+        raise ValueError(
+            f"Invalid qualified tool name '{qualified_name}'. Expected format: '<namespace>{separator}<tool>'"
+        )
+    parts = qualified_name.split(separator, 1)
+    namespace, tool = parts[0].strip(), parts[1].strip()
+    if not namespace or not tool:
+        raise ValueError(
+            f"Malformed qualified tool name '{qualified_name}'. Namespace and tool must both be non-empty."
+        )
+    return namespace, tool
+
+
+def format_qualified_tool_name(
+    namespace: str,
+    tool_name: str,
+    separator: str = DEFAULT_NAMESPACE_SEPARATOR,
+) -> str:
+    """Format namespace and tool name into unified qualified tool string."""
+    clean_ns = str(namespace).strip()
+    clean_tool = str(tool_name).strip()
+    if not clean_ns or not clean_tool:
+        raise ValueError("Namespace and tool name must both be non-empty.")
+    return f"{clean_ns}{separator}{clean_tool}"
+
+
+class McpNamespaceRouter:
+    """Multi-namespace router managing server namespaces, aliases, and tool dispatch."""
+
+    def __init__(self, separator: str = DEFAULT_NAMESPACE_SEPARATOR) -> None:
+        self.separator = separator
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset all registered namespaces, aliases, and counters."""
+        self._namespaces: Dict[str, Any] = {}
+        self._aliases: Dict[str, str] = {}
+        self._dispatch_count: int = 0
+
+    def register_client(
+        self,
+        namespace: str,
+        client: Any,
+        aliases: Optional[List[str]] = None,
+    ) -> None:
+        """Register client under primary namespace and optional aliases."""
+        clean_ns = namespace.strip().lower()
+        if not clean_ns:
+            raise ValueError("Namespace must not be empty.")
+        self._namespaces[clean_ns] = client
+        if aliases:
+            for alias in aliases:
+                self.add_alias(alias, clean_ns)
+
+    def add_alias(self, alias: str, target_namespace: str) -> None:
+        """Register shorthand alias pointing to target namespace."""
+        clean_alias = alias.strip().lower()
+        clean_target = target_namespace.strip().lower()
+        if clean_alias == clean_target:
+            return
+        self._aliases[clean_alias] = clean_target
+
+    def resolve_namespace(self, name: str) -> str:
+        """Resolve alias to canonical namespace with cycle protection."""
+        current = name.strip().lower()
+        visited = set()
+        while current in self._aliases:
+            if current in visited:
+                break
+            visited.add(current)
+            current = self._aliases[current]
+        return current
+
+    def get_client(self, namespace: str) -> Optional[Any]:
+        """Retrieve client associated with namespace or alias."""
+        canonical = self.resolve_namespace(namespace)
+        return self._namespaces.get(canonical)
+
+    def list_namespaces(self) -> List[str]:
+        """Return list of canonical registered namespaces."""
+        return sorted(self._namespaces.keys())
+
+    def list_all_tools(self) -> List[Dict[str, Any]]:
+        """List all tools across all registered namespaces with qualified names."""
+        all_tools: List[Dict[str, Any]] = []
+        for ns, client in self._namespaces.items():
+            if hasattr(client, "list_tools"):
+                try:
+                    raw_tools = client.list_tools()
+                    for t in raw_tools:
+                        orig = t.get("name", "")
+                        tool_entry = dict(t)
+                        tool_entry["name"] = format_qualified_tool_name(ns, orig, self.separator)
+                        tool_entry["_namespace"] = ns
+                        tool_entry["_original_name"] = orig
+                        all_tools.append(tool_entry)
+                except Exception:
+                    continue
+        return all_tools
+
+    def dispatch(
+        self,
+        qualified_tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Route tool execution through namespace router."""
+        self._dispatch_count += 1
+        ns, tool_name = parse_qualified_tool_name(qualified_tool_name, self.separator)
+        canonical = self.resolve_namespace(ns)
+        client = self._namespaces.get(canonical)
+        if not client:
+            raise KeyError(f"Unknown MCP namespace '{ns}'")
+        if hasattr(client, "call_tool"):
+            return client.call_tool(tool_name, arguments or {})
+        raise RuntimeError(f"Client for namespace '{ns}' does not implement call_tool")
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters for namespace routing."""
+        return {
+            "registered_namespaces": len(self._namespaces),
+            "registered_aliases": len(self._aliases),
+            "total_dispatches": self._dispatch_count,
+        }
+
+
+_DEFAULT_NAMESPACE_ROUTER = McpNamespaceRouter()
+
+
+def get_default_namespace_router() -> McpNamespaceRouter:
+    """Return default singleton MCP namespace router."""
+    return _DEFAULT_NAMESPACE_ROUTER
+
+
+def reset_namespace_router() -> None:
+    """Reset global MCP namespace router state."""
+    _DEFAULT_NAMESPACE_ROUTER.reset()
 
 
 class McpHeartbeatMonitor:
@@ -215,6 +361,7 @@ class McpSubprocessClient:
         env_passthrough: Optional[Iterable[str]] = None,
         timeout: Optional[float] = None,
         init_timeout: Optional[float] = None,
+        namespace: Optional[str] = None,
     ):
         self.command = command
         self.args: List[str] = list(args) if args else []
@@ -222,6 +369,7 @@ class McpSubprocessClient:
         self.cwd = cwd
         self.env_passthrough: List[str] = list(env_passthrough or [])
         self.timeout = float(timeout) if timeout else _env_timeout("HYDRA_MCP_TIMEOUT", DEFAULT_RPC_TIMEOUT)
+        self.namespace: Optional[str] = namespace.strip().lower() if namespace else None
         self.init_timeout = (
             float(init_timeout) if init_timeout
             else max(self.timeout, _env_timeout("HYDRA_MCP_INIT_TIMEOUT", DEFAULT_INIT_TIMEOUT))
@@ -430,6 +578,39 @@ class McpSubprocessClient:
         if isinstance(result, list):
             return result
         return []
+
+    def qualify_tool_name(self, tool_name: str, separator: str = DEFAULT_NAMESPACE_SEPARATOR) -> str:
+        """Qualify tool name with client namespace if configured."""
+        if not self.namespace:
+            return tool_name
+        return format_qualified_tool_name(self.namespace, tool_name, separator=separator)
+
+    def unqualify_tool_name(self, qualified_name: str, separator: str = DEFAULT_NAMESPACE_SEPARATOR) -> str:
+        """Strip client namespace from qualified tool name if matching."""
+        if not self.namespace or separator not in qualified_name:
+            return qualified_name
+        try:
+            ns, tool = parse_qualified_tool_name(qualified_name, separator=separator)
+            if ns == self.namespace:
+                return tool
+        except ValueError:
+            pass
+        return qualified_name
+
+    def list_namespaced_tools(self, separator: str = DEFAULT_NAMESPACE_SEPARATOR) -> List[Dict[str, Any]]:
+        """List tools with qualified names using client namespace."""
+        tools = self.list_tools()
+        if not self.namespace:
+            return tools
+        namespaced: List[Dict[str, Any]] = []
+        for t in tools:
+            copy_t = dict(t)
+            orig = copy_t.get("name", "")
+            copy_t["name"] = format_qualified_tool_name(self.namespace, orig, separator=separator)
+            copy_t["_namespace"] = self.namespace
+            copy_t["_original_name"] = orig
+            namespaced.append(copy_t)
+        return namespaced
 
     def ping(self, timeout: Optional[float] = None) -> bool:
         """Send MCP JSON-RPC ping request and verify server responds."""

@@ -4911,6 +4911,91 @@ def mcp_heartbeat_keepalive_contracts():
 
 
 @check
+def mcp_multi_namespace_contracts():
+    from hydra_cli.mcp import (
+        McpNamespaceRouter,
+        parse_qualified_tool_name,
+        format_qualified_tool_name,
+        get_default_namespace_router,
+        reset_namespace_router,
+        McpSubprocessClient,
+    )
+
+    reset_namespace_router()
+
+    # 1. Qualified name parsing and formatting
+    assert format_qualified_tool_name("fs", "read_file") == "fs__read_file"
+    ns, tool = parse_qualified_tool_name("fs__read_file")
+    assert ns == "fs"
+    assert tool == "read_file"
+
+    assert format_qualified_tool_name("db", "query", separator=":") == "db:query"
+    ns_c, tool_c = parse_qualified_tool_name("db:query", separator=":")
+    assert ns_c == "db"
+    assert tool_c == "query"
+
+    # 2. Namespace router with mock clients
+    class TargetClient:
+        def __init__(self, name):
+            self.name = name
+
+        def list_tools(self):
+            return [
+                {"name": "fetch", "description": "fetch tool"},
+                {"name": "post", "description": "post tool"},
+            ]
+
+        def call_tool(self, tool_name, arguments):
+            return f"{self.name}:{tool_name}:{arguments.get('q', '')}"
+
+    router = get_default_namespace_router()
+    c1 = TargetClient("srv1")
+    c2 = TargetClient("srv2")
+
+    router.register_client("http", c1, aliases=["web", "net"])
+    router.register_client("storage", c2, aliases=["fs", "disk"])
+
+    # Alias resolution
+    assert router.resolve_namespace("web") == "http"
+    assert router.resolve_namespace("net") == "http"
+    assert router.resolve_namespace("disk") == "storage"
+    assert router.resolve_namespace("unknown") == "unknown"
+
+    # Tool listing across all namespaces
+    all_tools = router.list_all_tools()
+    tool_names = [t["name"] for t in all_tools]
+    assert "http__fetch" in tool_names
+    assert "http__post" in tool_names
+    assert "storage__fetch" in tool_names
+    assert "storage__post" in tool_names
+
+    # Dispatch routing via canonical namespace and alias
+    res1 = router.dispatch("http__fetch", {"q": "ping"})
+    assert res1 == "srv1:fetch:ping"
+
+    res2 = router.dispatch("web__post", {"q": "data"})
+    assert res2 == "srv1:post:data"
+
+    res3 = router.dispatch("fs__fetch", {"q": "file.txt"})
+    assert res3 == "srv2:fetch:file.txt"
+
+    # 3. Client namespace integration
+    sub_client = McpSubprocessClient("python", ["-c", "pass"], namespace="playwright")
+    assert sub_client.namespace == "playwright"
+    assert sub_client.qualify_tool_name("click") == "playwright__click"
+    assert sub_client.unqualify_tool_name("playwright__click") == "click"
+    assert sub_client.unqualify_tool_name("other__click") == "other__click"
+
+    # 4. Telemetry metrics
+    met = router.get_metrics()
+    assert met["registered_namespaces"] == 2
+    assert met["registered_aliases"] == 4
+    assert met["total_dispatches"] == 3
+
+    reset_namespace_router()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
