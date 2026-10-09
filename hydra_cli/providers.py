@@ -2878,6 +2878,168 @@ def reset_cache_warmer() -> None:
     _DEFAULT_CACHE_WARMUP_CONTROLLER.reset()
 
 
+class ToolCacheManager:
+    """Manage deterministic tool serialization, hashing, and cache control attachment."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal tool cache registry and invocation statistics."""
+        self._registry: Dict[str, Dict[str, Any]] = {}
+        self._injection_count: int = 0
+
+    @staticmethod
+    def _extract_tool_name(tool: Dict[str, Any]) -> str:
+        if "function" in tool and isinstance(tool["function"], dict):
+            return str(tool["function"].get("name", ""))
+        return str(tool.get("name", ""))
+
+    def canonicalize_tools(self, tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Order tools deterministically by name and sort nested attributes."""
+        import copy
+        copied = [copy.deepcopy(t) for t in tools]
+        copied.sort(key=self._extract_tool_name)
+        return copied
+
+    def hash_tools(self, tools: List[Dict[str, Any]]) -> str:
+        """Compute 16-character SHA256 digest of canonical tool definitions."""
+        if not tools:
+            return ""
+        canonical = self.canonicalize_tools(tools)
+        clean_tools = []
+        for t in canonical:
+            ct = {k: v for k, v in t.items() if k != "cache_control"}
+            clean_tools.append(ct)
+        raw = json.dumps(clean_tools, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:16]
+
+    def attach_tool_cache_control(
+        self,
+        tools: List[Dict[str, Any]],
+        cache_type: str = "ephemeral",
+    ) -> List[Dict[str, Any]]:
+        """Attach cache control block to final tool definition in sequence."""
+        if not tools:
+            return []
+        canonical = self.canonicalize_tools(tools)
+        if "cache_control" not in canonical[-1]:
+            canonical[-1]["cache_control"] = {"type": cache_type}
+        return canonical
+
+    def register_tool_set(
+        self,
+        name: str,
+        tools: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Register canonical tool set and return metadata descriptor."""
+        canonical = self.canonicalize_tools(tools)
+        thash = self.hash_tools(canonical)
+        record = {
+            "name": name,
+            "tool_count": len(canonical),
+            "tool_set_hash": thash,
+            "tools": canonical,
+        }
+        self._registry[name] = record
+        return dict(record)
+
+    def get_cached_tool_set(self, name: str) -> Optional[Dict[str, Any]]:
+        """Retrieve registered tool cache descriptor by name."""
+        if name in self._registry:
+            return dict(self._registry[name])
+        return None
+
+    def inject_tool_caching(
+        self,
+        payload: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        enable_cache_control: bool = True,
+    ) -> Dict[str, Any]:
+        """Inject canonical tool schemas and caching headers into provider payload."""
+        self._injection_count += 1
+        target_tools = tools if tools is not None else payload.get("tools", [])
+        if not target_tools:
+            return payload
+
+        if enable_cache_control:
+            processed = self.attach_tool_cache_control(target_tools)
+        else:
+            processed = self.canonicalize_tools(target_tools)
+
+        payload["tools"] = processed
+        payload["_tool_set_hash"] = self.hash_tools(processed)
+        return payload
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Return aggregate tool caching metrics."""
+        total_tools = sum(entry["tool_count"] for entry in self._registry.values())
+        return {
+            "registered_sets": len(self._registry),
+            "total_tools_cached": total_tools,
+            "injection_count": self._injection_count,
+        }
+
+
+_DEFAULT_TOOL_CACHE_MANAGER = ToolCacheManager()
+
+
+def get_default_tool_cache_manager() -> ToolCacheManager:
+    """Return default singleton tool cache manager instance."""
+    return _DEFAULT_TOOL_CACHE_MANAGER
+
+
+def canonicalize_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Order tool definitions deterministically by name."""
+    return _DEFAULT_TOOL_CACHE_MANAGER.canonicalize_tools(tools)
+
+
+def hash_tools(tools: List[Dict[str, Any]]) -> str:
+    """Compute deterministic hash digest for tool list."""
+    return _DEFAULT_TOOL_CACHE_MANAGER.hash_tools(tools)
+
+
+def attach_tool_cache_control(
+    tools: List[Dict[str, Any]],
+    cache_type: str = "ephemeral",
+) -> List[Dict[str, Any]]:
+    """Attach prompt cache control marker to final tool definition."""
+    return _DEFAULT_TOOL_CACHE_MANAGER.attach_tool_cache_control(tools, cache_type=cache_type)
+
+
+def register_tool_set(name: str, tools: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Register named tool set in global tool cache manager."""
+    return _DEFAULT_TOOL_CACHE_MANAGER.register_tool_set(name, tools)
+
+
+def get_cached_tool_set(name: str) -> Optional[Dict[str, Any]]:
+    """Retrieve registered named tool set descriptor."""
+    return _DEFAULT_TOOL_CACHE_MANAGER.get_cached_tool_set(name)
+
+
+def inject_tool_caching(
+    payload: Dict[str, Any],
+    tools: Optional[List[Dict[str, Any]]] = None,
+    enable_cache_control: bool = True,
+) -> Dict[str, Any]:
+    """Inject canonical tools and cache control into request payload."""
+    return _DEFAULT_TOOL_CACHE_MANAGER.inject_tool_caching(
+        payload,
+        tools=tools,
+        enable_cache_control=enable_cache_control,
+    )
+
+
+def get_tool_cache_stats() -> Dict[str, Any]:
+    """Retrieve aggregate tool cache statistics."""
+    return _DEFAULT_TOOL_CACHE_MANAGER.get_stats()
+
+
+def reset_tool_cache_manager() -> None:
+    """Reset global tool cache manager state."""
+    _DEFAULT_TOOL_CACHE_MANAGER.reset()
+
+
 def adapt_model_for_url(url: str, model: str) -> str:
     """Translate provider namespaces. Unknown ids pass through unchanged."""
     parsed = urlparse(url)

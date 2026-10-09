@@ -3972,6 +3972,68 @@ def cache_warmup_contracts():
 
 
 @check
+def tool_caching_contracts():
+    from hydra_cli.providers import (
+        ToolCacheManager,
+        canonicalize_tools,
+        hash_tools,
+        attach_tool_cache_control,
+        register_tool_set,
+        get_cached_tool_set,
+        inject_tool_caching,
+        get_tool_cache_stats,
+        reset_tool_cache_manager,
+    )
+
+    reset_tool_cache_manager()
+
+    t1 = {"type": "function", "function": {"name": "read_file", "description": "Read file"}}
+    t2 = {"type": "function", "function": {"name": "run_command", "description": "Run shell"}}
+
+    # 1. Canonicalize and hash invariance
+    h1 = hash_tools([t2, t1])
+    h2 = hash_tools([t1, t2])
+    assert h1 == h2
+    assert len(h1) == 16
+
+    # 2. Register tool set
+    reg = register_tool_set("suite_1", [t2, t1])
+    assert reg["name"] == "suite_1"
+    assert reg["tool_count"] == 2
+    assert reg["tool_set_hash"] == h1
+
+    # 3. Retrieve registered tool set
+    retrieved = get_cached_tool_set("suite_1")
+    assert retrieved is not None
+    assert retrieved["tool_set_hash"] == h1
+
+    # 4. Attach ephemeral cache control
+    ctrl = attach_tool_cache_control([t1, t2])
+    assert len(ctrl) == 2
+    assert ctrl[0]["function"]["name"] == "read_file"
+    assert "cache_control" not in ctrl[0]
+    assert ctrl[1]["function"]["name"] == "run_command"
+    assert ctrl[1]["cache_control"] == {"type": "ephemeral"}
+
+    # 5. Inject tool caching into payload
+    payload = {"model": "claude-3-7-sonnet", "messages": [{"role": "user", "content": "hi"}]}
+    injected = inject_tool_caching(payload, tools=[t2, t1])
+    assert "_tool_set_hash" in injected
+    assert injected["_tool_set_hash"] == h1
+    assert len(injected["tools"]) == 2
+    assert injected["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+
+    # 6. Check metrics and reset
+    stats = get_tool_cache_stats()
+    assert stats["registered_sets"] == 1
+    assert stats["total_tools_cached"] == 2
+    assert stats["injection_count"] == 1
+
+    reset_tool_cache_manager()
+    assert get_cached_tool_set("suite_1") is None
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
