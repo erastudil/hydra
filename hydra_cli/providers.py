@@ -2678,6 +2678,206 @@ def reset_prompt_pool_manager() -> None:
     _DEFAULT_PROMPT_POOL_MANAGER.reset()
 
 
+class CacheWarmupController:
+    """Manage prompt cache pre-warming payloads, heartbeat keep-alives, and warm cache status."""
+
+    def __init__(self, default_ttl: float = 300.0) -> None:
+        self.default_ttl = default_ttl
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset warmer state and clear registered warm cache entries."""
+        self._warm_entries: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _compute_prefix_hash(messages: List[Dict[str, Any]]) -> str:
+        prefix_items = []
+        for m in messages:
+            if m.get("role") in ("system", "developer"):
+                prefix_items.append(f"{m.get('role')}:{m.get('content')}")
+            else:
+                break
+        if not prefix_items and messages:
+            prefix_items.append(f"{messages[0].get('role')}:{messages[0].get('content')}")
+        raw = "\n---\n".join(prefix_items).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:16]
+
+    def build_warmup_payload(
+        self,
+        messages: List[Dict[str, Any]],
+        model: str,
+        provider_url: Optional[str] = None,
+        ping_text: str = "ping",
+    ) -> Dict[str, Any]:
+        """Construct minimal low-cost warmup request payload to prime provider prompt cache."""
+        prefix_hash = self._compute_prefix_hash(messages)
+        warmup_msgs = []
+
+        for idx, m in enumerate(messages):
+            copy_m = dict(m)
+            if idx == len(messages) - 1:
+                copy_m["cache_control"] = {"type": "ephemeral"}
+            warmup_msgs.append(copy_m)
+
+        warmup_msgs.append({"role": "user", "content": ping_text})
+
+        payload = {
+            "model": model,
+            "messages": warmup_msgs,
+            "max_tokens": 1,
+            "temperature": 0.0,
+            "_warmup": True,
+            "_prefix_hash": prefix_hash,
+        }
+        return payload
+
+    def record_warmup(
+        self,
+        prefix_hash: str,
+        provider: str,
+        model: str,
+        ttl_seconds: Optional[float] = None,
+        timestamp: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Record successful cache warmup and register active cache lease."""
+        now = timestamp if timestamp is not None else time.time()
+        ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl
+
+        entry = {
+            "prefix_hash": prefix_hash,
+            "provider": provider,
+            "model": model,
+            "warmed_at": now,
+            "expires_at": now + ttl,
+            "ttl": ttl,
+            "warmup_count": self._warm_entries.get(prefix_hash, {}).get("warmup_count", 0) + 1,
+        }
+        self._warm_entries[prefix_hash] = entry
+        return dict(entry)
+
+    def is_warm(self, prefix_hash: str, current_time: Optional[float] = None) -> bool:
+        """Check whether prefix hash has active unexpired warm cache."""
+        if prefix_hash not in self._warm_entries:
+            return False
+        now = current_time if current_time is not None else time.time()
+        return now < self._warm_entries[prefix_hash]["expires_at"]
+
+    def should_refresh(
+        self,
+        prefix_hash: str,
+        threshold_seconds: float = 60.0,
+        current_time: Optional[float] = None,
+    ) -> bool:
+        """Check whether warm cache entry is nearing expiration and requires refresh."""
+        if prefix_hash not in self._warm_entries:
+            return True
+        now = current_time if current_time is not None else time.time()
+        remaining = self._warm_entries[prefix_hash]["expires_at"] - now
+        return remaining <= threshold_seconds
+
+    def get_status(self, prefix_hash: str, current_time: Optional[float] = None) -> Dict[str, Any]:
+        """Retrieve comprehensive status dictionary for warmed prefix."""
+        if prefix_hash not in self._warm_entries:
+            return {
+                "prefix_hash": prefix_hash,
+                "is_warm": False,
+                "remaining_ttl": 0.0,
+            }
+        entry = self._warm_entries[prefix_hash]
+        now = current_time if current_time is not None else time.time()
+        remaining = max(0.0, round(entry["expires_at"] - now, 2))
+        warm = now < entry["expires_at"]
+        return {
+            "prefix_hash": prefix_hash,
+            "is_warm": warm,
+            "provider": entry["provider"],
+            "model": entry["model"],
+            "remaining_ttl": remaining,
+            "warmup_count": entry["warmup_count"],
+        }
+
+    def list_warm(self, current_time: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Return list of active warm cache records."""
+        now = current_time if current_time is not None else time.time()
+        return [
+            dict(v) for v in self._warm_entries.values()
+            if now < v["expires_at"]
+        ]
+
+
+_DEFAULT_CACHE_WARMUP_CONTROLLER = CacheWarmupController()
+
+
+def get_default_cache_warmer() -> CacheWarmupController:
+    """Return default singleton cache warmup controller instance."""
+    return _DEFAULT_CACHE_WARMUP_CONTROLLER
+
+
+def build_cache_warmup_payload(
+    messages: List[Dict[str, Any]],
+    model: str,
+    provider_url: Optional[str] = None,
+    ping_text: str = "ping",
+) -> Dict[str, Any]:
+    """Construct minimal prompt cache warmup payload targeting specific model."""
+    return _DEFAULT_CACHE_WARMUP_CONTROLLER.build_warmup_payload(
+        messages,
+        model,
+        provider_url=provider_url,
+        ping_text=ping_text,
+    )
+
+
+def record_cache_warmup(
+    prefix_hash: str,
+    provider: str,
+    model: str,
+    ttl_seconds: Optional[float] = None,
+    timestamp: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Record successful cache warmup event in global warmer."""
+    return _DEFAULT_CACHE_WARMUP_CONTROLLER.record_warmup(
+        prefix_hash,
+        provider,
+        model,
+        ttl_seconds=ttl_seconds,
+        timestamp=timestamp,
+    )
+
+
+def is_prefix_cache_warm(prefix_hash: str, current_time: Optional[float] = None) -> bool:
+    """Check whether given prefix hash is currently warm in global cache."""
+    return _DEFAULT_CACHE_WARMUP_CONTROLLER.is_warm(prefix_hash, current_time=current_time)
+
+
+def should_refresh_cache_warmup(
+    prefix_hash: str,
+    threshold_seconds: float = 60.0,
+    current_time: Optional[float] = None,
+) -> bool:
+    """Check whether warm cache entry is nearing expiration and requires refresh."""
+    return _DEFAULT_CACHE_WARMUP_CONTROLLER.should_refresh(
+        prefix_hash,
+        threshold_seconds=threshold_seconds,
+        current_time=current_time,
+    )
+
+
+def get_cache_warmup_status(prefix_hash: str, current_time: Optional[float] = None) -> Dict[str, Any]:
+    """Retrieve warm status telemetry for given prefix hash."""
+    return _DEFAULT_CACHE_WARMUP_CONTROLLER.get_status(prefix_hash, current_time=current_time)
+
+
+def list_warm_cache_entries(current_time: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Return list of active warm cache records."""
+    return _DEFAULT_CACHE_WARMUP_CONTROLLER.list_warm(current_time=current_time)
+
+
+def reset_cache_warmer() -> None:
+    """Reset global cache warmer state."""
+    _DEFAULT_CACHE_WARMUP_CONTROLLER.reset()
+
+
 def adapt_model_for_url(url: str, model: str) -> str:
     """Translate provider namespaces. Unknown ids pass through unchanged."""
     parsed = urlparse(url)

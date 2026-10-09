@@ -3907,6 +3907,71 @@ def prompt_pooling_contracts():
 
 
 @check
+def cache_warmup_contracts():
+    from hydra_cli.providers import (
+        CacheWarmupController,
+        build_cache_warmup_payload,
+        record_cache_warmup,
+        is_prefix_cache_warm,
+        should_refresh_cache_warmup,
+        get_cache_warmup_status,
+        list_warm_cache_entries,
+        reset_cache_warmer,
+    )
+
+    reset_cache_warmer()
+
+    msgs = [
+        {"role": "system", "content": "You are a swarm agent."},
+        {"role": "user", "content": "Initial context"},
+    ]
+
+    # 1. Build warmup payload
+    payload = build_cache_warmup_payload(msgs, model="cheaper-deepseek-r1", ping_text="ping")
+    assert payload["model"] == "cheaper-deepseek-r1"
+    assert payload["max_tokens"] == 1
+    assert payload["temperature"] == 0.0
+    assert payload["_warmup"] is True
+    assert len(payload["messages"]) == 3
+    assert payload["messages"][1].get("cache_control") == {"type": "ephemeral"}
+    assert payload["messages"][2]["content"] == "ping"
+
+    p_hash = payload["_prefix_hash"]
+    assert isinstance(p_hash, str) and len(p_hash) == 16
+
+    # 2. Check initial warm state
+    assert not is_prefix_cache_warm(p_hash, current_time=1000.0)
+
+    # 3. Record cache warmup event
+    rec = record_cache_warmup(p_hash, provider="cheaperinference", model="cheaper-deepseek-r1", ttl_seconds=300.0, timestamp=1000.0)
+    assert rec["prefix_hash"] == p_hash
+    assert rec["expires_at"] == 1300.0
+    assert rec["warmup_count"] == 1
+
+    # 4. Check warm state and expiration
+    assert is_prefix_cache_warm(p_hash, current_time=1100.0)
+    assert not is_prefix_cache_warm(p_hash, current_time=1350.0)
+
+    # 5. Check refresh thresholds
+    assert not should_refresh_cache_warmup(p_hash, threshold_seconds=60.0, current_time=1200.0)
+    assert should_refresh_cache_warmup(p_hash, threshold_seconds=60.0, current_time=1250.0)
+
+    # 6. Retrieve status and list entries
+    status = get_cache_warmup_status(p_hash, current_time=1100.0)
+    assert status["is_warm"] is True
+    assert status["remaining_ttl"] == 200.0
+    assert status["warmup_count"] == 1
+
+    warm_list = list_warm_cache_entries(current_time=1100.0)
+    assert len(warm_list) == 1
+    assert warm_list[0]["prefix_hash"] == p_hash
+
+    # 7. Reset warmer
+    reset_cache_warmer()
+    assert not is_prefix_cache_warm(p_hash, current_time=1100.0)
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
