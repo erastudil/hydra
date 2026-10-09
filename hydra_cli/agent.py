@@ -1855,6 +1855,157 @@ def reset_selective_recall() -> None:
     _DEFAULT_SELECTIVE_RECALL.reset()
 
 
+def is_null_or_empty(val: Any, strip_empty_str: bool = False) -> bool:
+    """Return boolean true if value represents null, empty collection, or optional empty string."""
+    if val is None:
+        return True
+    if isinstance(val, (list, dict, set, tuple)) and len(val) == 0:
+        return True
+    if strip_empty_str and isinstance(val, str) and not val.strip():
+        return True
+    return False
+
+
+class NullPayloadStripper:
+    """Recursively cleans null, empty, and redundant fields from context payloads."""
+
+    ESSENTIAL_KEYS = frozenset({"role", "content"})
+
+    def __init__(self, strip_empty_strings: bool = False) -> None:
+        self.strip_empty_strings = strip_empty_strings
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset stripper telemetry metrics."""
+        self._fields_stripped: int = 0
+        self._collections_stripped: int = 0
+        self._messages_cleaned: int = 0
+        self._chars_saved: int = 0
+
+    def clean_value(self, value: Any, is_root_key: bool = False, key_name: str = "") -> Any:
+        """Recursively clean nested data structure of null and empty values."""
+        if isinstance(value, dict):
+            cleaned_dict: Dict[str, Any] = {}
+            for k, v in value.items():
+                if v is None:
+                    if is_root_key and k in self.ESSENTIAL_KEYS:
+                        cleaned_dict[k] = v
+                    else:
+                        self._fields_stripped += 1
+                        continue
+                cleaned_v = self.clean_value(v, is_root_key=False, key_name=k)
+                if is_null_or_empty(cleaned_v, strip_empty_str=self.strip_empty_strings):
+                    if is_root_key and k in self.ESSENTIAL_KEYS:
+                        cleaned_dict[k] = cleaned_v
+                    else:
+                        self._collections_stripped += 1
+                        continue
+                cleaned_dict[k] = cleaned_v
+            return cleaned_dict
+        elif isinstance(value, list):
+            cleaned_list: List[Any] = []
+            for item in value:
+                if item is None:
+                    self._fields_stripped += 1
+                    continue
+                cleaned_item = self.clean_value(item, is_root_key=False, key_name=key_name)
+                if is_null_or_empty(cleaned_item, strip_empty_str=self.strip_empty_strings):
+                    self._collections_stripped += 1
+                    continue
+                cleaned_list.append(cleaned_item)
+            return cleaned_list
+        return value
+
+    def clean_message(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Clean single message dictionary of null or empty fields."""
+        self._messages_cleaned += 1
+        orig_serialized = len(json.dumps(message, default=str))
+
+        cleaned: Dict[str, Any] = {}
+        for k, v in message.items():
+            if v is None:
+                if k in self.ESSENTIAL_KEYS:
+                    cleaned[k] = "" if k == "content" else v
+                else:
+                    self._fields_stripped += 1
+                continue
+
+            cleaned_v = self.clean_value(v, is_root_key=False, key_name=k)
+            if is_null_or_empty(cleaned_v, strip_empty_str=self.strip_empty_strings):
+                if k in self.ESSENTIAL_KEYS:
+                    cleaned[k] = cleaned_v
+                else:
+                    self._collections_stripped += 1
+                continue
+            cleaned[k] = cleaned_v
+
+        if "role" not in cleaned:
+            return None
+
+        new_serialized = len(json.dumps(cleaned, default=str))
+        if orig_serialized > new_serialized:
+            self._chars_saved += (orig_serialized - new_serialized)
+
+        return cleaned
+
+    def clean_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Clean message sequence by stripping null fields and empty phantom turns."""
+        cleaned_list: List[Dict[str, Any]] = []
+        for m in messages:
+            res = self.clean_message(m)
+            if res is not None:
+                cleaned_list.append(res)
+        return cleaned_list
+
+    def clean_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean full completion request payload including messages and parameters."""
+        orig_serialized = len(json.dumps(payload, default=str))
+        cleaned = self.clean_value(payload, is_root_key=True)
+        if isinstance(cleaned, dict):
+            new_serialized = len(json.dumps(cleaned, default=str))
+            if orig_serialized > new_serialized:
+                self._chars_saved += (orig_serialized - new_serialized)
+            return cleaned
+        return payload
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters for null payload stripping."""
+        return {
+            "fields_stripped": self._fields_stripped,
+            "collections_stripped": self._collections_stripped,
+            "messages_cleaned": self._messages_cleaned,
+            "chars_saved": self._chars_saved,
+        }
+
+
+_DEFAULT_NULL_STRIPPER = NullPayloadStripper()
+
+
+def get_default_null_payload_stripper() -> NullPayloadStripper:
+    """Return default singleton null payload stripper."""
+    return _DEFAULT_NULL_STRIPPER
+
+
+def strip_null_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Clean arbitrary payload dictionary of null and empty values."""
+    return _DEFAULT_NULL_STRIPPER.clean_payload(payload)
+
+
+def strip_message_nulls(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Clean single message dictionary of null and empty fields."""
+    return _DEFAULT_NULL_STRIPPER.clean_message(message)
+
+
+def strip_messages_null_payloads(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Clean message list of null fields and empty collections."""
+    return _DEFAULT_NULL_STRIPPER.clean_messages(messages)
+
+
+def reset_null_payload_stripper() -> None:
+    """Reset global null payload stripper state."""
+    _DEFAULT_NULL_STRIPPER.reset()
+
+
 _CONTEXT_MARKERS = (
     "context window",
     "context length",

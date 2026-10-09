@@ -4616,6 +4616,87 @@ def selective_recall_contracts():
 
 
 @check
+def null_payload_strip_contracts():
+    from hydra_cli.agent import (
+        NullPayloadStripper,
+        get_default_null_payload_stripper,
+        strip_null_payload,
+        strip_message_nulls,
+        strip_messages_null_payloads,
+        reset_null_payload_stripper,
+    )
+
+    reset_null_payload_stripper()
+
+    # 1. Message stripping
+    msg = {
+        "role": "assistant",
+        "content": "Running command",
+        "thought": None,
+        "tool_calls": [],
+        "metadata": {},
+        "annotations": None,
+        "confidence": 0.0,
+        "is_valid": False,
+    }
+
+    cleaned = strip_message_nulls(msg)
+    assert cleaned is not None
+    assert cleaned["role"] == "assistant"
+    assert cleaned["content"] == "Running command"
+    assert "thought" not in cleaned
+    assert "tool_calls" not in cleaned
+    assert "metadata" not in cleaned
+    assert "annotations" not in cleaned
+    assert cleaned["confidence"] == 0.0
+    assert cleaned["is_valid"] is False
+
+    # 2. Phantom empty turn stripping
+    phantom = {"thought": None, "annotations": []}
+    assert strip_message_nulls(phantom) is None
+
+    # 3. List of messages stripping
+    msgs = [
+        {"role": "system", "content": "You are Hydra", "extra": None},
+        {"thought": None},
+        {"role": "user", "content": "Hello", "tools": []},
+    ]
+    cleaned_msgs = strip_messages_null_payloads(msgs)
+    assert len(cleaned_msgs) == 2
+    assert cleaned_msgs[0]["role"] == "system"
+    assert "extra" not in cleaned_msgs[0]
+    assert cleaned_msgs[1]["role"] == "user"
+    assert "tools" not in cleaned_msgs[1]
+
+    # 4. Nested payload stripping
+    payload = {
+        "model": "deepseek-coder",
+        "temperature": 0.2,
+        "stream": True,
+        "null_param": None,
+        "empty_tools": [],
+        "nested": {
+            "keep": 123,
+            "discard_null": None,
+            "discard_empty": {},
+        },
+    }
+    cleaned_payload = strip_null_payload(payload)
+    assert "null_param" not in cleaned_payload
+    assert "empty_tools" not in cleaned_payload
+    assert cleaned_payload["nested"] == {"keep": 123}
+
+    # 5. Telemetry metrics
+    met = get_default_null_payload_stripper().get_metrics()
+    assert met["fields_stripped"] > 0
+    assert met["collections_stripped"] > 0
+    assert met["messages_cleaned"] >= 4
+    assert met["chars_saved"] > 0
+
+    reset_null_payload_stripper()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
