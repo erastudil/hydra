@@ -4,6 +4,7 @@ Manages JSON-RPC 2.0 stdio subprocess connection with thread-safe RPC lock
 and background daemon thread for stderr to prevent pipe deadlocks.
 """
 
+import fnmatch
 import json
 import os
 import queue
@@ -87,6 +88,71 @@ def should_use_shell(command: str, platform: Optional[str] = None) -> bool:
     if ext in (".exe", ".cmd"):
         return False
     return True
+
+
+class McpTimeoutGuard:
+    """Manages per-tool timeout policies, cancellation notifications, and timeout telemetry."""
+
+    def __init__(self, default_timeout: float = DEFAULT_RPC_TIMEOUT) -> None:
+        self.default_timeout = float(default_timeout)
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset timeout policies and telemetry counters."""
+        self._rules: List[Tuple[str, float]] = []
+        self._timeout_counts: Dict[str, int] = {}
+        self._cancellations_sent: int = 0
+        self._last_timeout_timestamp: Optional[float] = None
+
+    def register_rule(self, pattern: str, timeout_seconds: float) -> None:
+        """Register pattern-based timeout rule for matching tools."""
+        if timeout_seconds <= 0:
+            raise ValueError("Timeout seconds must be strictly positive.")
+        clean_pat = pattern.strip().lower()
+        self._rules.append((clean_pat, float(timeout_seconds)))
+
+    def resolve_timeout(self, tool_name: str, explicit_timeout: Optional[float] = None) -> float:
+        """Resolve effective timeout for tool name across explicit, pattern, and default rules."""
+        if explicit_timeout is not None and explicit_timeout > 0:
+            return float(explicit_timeout)
+        target = tool_name.strip().lower()
+        for pattern, t_val in reversed(self._rules):
+            if fnmatch.fnmatch(target, pattern):
+                return t_val
+        return self.default_timeout
+
+    def record_timeout(self, tool_name: str) -> None:
+        """Record timeout occurrence for telemetry tracking."""
+        self._last_timeout_timestamp = time.time()
+        self._timeout_counts[tool_name] = self._timeout_counts.get(tool_name, 0) + 1
+
+    def record_cancellation(self) -> None:
+        """Record transmission of cancellation notification."""
+        self._cancellations_sent += 1
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return timeout guard telemetry statistics."""
+        return {
+            "default_timeout": self.default_timeout,
+            "rules_count": len(self._rules),
+            "total_timeouts": sum(self._timeout_counts.values()),
+            "cancellations_sent": self._cancellations_sent,
+            "last_timeout": self._last_timeout_timestamp,
+            "timeouts_by_tool": dict(self._timeout_counts),
+        }
+
+
+_DEFAULT_TIMEOUT_GUARD = McpTimeoutGuard()
+
+
+def get_default_timeout_guard() -> McpTimeoutGuard:
+    """Return default singleton MCP timeout guard."""
+    return _DEFAULT_TIMEOUT_GUARD
+
+
+def reset_timeout_guard() -> None:
+    """Reset global MCP timeout guard state."""
+    _DEFAULT_TIMEOUT_GUARD.reset()
 
 
 DEFAULT_NAMESPACE_SEPARATOR = "__"
@@ -387,6 +453,7 @@ class McpSubprocessClient:
         self.server_info: Dict[str, Any] = {}
         self.server_capabilities: Dict[str, Any] = {}
         self._heartbeat_monitor: Optional[McpHeartbeatMonitor] = None
+        self._timeout_guard: McpTimeoutGuard = McpTimeoutGuard(default_timeout=self.timeout)
 
     @property
     def is_running(self) -> bool:
@@ -489,6 +556,19 @@ class McpSubprocessClient:
             self._process.stdin.write(msg)
             self._process.stdin.flush()
 
+    def _emit_cancellation(self, request_id: int, reason: str = "timeout") -> None:
+        """Send notifications/cancelled to notify server of aborted request."""
+        try:
+            params = {
+                "requestId": request_id,
+                "reason": reason,
+            }
+            self._send_notification("notifications/cancelled", params)
+            if hasattr(self, "_timeout_guard") and self._timeout_guard:
+                self._timeout_guard.record_cancellation()
+        except Exception:
+            pass
+
     def _send_rpc(self, method: str, params: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None) -> Any:
         """
         Send a JSON-RPC 2.0 request and wait for the matching response, at most `timeout` seconds.
@@ -516,10 +596,16 @@ class McpSubprocessClient:
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    self._emit_cancellation(req_id, reason=f"timeout after {wait:g}s")
+                    if hasattr(self, "_timeout_guard") and self._timeout_guard:
+                        self._timeout_guard.record_timeout(method)
                     raise TimeoutError(f"MCP server did not answer '{method}' within {wait:g}s")
                 try:
                     line = self._stdout_queue.get(timeout=remaining)
                 except queue.Empty:
+                    self._emit_cancellation(req_id, reason=f"timeout after {wait:g}s")
+                    if hasattr(self, "_timeout_guard") and self._timeout_guard:
+                        self._timeout_guard.record_timeout(method)
                     raise TimeoutError(f"MCP server did not answer '{method}' within {wait:g}s")
                 if not line:
                     self._stdout_queue.put(None)  # keep EOF visible to later calls
@@ -658,13 +744,27 @@ class McpSubprocessClient:
             return self._heartbeat_monitor.get_status()
         return None
 
-    def call_tool(self, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
-        """Call a specific tool on the MCP server with the provided arguments."""
+    def call_tool(
+        self,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """Call a specific tool on the MCP server with the provided arguments and timeout guard."""
+        effective_timeout = self.get_tool_timeout(tool_name, explicit_timeout=timeout)
         params = {
             "name": tool_name,
             "arguments": arguments if arguments is not None else {},
         }
-        return self._send_rpc("tools/call", params)
+        return self._send_rpc("tools/call", params, timeout=effective_timeout)
+
+    def set_tool_timeout(self, pattern: str, timeout_seconds: float) -> None:
+        """Register pattern-based timeout rule on client timeout guard."""
+        self._timeout_guard.register_rule(pattern, timeout_seconds)
+
+    def get_tool_timeout(self, tool_name: str, explicit_timeout: Optional[float] = None) -> float:
+        """Resolve effective timeout for tool name."""
+        return self._timeout_guard.resolve_timeout(tool_name, explicit_timeout=explicit_timeout)
 
     def close(self) -> None:
         """Terminate subprocess and cleanly join stderr background thread."""

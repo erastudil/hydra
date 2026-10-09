@@ -4996,6 +4996,51 @@ def mcp_multi_namespace_contracts():
 
 
 @check
+def mcp_timeout_guard_contracts():
+    from hydra_cli.mcp import (
+        McpTimeoutGuard,
+        get_default_timeout_guard,
+        reset_timeout_guard,
+        McpSubprocessClient,
+    )
+
+    reset_timeout_guard()
+
+    # 1. Timeout rule resolution
+    guard = get_default_timeout_guard()
+    guard.register_rule("playwright_*", 45.0)
+    guard.register_rule("compile_*", 120.0)
+
+    assert guard.resolve_timeout("playwright_click") == 45.0
+    assert guard.resolve_timeout("compile_cpp") == 120.0
+    assert guard.resolve_timeout("general_calc") == 60.0
+
+    # Explicit override precedence
+    assert guard.resolve_timeout("playwright_click", explicit_timeout=10.0) == 10.0
+
+    # 2. Timeout telemetry recording
+    guard.record_timeout("compile_cpp")
+    guard.record_timeout("compile_cpp")
+    guard.record_cancellation()
+
+    met = guard.get_metrics()
+    assert met["total_timeouts"] == 2
+    assert met["cancellations_sent"] == 1
+    assert met["timeouts_by_tool"]["compile_cpp"] == 2
+
+    # 3. Subprocess client per-tool timeout configuration
+    client = McpSubprocessClient("python", ["-c", "pass"], timeout=15.0)
+    assert client.get_tool_timeout("any_tool") == 15.0
+
+    client.set_tool_timeout("long_*", 90.0)
+    assert client.get_tool_timeout("long_task") == 90.0
+    assert client.get_tool_timeout("short_task") == 15.0
+    assert client.get_tool_timeout("long_task", explicit_timeout=5.0) == 5.0
+
+    reset_timeout_guard()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
