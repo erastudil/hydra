@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and len(names) == 16
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and len(names) == 17
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -2412,6 +2412,89 @@ def ast_type_annotations_contracts():
         assert not f_res["isError"]
         assert f_res["clean"] is True
         assert f_res["overall_coverage_pct"] == 100.0
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+@check
+def ast_unused_var_cleaner_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstUnusedVarCleaner, NativeToolRegistry
+
+    cleaner = AstUnusedVarCleaner()
+
+    sample = (
+        "def compute(a, b):\n"
+        "    temp = a + b  # calculate sum\n"
+        "    return a * 2\n"
+    )
+
+    res = cleaner.analyze_source(sample, auto_fix=False)
+    assert not res["isError"]
+    assert res["unused_count"] == 1
+    assert res["unused_variables"][0]["name"] == "temp"
+    assert res["unused_variables"][0]["function"] == "compute"
+    assert res["unused_variables"][0]["lineno"] == 2
+    assert res["clean"] is False
+    assert res["changed"] is False
+
+    fix_res = cleaner.analyze_source(sample, auto_fix=True)
+    assert not fix_res["isError"]
+    assert fix_res["changed"] is True
+    assert "_temp = a + b  # calculate sum" in fix_res["cleaned_code"]
+    assert "return a * 2" in fix_res["cleaned_code"]
+
+    exempt_sample = (
+        "def process(item):\n"
+        "    _dummy = 1\n"
+        "    return item\n"
+    )
+    exempt_res = cleaner.analyze_source(exempt_sample, auto_fix=False)
+    assert not exempt_res["isError"]
+    assert exempt_res["unused_count"] == 0
+    assert exempt_res["clean"] is True
+
+    global_sample = (
+        "GLOBAL_VAR = 10\n"
+        "def foo():\n"
+        "    return 42\n"
+    )
+    g_res = cleaner.analyze_source(global_sample, auto_fix=False)
+    assert not g_res["isError"]
+    assert g_res["unused_count"] == 0
+    assert g_res["clean"] is True
+
+    used_sample = (
+        "def mult(x, y):\n"
+        "    val = x * y\n"
+        "    return val\n"
+    )
+    u_res = cleaner.analyze_source(used_sample, auto_fix=False)
+    assert not u_res["isError"]
+    assert u_res["unused_count"] == 0
+    assert u_res["clean"] is True
+
+    reg = NativeToolRegistry()
+    assert reg.has_tool("clean_unused_variables")
+    assert reg.has_tool("find_unused_variables")
+    assert reg.has_tool("unused_var_cleaner")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "clean_unused_variables" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(sample)
+        tmp_file = f.name
+    try:
+        f_res = reg.dispatch("clean_unused_variables", {"path": tmp_file, "auto_fix": True, "in_place": True})
+        assert not f_res["isError"]
+        assert f_res["unused_count"] == 1
+        assert f_res["changed"] is True
+        with open(tmp_file, "r", encoding="utf-8") as rf:
+            disk_code = rf.read()
+        assert "_temp = a + b  # calculate sum" in disk_code
     finally:
         if os.path.exists(tmp_file):
             os.remove(tmp_file)

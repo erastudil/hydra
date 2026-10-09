@@ -602,6 +602,124 @@ class AstTypeAnnotationLinter:
 
 
 
+class AstUnusedVarCleaner:
+    """AST visitor detecting and surgically renaming unused local variables in Python source code."""
+
+    def __init__(self, prefix: str = "_"):
+        self.prefix = prefix
+
+    def analyze_source(self, source: str, auto_fix: bool = False) -> Dict[str, Any]:
+        """Analyze source code for unused local variables with optional surgical underscore prefixing."""
+        newline = "\r\n" if "\r\n" in source else "\n"
+        code = source.replace("\r\n", "\n")
+        has_bom = code.startswith("\ufeff")
+        if has_bom:
+            code = code[1:]
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        unused_items: List[Dict[str, Any]] = []
+        replacements: List[Tuple[int, int, str, str]] = []
+
+        def find_functions(node: ast.AST, prefix: str = "") -> List[Tuple[str, ast.AST]]:
+            items: List[Tuple[str, ast.AST]] = []
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    full_name = f"{prefix}{child.name}"
+                    items.append((full_name, child))
+                    items.extend(find_functions(child, prefix=f"{full_name}."))
+                elif isinstance(child, ast.ClassDef):
+                    nested_prefix = f"{prefix}{child.name}."
+                    items.extend(find_functions(child, prefix=nested_prefix))
+            return items
+
+        functions = find_functions(tree)
+
+        for fn_name, fn_node in functions:
+            explicit_nonlocals: Set[str] = set()
+            assigned: Dict[str, List[ast.Name]] = {}
+
+            def walk_local_scope(subnode: ast.AST) -> None:
+                for child in ast.iter_child_nodes(subnode):
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        continue
+                    if isinstance(child, (ast.Global, ast.Nonlocal)):
+                        explicit_nonlocals.update(child.names)
+                    elif isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                        if not child.id.startswith(self.prefix):
+                            assigned.setdefault(child.id, []).append(child)
+                    walk_local_scope(child)
+
+            walk_local_scope(fn_node)
+
+            loaded: Set[str] = set()
+            for sub in ast.walk(fn_node):
+                if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                    loaded.add(sub.id)
+                elif isinstance(sub, ast.AugAssign) and isinstance(sub.target, ast.Name):
+                    loaded.add(sub.target.id)
+
+            for var_name, name_nodes in assigned.items():
+                if var_name in explicit_nonlocals:
+                    continue
+                if var_name not in loaded:
+                    for n in name_nodes:
+                        unused_items.append({
+                            "function": fn_name,
+                            "name": var_name,
+                            "variable": var_name,
+                            "lineno": n.lineno,
+                            "col_offset": n.col_offset,
+                            "message": f"Local variable '{var_name}' in function '{fn_name}' assigned but never used.",
+                        })
+                        replacements.append((
+                            n.lineno,
+                            n.col_offset,
+                            var_name,
+                            f"{self.prefix}{var_name}",
+                        ))
+
+        unused_items.sort(key=lambda u: (u["lineno"], u["col_offset"], u["variable"]))
+
+        if not auto_fix or not unused_items:
+            return {
+                "isError": False,
+                "unused_count": len(unused_items),
+                "unused_variables": unused_items,
+                "changed": False,
+                "cleaned_code": source,
+                "clean": len(unused_items) == 0,
+            }
+
+        code_lines = code.split("\n")
+        replacements.sort(key=lambda r: (r[0], -r[1]))
+
+        for lineno, col, old_name, new_name in replacements:
+            if 1 <= lineno <= len(code_lines):
+                line = code_lines[lineno - 1]
+                if col + len(old_name) <= len(line) and line[col : col + len(old_name)] == old_name:
+                    code_lines[lineno - 1] = line[:col] + new_name + line[col + len(old_name):]
+
+        cleaned = "\n".join(code_lines)
+        if newline == "\r\n":
+            cleaned = cleaned.replace("\n", "\r\n")
+        if has_bom:
+            cleaned = "\ufeff" + cleaned
+
+        return {
+            "isError": False,
+            "unused_count": len(unused_items),
+            "unused_variables": unused_items,
+            "changed": (cleaned != source),
+            "cleaned_code": cleaned,
+            "clean": len(unused_items) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -658,6 +776,9 @@ class NativeToolRegistry:
             "complexity_meter": self.measure_complexity,
             "check_type_annotations": self.check_type_annotations,
             "lint_type_annotations": self.check_type_annotations,
+            "clean_unused_variables": self.clean_unused_variables,
+            "find_unused_variables": self.clean_unused_variables,
+            "unused_var_cleaner": self.clean_unused_variables,
         }
 
     @property
@@ -1316,6 +1437,107 @@ class NativeToolRegistry:
             "clean": len(all_missing) == 0,
         }
 
+    def clean_unused_variables(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        auto_fix: bool = False,
+        in_place: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Detect and optionally clean unused local variables in Python functions.
+        Prefixes unused variables with an underscore to satisfy lint invariants.
+        """
+        cleaner = AstUnusedVarCleaner()
+
+        if source is not None:
+            return cleaner.analyze_source(source, auto_fix=auto_fix)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = cleaner.analyze_source(content, auto_fix=auto_fix)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            if in_place and auto_fix and res["changed"]:
+                tmp_path = target_path + f".tmp.{uuid.uuid4().hex[:8]}"
+                try:
+                    with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+                        f.write(res["cleaned_code"])
+                    os.replace(tmp_path, target_path)
+                except Exception as exc:
+                    if os.path.exists(tmp_path):
+                        try:
+                            os.remove(tmp_path)
+                        except OSError:
+                            pass
+                    return {"isError": True, "error": f"Failed writing cleaned file: {exc}"}
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        total_unused = 0
+        all_unused = []
+        files_modified = 0
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = cleaner.analyze_source(file_code, auto_fix=auto_fix)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                if rep["unused_count"] > 0:
+                    file_metrics[rel_p] = rep["unused_count"]
+                    total_unused += rep["unused_count"]
+                    for u in rep["unused_variables"]:
+                        u_copy = dict(u)
+                        u_copy["file"] = rel_p
+                        all_unused.append(u_copy)
+                    if in_place and auto_fix and rep["changed"]:
+                        tmp_p = file_path + f".tmp.{uuid.uuid4().hex[:8]}"
+                        try:
+                            with open(tmp_p, "w", encoding="utf-8", newline="") as f:
+                                f.write(rep["cleaned_code"])
+                            os.replace(tmp_p, file_path)
+                            files_modified += 1
+                        except Exception:
+                            if os.path.exists(tmp_p):
+                                try:
+                                    os.remove(tmp_p)
+                                except OSError:
+                                    pass
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_unused": total_unused,
+            "files_with_unused": len(file_metrics),
+            "files_modified": files_modified,
+            "summary": file_metrics,
+            "unused_variables": all_unused,
+            "clean": total_unused == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -1617,6 +1839,34 @@ class NativeToolRegistry:
                             "min_coverage": {
                                 "type": "number",
                                 "description": "Minimum type coverage percentage threshold. Default 0.0.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "clean_unused_variables",
+                    "description": "Detect and optionally clean unused local variables in Python functions by prefixing with an underscore.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to inspect. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to inspect.",
+                            },
+                            "auto_fix": {
+                                "type": "boolean",
+                                "description": "Whether to rename unused variables with leading underscore. Default false.",
+                            },
+                            "in_place": {
+                                "type": "boolean",
+                                "description": "Whether to rewrite target file in place when auto_fix is enabled. Default false.",
                             },
                         },
                     },
