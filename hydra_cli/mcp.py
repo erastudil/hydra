@@ -12,7 +12,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from hydra_cli._version import __version__
 
@@ -279,11 +279,36 @@ class McpNamespaceRouter:
             return client.call_tool(tool_name, arguments or {})
         raise RuntimeError(f"Client for namespace '{ns}' does not implement call_tool")
 
+    def register_lazy_client(
+        self,
+        namespace: str,
+        factory_or_command: Any,
+        args: Optional[List[str]] = None,
+        aliases: Optional[List[str]] = None,
+        predeclared_tools: Optional[List[Dict[str, Any]]] = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Register lazily-spawned MCP client under namespace."""
+        lazy_client = McpLazyClient(
+            factory_or_command=factory_or_command,
+            args=args,
+            namespace=namespace,
+            predeclared_tools=predeclared_tools,
+            **kwargs,
+        )
+        self.register_client(namespace, lazy_client, aliases=aliases)
+        return lazy_client
+
     def get_metrics(self) -> Dict[str, Any]:
         """Return telemetry counters for namespace routing."""
+        lazy_count = sum(
+            1 for c in self._namespaces.values()
+            if isinstance(c, McpLazyClient) or getattr(c, "lazy", False)
+        )
         return {
             "registered_namespaces": len(self._namespaces),
             "registered_aliases": len(self._aliases),
+            "lazy_clients": lazy_count,
             "total_dispatches": self._dispatch_count,
         }
 
@@ -428,6 +453,8 @@ class McpSubprocessClient:
         timeout: Optional[float] = None,
         init_timeout: Optional[float] = None,
         namespace: Optional[str] = None,
+        lazy: bool = False,
+        predeclared_tools: Optional[List[Dict[str, Any]]] = None,
     ):
         self.command = command
         self.args: List[str] = list(args) if args else []
@@ -440,6 +467,13 @@ class McpSubprocessClient:
             float(init_timeout) if init_timeout
             else max(self.timeout, _env_timeout("HYDRA_MCP_INIT_TIMEOUT", DEFAULT_INIT_TIMEOUT))
         )
+        self.lazy = bool(lazy)
+        self.predeclared_tools: Optional[List[Dict[str, Any]]] = (
+            [dict(t) for t in predeclared_tools] if predeclared_tools is not None else None
+        )
+        self.spawn_count: int = 0
+        self.last_spawn_time: Optional[float] = None
+
         self._stdout_queue: "queue.Queue[Optional[str]]" = queue.Queue()
         self._stdout_reader_for: Any = None
 
@@ -456,9 +490,19 @@ class McpSubprocessClient:
         self._timeout_guard: McpTimeoutGuard = McpTimeoutGuard(default_timeout=self.timeout)
 
     @property
+    def is_spawned(self) -> bool:
+        """Return boolean status indicating whether subprocess spawned."""
+        return self._process is not None
+
+    @property
     def is_running(self) -> bool:
-        """True if the subprocess is currently active."""
+        """True when the subprocess currently active."""
         return self._process is not None and self._process.poll() is None
+
+    def ensure_started(self) -> None:
+        """Ensure subprocess running; spawn and perform handshake if not already started."""
+        if not self.is_running:
+            self.start()
 
     @property
     def stderr_output(self) -> str:
@@ -509,7 +553,7 @@ class McpSubprocessClient:
     def start(self) -> None:
         """Start subprocess, initiate background stderr reader, and perform MCP handshake."""
         with self._lock:
-            if self._process is not None:
+            if self._process is not None and self._process.poll() is None:
                 return
             self._closed = False
             use_shell = should_use_shell(self.command)
@@ -530,6 +574,9 @@ class McpSubprocessClient:
                 env=full_env,
                 cwd=self.cwd,
             )
+
+            self.spawn_count += 1
+            self.last_spawn_time = time.time()
 
             self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
             self._stderr_thread.start()
@@ -574,6 +621,8 @@ class McpSubprocessClient:
         Send a JSON-RPC 2.0 request and wait for the matching response, at most `timeout` seconds.
         Thread-safe under self._lock.
         """
+        if self.lazy and not self.is_running:
+            self.ensure_started()
         wait = float(timeout) if timeout else self.timeout
         with self._lock:
             if self._process is None or self._process.stdin is None or self._process.stdout is None:
@@ -658,6 +707,10 @@ class McpSubprocessClient:
 
     def list_tools(self) -> List[Dict[str, Any]]:
         """List all tools exposed by the MCP server."""
+        if self.lazy and self.predeclared_tools is not None and not self.is_running:
+            return [dict(t) for t in self.predeclared_tools]
+        if self.lazy and not self.is_running:
+            self.ensure_started()
         result = self._send_rpc("tools/list", {})
         if isinstance(result, dict):
             return result.get("tools", [])
@@ -700,6 +753,11 @@ class McpSubprocessClient:
 
     def ping(self, timeout: Optional[float] = None) -> bool:
         """Send MCP JSON-RPC ping request and verify server responds."""
+        if self.lazy and not self.is_running:
+            try:
+                self.ensure_started()
+            except Exception:
+                return False
         if not self.is_running:
             return False
         try:
@@ -751,6 +809,8 @@ class McpSubprocessClient:
         timeout: Optional[float] = None,
     ) -> Any:
         """Call a specific tool on the MCP server with the provided arguments and timeout guard."""
+        if self.lazy and not self.is_running:
+            self.ensure_started()
         effective_timeout = self.get_tool_timeout(tool_name, explicit_timeout=timeout)
         params = {
             "name": tool_name,
@@ -805,6 +865,194 @@ class McpSubprocessClient:
 
     def __enter__(self) -> "McpSubprocessClient":
         self.start()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+class McpLazyClient:
+    """
+    Lazy proxy client managing deferred spawning of an underlying MCP client.
+    Supports either an existing client factory callable or direct command invocation.
+    Defers process startup until first operational tool dispatch or discovery request.
+    """
+
+    def __init__(
+        self,
+        factory_or_command: Any,
+        args: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
+        cwd: Optional[str] = None,
+        env_passthrough: Optional[Iterable[str]] = None,
+        timeout: Optional[float] = None,
+        init_timeout: Optional[float] = None,
+        namespace: Optional[str] = None,
+        predeclared_tools: Optional[List[Dict[str, Any]]] = None,
+        auto_start: bool = True,
+    ) -> None:
+        self.factory_or_command = factory_or_command
+        self.args: List[str] = list(args) if args else []
+        self.env = env
+        self.cwd = cwd
+        self.env_passthrough: List[str] = list(env_passthrough or [])
+        self.timeout = float(timeout) if timeout else _env_timeout("HYDRA_MCP_TIMEOUT", DEFAULT_RPC_TIMEOUT)
+        self.init_timeout = float(init_timeout) if init_timeout else DEFAULT_INIT_TIMEOUT
+        self.namespace: Optional[str] = namespace.strip().lower() if namespace else None
+        self.predeclared_tools: Optional[List[Dict[str, Any]]] = (
+            [dict(t) for t in predeclared_tools] if predeclared_tools else None
+        )
+        self.auto_start = bool(auto_start)
+
+        self._client: Optional[Any] = None
+        self._lock = threading.Lock()
+        self.spawn_count: int = 0
+        self.last_spawn_time: Optional[float] = None
+        self.total_calls: int = 0
+
+    @property
+    def is_spawned(self) -> bool:
+        """Return boolean status indicating whether target client spawned."""
+        return self._client is not None
+
+    @property
+    def is_running(self) -> bool:
+        """Return boolean status indicating whether underlying process active."""
+        if self._client is None:
+            return False
+        return getattr(self._client, "is_running", False)
+
+    @property
+    def client(self) -> Optional[Any]:
+        """Return underlying client instance when spawned."""
+        return self._client
+
+    def ensure_started(self) -> Any:
+        """Ensure underlying MCP client instantiated and started thread-safely."""
+        with self._lock:
+            if self._client is not None and getattr(self._client, "is_running", True):
+                return self._client
+
+            if callable(self.factory_or_command):
+                client = self.factory_or_command()
+                if hasattr(client, "is_running") and not client.is_running and hasattr(client, "start"):
+                    client.start()
+                elif hasattr(client, "start") and not hasattr(client, "is_running"):
+                    client.start()
+            else:
+                client = McpSubprocessClient(
+                    command=str(self.factory_or_command),
+                    args=self.args,
+                    env=self.env,
+                    cwd=self.cwd,
+                    env_passthrough=self.env_passthrough,
+                    timeout=self.timeout,
+                    init_timeout=self.init_timeout,
+                    namespace=self.namespace,
+                    lazy=False,
+                )
+                client.start()
+
+            self._client = client
+            self.spawn_count += 1
+            self.last_spawn_time = time.time()
+            return self._client
+
+    def list_tools(self) -> List[Dict[str, Any]]:
+        """List exposed tools; return predeclared tools without spawning when available."""
+        if not self.is_spawned and self.predeclared_tools is not None:
+            return [dict(t) for t in self.predeclared_tools]
+        client = self.ensure_started()
+        if hasattr(client, "list_tools"):
+            return client.list_tools()
+        return []
+
+    def call_tool(
+        self,
+        tool_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """Dispatch tool execution to underlying spawned client."""
+        self.total_calls += 1
+        client = self.ensure_started()
+        if hasattr(client, "call_tool"):
+            try:
+                return client.call_tool(tool_name, arguments or {}, timeout=timeout)
+            except TypeError:
+                return client.call_tool(tool_name, arguments or {})
+        raise RuntimeError("Underlying client does not implement call_tool.")
+
+    def ping(self, timeout: Optional[float] = None) -> bool:
+        """Ping underlying client; spawn when auto_start configured."""
+        if not self.is_spawned and not self.auto_start:
+            return False
+        client = self.ensure_started()
+        if hasattr(client, "ping"):
+            return bool(client.ping(timeout=timeout))
+        return True
+
+    def qualify_tool_name(self, tool_name: str, separator: str = DEFAULT_NAMESPACE_SEPARATOR) -> str:
+        """Qualify tool name with namespace."""
+        if not self.namespace:
+            return tool_name
+        return format_qualified_tool_name(self.namespace, tool_name, separator=separator)
+
+    def unqualify_tool_name(self, qualified_name: str, separator: str = DEFAULT_NAMESPACE_SEPARATOR) -> str:
+        """Strip namespace from qualified tool name."""
+        if not self.namespace or separator not in qualified_name:
+            return qualified_name
+        try:
+            ns, tool = parse_qualified_tool_name(qualified_name, separator=separator)
+            if ns == self.namespace:
+                return tool
+        except ValueError:
+            pass
+        return qualified_name
+
+    def set_tool_timeout(self, pattern: str, timeout_seconds: float) -> None:
+        """Configure tool timeout pattern on client or delegate when spawned."""
+        if self._client and hasattr(self._client, "set_tool_timeout"):
+            self._client.set_tool_timeout(pattern, timeout_seconds)
+
+    def get_tool_timeout(self, tool_name: str, explicit_timeout: Optional[float] = None) -> float:
+        """Resolve effective tool timeout."""
+        if self._client and hasattr(self._client, "get_tool_timeout"):
+            return self._client.get_tool_timeout(tool_name, explicit_timeout=explicit_timeout)
+        if explicit_timeout is not None and explicit_timeout > 0:
+            return float(explicit_timeout)
+        return self.timeout
+
+    def close(self) -> None:
+        """Close and shutdown underlying client process."""
+        with self._lock:
+            if self._client is not None:
+                try:
+                    if hasattr(self._client, "close"):
+                        self._client.close()
+                except Exception:
+                    pass
+                self._client = None
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return lazy spawning telemetry and lifecycle metrics."""
+        return {
+            "is_spawned": self.is_spawned,
+            "is_running": self.is_running,
+            "spawn_count": self.spawn_count,
+            "last_spawn_time": self.last_spawn_time,
+            "total_calls": self.total_calls,
+            "has_predeclared_tools": self.predeclared_tools is not None,
+            "predeclared_tools_count": len(self.predeclared_tools) if self.predeclared_tools else 0,
+        }
+
+    def __enter__(self) -> "McpLazyClient":
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:

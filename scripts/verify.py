@@ -5041,6 +5041,130 @@ def mcp_timeout_guard_contracts():
 
 
 @check
+def mcp_lazy_spawning_contracts():
+    import sys
+    from hydra_cli.mcp import (
+        McpLazyClient,
+        McpNamespaceRouter,
+        McpSubprocessClient,
+    )
+
+    # 1. McpLazyClient deferred factory execution with predeclared tools
+    factory_calls = []
+
+    class TargetClient:
+        def __init__(self, tag):
+            self.tag = tag
+            self.is_running = True
+
+        def list_tools(self):
+            return [{"name": "compute", "description": "live tool"}]
+
+        def call_tool(self, tool_name, arguments, timeout=None):
+            return {"result": f"{self.tag}:{tool_name}:{arguments.get('val', 0)}"}
+
+        def close(self):
+            self.is_running = False
+
+    def client_factory():
+        factory_calls.append(1)
+        return TargetClient("engine")
+
+    predeclared = [{"name": "compute", "description": "predeclared tool"}]
+    lazy_c = McpLazyClient(client_factory, predeclared_tools=predeclared)
+
+    assert lazy_c.is_spawned is False
+    assert lazy_c.is_running is False
+    assert len(factory_calls) == 0
+
+    # Listing tools retrieves predeclared schemas without invoking factory
+    tools = lazy_c.list_tools()
+    assert len(tools) == 1
+    assert tools[0]["description"] == "predeclared tool"
+    assert lazy_c.is_spawned is False
+    assert len(factory_calls) == 0
+
+    # Tool invocation triggers deferred factory instantiation
+    res = lazy_c.call_tool("compute", {"val": 42})
+    assert res == {"result": "engine:compute:42"}
+    assert lazy_c.is_spawned is True
+    assert lazy_c.is_running is True
+    assert len(factory_calls) == 1
+    assert lazy_c.spawn_count == 1
+    assert lazy_c.total_calls == 1
+
+    # Telemetry metrics
+    metrics = lazy_c.get_metrics()
+    assert metrics["is_spawned"] is True
+    assert metrics["is_running"] is True
+    assert metrics["spawn_count"] == 1
+    assert metrics["total_calls"] == 1
+    assert metrics["has_predeclared_tools"] is True
+
+    # Close lifecycle
+    lazy_c.close()
+    assert lazy_c.is_spawned is False
+    assert lazy_c.is_running is False
+
+    # 2. McpSubprocessClient lazy configuration
+    sub_c = McpSubprocessClient(
+        sys.executable,
+        ["-c", "pass"],
+        lazy=True,
+        predeclared_tools=[{"name": "stub_calc"}],
+    )
+    assert sub_c.lazy is True
+    assert sub_c.is_spawned is False
+    assert sub_c.is_running is False
+    assert sub_c.spawn_count == 0
+
+    listed_pre = sub_c.list_tools()
+    assert len(listed_pre) == 1
+    assert listed_pre[0]["name"] == "stub_calc"
+    assert sub_c.is_spawned is False
+
+    sub_c.close()
+
+    # 3. McpNamespaceRouter lazy client registration and dispatch
+    router = McpNamespaceRouter()
+    r_calls = []
+
+    def router_factory():
+        r_calls.append(1)
+        return TargetClient("routed_engine")
+
+    router.register_lazy_client(
+        namespace="calc",
+        factory_or_command=router_factory,
+        aliases=["math"],
+        predeclared_tools=[{"name": "eval"}],
+    )
+
+    # Tool listing retrieves qualified names across router without spawning
+    r_tools = router.list_all_tools()
+    r_names = [t["name"] for t in r_tools]
+    assert "calc__eval" in r_names
+    assert len(r_calls) == 0
+
+    # Dispatch triggers lazy spawn and routes execution
+    out = router.dispatch("calc__eval", {"val": 99})
+    assert out == {"result": "routed_engine:eval:99"}
+    assert len(r_calls) == 1
+
+    # Alias dispatch uses spawned instance
+    out_alias = router.dispatch("math__eval", {"val": 100})
+    assert out_alias == {"result": "routed_engine:eval:100"}
+    assert len(r_calls) == 1
+
+    # Router metrics reflect lazy client
+    r_met = router.get_metrics()
+    assert r_met["registered_namespaces"] == 1
+    assert r_met["registered_aliases"] == 1
+    assert r_met["lazy_clients"] == 1
+    assert r_met["total_dispatches"] == 2
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
