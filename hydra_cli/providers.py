@@ -3,6 +3,7 @@ Provider integrations and streaming transport for Hydra CLI.
 Supports OpenRouter, Vercel AI Gateway, Cloudflare Workers AI, and local inference.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -682,6 +683,139 @@ def attach_tool_capability(url: str, payload: Dict[str, Any]) -> None:
         payload["provider"] = {"require_parameters": True}
         return
     route.setdefault("require_parameters", True)
+
+
+
+
+class PrefixIsolationManager:
+    """Manager for prompt prefix isolation, token cache boundary alignment, and prefix hashing."""
+
+    def __init__(self, min_prefix_tokens: int = 64):
+        self.min_prefix_tokens = min_prefix_tokens
+        self._prefix_hits: Dict[str, int] = {}
+
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        """Estimate token count based on whitespace and character heuristics."""
+        if not text:
+            return 0
+        words = len(text.split())
+        chars = len(text)
+        return max(words, chars // 4)
+
+    @staticmethod
+    def compute_prefix_hash(prefix_messages: List[Dict[str, Any]]) -> str:
+        """Compute deterministic SHA-256 hash of invariant prefix messages."""
+        serialized = []
+        for m in prefix_messages:
+            role = str(m.get("role", ""))
+            content = str(m.get("content", ""))
+            serialized.append(f"{role}:{content}")
+        raw = "\n---\n".join(serialized).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    def isolate_prefix(
+        self,
+        messages: List[Dict[str, Any]],
+        attach_cache_control: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Partition messages into static prefix and dynamic suffix turns.
+        Returns isolated messages, prefix hash, token estimates, and cache metadata.
+        """
+        if not messages:
+            return {
+                "messages": [],
+                "prefix_messages": [],
+                "dynamic_messages": [],
+                "prefix_hash": "",
+                "prefix_tokens": 0,
+                "is_isolated": False,
+                "cache_hit_count": 0,
+            }
+
+        prefix_msgs: List[Dict[str, Any]] = []
+        dynamic_msgs: List[Dict[str, Any]] = []
+
+        collecting_prefix = True
+        for m in messages:
+            role = m.get("role", "")
+            if collecting_prefix and role in ("system", "developer"):
+                prefix_msgs.append(dict(m))
+            else:
+                collecting_prefix = False
+                dynamic_msgs.append(dict(m))
+
+        if not prefix_msgs and messages and messages[0].get("role") == "user":
+            first_content = str(messages[0].get("content", ""))
+            if len(messages) > 1 and self.estimate_tokens(first_content) >= self.min_prefix_tokens:
+                prefix_msgs.append(dict(messages[0]))
+                dynamic_msgs = [dict(m) for m in messages[1:]]
+
+        prefix_text = " ".join(str(m.get("content", "")) for m in prefix_msgs)
+        prefix_tokens = self.estimate_tokens(prefix_text)
+        prefix_hash = self.compute_prefix_hash(prefix_msgs) if prefix_msgs else ""
+
+        if prefix_hash:
+            self._prefix_hits[prefix_hash] = self._prefix_hits.get(prefix_hash, 0) + 1
+
+        isolated_messages = []
+        for idx, m in enumerate(prefix_msgs):
+            msg_copy = dict(m)
+            if attach_cache_control and idx == len(prefix_msgs) - 1:
+                msg_copy["cache_control"] = {"type": "ephemeral"}
+            isolated_messages.append(msg_copy)
+
+        isolated_messages.extend(dynamic_msgs)
+
+        return {
+            "messages": isolated_messages,
+            "prefix_messages": prefix_msgs,
+            "dynamic_messages": dynamic_msgs,
+            "prefix_hash": prefix_hash,
+            "prefix_tokens": prefix_tokens,
+            "is_isolated": len(prefix_msgs) > 0,
+            "cache_hit_count": self._prefix_hits.get(prefix_hash, 0) if prefix_hash else 0,
+        }
+
+
+_DEFAULT_PREFIX_MANAGER = PrefixIsolationManager()
+
+
+def isolate_cache_prefix(
+    messages: List[Dict[str, Any]],
+    attach_cache_control: bool = False,
+    min_prefix_tokens: int = 64,
+) -> Dict[str, Any]:
+    """Isolate static prompt prefix from dynamic suffix turns for token cache efficiency."""
+    manager = PrefixIsolationManager(min_prefix_tokens=min_prefix_tokens)
+    return manager.isolate_prefix(messages, attach_cache_control=attach_cache_control)
+
+
+def attach_prefix_isolation(
+    payload: Dict[str, Any],
+    url: Optional[str] = None,
+    enable_cache_control: bool = True,
+) -> None:
+    """
+    Enforce prefix isolation on payload messages and attach ephemeral cache control for supported providers.
+    Supports OpenRouter, Anthropic, and Vercel AI Gateway cache endpoints.
+    """
+    msgs = payload.get("messages")
+    if not msgs or not isinstance(msgs, list):
+        return
+
+    should_cache_control = enable_cache_control
+    if url:
+        host = (urlparse(url).hostname or url).lower()
+        if "openrouter.ai" not in host and "vercel" not in host and "anthropic" not in host:
+            should_cache_control = False
+
+    isolated = isolate_cache_prefix(msgs, attach_cache_control=should_cache_control)
+    payload["messages"] = isolated["messages"]
+    if isolated["prefix_hash"]:
+        payload["_cache_prefix_hash"] = isolated["prefix_hash"]
+        payload["_cache_prefix_tokens"] = isolated["prefix_tokens"]
 
 
 def adapt_model_for_url(url: str, model: str) -> str:

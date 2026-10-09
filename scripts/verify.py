@@ -3260,6 +3260,69 @@ def ast_fstring_modernizer_contracts():
 
 
 @check
+def prefix_isolation_contracts():
+    from hydra_cli.providers import (
+        PrefixIsolationManager,
+        isolate_cache_prefix,
+        attach_prefix_isolation,
+    )
+
+    manager = PrefixIsolationManager()
+
+    # 1. Isolate system prefix from user query
+    msgs = [
+        {"role": "system", "content": "You are Hydra engine. Dialect: progen syntax."},
+        {"role": "user", "content": "Run tests."},
+    ]
+    res = manager.isolate_prefix(msgs, attach_cache_control=True)
+    assert res["is_isolated"] is True
+    assert len(res["prefix_messages"]) == 1
+    assert len(res["dynamic_messages"]) == 1
+    assert res["prefix_tokens"] > 0
+    assert res["prefix_hash"] != ""
+    assert res["messages"][0]["cache_control"] == {"type": "ephemeral"}
+
+    # 2. Stable prefix hash across different user queries
+    msgs_turn2 = [
+        {"role": "system", "content": "You are Hydra engine. Dialect: progen syntax."},
+        {"role": "user", "content": "Check coverage report."},
+    ]
+    res_turn2 = manager.isolate_prefix(msgs_turn2)
+    assert res_turn2["prefix_hash"] == res["prefix_hash"]
+    assert res_turn2["cache_hit_count"] == 2
+
+    # 3. Changed system prompt produces new hash
+    msgs_alt = [
+        {"role": "system", "content": "Alternative instructions."},
+        {"role": "user", "content": "Run tests."},
+    ]
+    res_alt = manager.isolate_prefix(msgs_alt)
+    assert res_alt["prefix_hash"] != res["prefix_hash"]
+
+    # 4. Helper isolate_cache_prefix function
+    iso = isolate_cache_prefix(msgs, attach_cache_control=False)
+    assert iso["is_isolated"] is True
+    assert "cache_control" not in iso["messages"][0]
+
+    # 5. attach_prefix_isolation on OpenRouter attaches cache_control
+    or_payload = {"messages": [m.copy() for m in msgs]}
+    attach_prefix_isolation(or_payload, url="https://openrouter.ai/api/v1/chat/completions")
+    assert or_payload["messages"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "_cache_prefix_hash" in or_payload
+
+    # 6. attach_prefix_isolation on CheaperInference does not attach cache_control
+    ci_payload = {"messages": [m.copy() for m in msgs]}
+    attach_prefix_isolation(ci_payload, url="https://api.cheaperinference.com/v1/chat/completions")
+    assert "cache_control" not in ci_payload["messages"][0]
+    assert "_cache_prefix_hash" in ci_payload
+
+    # 7. Empty messages
+    empty_res = manager.isolate_prefix([])
+    assert empty_res["is_isolated"] is False
+    assert empty_res["prefix_tokens"] == 0
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
