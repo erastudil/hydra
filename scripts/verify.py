@@ -4240,6 +4240,52 @@ def progen_reanchor_contracts():
 
 
 @check
+def context_decay_weighting_contracts():
+    from hydra_cli.agent import (
+        ContextDecayWeighter,
+        calculate_turn_decay_weight,
+        score_context_decay,
+        prune_context_by_decay,
+        get_default_decay_weighter,
+        reset_decay_weighter,
+    )
+
+    reset_decay_weighter()
+
+    m_sys = {"role": "system", "content": "You are Hydra."}
+    m_old_tool = {"role": "tool", "content": "File listing " * 500}
+    m_mid_user = {"role": "user", "content": "Search for code"}
+    m_mid_asst = {"role": "assistant", "content": "Found code"}
+    m_new_user = {"role": "user", "content": "Refactor code"}
+
+    msgs = [m_sys, m_old_tool, m_mid_user, m_mid_asst, m_new_user]
+
+    # 1. Single turn weight calculation
+    w_sys = calculate_turn_decay_weight(m_sys, turn_index=0, total_turns=5)
+    assert w_sys == 1.0
+
+    # 2. Score messages across sequence
+    scored = score_context_decay(msgs)
+    assert len(scored) == 5
+    assert scored[0]["_decay_weight"] == 1.0
+    assert scored[1]["_decay_weight"] < scored[2]["_decay_weight"]
+    assert scored[4]["_decay_weight"] > scored[2]["_decay_weight"]
+
+    # 3. Prune messages by decay priority
+    pruned = prune_context_by_decay(msgs, max_chars=300)
+    assert len(pruned) < len(msgs)
+    assert pruned[0]["role"] == "system"
+    assert pruned[-1]["content"] == "Refactor code"
+
+    # 4. Check weighter telemetry
+    met = get_default_decay_weighter().get_metrics()
+    assert met["prune_events"] == 1
+    assert met["total_chars_pruned"] > 0
+
+    reset_decay_weighter()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

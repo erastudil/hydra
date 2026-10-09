@@ -685,6 +685,166 @@ def reset_progen_reanchor_controller() -> None:
     _DEFAULT_PROGEN_REANCHOR_CONTROLLER.reset()
 
 
+ROLE_BASE_WEIGHTS = {
+    "system": 1.0,
+    "developer": 1.0,
+    "user": 0.90,
+    "assistant": 0.75,
+    "tool": 0.50,
+}
+
+
+class ContextDecayWeighter:
+    """Evaluate recency decay and role importance weights for context compaction."""
+
+    def __init__(self, default_decay_factor: float = 0.85) -> None:
+        self.default_decay_factor = default_decay_factor
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal metrics and pruning operation counters."""
+        self._prune_events: int = 0
+        self._total_chars_pruned: int = 0
+
+    def calculate_weight(
+        self,
+        message: Dict[str, Any],
+        turn_index: int,
+        total_turns: int,
+        decay_factor: Optional[float] = None,
+    ) -> float:
+        """Compute composite retention weight combining role significance, recency decay, and size."""
+        import math
+        if message.get("pinned") or message.get("role") in ("system", "developer"):
+            return 1.0
+
+        factor = decay_factor if decay_factor is not None else self.default_decay_factor
+        age = max(0, total_turns - turn_index - 1)
+        recency = factor ** age
+
+        role = message.get("role", "user")
+        base_role = ROLE_BASE_WEIGHTS.get(role, 0.70)
+
+        content_len = len(str(message.get("content") or ""))
+        length_penalty = 1.0 / (1.0 + math.log1p(content_len / 2000.0))
+
+        composite = base_role * recency * length_penalty
+        return round(composite, 6)
+
+    def score_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        decay_factor: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Annotate message copies with computed decay weights."""
+        total = len(messages)
+        scored = []
+        for idx, m in enumerate(messages):
+            copy_m = dict(m)
+            copy_m["_decay_weight"] = self.calculate_weight(
+                m,
+                turn_index=idx,
+                total_turns=total,
+                decay_factor=decay_factor,
+            )
+            scored.append(copy_m)
+        return scored
+
+    def prune_by_decay(
+        self,
+        messages: List[Dict[str, Any]],
+        max_chars: int,
+        decay_factor: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Prune lowest-weight messages iteratively until total serialized characters fit budget."""
+        if not messages:
+            return []
+
+        def total_chars(msgs: List[Dict[str, Any]]) -> int:
+            return sum(len(str(m.get("content") or "")) for m in msgs)
+
+        current = [dict(m) for m in messages]
+        initial_chars = total_chars(current)
+        if initial_chars <= max_chars:
+            return current
+
+        while len(current) > 2 and total_chars(current) > max_chars:
+            total = len(current)
+            candidates = []
+            for idx in range(1, total - 1):
+                if current[idx].get("role") in ("system", "developer") or current[idx].get("pinned"):
+                    continue
+                w = self.calculate_weight(current[idx], idx, total, decay_factor=decay_factor)
+                candidates.append((w, idx))
+
+            if not candidates:
+                break
+
+            candidates.sort(key=lambda x: x[0])
+            lowest_idx = candidates[0][1]
+            removed = current.pop(lowest_idx)
+            self._total_chars_pruned += len(str(removed.get("content") or ""))
+
+        self._prune_events += 1
+        return current
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregate decay pruning metrics."""
+        return {
+            "prune_events": self._prune_events,
+            "total_chars_pruned": self._total_chars_pruned,
+        }
+
+
+_DEFAULT_CONTEXT_DECAY_WEIGHTER = ContextDecayWeighter()
+
+
+def get_default_decay_weighter() -> ContextDecayWeighter:
+    """Return default singleton context decay weighter instance."""
+    return _DEFAULT_CONTEXT_DECAY_WEIGHTER
+
+
+def calculate_turn_decay_weight(
+    message: Dict[str, Any],
+    turn_index: int,
+    total_turns: int,
+    decay_factor: Optional[float] = None,
+) -> float:
+    """Calculate decay retention weight for a specific message."""
+    return _DEFAULT_CONTEXT_DECAY_WEIGHTER.calculate_weight(
+        message,
+        turn_index=turn_index,
+        total_turns=total_turns,
+        decay_factor=decay_factor,
+    )
+
+
+def score_context_decay(
+    messages: List[Dict[str, Any]],
+    decay_factor: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Score messages with recency and role decay weights."""
+    return _DEFAULT_CONTEXT_DECAY_WEIGHTER.score_messages(messages, decay_factor=decay_factor)
+
+
+def prune_context_by_decay(
+    messages: List[Dict[str, Any]],
+    max_chars: int,
+    decay_factor: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Prune context messages according to decay weight ranking."""
+    return _DEFAULT_CONTEXT_DECAY_WEIGHTER.prune_by_decay(
+        messages,
+        max_chars=max_chars,
+        decay_factor=decay_factor,
+    )
+
+
+def reset_decay_weighter() -> None:
+    """Reset global context decay weighter state."""
+    _DEFAULT_CONTEXT_DECAY_WEIGHTER.reset()
+
+
 _CONTEXT_MARKERS = (
     "context window",
     "context length",
