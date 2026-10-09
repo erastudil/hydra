@@ -166,7 +166,7 @@ def _install_word_wrap() -> None:
 
 def _win32_scroll_viewport(lines: int) -> bool:
     """Move the visible console window within the screen buffer (negative = older history)."""
-    if os.name != "nt" or lines == 0:
+    if os.name != "nt":
         return False
     try:
         import ctypes
@@ -200,7 +200,9 @@ def _win32_scroll_viewport(lines: int) -> bool:
         sr = info.srWindow
         height = sr.Bottom - sr.Top
         width = sr.Right - sr.Left
-        max_top = max(0, info.dwSize.Y - height - 1)
+        max_top = max(0, min(info.dwSize.Y - height - 1, max(sr.Bottom, info.dwCursorPosition.Y + 1) - height))
+        if lines == 0 and sr.Top <= max_top:
+            return False
         new_top = max(0, min(max_top, sr.Top + lines))
         if new_top == sr.Top:
             return False
@@ -212,8 +214,6 @@ def _win32_scroll_viewport(lines: int) -> bool:
 
 def scroll_terminal_history(lines: int) -> bool:
     """Scroll the host terminal's history viewport when the console API supports it."""
-    if lines == 0:
-        return False
     return _win32_scroll_viewport(lines)
 
 
@@ -537,6 +537,8 @@ class _ReflowSafeApplication(Application):
             extra = reflow_rows_above_cursor(screen, cursor.x, cursor.y, new_width)
             if extra:
                 self.output.cursor_up(extra)
+        if os.name == "nt":
+            _win32_scroll_viewport(0)
         super()._on_resize()
 
 
@@ -878,6 +880,8 @@ class HydraTUI:
     def _pin_prompt(self) -> None:
         """Keep the composer glued to the bottom of the visible window."""
         self._history_scroll = 0
+        if os.name == "nt":
+            _win32_scroll_viewport(0)
         app = self._app
         if app is None:
             return
@@ -1388,7 +1392,7 @@ class HydraTUI:
             Window(char=g["h"], height=1, style=border),
             Window(width=1, height=1, char=g["br"], style=border),
         ])
-        spacer = Window(dont_extend_height=False)
+        spacer = Window(height=Dimension.exact(0), dont_extend_height=True)
         root = _WheelRoot(
             [
                 spacer,

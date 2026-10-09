@@ -557,8 +557,15 @@ def display_and_voice():
         wide = ui.get_terminal_banner(columns=140, rows=60)
         mid = ui.get_terminal_banner(columns=70, rows=40)
         narrow = ui.get_terminal_banner(columns=50, rows=20)
+        compact_80 = ui.get_terminal_banner(columns=80, rows=24)
+        medium_100 = ui.get_terminal_banner(columns=100, rows=30)
         for cols, text in ((140, wide), (70, mid), (50, narrow)):
             assert max(len(line) for line in text.splitlines()) <= cols
+            assert text.count(ui.TAGLINE) == 1
+        for cols, text, max_h in ((80, compact_80, 15), (100, medium_100, 22)):
+            assert max(len(line) for line in text.splitlines()) <= cols
+            assert len(text.splitlines()) <= max_h
+            assert "(@)" in text
             assert text.count(ui.TAGLINE) == 1
         assert "(@)" in wide and "(@)" in mid and "(@)" not in narrow
         assert "HERMES" not in wide and wide.count("Sovereign Multi-Headed AI Shell") == 1
@@ -584,7 +591,7 @@ def display_and_voice():
     assert r"(\___/)" not in HELP_BANNER and "___ ___" in HELP_BANNER
     assert "HERMES" not in HELP_BANNER
     ansi = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-    for art in (ui.HYDRA_ART_LARGE, ui.HYDRA_ART_MEDIUM):
+    for art in (ui.HYDRA_ART_LARGE, ui.HYDRA_ART_MEDIUM, ui.HYDRA_ART_COMPACT):
         plain = [ansi.sub("", line) for line in ui.paint_art(art, ui.COLOR_256)]
         assert plain == art.strip("\n").splitlines()
         table = str.maketrans("/\\()<>`'", "\\/)(><'`")
@@ -1516,7 +1523,7 @@ def tui_composer():
     root = app.layout.container
     assert isinstance(root, HSplit)
     assert isinstance(root.children[0], Window)
-    assert root.children[0].dont_extend_height() is False
+    assert root.children[0].dont_extend_height() is True
 
     writes = []
 
@@ -1671,7 +1678,7 @@ def tui_composer():
                 )
                 return max(pos.ypos for pos in screen.visible_windows_to_write_positions.values())
 
-        assert asyncio.run(pin()) == 49
+        assert asyncio.run(pin()) <= 6
 
         board = InMemoryClipboard()
         editing = HydraTUI(
