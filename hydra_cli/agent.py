@@ -539,6 +539,14 @@ class SessionCheckpointer:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             os.replace(tmp_path, self.file_path)
+            get_default_checkpoint_index().index_checkpoint(
+                session_id=self.session_id,
+                state=self.state,
+                model=self.model,
+                task=self.task,
+                turns_count=len(self.turns),
+                file_path=self.file_path,
+            )
         except Exception as e:
             sys.stderr.write(f"[HYDRA CHECKPOINT] Note: session save skipped ({redact(e)})\n")
             sys.stderr.flush()
@@ -962,6 +970,242 @@ def semantic_deduplicate_messages(
 def reset_semantic_deduplicator() -> None:
     """Reset global semantic context deduplicator state."""
     _DEFAULT_SEMANTIC_DEDUPLICATOR.reset()
+
+
+class SessionCheckpointIndex:
+    """Index and catalog session checkpoints for fast retrieval and state querying."""
+
+    def __init__(self, index_file: Optional[str] = None) -> None:
+        self.index_file = index_file
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset in-memory index catalog and operational counters."""
+        self._entries: Dict[str, Dict[str, Any]] = {}
+        self._state_index: Dict[str, List[str]] = {}
+        self._index_writes: int = 0
+        self._index_queries: int = 0
+
+    def index_checkpoint(
+        self,
+        session_id: str,
+        state: str,
+        model: str,
+        task: str,
+        turns_count: int,
+        file_path: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Index or update session checkpoint entry in catalog."""
+        now = timestamp if timestamp is not None else time.time()
+        record = {
+            "session_id": session_id,
+            "state": state,
+            "model": model,
+            "task": task,
+            "turns_count": turns_count,
+            "file_path": file_path,
+            "updated_at": now,
+            "metadata": dict(metadata or {}),
+        }
+        self._entries[session_id] = record
+
+        bucket = self._state_index.setdefault(state, [])
+        if session_id not in bucket:
+            bucket.append(session_id)
+
+        for s, s_list in self._state_index.items():
+            if s != state and session_id in s_list:
+                s_list.remove(session_id)
+
+        self._index_writes += 1
+        return dict(record)
+
+    def get_entry(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve indexed checkpoint metadata for session."""
+        entry = self._entries.get(session_id)
+        return dict(entry) if entry else None
+
+    def query(
+        self,
+        state: Optional[str] = None,
+        model: Optional[str] = None,
+        keyword: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Query indexed checkpoints matching state, model, or task keywords."""
+        self._index_queries += 1
+        matched: List[Dict[str, Any]] = []
+
+        if state and state in self._state_index:
+            candidates = [self._entries[sid] for sid in self._state_index[state] if sid in self._entries]
+        else:
+            candidates = list(self._entries.values())
+
+        for entry in candidates:
+            if model and entry.get("model") != model:
+                continue
+            if keyword:
+                kw = keyword.lower()
+                task_text = entry.get("task", "").lower()
+                meta_text = json.dumps(entry.get("metadata", {})).lower()
+                if kw not in task_text and kw not in meta_text and kw not in entry.get("session_id", "").lower():
+                    continue
+            matched.append(dict(entry))
+            if len(matched) >= limit:
+                break
+
+        matched.sort(key=lambda x: x.get("updated_at", 0), reverse=True)
+        return matched
+
+    def remove(self, session_id: str) -> bool:
+        """Remove session checkpoint from index catalog."""
+        if session_id in self._entries:
+            entry = self._entries.pop(session_id)
+            state = entry.get("state")
+            if state in self._state_index and session_id in self._state_index[state]:
+                self._state_index[state].remove(session_id)
+            return True
+        return False
+
+    def rebuild_from_directory(self, sessions_dir: str) -> int:
+        """Scan directory and index all valid session checkpoint JSON files."""
+        if not os.path.isdir(sessions_dir):
+            return 0
+        indexed_count = 0
+        for name in os.listdir(sessions_dir):
+            if not name.endswith(".json") or name == "index.json":
+                continue
+            fpath = os.path.join(sessions_dir, name)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                sid = data.get("session_id", name[:-5])
+                self.index_checkpoint(
+                    session_id=sid,
+                    state=data.get("state", "UNKNOWN"),
+                    model=data.get("model", ""),
+                    task=data.get("task", ""),
+                    turns_count=len(data.get("turns", [])),
+                    file_path=fpath,
+                )
+                indexed_count += 1
+            except Exception:
+                continue
+        return indexed_count
+
+    def prune(
+        self,
+        max_entries: int = 50,
+        max_age_seconds: float = 86400.0,
+        current_time: Optional[float] = None,
+    ) -> int:
+        """Prune stale or excess entries from index catalog."""
+        now = current_time if current_time is not None else time.time()
+        pruned = 0
+
+        for sid in list(self._entries.keys()):
+            if (now - self._entries[sid]["updated_at"]) > max_age_seconds:
+                self.remove(sid)
+                pruned += 1
+
+        if len(self._entries) > max_entries:
+            sorted_sids = sorted(self._entries.keys(), key=lambda k: self._entries[k]["updated_at"])
+            excess = len(self._entries) - max_entries
+            for sid in sorted_sids[:excess]:
+                self.remove(sid)
+                pruned += 1
+
+        return pruned
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregate checkpoint index telemetry metrics."""
+        return {
+            "indexed_checkpoints": len(self._entries),
+            "indexed_states": len(self._state_index),
+            "index_writes": self._index_writes,
+            "index_queries": self._index_queries,
+        }
+
+
+_DEFAULT_SESSION_CHECKPOINT_INDEX = SessionCheckpointIndex()
+
+
+def get_default_checkpoint_index() -> SessionCheckpointIndex:
+    """Return default singleton session checkpoint index instance."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX
+
+
+def register_checkpoint_index(
+    session_id: str,
+    state: str,
+    model: str,
+    task: str,
+    turns_count: int,
+    file_path: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    timestamp: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Record session checkpoint in global checkpoint index."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX.index_checkpoint(
+        session_id=session_id,
+        state=state,
+        model=model,
+        task=task,
+        turns_count=turns_count,
+        file_path=file_path,
+        metadata=metadata,
+        timestamp=timestamp,
+    )
+
+
+def get_checkpoint_index_entry(session_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve checkpoint index entry for session."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX.get_entry(session_id)
+
+
+def query_checkpoint_index(
+    state: Optional[str] = None,
+    model: Optional[str] = None,
+    keyword: Optional[str] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Query global checkpoint index with filtering criteria."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX.query(
+        state=state,
+        model=model,
+        keyword=keyword,
+        limit=limit,
+    )
+
+
+def remove_checkpoint_index_entry(session_id: str) -> bool:
+    """Remove session checkpoint entry from global index."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX.remove(session_id)
+
+
+def rebuild_checkpoint_index(sessions_dir: str) -> int:
+    """Rebuild global checkpoint index from directory scans."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX.rebuild_from_directory(sessions_dir)
+
+
+def prune_checkpoint_index(
+    max_entries: int = 50,
+    max_age_seconds: float = 86400.0,
+    current_time: Optional[float] = None,
+) -> int:
+    """Prune stale entries from global checkpoint index."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX.prune(
+        max_entries=max_entries,
+        max_age_seconds=max_age_seconds,
+        current_time=current_time,
+    )
+
+
+def reset_checkpoint_index() -> None:
+    """Reset global checkpoint index state."""
+    _DEFAULT_SESSION_CHECKPOINT_INDEX.reset()
 
 
 _CONTEXT_MARKERS = (

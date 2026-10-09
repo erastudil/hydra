@@ -4324,6 +4324,99 @@ def semantic_deduplication_contracts():
 
 
 @check
+def session_checkpoint_index_contracts():
+    from hydra_cli.agent import (
+        SessionCheckpointIndex,
+        get_default_checkpoint_index,
+        register_checkpoint_index,
+        get_checkpoint_index_entry,
+        query_checkpoint_index,
+        remove_checkpoint_index_entry,
+        rebuild_checkpoint_index,
+        prune_checkpoint_index,
+        reset_checkpoint_index,
+    )
+
+    reset_checkpoint_index()
+
+    # 1. Registration and query
+    rec = register_checkpoint_index(
+        session_id="sess-alpha-001",
+        state="RUNNING",
+        model="claude-3-5-sonnet",
+        task="optimize context indexing",
+        turns_count=4,
+        file_path="/tmp/sessions/sess-alpha-001.json",
+        metadata={"priority": "high"},
+    )
+    assert rec["session_id"] == "sess-alpha-001"
+    assert rec["state"] == "RUNNING"
+
+    entry = get_checkpoint_index_entry("sess-alpha-001")
+    assert entry is not None
+    assert entry["turns_count"] == 4
+
+    results = query_checkpoint_index(state="RUNNING")
+    assert len(results) == 1
+    assert results[0]["session_id"] == "sess-alpha-001"
+
+    # Query with keyword match
+    results_kw = query_checkpoint_index(keyword="optimize")
+    assert len(results_kw) == 1
+    assert results_kw[0]["session_id"] == "sess-alpha-001"
+
+    # Query with non-matching filter
+    assert len(query_checkpoint_index(model="gpt-4o")) == 0
+
+    # 2. State transition indexing
+    register_checkpoint_index(
+        session_id="sess-alpha-001",
+        state="COMPLETED",
+        model="claude-3-5-sonnet",
+        task="optimize context indexing",
+        turns_count=6,
+        file_path="/tmp/sessions/sess-alpha-001.json",
+    )
+    assert len(query_checkpoint_index(state="RUNNING")) == 0
+    assert len(query_checkpoint_index(state="COMPLETED")) == 1
+
+    # 3. Directory rebuilding
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        for idx in range(3):
+            file_name = f"sess_mock_{idx}.json"
+            data = {
+                "session_id": f"sess-{idx}",
+                "state": "IDLE",
+                "model": "qwen2.5-coder",
+                "task": f"kaizen task {idx}",
+                "turns": [{"role": "user", "content": "hi"}],
+            }
+            with open(os.path.join(tmp_dir, file_name), "w", encoding="utf-8") as f:
+                json.dump(data, f)
+
+        idx_inst = SessionCheckpointIndex()
+        rebuilt = idx_inst.rebuild_from_directory(tmp_dir)
+        assert rebuilt == 3
+        q_rebuilt = idx_inst.query(state="IDLE")
+        assert len(q_rebuilt) == 3
+
+        # 4. Pruning
+        idx_inst.prune(max_entries=2)
+        assert len(idx_inst.query()) == 2
+
+    # 5. Removal and metrics
+    assert remove_checkpoint_index_entry("sess-alpha-001") is True
+    assert get_checkpoint_index_entry("sess-alpha-001") is None
+
+    met = get_default_checkpoint_index().get_metrics()
+    assert met["indexed_checkpoints"] == 0
+    assert met["index_writes"] >= 2
+    assert met["index_queries"] >= 1
+
+    reset_checkpoint_index()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
