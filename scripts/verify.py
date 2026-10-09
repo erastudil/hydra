@@ -4771,6 +4771,74 @@ def token_metering_contracts():
 
 
 @check
+def preamble_masking_contracts():
+    from hydra_cli.agent import (
+        PreambleMasker,
+        get_default_preamble_masker,
+        strip_discursive_preamble,
+        mask_message_preamble,
+        mask_messages_preamble,
+        reset_preamble_masker,
+    )
+
+    reset_preamble_masker()
+
+    # 1. Direct preamble stripping
+    clean1, mod1 = strip_discursive_preamble("Sure! Here is the revised code for your project.")
+    assert mod1 is True
+    assert clean1.startswith("Here is the revised code") or clean1.startswith("The revised code")
+
+    clean2, mod2 = strip_discursive_preamble("Certainly! Running the test suite.")
+    assert mod2 is True
+    assert clean2 == "Running the test suite."
+
+    # Progen syntax preservation
+    progen_text = "status : build passing."
+    clean_p, mod_p = strip_discursive_preamble(progen_text)
+    assert mod_p is False
+    assert clean_p == progen_text
+
+    # Code block preservation
+    code_text = "```python\nprint(1)\n```"
+    clean_c, mod_c = strip_discursive_preamble(code_text)
+    assert mod_c is False
+    assert clean_c == code_text
+
+    # 2. Message masking
+    msg1 = {"role": "assistant", "content": "Okay, I can help with that. Creating file at config.yaml"}
+    masked1 = mask_message_preamble(msg1)
+    assert "Creating file at config.yaml" in masked1["content"]
+    assert not masked1["content"].startswith("Okay")
+
+    # System message protected
+    sys_msg = {"role": "system", "content": "Certainly you are the Hydra engine."}
+    assert mask_message_preamble(sys_msg)["content"] == sys_msg["content"]
+
+    # Custom replacement marker
+    masked_custom = mask_message_preamble(msg1, mask_replacement="[PREAMBLE]")
+    assert masked_custom["content"].startswith("[PREAMBLE]")
+
+    # 3. Message sequence masking
+    msgs = [
+        {"role": "system", "content": "You are Hydra root."},
+        {"role": "assistant", "content": "Certainly! Executing verify.py now."},
+        {"role": "user", "content": "Sure, check exit code."},
+    ]
+    res_msgs = mask_messages_preamble(msgs)
+    assert len(res_msgs) == 3
+    assert res_msgs[1]["content"] == "Executing verify.py now."
+
+    # 4. Telemetry metrics
+    met = get_default_preamble_masker().get_metrics()
+    assert met["preambles_detected"] >= 2
+    assert met["preambles_masked"] >= 2
+    assert met["chars_saved"] > 0
+    assert met["turns_processed"] >= 4
+
+    reset_preamble_masker()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

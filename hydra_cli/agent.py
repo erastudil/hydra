@@ -2189,6 +2189,137 @@ def reset_token_meter() -> None:
     _DEFAULT_TOKEN_METER.reset()
 
 
+_DISCURSIVE_PREAMBLE_PATTERNS = [
+    re.compile(r"^(?:sure|certainly|absolutely|okay|ok|i will|i can help|i would be happy to|i'd be glad to)[\s\.,!:]+", re.IGNORECASE),
+    re.compile(r"^(?:here is|here are|below is|the following is|as requested)[\s\.,!:]+", re.IGNORECASE),
+    re.compile(r"^(?:let me|allow me to|i understand|based on your request|in response to)[\s\.,!:]+", re.IGNORECASE),
+    re.compile(r"^(?:no problem|you got it|of course)[\s\.,!:]+", re.IGNORECASE),
+]
+
+
+def strip_discursive_preamble(text: str) -> Tuple[str, bool]:
+    """Strip leading conversational preamble filler from text while preserving substantive content."""
+    if not text or not isinstance(text, str):
+        return text, False
+
+    stripped = text.strip()
+    if ":" in stripped and not stripped.lower().startswith(("sure", "certainly", "okay", "here", "let me", "i can")):
+        parts = stripped.split(":", 1)
+        if parts[0].strip().replace(" ", "_").isalnum():
+            return text, False
+
+    if stripped.startswith("```") or stripped.startswith("#"):
+        return text, False
+
+    modified = False
+    working = stripped
+    for pat in _DISCURSIVE_PREAMBLE_PATTERNS:
+        match = pat.match(working)
+        if match:
+            working = working[match.end():].lstrip()
+            modified = True
+            break
+
+    if not working:
+        return text, False
+
+    if modified and working:
+        working = working[0].upper() + working[1:]
+
+    return working, modified
+
+
+class PreambleMasker:
+    """Masks or strips discursive and conversational preamble from context messages."""
+
+    def __init__(self, mask_replacement: Optional[str] = None) -> None:
+        self.mask_replacement = mask_replacement
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset preamble masker telemetry counters."""
+        self._preambles_detected: int = 0
+        self._preambles_masked: int = 0
+        self._chars_saved: int = 0
+        self._turns_processed: int = 0
+
+    def mask_text(self, text: str) -> str:
+        """Mask or strip leading conversational preamble from text string."""
+        if not text:
+            return ""
+        cleaned, modified = strip_discursive_preamble(text)
+        if modified:
+            self._preambles_detected += 1
+            self._preambles_masked += 1
+            saved = len(text) - len(cleaned)
+            if self.mask_replacement:
+                res = f"{self.mask_replacement} {cleaned}"
+                self._chars_saved += max(0, len(text) - len(res))
+                return res
+            else:
+                self._chars_saved += max(0, saved)
+                return cleaned
+        return text
+
+    def mask_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Mask leading conversational preamble from message dictionary."""
+        self._turns_processed += 1
+        role = message.get("role", "")
+        if role in ("system", "instruction"):
+            return dict(message)
+
+        content = message.get("content")
+        if not isinstance(content, str) or not content:
+            return dict(message)
+
+        masked_content = self.mask_text(content)
+        new_msg = dict(message)
+        new_msg["content"] = masked_content
+        return new_msg
+
+    def mask_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Mask leading discursive preambles across message sequence."""
+        return [self.mask_message(m) for m in messages]
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return preamble masking telemetry counters."""
+        return {
+            "preambles_detected": self._preambles_detected,
+            "preambles_masked": self._preambles_masked,
+            "chars_saved": self._chars_saved,
+            "turns_processed": self._turns_processed,
+        }
+
+
+_DEFAULT_PREAMBLE_MASKER = PreambleMasker()
+
+
+def get_default_preamble_masker() -> PreambleMasker:
+    """Return default singleton preamble masker."""
+    return _DEFAULT_PREAMBLE_MASKER
+
+
+def mask_message_preamble(message: Dict[str, Any], mask_replacement: Optional[str] = None) -> Dict[str, Any]:
+    """Mask leading preamble in single message using default or custom replacement."""
+    if mask_replacement is not None:
+        masker = PreambleMasker(mask_replacement=mask_replacement)
+        return masker.mask_message(message)
+    return _DEFAULT_PREAMBLE_MASKER.mask_message(message)
+
+
+def mask_messages_preamble(messages: List[Dict[str, Any]], mask_replacement: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Mask leading preambles across message sequence."""
+    if mask_replacement is not None:
+        masker = PreambleMasker(mask_replacement=mask_replacement)
+        return masker.mask_messages(messages)
+    return _DEFAULT_PREAMBLE_MASKER.mask_messages(messages)
+
+
+def reset_preamble_masker() -> None:
+    """Reset global preamble masker state."""
+    _DEFAULT_PREAMBLE_MASKER.reset()
+
+
 _CONTEXT_MARKERS = (
     "context window",
     "context length",
