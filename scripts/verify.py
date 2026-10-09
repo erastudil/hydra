@@ -216,6 +216,28 @@ def manifests():
 
 
 @check
+def release_archive_urls():
+    """Install docs may only name release assets that GitHub actually serves."""
+    import re
+
+    urls = []
+    for name in ("README.md", "GUIDE.md"):
+        text = open(os.path.join(REPO, name), encoding="utf-8").read()
+        urls.extend(re.findall(r"https://github\.com/erastudil/hydra/releases/download/\S+", text))
+    urls = [url.rstrip(").,") for url in urls]
+    assert urls, "README.md and GUIDE.md name no release assets"
+    for url in dict.fromkeys(urls):
+        request = urllib.request.Request(url, method="HEAD")
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                assert response.status == 200, f"{url} -> {response.status}"
+        except urllib.error.HTTPError as exc:
+            raise AssertionError(f"{url} -> {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise Skip(f"release host unreachable: {exc.reason}") from exc
+
+
+@check
 def cli_processes():
     cases = [
         (["--help"], 0, "USAGE:", ""),
