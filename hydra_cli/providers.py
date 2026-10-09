@@ -3281,6 +3281,129 @@ def reset_cache_breakage_detector() -> None:
     _DEFAULT_CACHE_BREAKAGE_DETECTOR.reset()
 
 
+class CacheEfficiencyReporter:
+    """Consolidate token cache telemetry, financial savings, and prefix stability into unified reports."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal report caches and state counters."""
+        self._last_report: Optional[Dict[str, Any]] = None
+
+    def generate_report(self) -> Dict[str, Any]:
+        """Aggregate telemetry across cache hits, savings, KV reuse, warmup, tools, and breakage."""
+        telemetry = _DEFAULT_CACHE_HIT_TELEMETRY.get_summary()
+        savings = _DEFAULT_CACHE_SAVINGS_AUDITOR.get_summary()
+        kv_reuse = _DEFAULT_KV_REUSE_MANAGER.get_metrics()
+        warm_entries = _DEFAULT_CACHE_WARMUP_CONTROLLER.list_warm()
+        tools_stats = _DEFAULT_TOOL_CACHE_MANAGER.get_stats()
+        breakage = _DEFAULT_CACHE_BREAKAGE_DETECTOR.get_metrics()
+
+        total_requests = telemetry.get("total_requests", 0)
+        cache_hits = telemetry.get("cache_hit_requests", 0)
+        hit_rate_pct = round(telemetry.get("request_hit_ratio", 0.0) * 100.0, 2)
+
+        total_prompt_tokens = telemetry.get("total_prompt_tokens", 0)
+        cached_tokens = telemetry.get("total_cached_tokens", 0)
+        token_hit_ratio = round(telemetry.get("overall_hit_ratio", 0.0) * 100.0, 2)
+
+        gross_cost = savings.get("gross_cost_usd", 0.0)
+        net_cost = savings.get("net_cost_usd", 0.0)
+        saved_usd = savings.get("saved_cost_usd", 0.0)
+        savings_pct = savings.get("overall_savings_pct", 0.0)
+
+        report = {
+            "summary": {
+                "total_requests": total_requests,
+                "cache_hits": cache_hits,
+                "hit_rate_pct": hit_rate_pct,
+                "total_prompt_tokens": total_prompt_tokens,
+                "cached_tokens": cached_tokens,
+                "token_hit_ratio_pct": token_hit_ratio,
+                "cost_without_cache_usd": gross_cost,
+                "cost_with_cache_usd": net_cost,
+                "saved_usd": saved_usd,
+                "savings_pct": savings_pct,
+                "active_warm_leases": len(warm_entries),
+                "registered_tool_sets": tools_stats.get("registered_sets", 0),
+                "breakage_events": breakage.get("breakage_events", 0),
+                "clean_continuations": breakage.get("clean_continuations", 0),
+            },
+            "subsystems": {
+                "telemetry": telemetry,
+                "savings": savings,
+                "kv_reuse": kv_reuse,
+                "warm_leases": warm_entries,
+                "tools": tools_stats,
+                "breakage": breakage,
+            },
+        }
+        self._last_report = report
+        return report
+
+    def format_progen(self, report: Optional[Dict[str, Any]] = None) -> str:
+        """Render efficiency report into deterministic Progen syntax."""
+        data = report if report is not None else self.generate_report()
+        s = data.get("summary", {})
+
+        lines = [
+            "report scope : prompt cache efficiency summary.",
+            "",
+            f"total requests : {s.get('total_requests', 0)}.",
+            "",
+            f"cache hits : {s.get('cache_hits', 0)}.",
+            "",
+            f"hit rate : {s.get('hit_rate_pct', 0.0)}%.",
+            "",
+            f"cached tokens : {s.get('cached_tokens', 0)}.",
+            "",
+            f"token hit ratio : {s.get('token_hit_ratio_pct', 0.0)}%.",
+            "",
+            f"cost without cache : {s.get('cost_without_cache_usd', 0.0):.6f} USD.",
+            "",
+            f"cost with cache : {s.get('cost_with_cache_usd', 0.0):.6f} USD.",
+            "",
+            f"total savings : {s.get('saved_usd', 0.0):.6f} USD.",
+            "",
+            f"savings percentage : {s.get('savings_pct', 0.0):.2f}%.",
+            "",
+            f"active warm leases : {s.get('active_warm_leases', 0)}.",
+            "",
+            f"registered tool sets : {s.get('registered_tool_sets', 0)}.",
+            "",
+            f"breakage events : {s.get('breakage_events', 0)}.",
+            "",
+            f"clean continuations : {s.get('clean_continuations', 0)}.",
+        ]
+        return chr(10).join(lines)
+
+
+_DEFAULT_CACHE_EFFICIENCY_REPORTER = CacheEfficiencyReporter()
+
+
+def get_default_cache_efficiency_reporter() -> CacheEfficiencyReporter:
+    """Return default singleton cache efficiency reporter instance."""
+    return _DEFAULT_CACHE_EFFICIENCY_REPORTER
+
+
+def generate_cache_efficiency_report(as_progen: bool = False) -> Any:
+    """Generate consolidated prompt cache efficiency report across all cache subsystems."""
+    if as_progen:
+        return _DEFAULT_CACHE_EFFICIENCY_REPORTER.format_progen()
+    return _DEFAULT_CACHE_EFFICIENCY_REPORTER.generate_report()
+
+
+def format_cache_efficiency_progen(report: Optional[Dict[str, Any]] = None) -> str:
+    """Format cache efficiency report data into Progen syntax."""
+    return _DEFAULT_CACHE_EFFICIENCY_REPORTER.format_progen(report=report)
+
+
+def reset_cache_efficiency_reporter() -> None:
+    """Reset global cache efficiency reporter state."""
+    _DEFAULT_CACHE_EFFICIENCY_REPORTER.reset()
+
+
 def adapt_model_for_url(url: str, model: str) -> str:
     """Translate provider namespaces. Unknown ids pass through unchanged."""
     parsed = urlparse(url)

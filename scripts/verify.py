@@ -4091,6 +4091,50 @@ def cache_breakage_contracts():
 
 
 @check
+def cache_efficiency_report_contracts():
+    from hydra_cli.providers import (
+        CacheEfficiencyReporter,
+        generate_cache_efficiency_report,
+        format_cache_efficiency_progen,
+        reset_cache_efficiency_reporter,
+        get_default_cache_efficiency_reporter,
+    )
+
+    reset_cache_efficiency_reporter()
+
+    # 1. Generate structured report dictionary
+    rep = generate_cache_efficiency_report(as_progen=False)
+    assert isinstance(rep, dict)
+    assert "summary" in rep
+    assert "subsystems" in rep
+    summary = rep["summary"]
+    assert "total_requests" in summary
+    assert "cache_hits" in summary
+    assert "hit_rate_pct" in summary
+    assert "cost_without_cache_usd" in summary
+    assert "cost_with_cache_usd" in summary
+    assert "saved_usd" in summary
+    assert "active_warm_leases" in summary
+    assert "registered_tool_sets" in summary
+    assert "breakage_events" in summary
+    assert "clean_continuations" in summary
+
+    # 2. Render report in Progen syntax
+    progen_text = generate_cache_efficiency_report(as_progen=True)
+    assert "report scope : prompt cache efficiency summary." in progen_text
+    assert "total requests :" in progen_text
+    assert "hit rate :" in progen_text
+    assert "total savings :" in progen_text
+
+    # 3. Direct format check
+    progen_direct = format_cache_efficiency_progen(rep)
+    assert progen_direct == progen_text
+
+    # 4. Reporter reset
+    reset_cache_efficiency_reporter()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
