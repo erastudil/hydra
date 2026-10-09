@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and len(names) == 15
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and len(names) == 16
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -2351,6 +2351,67 @@ def ast_complexity_meter_contracts():
         assert not f_res["isError"]
         assert f_res["total_functions"] == 2
         assert f_res["max_complexity"] == 6
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+@check
+def ast_type_annotations_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstTypeAnnotationLinter, NativeToolRegistry
+
+    linter = AstTypeAnnotationLinter()
+
+    # Mixed typed and untyped functions
+    sample = (
+        "class Service:\n"
+        "    def __init__(self, endpoint: str, retries):\n"
+        "        pass\n\n"
+        "    def call(self, payload: dict) -> dict:\n"
+        "        return {}\n\n"
+        "def compute(a, b: int) -> int:\n"
+        "    return a + b\n"
+    )
+
+    res = linter.analyze_source(sample)
+    assert not res["isError"]
+    assert res["total_functions"] == 3
+    assert res["total_arguments"] == 5
+    assert res["annotated_arguments"] == 3
+    assert res["annotated_returns"] == 2
+    assert res["missing_count"] == 3
+    assert res["clean"] is False
+
+    # Fully typed function
+    clean_sample = (
+        "def full_typed(x: int, y: float) -> str:\n"
+        "    return str(x + y)\n"
+    )
+    clean_res = linter.analyze_source(clean_sample)
+    assert not clean_res["isError"]
+    assert clean_res["total_functions"] == 1
+    assert clean_res["overall_coverage_pct"] == 100.0
+    assert clean_res["missing_count"] == 0
+    assert clean_res["clean"] is True
+
+    # NativeToolRegistry integration
+    reg = NativeToolRegistry()
+    assert reg.has_tool("check_type_annotations")
+    assert reg.has_tool("lint_type_annotations")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "check_type_annotations" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(clean_sample)
+        tmp_file = f.name
+    try:
+        f_res = reg.dispatch("check_type_annotations", {"path": tmp_file})
+        assert not f_res["isError"]
+        assert f_res["clean"] is True
+        assert f_res["overall_coverage_pct"] == 100.0
     finally:
         if os.path.exists(tmp_file):
             os.remove(tmp_file)

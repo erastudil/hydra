@@ -458,6 +458,150 @@ class AstComplexityMeter:
 
 
 
+class AstTypeAnnotationLinter:
+    """AST visitor measuring type annotation coverage and locating untyped parameters and returns."""
+
+    def __init__(self, min_coverage: float = 0.0):
+        self.min_coverage = min_coverage
+
+    def analyze_source(self, source: str) -> Dict[str, Any]:
+        """Analyze Python source code and return type annotation coverage metrics and missing items."""
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        functions: List[Tuple[str, ast.AST, bool, bool]] = []
+
+        def find_functions(node: ast.AST, prefix: str = "", in_class: bool = False) -> None:
+            for child in getattr(node, "body", []):
+                if isinstance(child, ast.ClassDef):
+                    new_prefix = f"{prefix}{child.name}."
+                    find_functions(child, prefix=new_prefix, in_class=True)
+                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    is_classmethod = False
+                    for dec in child.decorator_list:
+                        if isinstance(dec, ast.Name) and dec.id in ("classmethod", "staticmethod"):
+                            if dec.id == "classmethod":
+                                is_classmethod = True
+                        elif isinstance(dec, ast.Attribute) and dec.attr in ("classmethod", "staticmethod"):
+                            if dec.attr == "classmethod":
+                                is_classmethod = True
+
+                    fn_name = f"{prefix}{child.name}"
+                    functions.append((fn_name, child, in_class, is_classmethod))
+                    nested_prefix = f"{prefix}{child.name}."
+                    find_functions(child, prefix=nested_prefix, in_class=False)
+
+        find_functions(tree)
+
+        total_args = 0
+        annotated_args = 0
+        total_returns = len(functions)
+        annotated_returns = 0
+        missing: List[Dict[str, Any]] = []
+
+        for fn_name, fn_node, in_class, is_classmethod in functions:
+            lineno = fn_node.lineno
+
+            # Return type check
+            if fn_node.returns is not None:
+                annotated_returns += 1
+            else:
+                missing.append({
+                    "function": fn_name,
+                    "lineno": lineno,
+                    "kind": "return",
+                    "name": "return",
+                    "message": f"Function '{fn_name}' missing return type annotation.",
+                })
+
+            # Arguments check
+            args_obj = fn_node.args
+            all_pos = list(args_obj.posonlyargs) + list(args_obj.args)
+
+            # Skip self/cls for first parameter in class methods
+            for idx, arg in enumerate(all_pos):
+                if in_class and idx == 0 and arg.arg in ("self", "cls"):
+                    continue
+
+                total_args += 1
+                if arg.annotation is not None:
+                    annotated_args += 1
+                else:
+                    missing.append({
+                        "function": fn_name,
+                        "lineno": getattr(arg, "lineno", lineno),
+                        "kind": "argument",
+                        "name": arg.arg,
+                        "message": f"Argument '{arg.arg}' in function '{fn_name}' missing type annotation.",
+                    })
+
+            for arg in args_obj.kwonlyargs:
+                total_args += 1
+                if arg.annotation is not None:
+                    annotated_args += 1
+                else:
+                    missing.append({
+                        "function": fn_name,
+                        "lineno": getattr(arg, "lineno", lineno),
+                        "kind": "argument",
+                        "name": arg.arg,
+                        "message": f"Keyword-only argument '{arg.arg}' in function '{fn_name}' missing type annotation.",
+                    })
+
+            if args_obj.vararg:
+                total_args += 1
+                if args_obj.vararg.annotation is not None:
+                    annotated_args += 1
+                else:
+                    missing.append({
+                        "function": fn_name,
+                        "lineno": getattr(args_obj.vararg, "lineno", lineno),
+                        "kind": "vararg",
+                        "name": f"*{args_obj.vararg.arg}",
+                        "message": f"Vararg '*{args_obj.vararg.arg}' in function '{fn_name}' missing type annotation.",
+                    })
+
+            if args_obj.kwarg:
+                total_args += 1
+                if args_obj.kwarg.annotation is not None:
+                    annotated_args += 1
+                else:
+                    missing.append({
+                        "function": fn_name,
+                        "lineno": getattr(args_obj.kwarg, "lineno", lineno),
+                        "kind": "kwarg",
+                        "name": f"**{args_obj.kwarg.arg}",
+                        "message": f"Kwarg '**{args_obj.kwarg.arg}' in function '{fn_name}' missing type annotation.",
+                    })
+
+        arg_cov = round((annotated_args / total_args) * 100, 1) if total_args > 0 else 100.0
+        ret_cov = round((annotated_returns / total_returns) * 100, 1) if total_returns > 0 else 100.0
+        total_items = total_args + total_returns
+        annotated_items = annotated_args + annotated_returns
+        overall_cov = round((annotated_items / total_items) * 100, 1) if total_items > 0 else 100.0
+
+        missing.sort(key=lambda m: (m["lineno"], m["function"]))
+        meets_threshold = overall_cov >= self.min_coverage
+
+        return {
+            "isError": False,
+            "total_functions": len(functions),
+            "total_arguments": total_args,
+            "annotated_arguments": annotated_args,
+            "annotated_returns": annotated_returns,
+            "argument_coverage_pct": arg_cov,
+            "return_coverage_pct": ret_cov,
+            "overall_coverage_pct": overall_cov,
+            "missing_count": len(missing),
+            "missing": missing,
+            "meets_threshold": meets_threshold,
+            "clean": len(missing) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -512,6 +656,8 @@ class NativeToolRegistry:
             "detect_stubs": self.detect_p013,
             "measure_complexity": self.measure_complexity,
             "complexity_meter": self.measure_complexity,
+            "check_type_annotations": self.check_type_annotations,
+            "lint_type_annotations": self.check_type_annotations,
         }
 
     @property
@@ -1080,6 +1226,96 @@ class NativeToolRegistry:
             "file_metrics": file_metrics,
         }
 
+    def check_type_annotations(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        min_coverage: float = 0.0,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate type annotation coverage across functions, methods, files, or directories.
+        Identifies untyped arguments and missing return types.
+        """
+        linter = AstTypeAnnotationLinter(min_coverage=min_coverage)
+
+        if source is not None:
+            return linter.analyze_source(source)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = linter.analyze_source(content)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        total_fns = 0
+        total_args = 0
+        annotated_args = 0
+        annotated_returns = 0
+        all_missing = []
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = linter.analyze_source(file_code)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                file_metrics[rel_p] = {
+                    "functions": rep["total_functions"],
+                    "overall_coverage_pct": rep["overall_coverage_pct"],
+                    "missing_count": rep["missing_count"],
+                }
+                total_fns += rep["total_functions"]
+                total_args += rep["total_arguments"]
+                annotated_args += rep["annotated_arguments"]
+                annotated_returns += rep["annotated_returns"]
+                for item in rep["missing"]:
+                    item_copy = dict(item)
+                    item_copy["file"] = rel_p
+                    all_missing.append(item_copy)
+
+        total_items = total_args + total_fns
+        annotated_items = annotated_args + annotated_returns
+        overall_cov = round((annotated_items / total_items) * 100, 1) if total_items > 0 else 100.0
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_functions": total_fns,
+            "total_arguments": total_args,
+            "annotated_arguments": annotated_args,
+            "annotated_returns": annotated_returns,
+            "overall_coverage_pct": overall_cov,
+            "missing_count": len(all_missing),
+            "missing": all_missing,
+            "file_metrics": file_metrics,
+            "meets_threshold": overall_cov >= min_coverage,
+            "clean": len(all_missing) == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -1357,6 +1593,30 @@ class NativeToolRegistry:
                             "threshold": {
                                 "type": "integer",
                                 "description": "Cyclomatic complexity threshold for flagging high-complexity functions. Default 10.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "check_type_annotations",
+                    "description": "Evaluate type annotation coverage across functions, methods, files, or directories. Identifies untyped arguments and missing return types.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to analyze. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to analyze.",
+                            },
+                            "min_coverage": {
+                                "type": "number",
+                                "description": "Minimum type coverage percentage threshold. Default 0.0.",
                             },
                         },
                     },
