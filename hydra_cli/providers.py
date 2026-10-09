@@ -913,6 +913,7 @@ def attach_prefix_isolation(
         payload["_template_hash"] = isolated["template_hash"]
     if isolated.get("template_id"):
         payload["_template_id"] = isolated["template_id"]
+    payload["_cache_boundary"] = evaluate_cache_boundary(isolated["prefix_tokens"], provider_or_url=url)
 
 
 
@@ -1324,6 +1325,171 @@ def attach_template_metadata(
 ) -> List[Dict[str, Any]]:
     """Annotate messages list with template identifier and template hash metadata."""
     return _DEFAULT_TEMPLATE_HASHER.attach_metadata(messages, template_id, template=template)
+
+
+class CacheBoundaryAligner:
+    """Align token boundaries and evaluate caching eligibility across model providers."""
+
+    DEFAULT_PROFILES: Dict[str, Dict[str, int]] = {
+        "anthropic": {"min_tokens": 1024, "block_size": 64},
+        "openai": {"min_tokens": 1024, "block_size": 128},
+        "deepseek": {"min_tokens": 64, "block_size": 64},
+        "openrouter": {"min_tokens": 1024, "block_size": 64},
+        "generic": {"min_tokens": 64, "block_size": 32},
+    }
+
+    def __init__(self, custom_profiles: Optional[Dict[str, Dict[str, int]]] = None) -> None:
+        self.profiles = dict(self.DEFAULT_PROFILES)
+        if custom_profiles:
+            self.profiles.update(custom_profiles)
+
+    def get_profile(self, provider_or_url: Optional[str] = None) -> Dict[str, int]:
+        """Resolve provider caching profile from provider name or endpoint url."""
+        if not provider_or_url:
+            return dict(self.profiles["generic"])
+
+        target = provider_or_url.lower()
+        if "://" in target:
+            target = (urlparse(target).hostname or target).lower()
+
+        for key in ("anthropic", "openai", "deepseek", "openrouter"):
+            if key in target:
+                return dict(self.profiles[key])
+
+        return dict(self.profiles["generic"])
+
+    def align_token_count(self, token_count: int, block_size: int = 32, mode: str = "floor") -> int:
+        """Align token count to nearest multiple of block size using specified rounding mode."""
+        if token_count <= 0 or block_size <= 0:
+            return 0
+        if mode == "ceil":
+            return ((token_count + block_size - 1) // block_size) * block_size
+        if mode == "nearest":
+            return int(round(token_count / block_size)) * block_size
+        return (token_count // block_size) * block_size
+
+    def evaluate_boundary(
+        self,
+        prefix_tokens: int,
+        provider_or_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Evaluate cache boundary alignment and eligibility for given token count."""
+        prof = self.get_profile(provider_or_url)
+        min_tokens = prof["min_tokens"]
+        block_size = prof["block_size"]
+
+        provider_name = "generic"
+        if provider_or_url:
+            raw = provider_or_url.lower()
+            for key in ("anthropic", "openai", "deepseek", "openrouter"):
+                if key in raw:
+                    provider_name = key
+                    break
+
+        aligned = self.align_token_count(prefix_tokens, block_size=block_size, mode="floor")
+        remainder = prefix_tokens % block_size if block_size > 0 else 0
+        padding = (block_size - remainder) % block_size if block_size > 0 else 0
+        is_eligible = prefix_tokens >= min_tokens
+
+        return {
+            "provider": provider_name,
+            "prefix_tokens": prefix_tokens,
+            "min_tokens": min_tokens,
+            "block_size": block_size,
+            "is_eligible": is_eligible,
+            "aligned_tokens": aligned,
+            "remainder_tokens": remainder,
+            "padding_needed": padding,
+            "wasted_tokens": remainder,
+            "blocks_count": aligned // block_size if block_size > 0 else 0,
+        }
+
+    def align_messages_boundary(
+        self,
+        messages: List[Dict[str, Any]],
+        provider_or_url: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Find optimal message boundary index maximizing cached blocks for provider."""
+        if not messages:
+            return {
+                "optimal_index": -1,
+                "prefix_tokens": 0,
+                "aligned_tokens": 0,
+                "is_eligible": False,
+                "messages": [],
+            }
+
+        prof = self.get_profile(provider_or_url)
+        min_tokens = prof["min_tokens"]
+
+        cum_tokens = 0
+        turn_counts = []
+        for m in messages:
+            content = str(m.get("content", ""))
+            est = max(1, len(content) // 4)
+            cum_tokens += est
+            turn_counts.append(cum_tokens)
+
+        prefix_indices = [
+            idx for idx, m in enumerate(messages)
+            if m.get("role") in ("system", "developer")
+        ]
+        if not prefix_indices:
+            prefix_indices = [0]
+
+        best_idx = prefix_indices[0]
+        for idx in prefix_indices:
+            if turn_counts[idx] >= min_tokens:
+                best_idx = idx
+
+        eval_res = self.evaluate_boundary(turn_counts[best_idx], provider_or_url=provider_or_url)
+
+        output_msgs = []
+        for idx, m in enumerate(messages):
+            copy_m = dict(m)
+            if idx == best_idx and eval_res["is_eligible"]:
+                copy_m["cache_control"] = {"type": "ephemeral"}
+            output_msgs.append(copy_m)
+
+        return {
+            "optimal_index": best_idx,
+            "prefix_tokens": turn_counts[best_idx],
+            "aligned_tokens": eval_res["aligned_tokens"],
+            "is_eligible": eval_res["is_eligible"],
+            "boundary_info": eval_res,
+            "messages": output_msgs,
+        }
+
+
+_DEFAULT_CACHE_BOUNDARY_ALIGNER = CacheBoundaryAligner()
+
+
+def get_default_cache_boundary_aligner() -> CacheBoundaryAligner:
+    """Return default singleton cache boundary aligner instance."""
+    return _DEFAULT_CACHE_BOUNDARY_ALIGNER
+
+
+def align_cache_tokens(token_count: int, block_size: int = 64, mode: str = "floor") -> int:
+    """Align token count to block boundary using specified rounding mode."""
+    return _DEFAULT_CACHE_BOUNDARY_ALIGNER.align_token_count(token_count, block_size=block_size, mode=mode)
+
+
+def evaluate_cache_boundary(prefix_tokens: int, provider_or_url: Optional[str] = None) -> Dict[str, Any]:
+    """Evaluate cache boundary alignment metrics for given prefix token count."""
+    return _DEFAULT_CACHE_BOUNDARY_ALIGNER.evaluate_boundary(prefix_tokens, provider_or_url=provider_or_url)
+
+
+def get_cache_boundary_profile(provider_or_url: Optional[str] = None) -> Dict[str, int]:
+    """Retrieve boundary and caching profile for provider or endpoint url."""
+    return _DEFAULT_CACHE_BOUNDARY_ALIGNER.get_profile(provider_or_url)
+
+
+def align_cache_messages_boundary(
+    messages: List[Dict[str, Any]],
+    provider_or_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Determine optimal message boundary index for prompt cache placement."""
+    return _DEFAULT_CACHE_BOUNDARY_ALIGNER.align_messages_boundary(messages, provider_or_url=provider_or_url)
 
 
 def adapt_model_for_url(url: str, model: str) -> str:

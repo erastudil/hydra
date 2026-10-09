@@ -3536,6 +3536,56 @@ def template_hash_contracts():
 
 
 @check
+def boundary_align_contracts():
+    from hydra_cli.providers import (
+        CacheBoundaryAligner,
+        align_cache_tokens,
+        evaluate_cache_boundary,
+        get_cache_boundary_profile,
+        align_cache_messages_boundary,
+        attach_prefix_isolation,
+    )
+
+    # 1. Profile resolution across providers
+    assert get_cache_boundary_profile("anthropic") == {"min_tokens": 1024, "block_size": 64}
+    assert get_cache_boundary_profile("https://api.openai.com/v1/chat") == {"min_tokens": 1024, "block_size": 128}
+    assert get_cache_boundary_profile("deepseek-chat") == {"min_tokens": 64, "block_size": 64}
+    assert get_cache_boundary_profile("custom") == {"min_tokens": 64, "block_size": 32}
+
+    # 2. Token count alignment across rounding modes
+    assert align_cache_tokens(150, block_size=64, mode="floor") == 128
+    assert align_cache_tokens(150, block_size=64, mode="ceil") == 192
+    assert align_cache_tokens(150, block_size=64, mode="nearest") == 128
+
+    # 3. Boundary evaluation and eligibility metrics
+    ev1 = evaluate_cache_boundary(1100, provider_or_url="anthropic")
+    assert ev1["is_eligible"] is True
+    assert ev1["aligned_tokens"] == 1088
+    assert ev1["remainder_tokens"] == 12
+    assert ev1["padding_needed"] == 52
+
+    ev2 = evaluate_cache_boundary(500, provider_or_url="openai")
+    assert ev2["is_eligible"] is False
+    assert ev2["aligned_tokens"] == 384
+
+    # 4. Message alignment and optimal breakpoint detection
+    msgs = [
+        {"role": "system", "content": "x" * 4500},
+        {"role": "user", "content": "hello"},
+    ]
+    res = align_cache_messages_boundary(msgs, provider_or_url="anthropic")
+    assert res["is_eligible"] is True
+    assert res["optimal_index"] == 0
+    assert "cache_control" in res["messages"][0]
+
+    # 5. Integration in attach_prefix_isolation
+    payload = {"messages": [m.copy() for m in msgs]}
+    attach_prefix_isolation(payload, url="https://api.anthropic.com/v1/messages")
+    assert "_cache_boundary" in payload
+    assert payload["_cache_boundary"]["provider"] == "anthropic"
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
