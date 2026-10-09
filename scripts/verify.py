@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and len(names) == 24
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and len(names) == 25
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -2977,6 +2977,74 @@ def ast_function_length_contracts():
         assert f_res["clean"] is True
 
         alias_res = reg.dispatch("analyze_function_length", {"source": sample_short, "max_lines": 10})
+        assert not alias_res["isError"]
+        assert alias_res["clean"] is True
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+@check
+def ast_arg_count_guard_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstArgCountGuard, NativeToolRegistry
+
+    guard = AstArgCountGuard(max_args=3)
+
+    sample_code = (
+        "def clean_fn(a, b):\n"
+        "    return a + b\n\n"
+        "def excess_args_fn(a, b, c, d):\n"
+        "    return a + b + c + d\n\n"
+        "class Handler:\n"
+        "    def method(self, x, y):\n"
+        "        return x + y\n\n"
+        "    async def async_excess(self, a, b, c, d):\n"
+        "        return a\n"
+    )
+
+    res = guard.analyze_source(sample_code)
+    assert not res["isError"]
+    assert res["total_functions"] == 4
+    assert res["violations_count"] == 2
+    assert res["clean"] is False
+
+    names = [v["name"] for v in res["violations"]]
+    assert "excess_args_fn" in names
+    assert "Handler.async_excess" in names
+
+    # Positional and keyword-only threshold checks
+    strict_guard = AstArgCountGuard(max_args=10, max_positional=2, max_kwonly=1)
+    sample_split = (
+        "def split_fn(pos1, pos2, pos3, *, kw1, kw2):\n"
+        "    return 1\n"
+    )
+    res_split = strict_guard.analyze_source(sample_split)
+    assert res_split["violations_count"] == 2
+    kinds = {v["kind"] for v in res_split["violations"]}
+    assert "excessive_positional_arguments" in kinds
+    assert "excessive_keyword_arguments" in kinds
+
+    # Registry tool invocation and aliases
+    reg = NativeToolRegistry()
+    assert reg.has_tool("check_arg_count")
+    assert reg.has_tool("guard_arg_count")
+    assert reg.has_tool("arg_count_guard")
+    assert reg.has_tool("lint_arg_count")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "check_arg_count" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write("def ok_fn(x, y):\n    return x * y\n")
+        tmp_file = f.name
+    try:
+        f_res = reg.dispatch("check_arg_count", {"path": tmp_file, "max_args": 3})
+        assert not f_res["isError"]
+        assert f_res["clean"] is True
+
+        alias_res = reg.dispatch("arg_count_guard", {"source": "def ok_fn(x, y):\n    return x * y\n", "max_args": 3})
         assert not alias_res["isError"]
         assert alias_res["clean"] is True
     finally:

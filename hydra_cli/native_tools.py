@@ -1714,6 +1714,146 @@ class AstFunctionLengthAnalyzer:
 
 
 
+
+
+class AstArgCountGuard:
+    """AST visitor evaluating function and method argument counts against defined limits."""
+
+    def __init__(
+        self,
+        max_args: int = 5,
+        max_positional: Optional[int] = None,
+        max_kwonly: Optional[int] = None,
+        ignore_self_cls: bool = True,
+        ignore_varargs: bool = False,
+    ):
+        self.max_args = max_args
+        self.max_positional = max_positional
+        self.max_kwonly = max_kwonly
+        self.ignore_self_cls = ignore_self_cls
+        self.ignore_varargs = ignore_varargs
+
+    def analyze_source(self, source: str) -> Dict[str, Any]:
+        """Analyze Python source code and evaluate argument count limits."""
+        code = source.replace("\r\n", "\n")
+        if code.startswith("\ufeff"):
+            code = code[1:]
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        def find_functions(node: ast.AST, prefix: str = "") -> List[Tuple[str, ast.AST]]:
+            items: List[Tuple[str, ast.AST]] = []
+            for child in getattr(node, "body", []):
+                if isinstance(child, ast.ClassDef):
+                    items.extend(find_functions(child, prefix=f"{prefix}{child.name}."))
+                elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    fn_name = f"{prefix}{child.name}"
+                    items.append((fn_name, child))
+                    items.extend(find_functions(child, prefix=f"{fn_name}."))
+            return items
+
+        discovered = find_functions(tree)
+        functions: List[Dict[str, Any]] = []
+        violations: List[Dict[str, Any]] = []
+
+        for fn_name, fn_node in discovered:
+            lineno = fn_node.lineno
+            end_lineno = getattr(fn_node, "end_lineno", lineno)
+
+            posonly = [a.arg for a in getattr(fn_node.args, "posonlyargs", [])]
+            standard = [a.arg for a in getattr(fn_node.args, "args", [])]
+            kwonly = [a.arg for a in getattr(fn_node.args, "kwonlyargs", [])]
+            vararg = fn_node.args.vararg.arg if fn_node.args.vararg else None
+            kwarg = fn_node.args.kwarg.arg if fn_node.args.kwarg else None
+
+            effective_posonly = list(posonly)
+            effective_standard = list(standard)
+            if self.ignore_self_cls:
+                if effective_posonly and effective_posonly[0] in ("self", "cls"):
+                    effective_posonly.pop(0)
+                elif effective_standard and effective_standard[0] in ("self", "cls"):
+                    effective_standard.pop(0)
+
+            all_args = list(effective_posonly) + list(effective_standard) + list(kwonly)
+            if not self.ignore_varargs:
+                if vararg:
+                    all_args.append(f"*{vararg}")
+                if kwarg:
+                    all_args.append(f"**{kwarg}")
+
+            total_args = len(all_args)
+            positional_total = len(effective_posonly) + len(effective_standard)
+            kwonly_total = len(kwonly)
+
+            over_args = total_args > self.max_args
+            over_pos = self.max_positional is not None and positional_total > self.max_positional
+            over_kw = self.max_kwonly is not None and kwonly_total > self.max_kwonly
+
+            if over_args:
+                violations.append({
+                    "kind": "excessive_arguments",
+                    "name": fn_name,
+                    "lineno": lineno,
+                    "end_lineno": end_lineno,
+                    "value": total_args,
+                    "threshold": self.max_args,
+                    "arg_names": all_args,
+                    "message": f"Function '{fn_name}' parameter count {total_args} exceeds limit {self.max_args}.",
+                })
+
+            if over_pos:
+                violations.append({
+                    "kind": "excessive_positional_arguments",
+                    "name": fn_name,
+                    "lineno": lineno,
+                    "end_lineno": end_lineno,
+                    "value": positional_total,
+                    "threshold": self.max_positional,
+                    "arg_names": effective_posonly + effective_standard,
+                    "message": f"Function '{fn_name}' positional parameter count {positional_total} exceeds limit {self.max_positional}.",
+                })
+
+            if over_kw:
+                violations.append({
+                    "kind": "excessive_keyword_arguments",
+                    "name": fn_name,
+                    "lineno": lineno,
+                    "end_lineno": end_lineno,
+                    "value": kwonly_total,
+                    "threshold": self.max_kwonly,
+                    "arg_names": kwonly,
+                    "message": f"Function '{fn_name}' keyword-only parameter count {kwonly_total} exceeds limit {self.max_kwonly}.",
+                })
+
+            functions.append({
+                "name": fn_name,
+                "lineno": lineno,
+                "end_lineno": end_lineno,
+                "total_args": total_args,
+                "positional_args": positional_total,
+                "kwonly_args": kwonly_total,
+                "vararg": vararg,
+                "kwarg": kwarg,
+                "arg_names": all_args,
+                "over_args": over_args,
+            })
+
+        violations.sort(key=lambda item: (item["lineno"], item["name"], item["kind"]))
+
+        return {
+            "isError": False,
+            "total_functions": len(functions),
+            "violations_count": len(violations),
+            "violations": violations,
+            "functions": functions,
+            "clean": len(violations) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -1793,6 +1933,10 @@ class NativeToolRegistry:
             "check_function_length": self.check_function_length,
             "analyze_function_length": self.check_function_length,
             "function_length_checker": self.check_function_length,
+            "check_arg_count": self.check_arg_count,
+            "guard_arg_count": self.check_arg_count,
+            "arg_count_guard": self.check_arg_count,
+            "lint_arg_count": self.check_arg_count,
         }
 
     @property
@@ -3133,6 +3277,93 @@ class NativeToolRegistry:
             "clean": total_violations == 0,
         }
 
+    def check_arg_count(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        max_args: int = 5,
+        max_positional: Optional[int] = None,
+        max_kwonly: Optional[int] = None,
+        ignore_self_cls: bool = True,
+        ignore_varargs: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Analyze Python functions and methods for excessive argument count.
+        Supports inspecting files, raw source code, or recursive workspace directory scanning.
+        """
+        guard = AstArgCountGuard(
+            max_args=max_args,
+            max_positional=max_positional,
+            max_kwonly=max_kwonly,
+            ignore_self_cls=ignore_self_cls,
+            ignore_varargs=ignore_varargs,
+        )
+
+        if source is not None:
+            return guard.analyze_source(source)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = guard.analyze_source(content)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        total_functions = 0
+        total_violations = 0
+        all_violations = []
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = guard.analyze_source(file_code)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                total_functions += rep["total_functions"]
+                if rep["violations_count"] > 0:
+                    file_metrics[rel_p] = {
+                        "functions": rep["total_functions"],
+                        "violations": rep["violations_count"],
+                    }
+                    total_violations += rep["violations_count"]
+                    for item in rep["violations"]:
+                        item_copy = dict(item)
+                        item_copy["file"] = rel_p
+                        all_violations.append(item_copy)
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_functions": total_functions,
+            "total_violations": total_violations,
+            "summary": file_metrics,
+            "violations": all_violations,
+            "clean": total_violations == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -3434,6 +3665,46 @@ class NativeToolRegistry:
                             "min_coverage": {
                                 "type": "number",
                                 "description": "Minimum type coverage percentage threshold. Default 0.0.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "check_arg_count",
+                    "description": "Analyze Python functions and methods for parameter count limits and excessive arguments.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to inspect. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to inspect.",
+                            },
+                            "max_args": {
+                                "type": "integer",
+                                "description": "Maximum allowed total arguments per function. Default 5.",
+                            },
+                            "max_positional": {
+                                "type": "integer",
+                                "description": "Maximum allowed positional arguments. Default unlimited.",
+                            },
+                            "max_kwonly": {
+                                "type": "integer",
+                                "description": "Maximum allowed keyword-only arguments. Default unlimited.",
+                            },
+                            "ignore_self_cls": {
+                                "type": "boolean",
+                                "description": "Whether to ignore self and cls parameters in methods. Default true.",
+                            },
+                            "ignore_varargs": {
+                                "type": "boolean",
+                                "description": "Whether to ignore *args and **kwargs in total count. Default false.",
                             },
                         },
                     },
