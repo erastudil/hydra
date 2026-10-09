@@ -1361,6 +1361,116 @@ class AstPonytailAnalyzer:
 
 
 
+class AstP014MetaphorDetector:
+    """AST visitor detecting P014 metaphor violations, idioms, and machine-shop terminology."""
+
+    METAPHOR_IDIOMS = (
+        "under the hood",
+        "silver bullet",
+        "magic bullet",
+        "magic wand",
+        "secret sauce",
+        "reinvent the wheel",
+        "boil the ocean",
+        "move the needle",
+        "hit the ground running",
+        "tip of the iceberg",
+        "bite the bullet",
+        "low hanging fruit",
+        "go with the flow",
+        "water down a hill",
+        "like water",
+    )
+
+    MACHINE_SHOP_TOKENS = (
+        "anvil",
+        "crucible",
+        "smelt",
+        "smelting",
+        "quenching",
+        "lathe",
+    )
+
+    def analyze_source(self, source: str) -> Dict[str, Any]:
+        """Analyze Python source for banned P014 metaphors, idioms, and machine-shop tokens."""
+        code = source.replace("\r\n", "\n")
+        if code.startswith("\ufeff"):
+            code = code[1:]
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        violations: List[Dict[str, Any]] = []
+
+        # 1. Inspect docstrings and string constants in AST
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                text_lower = node.value.lower()
+                for idiom in self.METAPHOR_IDIOMS:
+                    if idiom in text_lower:
+                        violations.append({
+                            "kind": "figurative_idiom",
+                            "target": idiom,
+                            "lineno": node.lineno,
+                            "col_offset": getattr(node, "col_offset", 0),
+                            "message": f"Banned figurative idiom '{idiom}' in string/docstring violates P014 invariant.",
+                        })
+                for token in self.MACHINE_SHOP_TOKENS:
+                    if re.search(r"\b" + re.escape(token) + r"\b", text_lower):
+                        violations.append({
+                            "kind": "machine_shop_token",
+                            "target": token,
+                            "lineno": node.lineno,
+                            "col_offset": getattr(node, "col_offset", 0),
+                            "message": f"Banned machine-shop token '{token}' in string/docstring violates P014 invariant.",
+                        })
+
+        # 2. Inspect comments in source lines
+        for idx, line in enumerate(code.split("\n"), start=1):
+            if "#" in line:
+                comment_part = line[line.find("#"):]
+                comment_lower = comment_part.lower()
+                for idiom in self.METAPHOR_IDIOMS:
+                    if idiom in comment_lower:
+                        violations.append({
+                            "kind": "comment_metaphor",
+                            "target": idiom,
+                            "lineno": idx,
+                            "col_offset": line.find("#"),
+                            "message": f"Banned figurative idiom '{idiom}' in comment violates P014 invariant.",
+                        })
+                for token in self.MACHINE_SHOP_TOKENS:
+                    if re.search(r"\b" + re.escape(token) + r"\b", comment_lower):
+                        violations.append({
+                            "kind": "comment_machine_shop",
+                            "target": token,
+                            "lineno": idx,
+                            "col_offset": line.find("#"),
+                            "message": f"Banned machine-shop token '{token}' in comment violates P014 invariant.",
+                        })
+
+        seen = set()
+        unique = []
+        for v in violations:
+            key = (v["lineno"], v["target"])
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(v)
+
+        unique.sort(key=lambda item: (item["lineno"], item["col_offset"], item["kind"]))
+
+        return {
+            "isError": False,
+            "violations_count": len(unique),
+            "violations": unique,
+            "clean": len(unique) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -1431,6 +1541,9 @@ class NativeToolRegistry:
             "analyze_ponytail": self.analyze_ponytail,
             "ponytail_analyzer": self.analyze_ponytail,
             "check_ponytail": self.analyze_ponytail,
+            "detect_p014": self.detect_p014,
+            "ban_p014_metaphors": self.detect_p014,
+            "check_p014": self.detect_p014,
         }
 
     @property
@@ -2537,6 +2650,77 @@ class NativeToolRegistry:
             "clean": total_violations == 0,
         }
 
+    def detect_p014(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Scan Python source code, docstrings, and comments for banned P014 metaphors and machine-shop tokens.
+        Enforces sovereign invariant P014 requiring mathematical and computational predicates directly.
+        """
+        detector = AstP014MetaphorDetector()
+
+        if source is not None:
+            return detector.analyze_source(source)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = detector.analyze_source(content)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        total_violations = 0
+        all_violations = []
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = detector.analyze_source(file_code)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                if rep["violations_count"] > 0:
+                    file_metrics[rel_p] = rep["violations_count"]
+                    total_violations += rep["violations_count"]
+                    for item in rep["violations"]:
+                        item_copy = dict(item)
+                        item_copy["file"] = rel_p
+                        all_violations.append(item_copy)
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_violations": total_violations,
+            "files_with_violations": len(file_metrics),
+            "summary": file_metrics,
+            "violations": all_violations,
+            "clean": total_violations == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -2838,6 +3022,26 @@ class NativeToolRegistry:
                             "min_coverage": {
                                 "type": "number",
                                 "description": "Minimum type coverage percentage threshold. Default 0.0.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "detect_p014",
+                    "description": "Scan Python source code, docstrings, and comments for banned P014 metaphors and machine-shop tokens.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to inspect. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to inspect.",
                             },
                         },
                     },
