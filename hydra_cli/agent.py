@@ -845,6 +845,125 @@ def reset_decay_weighter() -> None:
     _DEFAULT_CONTEXT_DECAY_WEIGHTER.reset()
 
 
+def compute_text_similarity(a: str, b: str) -> float:
+    """Compute normalized similarity ratio between two text sequences."""
+    if a == b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    len_a = len(a)
+    len_b = len(b)
+    if abs(len_a - len_b) / max(len_a, len_b) > 0.4:
+        return 0.0
+    sample_a = a[:1000] if len_a > 1000 else a
+    sample_b = b[:1000] if len_b > 1000 else b
+    return difflib.SequenceMatcher(None, sample_a, sample_b).ratio()
+
+
+class SemanticContextDeduplicator:
+    """Identify and compact semantic duplicate messages within context history."""
+
+    def __init__(self, default_threshold: float = 0.85) -> None:
+        self.default_threshold = default_threshold
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset deduplicator metrics and internal tracking state."""
+        self._total_duplicates_found: int = 0
+        self._total_chars_saved: int = 0
+
+    def deduplicate(
+        self,
+        messages: List[Dict[str, Any]],
+        similarity_threshold: Optional[float] = None,
+        replace_with_pointer: bool = True,
+    ) -> Dict[str, Any]:
+        """Detect and compact duplicate turns across conversation history."""
+        if not messages:
+            return {
+                "deduplicated_messages": [],
+                "duplicates_found": 0,
+                "chars_saved": 0,
+            }
+
+        threshold = similarity_threshold if similarity_threshold is not None else self.default_threshold
+        result = [copy.deepcopy(m) for m in messages]
+        duplicates_count = 0
+        chars_saved = 0
+
+        for i in range(1, len(result) - 1):
+            curr_msg = result[i]
+            if curr_msg.get("role") in ("system", "developer") or curr_msg.get("pinned"):
+                continue
+
+            curr_content = str(curr_msg.get("content") or "")
+            if len(curr_content) < 30:
+                continue
+
+            for j in range(0, i):
+                prev_msg = result[j]
+                if prev_msg.get("role") != curr_msg.get("role"):
+                    continue
+
+                prev_content = str(prev_msg.get("content") or "")
+                sim = compute_text_similarity(prev_content, curr_content)
+
+                if sim >= threshold:
+                    duplicates_count += 1
+                    old_len = len(curr_content)
+                    if replace_with_pointer:
+                        pointer = f"[DUPLICATE OF TURN {j}]"
+                        curr_msg["content"] = pointer
+                        saved = max(0, old_len - len(pointer))
+                    else:
+                        saved = old_len
+                    chars_saved += saved
+                    break
+
+        self._total_duplicates_found += duplicates_count
+        self._total_chars_saved += chars_saved
+
+        return {
+            "deduplicated_messages": result,
+            "duplicates_found": duplicates_count,
+            "chars_saved": chars_saved,
+        }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregate deduplication telemetry metrics."""
+        return {
+            "total_duplicates_found": self._total_duplicates_found,
+            "total_chars_saved": self._total_chars_saved,
+        }
+
+
+_DEFAULT_SEMANTIC_DEDUPLICATOR = SemanticContextDeduplicator()
+
+
+def get_default_semantic_deduplicator() -> SemanticContextDeduplicator:
+    """Return default singleton semantic context deduplicator instance."""
+    return _DEFAULT_SEMANTIC_DEDUPLICATOR
+
+
+def semantic_deduplicate_messages(
+    messages: List[Dict[str, Any]],
+    similarity_threshold: Optional[float] = None,
+    replace_with_pointer: bool = True,
+) -> List[Dict[str, Any]]:
+    """Deduplicate conversation messages using semantic similarity matching."""
+    res = _DEFAULT_SEMANTIC_DEDUPLICATOR.deduplicate(
+        messages,
+        similarity_threshold=similarity_threshold,
+        replace_with_pointer=replace_with_pointer,
+    )
+    return res["deduplicated_messages"]
+
+
+def reset_semantic_deduplicator() -> None:
+    """Reset global semantic context deduplicator state."""
+    _DEFAULT_SEMANTIC_DEDUPLICATOR.reset()
+
+
 _CONTEXT_MARKERS = (
     "context window",
     "context length",

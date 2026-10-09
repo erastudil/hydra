@@ -4286,6 +4286,44 @@ def context_decay_weighting_contracts():
 
 
 @check
+def semantic_deduplication_contracts():
+    from hydra_cli.agent import (
+        SemanticContextDeduplicator,
+        compute_text_similarity,
+        semantic_deduplicate_messages,
+        get_default_semantic_deduplicator,
+        reset_semantic_deduplicator,
+    )
+
+    reset_semantic_deduplicator()
+
+    # 1. Similarity evaluation
+    assert compute_text_similarity("test abc", "test abc") == 1.0
+    assert compute_text_similarity("test abc", "totally different text completely") < 0.5
+
+    # 2. Semantic deduplication across turn history
+    m0 = {"role": "system", "content": "You are Hydra."}
+    m1 = {"role": "tool", "content": "Directory listing: file1.py, file2.py, file3.py with long output statistics"}
+    m2 = {"role": "assistant", "content": "Analyzing files."}
+    m3 = {"role": "tool", "content": "Directory listing: file1.py, file2.py, file3.py with long output statistics!"}
+    m4 = {"role": "user", "content": "Proceed with refactoring."}
+
+    msgs = [m0, m1, m2, m3, m4]
+    deduped = semantic_deduplicate_messages(msgs, similarity_threshold=0.85)
+    assert len(deduped) == 5
+    assert deduped[0]["role"] == "system"
+    assert deduped[3]["content"] == "[DUPLICATE OF TURN 1]"
+    assert deduped[4]["content"] == "Proceed with refactoring."
+
+    # 3. Deduplicator metrics telemetry
+    met = get_default_semantic_deduplicator().get_metrics()
+    assert met["total_duplicates_found"] == 1
+    assert met["total_chars_saved"] > 0
+
+    reset_semantic_deduplicator()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
