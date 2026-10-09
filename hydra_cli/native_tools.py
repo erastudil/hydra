@@ -1976,6 +1976,112 @@ class AstStructuralDedup:
 
 
 
+
+
+class AstNarrowExceptionsGuard:
+    """AST visitor evaluating exception handling for bare excepts, broad exceptions, and empty handlers."""
+
+    def __init__(
+        self,
+        ban_bare_except: bool = True,
+        ban_base_exception: bool = True,
+        ban_broad_exception: bool = True,
+        ban_empty_handler: bool = True,
+    ):
+        self.ban_bare_except = ban_bare_except
+        self.ban_base_exception = ban_base_exception
+        self.ban_broad_exception = ban_broad_exception
+        self.ban_empty_handler = ban_empty_handler
+
+    def analyze_source(self, source: str) -> Dict[str, Any]:
+        """Analyze Python source code for broad or suppressed exception handlers."""
+        code = source.replace("\r\n", "\n")
+        if code.startswith("\ufeff"):
+            code = code[1:]
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        violations: List[Dict[str, Any]] = []
+        total_handlers = 0
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ExceptHandler):
+                continue
+
+            total_handlers += 1
+            col_offset = getattr(node, "col_offset", 0)
+
+            # 1. Bare except
+            if node.type is None:
+                if self.ban_bare_except:
+                    violations.append({
+                        "kind": "bare_except",
+                        "lineno": node.lineno,
+                        "col_offset": col_offset,
+                        "target": "bare",
+                        "message": f"Bare except clause on line {node.lineno} catches all exceptions including system interrupts.",
+                    })
+            else:
+                # 2. Check exception types
+                types_to_check = []
+                if isinstance(node.type, ast.Name):
+                    types_to_check.append(node.type.id)
+                elif isinstance(node.type, ast.Tuple):
+                    for elt in node.type.elts:
+                        if isinstance(elt, ast.Name):
+                            types_to_check.append(elt.id)
+
+                for exc_name in types_to_check:
+                    if self.ban_base_exception and exc_name == "BaseException":
+                        violations.append({
+                            "kind": "base_exception",
+                            "lineno": node.lineno,
+                            "col_offset": col_offset,
+                            "target": "BaseException",
+                            "message": f"Broad BaseException caught on line {node.lineno}.",
+                        })
+                    elif self.ban_broad_exception and exc_name == "Exception":
+                        violations.append({
+                            "kind": "broad_exception",
+                            "lineno": node.lineno,
+                            "col_offset": col_offset,
+                            "target": "Exception",
+                            "message": f"Broad Exception caught on line {node.lineno}; prefer specific error types.",
+                        })
+
+            # 3. Empty handler check
+            if self.ban_empty_handler:
+                is_empty = False
+                if len(node.body) == 1:
+                    stmt = node.body[0]
+                    if isinstance(stmt, ast.Pass):
+                        is_empty = True
+                    elif isinstance(stmt, ast.Expr) and isinstance(getattr(stmt, "value", None), ast.Constant) and stmt.value.value is ...:
+                        is_empty = True
+                if is_empty:
+                    violations.append({
+                        "kind": "empty_handler",
+                        "lineno": node.lineno,
+                        "col_offset": col_offset,
+                        "target": "pass",
+                        "message": f"Empty exception handler on line {node.lineno} suppresses errors silently without logging or re-raising.",
+                    })
+
+        violations.sort(key=lambda item: (item["lineno"], item["col_offset"], item["kind"]))
+
+        return {
+            "isError": False,
+            "total_handlers": total_handlers,
+            "violations_count": len(violations),
+            "violations": violations,
+            "clean": len(violations) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -2063,6 +2169,10 @@ class NativeToolRegistry:
             "dedup_structural": self.find_structural_duplicates,
             "structural_dedup": self.find_structural_duplicates,
             "detect_code_clones": self.find_structural_duplicates,
+            "check_narrow_exceptions": self.check_narrow_exceptions,
+            "lint_narrow_exceptions": self.check_narrow_exceptions,
+            "narrow_exceptions_guard": self.check_narrow_exceptions,
+            "narrow_exceptions": self.check_narrow_exceptions,
         }
 
     @property
@@ -3603,6 +3713,91 @@ class NativeToolRegistry:
             "clean": len(duplicate_groups) == 0,
         }
 
+    def check_narrow_exceptions(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        ban_bare_except: bool = True,
+        ban_base_exception: bool = True,
+        ban_broad_exception: bool = True,
+        ban_empty_handler: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Scan Python source code or directories for broad exception handling and empty handlers.
+        Supports single source strings, individual files, or recursive directory scans.
+        """
+        guard = AstNarrowExceptionsGuard(
+            ban_bare_except=ban_bare_except,
+            ban_base_exception=ban_base_exception,
+            ban_broad_exception=ban_broad_exception,
+            ban_empty_handler=ban_empty_handler,
+        )
+
+        if source is not None:
+            return guard.analyze_source(source)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = guard.analyze_source(content)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        total_handlers = 0
+        total_violations = 0
+        all_violations = []
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = guard.analyze_source(file_code)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                total_handlers += rep["total_handlers"]
+                if rep["violations_count"] > 0:
+                    file_metrics[rel_p] = {
+                        "handlers": rep["total_handlers"],
+                        "violations": rep["violations_count"],
+                    }
+                    total_violations += rep["violations_count"]
+                    for item in rep["violations"]:
+                        item_copy = dict(item)
+                        item_copy["file"] = rel_p
+                        all_violations.append(item_copy)
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_handlers": total_handlers,
+            "total_violations": total_violations,
+            "summary": file_metrics,
+            "violations": all_violations,
+            "clean": total_violations == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -3904,6 +4099,42 @@ class NativeToolRegistry:
                             "min_coverage": {
                                 "type": "number",
                                 "description": "Minimum type coverage percentage threshold. Default 0.0.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "check_narrow_exceptions",
+                    "description": "Scan Python code for broad exception handling, bare excepts, and empty handlers.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to inspect. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to inspect.",
+                            },
+                            "ban_bare_except": {
+                                "type": "boolean",
+                                "description": "Whether to flag bare except clauses without exception type. Default true.",
+                            },
+                            "ban_base_exception": {
+                                "type": "boolean",
+                                "description": "Whether to flag BaseException clauses. Default true.",
+                            },
+                            "ban_broad_exception": {
+                                "type": "boolean",
+                                "description": "Whether to flag general Exception clauses. Default true.",
+                            },
+                            "ban_empty_handler": {
+                                "type": "boolean",
+                                "description": "Whether to flag empty handlers with pass or ellipsis. Default true.",
                             },
                         },
                     },
