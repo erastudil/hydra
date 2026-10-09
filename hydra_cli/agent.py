@@ -2006,6 +2006,189 @@ def reset_null_payload_stripper() -> None:
     _DEFAULT_NULL_STRIPPER.reset()
 
 
+def estimate_text_tokens(text: str) -> int:
+    """Estimate token count for arbitrary text string using heuristic tokenizer modeling."""
+    if not text:
+        return 0
+    total_len = len(text)
+    words = len(re.findall(r"\b\w+\b", text))
+    symbols = len(re.findall(r"[^\w\s]", text))
+    non_ascii = len(re.findall(r"[^\x00-\x7F]", text))
+
+    est = int((words * 1.3) + (symbols * 0.5) + (non_ascii * 1.5))
+    fallback = max(1, (total_len + 3) // 4)
+    return max(1, max(est, fallback))
+
+
+def estimate_message_tokens(message: Dict[str, Any]) -> int:
+    """Estimate tokens consumed by single message dictionary including framing overhead."""
+    base_overhead = 4
+    content = message.get("content", "")
+    if isinstance(content, str):
+        content_tokens = estimate_text_tokens(content)
+    elif isinstance(content, list):
+        content_tokens = sum(estimate_text_tokens(str(part)) for part in content)
+    else:
+        content_tokens = estimate_text_tokens(str(content)) if content else 0
+
+    role_tokens = estimate_text_tokens(str(message.get("role", "")))
+    name_tokens = estimate_text_tokens(str(message.get("name", ""))) if "name" in message else 0
+    tool_tokens = 0
+    if "tool_calls" in message:
+        tool_tokens = estimate_text_tokens(json.dumps(message["tool_calls"], default=str))
+
+    return base_overhead + content_tokens + role_tokens + name_tokens + tool_tokens
+
+
+def estimate_messages_tokens(messages: List[Dict[str, Any]]) -> int:
+    """Estimate total tokens across sequence of message dictionaries."""
+    if not messages:
+        return 0
+    priming_overhead = 3
+    return priming_overhead + sum(estimate_message_tokens(m) for m in messages)
+
+
+class TokenMeter:
+    """Tracks token expenditures, role breakdowns, capacity limits, and compaction savings."""
+
+    def __init__(self, default_window_tokens: int = 128000) -> None:
+        self.default_window_tokens = default_window_tokens
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset all metering ledgers and telemetry counters."""
+        self._prompt_tokens: int = 0
+        self._completion_tokens: int = 0
+        self._cached_tokens: int = 0
+        self._savings_tokens: int = 0
+        self._metered_turns: int = 0
+        self._role_breakdown: Dict[str, int] = {
+            "system": 0,
+            "user": 0,
+            "assistant": 0,
+            "tool": 0,
+        }
+        self._turn_ledger: List[Dict[str, Any]] = []
+
+    def meter_turn(
+        self,
+        messages: List[Dict[str, Any]],
+        completion_text: str = "",
+        cached_tokens: int = 0,
+        saved_tokens: int = 0,
+    ) -> Dict[str, Any]:
+        """Meter active turn prompt messages, completion, and cache stats."""
+        self._metered_turns += 1
+        prompt_t = estimate_messages_tokens(messages)
+        comp_t = estimate_text_tokens(completion_text)
+
+        self._prompt_tokens += prompt_t
+        self._completion_tokens += comp_t
+        self._cached_tokens += cached_tokens
+        self._savings_tokens += saved_tokens
+
+        turn_roles: Dict[str, int] = {}
+        for m in messages:
+            r = str(m.get("role", "other"))
+            t_count = estimate_message_tokens(m)
+            turn_roles[r] = turn_roles.get(r, 0) + t_count
+            self._role_breakdown[r] = self._role_breakdown.get(r, 0) + t_count
+
+        record = {
+            "turn_index": self._metered_turns,
+            "prompt_tokens": prompt_t,
+            "completion_tokens": comp_t,
+            "cached_tokens": cached_tokens,
+            "saved_tokens": saved_tokens,
+            "role_tokens": turn_roles,
+        }
+        self._turn_ledger.append(record)
+        if len(self._turn_ledger) > 100:
+            self._turn_ledger.pop(0)
+
+        return record
+
+    def check_capacity(
+        self,
+        messages: List[Dict[str, Any]],
+        window_tokens: Optional[int] = None,
+        reserve_tokens: int = 4096,
+    ) -> Dict[str, Any]:
+        """Evaluate context window capacity, utilization rate, and compaction need."""
+        max_window = window_tokens if window_tokens is not None else self.default_window_tokens
+        current_tokens = estimate_messages_tokens(messages)
+        effective_capacity = max(1024, max_window - reserve_tokens)
+        utilization = float(current_tokens) / float(effective_capacity)
+
+        return {
+            "current_tokens": current_tokens,
+            "max_window": max_window,
+            "reserve_tokens": reserve_tokens,
+            "effective_capacity": effective_capacity,
+            "available_tokens": max(0, effective_capacity - current_tokens),
+            "utilization_rate": min(1.0, utilization),
+            "compaction_recommended": utilization >= 0.75,
+            "capacity_exceeded": current_tokens > effective_capacity,
+        }
+
+    def record_savings(self, saved_tokens: int) -> None:
+        """Record tokens saved through context compaction or deduplication."""
+        if saved_tokens > 0:
+            self._savings_tokens += saved_tokens
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return cumulative token metering metrics."""
+        return {
+            "prompt_tokens": self._prompt_tokens,
+            "completion_tokens": self._completion_tokens,
+            "cached_tokens": self._cached_tokens,
+            "savings_tokens": self._savings_tokens,
+            "metered_turns": self._metered_turns,
+            "role_breakdown": dict(self._role_breakdown),
+        }
+
+
+_DEFAULT_TOKEN_METER = TokenMeter()
+
+
+def get_default_token_meter() -> TokenMeter:
+    """Return default singleton token meter."""
+    return _DEFAULT_TOKEN_METER
+
+
+def meter_context_turn(
+    messages: List[Dict[str, Any]],
+    completion_text: str = "",
+    cached_tokens: int = 0,
+    saved_tokens: int = 0,
+) -> Dict[str, Any]:
+    """Meter conversation turn using default token meter."""
+    return _DEFAULT_TOKEN_METER.meter_turn(
+        messages=messages,
+        completion_text=completion_text,
+        cached_tokens=cached_tokens,
+        saved_tokens=saved_tokens,
+    )
+
+
+def check_context_capacity(
+    messages: List[Dict[str, Any]],
+    window_tokens: Optional[int] = None,
+    reserve_tokens: int = 4096,
+) -> Dict[str, Any]:
+    """Check context capacity and compaction trigger using default meter."""
+    return _DEFAULT_TOKEN_METER.check_capacity(
+        messages=messages,
+        window_tokens=window_tokens,
+        reserve_tokens=reserve_tokens,
+    )
+
+
+def reset_token_meter() -> None:
+    """Reset global token meter state."""
+    _DEFAULT_TOKEN_METER.reset()
+
+
 _CONTEXT_MARKERS = (
     "context window",
     "context length",

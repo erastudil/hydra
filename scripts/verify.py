@@ -4697,6 +4697,80 @@ def null_payload_strip_contracts():
 
 
 @check
+def token_metering_contracts():
+    from hydra_cli.agent import (
+        TokenMeter,
+        get_default_token_meter,
+        estimate_text_tokens,
+        estimate_message_tokens,
+        estimate_messages_tokens,
+        meter_context_turn,
+        check_context_capacity,
+        reset_token_meter,
+    )
+
+    reset_token_meter()
+
+    # 1. Text token estimation
+    assert estimate_text_tokens("") == 0
+    t1 = estimate_text_tokens("hello world")
+    assert t1 > 0
+    t2 = estimate_text_tokens("def foo(bar: int) -> bool:\n    return bar > 10\n")
+    assert t2 > t1
+
+    # 2. Message and message list estimation
+    m_sys = {"role": "system", "content": "You are Hydra engine genome."}
+    m_user = {"role": "user", "content": "Run tests now."}
+    m_ast = {"role": "assistant", "content": "Running test suite on verification gate."}
+
+    t_m = estimate_message_tokens(m_sys)
+    assert t_m >= 4
+
+    t_msgs = estimate_messages_tokens([m_sys, m_user, m_ast])
+    assert t_msgs > t_m
+
+    # 3. Metering a turn
+    turn_rec = meter_context_turn(
+        messages=[m_sys, m_user],
+        completion_text="Running test suite.",
+        cached_tokens=25,
+        saved_tokens=50,
+    )
+    assert turn_rec["turn_index"] == 1
+    assert turn_rec["prompt_tokens"] > 0
+    assert turn_rec["completion_tokens"] > 0
+    assert turn_rec["cached_tokens"] == 25
+    assert turn_rec["saved_tokens"] == 50
+    assert "system" in turn_rec["role_tokens"]
+    assert "user" in turn_rec["role_tokens"]
+
+    # 4. Context capacity check
+    cap = check_context_capacity([m_sys, m_user], window_tokens=8192, reserve_tokens=1024)
+    assert cap["max_window"] == 8192
+    assert cap["effective_capacity"] == 7168
+    assert cap["available_tokens"] > 0
+    assert cap["utilization_rate"] < 0.1
+    assert cap["compaction_recommended"] is False
+    assert cap["capacity_exceeded"] is False
+
+    cap_full = check_context_capacity([m_sys, m_user], window_tokens=1050, reserve_tokens=1000)
+    assert cap_full["effective_capacity"] == 1024
+
+    # 5. Metrics
+    meter = get_default_token_meter()
+    meter.record_savings(100)
+    met = meter.get_metrics()
+    assert met["prompt_tokens"] > 0
+    assert met["completion_tokens"] > 0
+    assert met["cached_tokens"] == 25
+    assert met["savings_tokens"] == 150
+    assert met["metered_turns"] == 1
+    assert met["role_breakdown"]["system"] > 0
+
+    reset_token_meter()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
