@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and len(names) == 19
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and len(names) == 20
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -2648,6 +2648,69 @@ def ast_constant_folder_contracts():
         with open(tmp_file, "r", encoding="utf-8") as rf:
             disk_code = rf.read()
         assert "seconds = 86400  # full day" in disk_code
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+@check
+def ast_mock_test_banning_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstMockTestDetector, NativeToolRegistry
+
+    detector = AstMockTestDetector()
+
+    sample = (
+        "import unittest.mock\n"
+        "from unittest.mock import patch, MagicMock\n"
+        "import responses\n\n"
+        '@patch("requests.get")\n'
+        "def test_fake(mock_get):\n"
+        "    client = MagicMock()\n"
+        "    client.query()\n"
+        "    client.query.assert_called_once()\n"
+    )
+
+    res = detector.analyze_source(sample)
+    assert not res["isError"]
+    assert res["violations_count"] == 9
+    assert res["clean"] is False
+
+    kinds = {v["kind"] for v in res["violations"]}
+    assert "mock_import" in kinds
+    assert "mock_decorator" in kinds
+    assert "mock_argument" in kinds
+    assert "mock_call" in kinds
+    assert "mock_assertion" in kinds
+
+    clean_sample = (
+        "def test_deterministic_add():\n"
+        "    a = 10\n"
+        "    b = 20\n"
+        "    assert a + b == 30\n"
+    )
+    clean_res = detector.analyze_source(clean_sample)
+    assert not clean_res["isError"]
+    assert clean_res["violations_count"] == 0
+    assert clean_res["clean"] is True
+
+    reg = NativeToolRegistry()
+    assert reg.has_tool("ban_mock_tests")
+    assert reg.has_tool("check_mock_tests")
+    assert reg.has_tool("detect_mock_tests")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "ban_mock_tests" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(sample)
+        tmp_file = f.name
+    try:
+        f_res = reg.dispatch("ban_mock_tests", {"path": tmp_file})
+        assert not f_res["isError"]
+        assert f_res["violations_count"] == 9
+        assert f_res["clean"] is False
     finally:
         if os.path.exists(tmp_file):
             os.remove(tmp_file)

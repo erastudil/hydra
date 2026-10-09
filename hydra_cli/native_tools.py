@@ -1076,6 +1076,165 @@ class AstConstantFolder:
 
 
 
+class AstMockTestDetector:
+    """AST visitor detecting synthetic mocks, patches, and fake test assertions."""
+
+    BANNED_MODULES = {
+        "unittest.mock",
+        "mock",
+        "pytest_mock",
+        "responses",
+        "requests_mock",
+        "flexmock",
+        "freezegun",
+        "doublex",
+        "vcr",
+    }
+
+    BANNED_CALLS = {
+        "Mock",
+        "MagicMock",
+        "AsyncMock",
+        "PropertyMock",
+        "NonCallableMock",
+        "NonCallableMagicMock",
+        "patch",
+        "mocker",
+    }
+
+    BANNED_ASSERTIONS = {
+        "assert_called",
+        "assert_called_once",
+        "assert_called_with",
+        "assert_called_once_with",
+        "assert_any_call",
+        "assert_not_called",
+        "assert_has_calls",
+    }
+
+    def analyze_source(self, source: str) -> Dict[str, Any]:
+        """Scan source code for banned mock objects, imports, patches, and assertions."""
+        code = source.replace("\r\n", "\n")
+        if code.startswith("\ufeff"):
+            code = code[1:]
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        violations: List[Dict[str, Any]] = []
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root_mod = alias.name.split(".")[0]
+                    if alias.name in self.BANNED_MODULES or root_mod in self.BANNED_MODULES or alias.name.startswith("unittest.mock"):
+                        violations.append({
+                            "kind": "mock_import",
+                            "target": alias.name,
+                            "lineno": node.lineno,
+                            "col_offset": getattr(node, "col_offset", 0),
+                            "message": f"Synthetic mock module '{alias.name}' banned under zero-fake-test invariant.",
+                        })
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    root_mod = node.module.split(".")[0]
+                    if node.module in self.BANNED_MODULES or root_mod in self.BANNED_MODULES or node.module.startswith("unittest.mock"):
+                        for alias in node.names:
+                            violations.append({
+                                "kind": "mock_import",
+                                "target": f"{node.module}.{alias.name}",
+                                "lineno": node.lineno,
+                                "col_offset": getattr(node, "col_offset", 0),
+                                "message": f"Synthetic mock import '{node.module}.{alias.name}' banned under zero-fake-test invariant.",
+                            })
+                    else:
+                        for alias in node.names:
+                            if alias.name in self.BANNED_CALLS:
+                                violations.append({
+                                    "kind": "mock_import",
+                                    "target": f"{node.module}.{alias.name}",
+                                    "lineno": node.lineno,
+                                    "col_offset": getattr(node, "col_offset", 0),
+                                    "message": f"Synthetic mock symbol '{alias.name}' from '{node.module}' banned under zero-fake-test invariant.",
+                                })
+
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                for dec in node.decorator_list:
+                    dec_name = None
+                    if isinstance(dec, ast.Name):
+                        dec_name = dec.id
+                    elif isinstance(dec, ast.Attribute):
+                        dec_name = dec.attr
+                    elif isinstance(dec, ast.Call):
+                        if isinstance(dec.func, ast.Name):
+                            dec_name = dec.func.id
+                        elif isinstance(dec.func, ast.Attribute):
+                            dec_name = dec.func.attr
+                    if dec_name and (dec_name in ("patch", "mocker") or "mock" in dec_name.lower()):
+                        violations.append({
+                            "kind": "mock_decorator",
+                            "target": dec_name,
+                            "lineno": getattr(dec, "lineno", node.lineno),
+                            "col_offset": getattr(dec, "col_offset", 0),
+                            "message": f"Synthetic patch/mock decorator '@{dec_name}' banned under zero-fake-test invariant.",
+                        })
+
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    for arg in node.args.args:
+                        if arg.arg in ("mocker", "monkeypatch") or arg.arg.startswith("mock_"):
+                            violations.append({
+                                "kind": "mock_argument",
+                                "target": arg.arg,
+                                "lineno": getattr(arg, "lineno", node.lineno),
+                                "col_offset": getattr(arg, "col_offset", 0),
+                                "message": f"Test function parameter '{arg.arg}' introduces synthetic mock fixture.",
+                            })
+
+            if isinstance(node, ast.Call):
+                func_name = None
+                if isinstance(node.func, ast.Name):
+                    func_name = node.func.id
+                elif isinstance(node.func, ast.Attribute):
+                    func_name = node.func.attr
+                    if isinstance(node.func.value, ast.Name) and node.func.value.id in ("mocker", "monkeypatch", "mock"):
+                        violations.append({
+                            "kind": "mock_call",
+                            "target": f"{node.func.value.id}.{node.func.attr}",
+                            "lineno": node.lineno,
+                            "col_offset": getattr(node, "col_offset", 0),
+                            "message": f"Synthetic mock call '{node.func.value.id}.{node.func.attr}()' banned under zero-fake-test invariant.",
+                        })
+
+                if func_name in self.BANNED_CALLS:
+                    violations.append({
+                        "kind": "mock_call",
+                        "target": func_name,
+                        "lineno": node.lineno,
+                        "col_offset": getattr(node, "col_offset", 0),
+                        "message": f"Synthetic mock call '{func_name}()' banned under zero-fake-test invariant.",
+                    })
+                elif func_name in self.BANNED_ASSERTIONS:
+                    violations.append({
+                        "kind": "mock_assertion",
+                        "target": func_name,
+                        "lineno": node.lineno,
+                        "col_offset": getattr(node, "col_offset", 0),
+                        "message": f"Mock assertion '{func_name}()' banned under zero-fake-test invariant.",
+                    })
+
+        violations.sort(key=lambda v: (v["lineno"], v["col_offset"], v["kind"]))
+
+        return {
+            "isError": False,
+            "violations_count": len(violations),
+            "violations": violations,
+            "clean": len(violations) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -1140,6 +1299,9 @@ class NativeToolRegistry:
             "docstring_linter": self.lint_docstrings,
             "fold_constants": self.fold_constants,
             "constant_folder": self.fold_constants,
+            "ban_mock_tests": self.ban_mock_tests,
+            "check_mock_tests": self.ban_mock_tests,
+            "detect_mock_tests": self.ban_mock_tests,
         }
 
     @property
@@ -2103,6 +2265,77 @@ class NativeToolRegistry:
             "clean": total_foldable == 0,
         }
 
+    def ban_mock_tests(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Scan Python source code or test directories for banned synthetic mocks, patches, and fake assertions.
+        Enforces sovereign zero-fake-test invariant A5 across codebase.
+        """
+        detector = AstMockTestDetector()
+
+        if source is not None:
+            return detector.analyze_source(source)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = detector.analyze_source(content)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        total_violations = 0
+        all_violations = []
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = detector.analyze_source(file_code)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                if rep["violations_count"] > 0:
+                    file_metrics[rel_p] = rep["violations_count"]
+                    total_violations += rep["violations_count"]
+                    for item in rep["violations"]:
+                        item_copy = dict(item)
+                        item_copy["file"] = rel_p
+                        all_violations.append(item_copy)
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_violations": total_violations,
+            "files_with_violations": len(file_metrics),
+            "summary": file_metrics,
+            "violations": all_violations,
+            "clean": total_violations == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -2404,6 +2637,26 @@ class NativeToolRegistry:
                             "min_coverage": {
                                 "type": "number",
                                 "description": "Minimum type coverage percentage threshold. Default 0.0.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "ban_mock_tests",
+                    "description": "Scan Python source code or test directories for banned synthetic mocks, patches, and fake assertions.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to inspect. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to inspect.",
                             },
                         },
                     },
