@@ -10,6 +10,7 @@ import re
 import socket
 import urllib.error
 import urllib.request
+import unicodedata
 import random
 import time
 from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
@@ -763,6 +764,120 @@ def sanitize_messages_timestamps(
     return TimestampSanitizer.sanitize_messages(messages, target_roles=target_roles, replacement=replacement)
 
 
+class PrefixNormalizer:
+    """Normalize text and message structures to ensure deterministic prompt cache prefix hashing."""
+
+    def __init__(self) -> None:
+        pass
+
+    def normalize_text(
+        self,
+        text: str,
+        line_endings: bool = True,
+        strip_trailing_spaces: bool = True,
+        collapse_blank_lines: bool = True,
+        unicode_nfc: bool = True,
+        clean_smart_quotes: bool = True,
+    ) -> str:
+        """Normalize raw string content across line endings, trailing spaces, and unicode forms."""
+        if not text:
+            return ""
+
+        res = text
+        if unicode_nfc:
+            res = unicodedata.normalize("NFC", res)
+
+        if line_endings:
+            res = res.replace("\r\n", "\n").replace("\r", "\n")
+
+        if clean_smart_quotes:
+            res = (
+                res.replace("\u201c", '"')
+                .replace("\u201d", '"')
+                .replace("\u2018", "'")
+                .replace("\u2019", "'")
+                .replace("\u00a0", " ")
+            )
+
+        if strip_trailing_spaces:
+            lines = [line.rstrip() for line in res.split("\n")]
+            res = "\n".join(lines)
+
+        if collapse_blank_lines:
+            res = re.sub(r"\n{3,}", "\n\n", res)
+
+        return res.strip()
+
+    def normalize_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        normalize_all: bool = False,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Normalize message dictionary list to canonical structure and clean text content."""
+        if not messages:
+            return [], {
+                "modified_count": 0,
+                "total_messages": 0,
+                "original_hash": "",
+                "normalized_hash": "",
+            }
+
+        orig_serialized = "\n---\n".join(f"{m.get('role')}:{m.get('content')}" for m in messages)
+        orig_hash = hashlib.sha256(orig_serialized.encode("utf-8")).hexdigest()[:16]
+
+        normalized_list: List[Dict[str, Any]] = []
+        modified_count = 0
+
+        for idx, m in enumerate(messages):
+            role = str(m.get("role", ""))
+            content = str(m.get("content", ""))
+
+            should_norm = normalize_all or role in ("system", "developer") or idx == 0
+            clean_content = self.normalize_text(content) if should_norm else content
+
+            if clean_content != content:
+                modified_count += 1
+
+            new_m = {"role": role, "content": clean_content}
+            for k, v in m.items():
+                if k not in ("role", "content"):
+                    new_m[k] = v
+            normalized_list.append(new_m)
+
+        norm_serialized = "\n---\n".join(f"{m.get('role')}:{m.get('content')}" for m in normalized_list)
+        norm_hash = hashlib.sha256(norm_serialized.encode("utf-8")).hexdigest()[:16]
+
+        metrics = {
+            "modified_count": modified_count,
+            "total_messages": len(messages),
+            "original_hash": orig_hash,
+            "normalized_hash": norm_hash,
+            "hash_changed": orig_hash != norm_hash,
+        }
+        return normalized_list, metrics
+
+
+_DEFAULT_PREFIX_NORMALIZER = PrefixNormalizer()
+
+
+def get_default_prefix_normalizer() -> PrefixNormalizer:
+    """Return default singleton prefix normalizer instance."""
+    return _DEFAULT_PREFIX_NORMALIZER
+
+
+def normalize_cache_prefix_text(text: str) -> str:
+    """Normalize raw text content for prompt cache prefix consistency."""
+    return _DEFAULT_PREFIX_NORMALIZER.normalize_text(text)
+
+
+def normalize_cache_prefix_messages(
+    messages: List[Dict[str, Any]],
+    normalize_all: bool = False,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Normalize message list and report structural normalization metrics."""
+    return _DEFAULT_PREFIX_NORMALIZER.normalize_messages(messages, normalize_all=normalize_all)
+
+
 class PrefixIsolationManager:
     """Manager for prompt prefix isolation, token cache boundary alignment, and prefix hashing."""
 
@@ -795,6 +910,7 @@ class PrefixIsolationManager:
         messages: List[Dict[str, Any]],
         attach_cache_control: bool = False,
         strip_timestamps: bool = True,
+        normalize_prefix: bool = True,
     ) -> Dict[str, Any]:
         """
         Partition messages into static prefix and dynamic suffix turns.
@@ -831,6 +947,9 @@ class PrefixIsolationManager:
 
         if strip_timestamps and prefix_msgs:
             prefix_msgs, _ = TimestampSanitizer.sanitize_messages(prefix_msgs)
+
+        if normalize_prefix and prefix_msgs:
+            prefix_msgs, _ = PrefixNormalizer().normalize_messages(prefix_msgs)
 
         prefix_text = " ".join(str(m.get("content", "")) for m in prefix_msgs)
         prefix_tokens = self.estimate_tokens(prefix_text)
@@ -881,6 +1000,7 @@ def isolate_cache_prefix(
     attach_cache_control: bool = False,
     min_prefix_tokens: int = 64,
     strip_timestamps: bool = True,
+    normalize_prefix: bool = True,
 ) -> Dict[str, Any]:
     """Isolate static prompt prefix from dynamic suffix turns for token cache efficiency."""
     manager = PrefixIsolationManager(min_prefix_tokens=min_prefix_tokens)
@@ -888,6 +1008,7 @@ def isolate_cache_prefix(
         messages,
         attach_cache_control=attach_cache_control,
         strip_timestamps=strip_timestamps,
+        normalize_prefix=normalize_prefix,
     )
 
 

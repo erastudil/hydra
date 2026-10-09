@@ -3824,6 +3824,44 @@ def savings_audit_contracts():
 
 
 @check
+def prefix_normalize_contracts():
+    from hydra_cli.providers import (
+        PrefixNormalizer,
+        normalize_cache_prefix_text,
+        normalize_cache_prefix_messages,
+        isolate_cache_prefix,
+    )
+
+    # 1. Text normalization
+    raw_text = "System Prompt \r\n\r\n\r\nLine 2   \r\n\u201cquoted\u201d text\u00a0end"
+    cleaned = normalize_cache_prefix_text(raw_text)
+    assert "\r" not in cleaned
+    assert "\n\n\n" not in cleaned
+    assert "  \n" not in cleaned
+    assert '"quoted"' in cleaned
+    assert "\u00a0" not in cleaned
+
+    # 2. Windows vs Linux equivalence check
+    win_text = "role : orchestrator\r\n\r\ninvariant : exit 0\r\n"
+    nix_text = "role : orchestrator\n\ninvariant : exit 0\n"
+    assert normalize_cache_prefix_text(win_text) == normalize_cache_prefix_text(nix_text)
+
+    # 3. Message normalization
+    msgs = [
+        {"role": "system", "content": win_text},
+        {"role": "user", "content": "hello world"},
+    ]
+    norm_msgs, metrics = normalize_cache_prefix_messages(msgs)
+    assert metrics["modified_count"] == 1
+    assert norm_msgs[0]["content"] == normalize_cache_prefix_text(nix_text)
+
+    # 4. Integration in isolate_cache_prefix
+    iso_win = isolate_cache_prefix([{"role": "system", "content": win_text}, {"role": "user", "content": "q"}])
+    iso_nix = isolate_cache_prefix([{"role": "system", "content": nix_text}, {"role": "user", "content": "q"}])
+    assert iso_win["prefix_hash"] == iso_nix["prefix_hash"]
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
