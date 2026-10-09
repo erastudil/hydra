@@ -3421,6 +3421,62 @@ def timestamp_strip_contracts():
 
 
 @check
+def cache_hit_telemetry_contracts():
+    from hydra_cli.providers import (
+        CacheHitTelemetry,
+        extract_cache_tokens_from_usage,
+        record_cache_hit_telemetry,
+        get_cache_hit_telemetry_summary,
+        reset_cache_hit_telemetry,
+    )
+
+    # 1. Extraction across provider schemas
+    u_openai = {"prompt_tokens": 100, "prompt_tokens_details": {"cached_tokens": 40}, "completion_tokens": 20}
+    assert extract_cache_tokens_from_usage(u_openai) == (40, 100)
+
+    u_deepseek = {"prompt_tokens": 120, "prompt_cache_hit_tokens": 60, "completion_tokens": 30}
+    assert extract_cache_tokens_from_usage(u_deepseek) == (60, 120)
+
+    u_anthropic = {"prompt_tokens": 150, "cache_read_input_tokens": 50, "completion_tokens": 25}
+    assert extract_cache_tokens_from_usage(u_anthropic) == (50, 150)
+
+    u_none = {"prompt_tokens": 80, "completion_tokens": 10}
+    assert extract_cache_tokens_from_usage(u_none) == (0, 80)
+
+    # 2. Isolated CacheHitTelemetry instance
+    tele = CacheHitTelemetry()
+    res1 = tele.record_usage("openrouter", u_openai)
+    assert res1["cached_tokens"] == 40
+    assert res1["prompt_tokens"] == 100
+    assert res1["hit_ratio"] == 0.4
+    assert res1["is_cache_hit"] is True
+
+    res2 = tele.record_usage("anthropic", u_none)
+    assert res2["cached_tokens"] == 0
+    assert res2["is_cache_hit"] is False
+
+    summary = tele.get_summary()
+    assert summary["total_requests"] == 2
+    assert summary["cache_hit_requests"] == 1
+    assert summary["request_hit_ratio"] == 0.5
+    assert summary["total_prompt_tokens"] == 180
+    assert summary["total_cached_tokens"] == 40
+    assert summary["total_uncached_tokens"] == 140
+    assert summary["overall_hit_ratio"] == round(40 / 180, 4)
+    assert "openrouter" in summary["by_provider"]
+    assert "anthropic" in summary["by_provider"]
+
+    # 3. Global telemetry helpers
+    reset_cache_hit_telemetry()
+    record_cache_hit_telemetry("openrouter", u_openai)
+    g_sum = get_cache_hit_telemetry_summary()
+    assert g_sum["total_requests"] == 1
+    assert g_sum["total_cached_tokens"] == 40
+    reset_cache_hit_telemetry()
+    assert get_cache_hit_telemetry_summary()["total_requests"] == 0
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

@@ -1020,6 +1020,140 @@ def match_kv_prefix(messages: List[Dict[str, Any]], block_size: int = 32) -> Dic
     return fingerprinter.match_prefix(messages)
 
 
+
+
+class CacheHitTelemetry:
+    """Tracks token cache hit metrics, savings ratios, and per-provider telemetry."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset all tracked cache hit counters and provider records."""
+        self.total_requests: int = 0
+        self.cache_hit_requests: int = 0
+        self.total_prompt_tokens: int = 0
+        self.total_cached_tokens: int = 0
+        self.total_completion_tokens: int = 0
+        self.by_provider: Dict[str, Dict[str, Any]] = {}
+
+    @staticmethod
+    def extract_cache_tokens(usage: Dict[str, Any]) -> Tuple[int, int]:
+        """Extract cached prompt tokens and total prompt tokens across provider formats."""
+        if not isinstance(usage, dict):
+            return 0, 0
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        cached_tokens = 0
+
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict):
+            cached_tokens = int(details.get("cached_tokens") or 0)
+
+        if not cached_tokens and "prompt_cache_hit_tokens" in usage:
+            cached_tokens = int(usage.get("prompt_cache_hit_tokens") or 0)
+
+        if not cached_tokens and "cache_read_input_tokens" in usage:
+            cached_tokens = int(usage.get("cache_read_input_tokens") or 0)
+
+        if not prompt_tokens and cached_tokens:
+            prompt_tokens = cached_tokens
+
+        return cached_tokens, prompt_tokens
+
+    def record_usage(self, provider: str, usage: Dict[str, Any]) -> Dict[str, Any]:
+        """Record token usage metrics and update cache hit statistics."""
+        cached_tokens, prompt_tokens = self.extract_cache_tokens(usage)
+        completion_tokens = int(usage.get("completion_tokens") or 0) if isinstance(usage, dict) else 0
+
+        self.total_requests += 1
+        if cached_tokens > 0:
+            self.cache_hit_requests += 1
+        self.total_prompt_tokens += prompt_tokens
+        self.total_cached_tokens += cached_tokens
+        self.total_completion_tokens += completion_tokens
+
+        prov_key = provider.lower()
+        if prov_key not in self.by_provider:
+            self.by_provider[prov_key] = {
+                "requests": 0,
+                "hit_requests": 0,
+                "prompt_tokens": 0,
+                "cached_tokens": 0,
+                "completion_tokens": 0,
+            }
+
+        rec = self.by_provider[prov_key]
+        rec["requests"] += 1
+        if cached_tokens > 0:
+            rec["hit_requests"] += 1
+        rec["prompt_tokens"] += prompt_tokens
+        rec["cached_tokens"] += cached_tokens
+        rec["completion_tokens"] += completion_tokens
+
+        hit_ratio = round(cached_tokens / prompt_tokens, 4) if prompt_tokens > 0 else 0.0
+
+        return {
+            "cached_tokens": cached_tokens,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "hit_ratio": hit_ratio,
+            "is_cache_hit": cached_tokens > 0,
+        }
+
+    def get_summary(self) -> Dict[str, Any]:
+        """Return aggregated cache hit telemetry summary."""
+        hit_ratio = (
+            round(self.total_cached_tokens / self.total_prompt_tokens, 4)
+            if self.total_prompt_tokens > 0
+            else 0.0
+        )
+        request_hit_ratio = (
+            round(self.cache_hit_requests / self.total_requests, 4)
+            if self.total_requests > 0
+            else 0.0
+        )
+        return {
+            "total_requests": self.total_requests,
+            "cache_hit_requests": self.cache_hit_requests,
+            "request_hit_ratio": request_hit_ratio,
+            "total_prompt_tokens": self.total_prompt_tokens,
+            "total_cached_tokens": self.total_cached_tokens,
+            "total_uncached_tokens": max(0, self.total_prompt_tokens - self.total_cached_tokens),
+            "total_completion_tokens": self.total_completion_tokens,
+            "overall_hit_ratio": hit_ratio,
+            "providers_count": len(self.by_provider),
+            "by_provider": dict(self.by_provider),
+        }
+
+
+_DEFAULT_CACHE_HIT_TELEMETRY = CacheHitTelemetry()
+
+
+def get_default_cache_hit_telemetry() -> CacheHitTelemetry:
+    """Return default singleton cache hit telemetry instance."""
+    return _DEFAULT_CACHE_HIT_TELEMETRY
+
+
+def record_cache_hit_telemetry(provider: str, usage: Dict[str, Any]) -> Dict[str, Any]:
+    """Record token usage and cache hit metrics into global telemetry."""
+    return _DEFAULT_CACHE_HIT_TELEMETRY.record_usage(provider, usage)
+
+
+def get_cache_hit_telemetry_summary() -> Dict[str, Any]:
+    """Return summary dictionary of global cache hit metrics."""
+    return _DEFAULT_CACHE_HIT_TELEMETRY.get_summary()
+
+
+def reset_cache_hit_telemetry() -> None:
+    """Reset global cache hit telemetry metrics."""
+    _DEFAULT_CACHE_HIT_TELEMETRY.reset()
+
+
+def extract_cache_tokens_from_usage(usage: Dict[str, Any]) -> Tuple[int, int]:
+    """Extract cached prompt tokens and total prompt tokens across provider formats."""
+    return CacheHitTelemetry.extract_cache_tokens(usage)
+
+
 def adapt_model_for_url(url: str, model: str) -> str:
     """Translate provider namespaces. Unknown ids pass through unchanged."""
     parsed = urlparse(url)
@@ -1389,14 +1523,22 @@ def fetch_chat_completion(
                         )
                     raise ProviderError(f"Empty completion from {where}")
                 record_provider_success(url)
+                usage_dict = res_json.get("usage")
+                if isinstance(usage_dict, dict):
+                    record_cache_hit_telemetry(url, usage_dict)
                 if return_meta:
                     upstream = res_json.get("provider")
-                    return {
+                    meta_dict = {
                         "content": content,
                         "model": res_json.get("model") or effective_model,
                         "upstream": upstream if isinstance(upstream, str) else None,
-                        "usage": res_json.get("usage") if isinstance(res_json.get("usage"), dict) else None,
+                        "usage": usage_dict if isinstance(usage_dict, dict) else None,
                     }
+                    if isinstance(usage_dict, dict):
+                        cached_t, prompt_t = CacheHitTelemetry.extract_cache_tokens(usage_dict)
+                        meta_dict["cached_tokens"] = cached_t
+                        meta_dict["cache_hit_ratio"] = round(cached_t / prompt_t, 4) if prompt_t > 0 else 0.0
+                    return meta_dict
                 return content
         except urllib.error.HTTPError as exc:
             if exc.code == 429 and attempt < retries:
