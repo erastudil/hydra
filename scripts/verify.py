@@ -4417,6 +4417,68 @@ def session_checkpoint_index_contracts():
 
 
 @check
+def buffer_isolation_contracts():
+    from hydra_cli.agent import (
+        IsolatedContextBuffer,
+        BufferIsolationManager,
+        get_default_buffer_manager,
+        create_isolated_buffer,
+        get_isolated_buffer,
+        isolate_tool_buffer,
+        merge_isolated_buffers,
+        purge_ephemeral_buffers,
+        reset_buffer_isolation,
+    )
+
+    reset_buffer_isolation()
+
+    # 1. Isolated buffer operations
+    b1 = create_isolated_buffer("system_prefix", scope="system", pinned=True)
+    b1.append({"role": "system", "content": "System operational genome."})
+    assert b1.total_chars() > 0
+    assert b1.is_pinned() is True
+
+    # 2. Ephemeral buffer operations and compaction
+    b2 = create_isolated_buffer("scratchpad_01", scope="scratchpad")
+    b2.append({"role": "assistant", "content": "step 1 calculation details"})
+    b2.append({"role": "assistant", "content": "step 2 calculation details"})
+    assert len(b2.get_messages()) == 2
+
+    cloned = b2.clone("scratchpad_clone")
+    assert len(cloned.get_messages()) == 2
+
+    # 3. Compaction
+    b2.compact(target_chars=30)
+    assert len(b2.get_messages()) == 1
+
+    # 4. Tool execution isolation
+    tool_res = isolate_tool_buffer("bash", "A" * 3000, max_chars=1000)
+    assert "[TRUNCATED 2000 CHARACTERS;" in tool_res["content"]
+    assert "isolated_buffer" in tool_res
+
+    # 5. Merging isolated buffers
+    b3 = create_isolated_buffer("conv_user", scope="user")
+    b3.append({"role": "user", "content": "execute test suite"})
+    merged = merge_isolated_buffers(["system_prefix", "conv_user"])
+    assert len(merged) == 2
+    assert merged[0]["role"] == "system"
+    assert merged[1]["role"] == "user"
+
+    # 6. Purging ephemeral
+    purged = purge_ephemeral_buffers()
+    assert purged >= 2
+    assert get_isolated_buffer("system_prefix") is not None
+
+    # 7. Metrics
+    mgr = get_default_buffer_manager()
+    met = mgr.get_metrics()
+    assert met["merges_executed"] >= 1
+    assert met["purges_executed"] >= 1
+
+    reset_buffer_isolation()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

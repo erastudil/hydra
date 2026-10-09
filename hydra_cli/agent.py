@@ -1208,6 +1208,267 @@ def reset_checkpoint_index() -> None:
     _DEFAULT_SESSION_CHECKPOINT_INDEX.reset()
 
 
+class IsolatedContextBuffer:
+    """Isolated message buffer preventing context contamination."""
+
+    def __init__(
+        self,
+        name: str,
+        scope: str = "general",
+        max_chars: Optional[int] = None,
+        pinned: bool = False,
+    ) -> None:
+        self.name = name
+        self.scope = scope
+        self.max_chars = max_chars
+        self.pinned = pinned
+        self._messages: List[Dict[str, Any]] = []
+
+    def append(self, message: Dict[str, Any]) -> None:
+        """Append single message dictionary to buffer."""
+        self._messages.append(dict(message))
+
+    def extend(self, messages: List[Dict[str, Any]]) -> None:
+        """Extend buffer with sequence of message dictionaries."""
+        for msg in messages:
+            self.append(msg)
+
+    def get_messages(self) -> List[Dict[str, Any]]:
+        """Return shallow copy of buffered message dictionaries."""
+        return [dict(m) for m in self._messages]
+
+    def clear(self) -> None:
+        """Remove all messages from buffer."""
+        self._messages.clear()
+
+    def total_chars(self) -> int:
+        """Calculate total characters across message content in buffer."""
+        total = 0
+        for m in self._messages:
+            c = m.get("content")
+            if isinstance(c, str):
+                total += len(c)
+            elif isinstance(c, list):
+                total += sum(len(str(part)) for part in c)
+        return total
+
+    def is_pinned(self) -> bool:
+        """Return boolean pin status protecting buffer from eviction."""
+        return self.pinned
+
+    def compact(self, target_chars: int) -> int:
+        """Compact buffer contents to fit within target character budget."""
+        current = self.total_chars()
+        if current <= target_chars or self.pinned:
+            return 0
+        removed_chars = 0
+        while self._messages and self.total_chars() > target_chars:
+            evicted = self._messages.pop(0)
+            c = evicted.get("content", "")
+            removed_chars += len(str(c))
+        return removed_chars
+
+    def clone(self, new_name: Optional[str] = None) -> "IsolatedContextBuffer":
+        """Produce independent clone of buffer."""
+        name = new_name or f"{self.name}_clone"
+        cloned = IsolatedContextBuffer(
+            name=name,
+            scope=self.scope,
+            max_chars=self.max_chars,
+            pinned=self.pinned,
+        )
+        cloned.extend(self.get_messages())
+        return cloned
+
+
+class BufferIsolationManager:
+    """Manager orchestrating isolated context buffers and cross-scope routing."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset all registered buffers and counters."""
+        self._buffers: Dict[str, IsolatedContextBuffer] = {}
+        self._tool_counter: int = 0
+        self._merges_count: int = 0
+        self._purges_count: int = 0
+
+    def create_buffer(
+        self,
+        name: str,
+        scope: str = "general",
+        max_chars: Optional[int] = None,
+        pinned: bool = False,
+    ) -> IsolatedContextBuffer:
+        """Create and register isolated buffer."""
+        buf = IsolatedContextBuffer(
+            name=name,
+            scope=scope,
+            max_chars=max_chars,
+            pinned=pinned,
+        )
+        self._buffers[name] = buf
+        return buf
+
+    def get_buffer(self, name: str) -> Optional[IsolatedContextBuffer]:
+        """Retrieve registered buffer by name."""
+        return self._buffers.get(name)
+
+    def delete_buffer(self, name: str) -> bool:
+        """Delete registered buffer from manager."""
+        if name in self._buffers:
+            del self._buffers[name]
+            return True
+        return False
+
+    def list_buffers(self) -> List[str]:
+        """List names of all registered buffers."""
+        return list(self._buffers.keys())
+
+    def append_to_buffer(self, name: str, message: Dict[str, Any]) -> bool:
+        """Append message to named buffer."""
+        buf = self.get_buffer(name)
+        if not buf:
+            return False
+        buf.append(message)
+        return True
+
+    def isolate_tool_execution(
+        self,
+        tool_name: str,
+        raw_output: str,
+        max_chars: int = 2000,
+    ) -> Dict[str, Any]:
+        """Isolate raw tool output and return bounded tool response message."""
+        self._tool_counter += 1
+        buf_name = f"tool_{tool_name}_{self._tool_counter}"
+        buf = self.create_buffer(name=buf_name, scope="tool_raw", pinned=False)
+        buf.append({"role": "tool", "name": tool_name, "content": raw_output})
+
+        if max_chars > 0 and len(raw_output) > max_chars:
+            omitted = len(raw_output) - max_chars
+            bounded_text = raw_output[:max_chars] + f"\n... [TRUNCATED {omitted} CHARACTERS; BUFFER: {buf_name}]"
+        else:
+            bounded_text = raw_output
+
+        return {
+            "role": "tool",
+            "name": tool_name,
+            "content": bounded_text,
+            "isolated_buffer": buf_name,
+        }
+
+    def merge_buffers(
+        self,
+        buffer_names: List[str],
+        target_budget: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Merge sequence of isolated buffers into combined message list."""
+        self._merges_count += 1
+        merged: List[Dict[str, Any]] = []
+        for bname in buffer_names:
+            buf = self.get_buffer(bname)
+            if buf:
+                merged.extend(buf.get_messages())
+
+        if target_budget is not None:
+            total = sum(len(str(m.get("content", ""))) for m in merged)
+            while merged and total > target_budget:
+                evicted = merged.pop(0)
+                total -= len(str(evicted.get("content", "")))
+
+        return merged
+
+    def purge_ephemeral(self) -> int:
+        """Purge non-pinned scratchpad and raw tool buffers."""
+        self._purges_count += 1
+        ephemeral_scopes = {"scratchpad", "ephemeral", "tool_raw"}
+        to_delete = [
+            name for name, buf in self._buffers.items()
+            if not buf.is_pinned() and buf.scope in ephemeral_scopes
+        ]
+        for name in to_delete:
+            del self._buffers[name]
+        return len(to_delete)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters for buffer isolation."""
+        scope_counts: Dict[str, int] = {}
+        for buf in self._buffers.values():
+            scope_counts[buf.scope] = scope_counts.get(buf.scope, 0) + 1
+
+        return {
+            "total_buffers": len(self._buffers),
+            "scope_breakdown": scope_counts,
+            "tool_buffers_created": self._tool_counter,
+            "merges_executed": self._merges_count,
+            "purges_executed": self._purges_count,
+        }
+
+
+_DEFAULT_BUFFER_MANAGER = BufferIsolationManager()
+
+
+def get_default_buffer_manager() -> BufferIsolationManager:
+    """Return default singleton buffer isolation manager."""
+    return _DEFAULT_BUFFER_MANAGER
+
+
+def create_isolated_buffer(
+    name: str,
+    scope: str = "general",
+    max_chars: Optional[int] = None,
+    pinned: bool = False,
+) -> IsolatedContextBuffer:
+    """Create isolated context buffer in global manager."""
+    return _DEFAULT_BUFFER_MANAGER.create_buffer(
+        name=name,
+        scope=scope,
+        max_chars=max_chars,
+        pinned=pinned,
+    )
+
+
+def get_isolated_buffer(name: str) -> Optional[IsolatedContextBuffer]:
+    """Retrieve isolated buffer by name from global manager."""
+    return _DEFAULT_BUFFER_MANAGER.get_buffer(name)
+
+
+def isolate_tool_buffer(
+    tool_name: str,
+    raw_output: str,
+    max_chars: int = 2000,
+) -> Dict[str, Any]:
+    """Isolate tool output in global buffer and return bounded message."""
+    return _DEFAULT_BUFFER_MANAGER.isolate_tool_execution(
+        tool_name=tool_name,
+        raw_output=raw_output,
+        max_chars=max_chars,
+    )
+
+
+def merge_isolated_buffers(
+    buffer_names: List[str],
+    target_budget: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Merge registered buffers through global manager."""
+    return _DEFAULT_BUFFER_MANAGER.merge_buffers(
+        buffer_names=buffer_names,
+        target_budget=target_budget,
+    )
+
+
+def purge_ephemeral_buffers() -> int:
+    """Purge ephemeral buffers through global manager."""
+    return _DEFAULT_BUFFER_MANAGER.purge_ephemeral()
+
+
+def reset_buffer_isolation() -> None:
+    """Reset global buffer isolation manager state."""
+    _DEFAULT_BUFFER_MANAGER.reset()
+
+
 _CONTEXT_MARKERS = (
     "context window",
     "context length",
