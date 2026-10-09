@@ -1693,6 +1693,172 @@ def recombine_frozen_preamble(
     )
 
 
+class TurnSeparator:
+    """Separate multi-turn dialogues into discrete cacheable turns and isolate active turn."""
+
+    def __init__(self) -> None:
+        pass
+
+    @staticmethod
+    def _hash_block(items: List[Dict[str, Any]]) -> str:
+        serialized = []
+        for m in items:
+            role = str(m.get("role", ""))
+            content = str(m.get("content", ""))
+            serialized.append(f"{role}:{content}")
+        raw = "\n---\n".join(serialized).encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:16]
+
+    def separate(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Separate message list into preamble, historical turns, and active turn."""
+        if not messages:
+            return {
+                "preamble": [],
+                "historical_turns": [],
+                "active_turn": [],
+                "turn_count": 0,
+                "preamble_hash": "",
+                "turn_hashes": [],
+                "cumulative_hashes": [],
+                "stable_prefix_messages": [],
+                "active_messages": [],
+            }
+
+        preamble: List[Dict[str, Any]] = []
+        dialogue: List[Dict[str, Any]] = []
+
+        collecting = True
+        for m in messages:
+            role = str(m.get("role", ""))
+            if collecting and role in ("system", "developer"):
+                preamble.append(dict(m))
+            else:
+                collecting = False
+                dialogue.append(dict(m))
+
+        preamble_hash = self._hash_block(preamble) if preamble else ""
+
+        if not dialogue:
+            return {
+                "preamble": preamble,
+                "historical_turns": [],
+                "active_turn": [],
+                "turn_count": 0,
+                "preamble_hash": preamble_hash,
+                "turn_hashes": [],
+                "cumulative_hashes": [preamble_hash] if preamble_hash else [],
+                "stable_prefix_messages": preamble,
+                "active_messages": [],
+            }
+
+        raw_turns: List[List[Dict[str, Any]]] = []
+        current_turn: List[Dict[str, Any]] = []
+
+        for m in dialogue:
+            role = str(m.get("role", ""))
+            if role == "user" and current_turn:
+                raw_turns.append(current_turn)
+                current_turn = [dict(m)]
+            else:
+                current_turn.append(dict(m))
+
+        if current_turn:
+            raw_turns.append(current_turn)
+
+        historical_turns = raw_turns[:-1] if len(raw_turns) > 1 else []
+        active_turn = raw_turns[-1] if raw_turns else []
+
+        turn_hashes = [self._hash_block(t) for t in raw_turns]
+
+        cumulative_hashes = []
+        running_block = list(preamble)
+        for t in raw_turns:
+            running_block.extend(t)
+            cumulative_hashes.append(self._hash_block(running_block))
+
+        stable_prefix = list(preamble)
+        for t in historical_turns:
+            stable_prefix.extend(t)
+
+        return {
+            "preamble": preamble,
+            "historical_turns": historical_turns,
+            "active_turn": active_turn,
+            "turn_count": len(raw_turns),
+            "preamble_hash": preamble_hash,
+            "turn_hashes": turn_hashes,
+            "cumulative_hashes": cumulative_hashes,
+            "stable_prefix_messages": stable_prefix,
+            "active_messages": list(active_turn),
+        }
+
+    def attach_turn_cache_control(
+        self,
+        messages: List[Dict[str, Any]],
+        mark_preamble: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Attach cache control breakpoint to final message of historical turns."""
+        sep = self.separate(messages)
+        if not sep["stable_prefix_messages"]:
+            return [dict(m) for m in messages]
+
+        annotated_prefix = [dict(m) for m in sep["stable_prefix_messages"]]
+
+        if mark_preamble and sep["preamble"] and sep["historical_turns"]:
+            preamble_last_idx = len(sep["preamble"]) - 1
+            annotated_prefix[preamble_last_idx]["cache_control"] = {"type": "ephemeral"}
+
+        annotated_prefix[-1]["cache_control"] = {"type": "ephemeral"}
+
+        return annotated_prefix + [dict(m) for m in sep["active_messages"]]
+
+    def validate_sequence(self, messages: List[Dict[str, Any]]) -> Tuple[bool, List[str]]:
+        """Validate turn sequencing and tool pairing consistency."""
+        issues: List[str] = []
+        if not messages:
+            return True, issues
+
+        last_role = None
+        for idx, m in enumerate(messages):
+            role = str(m.get("role", ""))
+            if role == "tool" and last_role not in ("assistant", "tool"):
+                issues.append(f"message {idx}: tool role without preceding assistant invocation")
+            last_role = role
+
+        return len(issues) == 0, issues
+
+
+_DEFAULT_TURN_SEPARATOR = TurnSeparator()
+
+
+def get_default_turn_separator() -> TurnSeparator:
+    """Return default singleton turn separator instance."""
+    return _DEFAULT_TURN_SEPARATOR
+
+
+def separate_chat_turns(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Separate chat message history into preamble, completed turns, and active turn."""
+    return _DEFAULT_TURN_SEPARATOR.separate(messages)
+
+
+def attach_turn_cache_control(
+    messages: List[Dict[str, Any]],
+    mark_preamble: bool = True,
+) -> List[Dict[str, Any]]:
+    """Attach prompt cache breakpoint to end of completed dialogue history."""
+    return _DEFAULT_TURN_SEPARATOR.attach_turn_cache_control(messages, mark_preamble=mark_preamble)
+
+
+def get_turn_prefix_hashes(messages: List[Dict[str, Any]]) -> List[str]:
+    """Compute running cumulative prefix hashes for each turn boundary."""
+    return _DEFAULT_TURN_SEPARATOR.separate(messages)["cumulative_hashes"]
+
+
+def validate_chat_turn_sequence(messages: List[Dict[str, Any]]) -> Tuple[bool, List[str]]:
+    """Validate dialogue turn sequencing and report detected structural issues."""
+    return _DEFAULT_TURN_SEPARATOR.validate_sequence(messages)
+
+
 def adapt_model_for_url(url: str, model: str) -> str:
     """Translate provider namespaces. Unknown ids pass through unchanged."""
     parsed = urlparse(url)

@@ -3643,6 +3643,52 @@ def preamble_freeze_contracts():
 
 
 @check
+def turn_separation_contracts():
+    from hydra_cli.providers import (
+        TurnSeparator,
+        separate_chat_turns,
+        attach_turn_cache_control,
+        get_turn_prefix_hashes,
+        validate_chat_turn_sequence,
+    )
+
+    chat = [
+        {"role": "system", "content": "You are Hydra engine."},
+        {"role": "user", "content": "What is 2+2?"},
+        {"role": "assistant", "content": "4."},
+        {"role": "user", "content": "What is 3+3?"},
+        {"role": "assistant", "content": "6."},
+        {"role": "user", "content": "What is 4+4?"},
+    ]
+
+    # 1. Turn separation
+    res = separate_chat_turns(chat)
+    assert len(res["preamble"]) == 1
+    assert len(res["historical_turns"]) == 2
+    assert len(res["active_turn"]) == 1
+    assert res["active_turn"][0]["content"] == "What is 4+4?"
+    assert res["turn_count"] == 3
+    assert len(res["cumulative_hashes"]) == 3
+    assert len(res["stable_prefix_messages"]) == 5
+    assert len(res["active_messages"]) == 1
+
+    # 2. Cache control attachment
+    annotated = attach_turn_cache_control(chat)
+    assert annotated[0]["cache_control"] == {"type": "ephemeral"}
+    assert annotated[4]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in annotated[5]
+
+    # 3. Cumulative prefix hashes
+    cum_hashes = get_turn_prefix_hashes(chat)
+    assert len(cum_hashes) == 3
+
+    # 4. Turn sequence validation
+    valid, issues = validate_chat_turn_sequence(chat)
+    assert valid is True
+    assert len(issues) == 0
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
