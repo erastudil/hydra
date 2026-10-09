@@ -3739,6 +3739,57 @@ def expiration_monitor_contracts():
 
 
 @check
+def kv_reuse_contracts():
+    from hydra_cli.providers import (
+        KvReuseManager,
+        register_kv_session,
+        find_kv_reuse,
+        branch_kv_session,
+        get_kv_session,
+        get_kv_reuse_metrics,
+        reset_kv_reuse_manager,
+    )
+
+    reset_kv_reuse_manager()
+
+    root_msgs = [
+        {"role": "system", "content": "You are Hydra open swarm orchestrator. Operating under strict Progen syntax invariants and mathematical foundations. Every operational unit formatted as topic : comment."},
+        {"role": "user", "content": "Analyze theoretical physics foundations across quantum field theories and cosmological models."},
+    ]
+
+    reg = register_kv_session("root_sess", root_msgs)
+    assert reg["session_id"] == "root_sess"
+    assert reg["total_tokens"] >= 40
+
+    # 1. Exact match
+    exact_res = find_kv_reuse(root_msgs)
+    assert exact_res["matched_session_id"] == "root_sess"
+    assert exact_res["matched_tokens"] == reg["total_tokens"]
+    assert exact_res["reuse_ratio"] == 1.0
+
+    # 2. Branch session
+    branch_arch = branch_kv_session("root_sess", "arch_head", [{"role": "assistant", "content": "Architect analysis and failure modes"}])
+    assert branch_arch["parent_id"] == "root_sess"
+    assert branch_arch["total_tokens"] > reg["total_tokens"]
+    assert get_kv_session("arch_head") is not None
+
+    # 3. Coder head reuse of root blocks
+    coder_msgs = list(root_msgs) + [{"role": "assistant", "content": "Coder implementation step and diffs"}]
+    reuse_res = find_kv_reuse(coder_msgs)
+    assert reuse_res["matched_session_id"] in ("root_sess", "arch_head")
+    assert reuse_res["matched_blocks"] >= 1
+    assert reuse_res["matched_tokens"] >= 32
+    assert reuse_res["reuse_ratio"] > 0.4
+
+    metrics = get_kv_reuse_metrics()
+    assert metrics["total_sessions"] == 2
+    assert metrics["total_queries"] == 2
+    assert metrics["overall_reuse_ratio"] > 0.5
+
+    reset_kv_reuse_manager()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

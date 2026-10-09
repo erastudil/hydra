@@ -2037,6 +2037,196 @@ def reset_cache_expiration_monitor() -> None:
     _DEFAULT_CACHE_EXPIRATION_MONITOR.reset()
 
 
+class KvReuseManager:
+    """Manage KV cache prefix reuse across multi-agent sessions and swarm branches."""
+
+    def __init__(self, block_size: int = 32) -> None:
+        self.block_size = block_size
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset manager state and clear registered KV sessions."""
+        self._sessions: Dict[str, Dict[str, Any]] = {}
+        self._total_queries: int = 0
+        self._total_matched_tokens: int = 0
+        self._total_queried_tokens: int = 0
+
+    @staticmethod
+    def _tokenize(text: str) -> List[str]:
+        return re.findall(r"\w+|[^\w\s]", text, re.UNICODE)
+
+    def _fingerprint(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        tokens = []
+        for m in messages:
+            role = str(m.get("role", ""))
+            content = str(m.get("content", ""))
+            tokens.extend(["<|im_start|>", role, "\n"])
+            tokens.extend(self._tokenize(content))
+            tokens.extend(["\n", "<|im_end|>", "\n"])
+
+        total_tokens = len(tokens)
+        blocks = []
+        cumulative_hash = hashlib.sha256(b"kv_init").hexdigest()
+
+        for idx in range(0, total_tokens, self.block_size):
+            chunk = tokens[idx : idx + self.block_size]
+            chunk_raw = " ".join(chunk).encode("utf-8")
+            block_hash = hashlib.sha256(chunk_raw).hexdigest()[:16]
+            combined = f"{cumulative_hash}:{block_hash}".encode("utf-8")
+            cumulative_hash = hashlib.sha256(combined).hexdigest()[:16]
+            blocks.append({
+                "block_index": len(blocks),
+                "tokens_count": len(chunk),
+                "cumulative_fingerprint": cumulative_hash,
+            })
+
+        return {
+            "root_fingerprint": cumulative_hash if blocks else "",
+            "total_tokens": total_tokens,
+            "blocks": blocks,
+        }
+
+    def register_session(self, session_id: str, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Register chat message sequence into KV session registry."""
+        fp = self._fingerprint(messages)
+        record = {
+            "session_id": session_id,
+            "messages": [dict(m) for m in messages],
+            "total_tokens": fp["total_tokens"],
+            "root_fingerprint": fp["root_fingerprint"],
+            "blocks": fp["blocks"],
+            "parent_id": None,
+        }
+        self._sessions[session_id] = record
+        return record
+
+    def find_best_reuse(self, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Find registered session offering maximum KV cache prefix reuse for messages."""
+        if not messages or not self._sessions:
+            return {
+                "matched_session_id": None,
+                "matched_tokens": 0,
+                "total_tokens": 0,
+                "reuse_ratio": 0.0,
+                "matched_blocks": 0,
+            }
+
+        fp = self._fingerprint(messages)
+        target_blocks = fp["blocks"]
+        total_tokens = fp["total_tokens"]
+
+        self._total_queries += 1
+        self._total_queried_tokens += total_tokens
+
+        best_session_id = None
+        best_matched_tokens = 0
+        best_matched_blocks = 0
+
+        for sid, sess in self._sessions.items():
+            sess_blocks = sess["blocks"]
+            matched_blocks = 0
+            matched_tokens = 0
+            for idx in range(min(len(target_blocks), len(sess_blocks))):
+                if target_blocks[idx]["cumulative_fingerprint"] == sess_blocks[idx]["cumulative_fingerprint"]:
+                    matched_blocks += 1
+                    matched_tokens += target_blocks[idx]["tokens_count"]
+                else:
+                    break
+
+            if matched_tokens > best_matched_tokens:
+                best_matched_tokens = matched_tokens
+                best_matched_blocks = matched_blocks
+                best_session_id = sid
+
+        self._total_matched_tokens += best_matched_tokens
+        ratio = round(best_matched_tokens / total_tokens, 4) if total_tokens > 0 else 0.0
+
+        return {
+            "matched_session_id": best_session_id,
+            "matched_tokens": best_matched_tokens,
+            "total_tokens": total_tokens,
+            "reuse_ratio": ratio,
+            "matched_blocks": best_matched_blocks,
+        }
+
+    def branch_session(
+        self,
+        parent_id: str,
+        branch_id: str,
+        additional_messages: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Fork child session branch from registered parent session sharing common prefix."""
+        parent = self._sessions.get(parent_id)
+        if not parent:
+            return self.register_session(branch_id, additional_messages)
+
+        full_messages = [dict(m) for m in parent["messages"]] + [dict(m) for m in additional_messages]
+        record = self.register_session(branch_id, full_messages)
+        record["parent_id"] = parent_id
+        return record
+
+    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve registered KV session entry."""
+        return self._sessions.get(session_id)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregated KV cache reuse metrics."""
+        overall_ratio = (
+            round(self._total_matched_tokens / self._total_queried_tokens, 4)
+            if self._total_queried_tokens > 0
+            else 0.0
+        )
+        return {
+            "total_sessions": len(self._sessions),
+            "total_queries": self._total_queries,
+            "total_queried_tokens": self._total_queried_tokens,
+            "total_matched_tokens": self._total_matched_tokens,
+            "overall_reuse_ratio": overall_ratio,
+        }
+
+
+_DEFAULT_KV_REUSE_MANAGER = KvReuseManager()
+
+
+def get_default_kv_reuse_manager() -> KvReuseManager:
+    """Return default singleton KV reuse manager instance."""
+    return _DEFAULT_KV_REUSE_MANAGER
+
+
+def register_kv_session(session_id: str, messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Register chat session into global KV reuse registry."""
+    return _DEFAULT_KV_REUSE_MANAGER.register_session(session_id, messages)
+
+
+def find_kv_reuse(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Find best KV prefix reuse match across registered sessions."""
+    return _DEFAULT_KV_REUSE_MANAGER.find_best_reuse(messages)
+
+
+def branch_kv_session(
+    parent_id: str,
+    branch_id: str,
+    additional_messages: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Fork child session branch sharing cached KV prefix blocks."""
+    return _DEFAULT_KV_REUSE_MANAGER.branch_session(parent_id, branch_id, additional_messages)
+
+
+def get_kv_session(session_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve registered KV session entry by identifier."""
+    return _DEFAULT_KV_REUSE_MANAGER.get_session(session_id)
+
+
+def get_kv_reuse_metrics() -> Dict[str, Any]:
+    """Retrieve aggregated global KV reuse metrics."""
+    return _DEFAULT_KV_REUSE_MANAGER.get_metrics()
+
+
+def reset_kv_reuse_manager() -> None:
+    """Reset global KV reuse manager state."""
+    _DEFAULT_KV_REUSE_MANAGER.reset()
+
+
 def adapt_model_for_url(url: str, model: str) -> str:
     """Translate provider namespaces. Unknown ids pass through unchanged."""
     parsed = urlparse(url)
