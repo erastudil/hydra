@@ -4555,6 +4555,67 @@ def state_quantization_contracts():
 
 
 @check
+def selective_recall_contracts():
+    from hydra_cli.agent import (
+        SelectiveRecallEngine,
+        get_default_selective_recall,
+        score_turn_relevance,
+        extract_recall_terms,
+        selective_recall_context,
+        reset_selective_recall,
+    )
+
+    reset_selective_recall()
+
+    # 1. Term extraction and relevance scoring
+    terms = extract_recall_terms("Fix bug in hydra_cli/agent.py using AST compiler")
+    assert "compiler" in terms
+
+    sc_high = score_turn_relevance(["compiler", "ast"], "This turn discusses AST compiler optimizations")
+    sc_low = score_turn_relevance(["compiler", "ast"], "Totally unrelated greeting and pleasantries")
+    assert sc_high > sc_low
+
+    # 2. Selective recall with multi-turn history
+    msgs = [
+        {"role": "system", "content": "You are Hydra root genome."},
+        {"role": "user", "content": "Configure database connection parameters in settings.py"},
+        {"role": "assistant", "content": "Settings configured for postgres database."},
+        {"role": "user", "content": "Inspect weather in Seattle today"},
+        {"role": "assistant", "content": "Weather in Seattle 55F and cloudy."},
+        {"role": "user", "content": "Now run migration on postgres database settings"},
+        {"role": "assistant", "content": "Ready to execute migration."},
+    ]
+
+    recalled = selective_recall_context(
+        messages=msgs,
+        query="postgres database settings migration",
+        budget_chars=5000,
+        preserve_recent_count=2,
+    )
+
+    # System prompt preserved
+    assert recalled[0]["role"] == "system"
+
+    # Tail turns preserved
+    assert recalled[-2]["content"] == msgs[5]["content"]
+    assert recalled[-1]["content"] == msgs[6]["content"]
+
+    # Database turns recalled while unrelated turns omitted
+    contents = [m["content"] for m in recalled]
+    assert any("postgres" in c for c in contents)
+    assert not any("Seattle" in c for c in contents)
+
+    # 3. Telemetry metrics
+    met = get_default_selective_recall().get_metrics()
+    assert met["queries_processed"] == 1
+    assert met["turns_evaluated"] > 0
+    assert met["turns_omitted"] > 0
+    assert met["chars_saved"] > 0
+
+    reset_selective_recall()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

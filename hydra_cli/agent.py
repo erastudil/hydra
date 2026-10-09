@@ -1667,6 +1667,194 @@ def reset_state_quantizer() -> None:
     _DEFAULT_STATE_QUANTIZER.reset()
 
 
+_RECALL_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "if", "then", "else", "when",
+    "at", "by", "for", "with", "about", "against", "between", "into", "through",
+    "during", "before", "after", "above", "below", "to", "from", "up", "down",
+    "in", "out", "on", "off", "over", "under", "again", "further", "then",
+    "once", "here", "there", "all", "any", "both", "each", "few", "more",
+    "most", "other", "some", "such", "no", "nor", "not", "only", "own",
+    "same", "so", "than", "too", "very", "can", "will", "just", "should",
+    "now", "is", "are", "was", "were", "be", "been", "being", "have", "has",
+})
+
+_IDENTIFIER_PATTERN = re.compile(r"\b[a-zA-Z_][a-zA-Z0-9_\-\.]{2,}\b")
+
+
+def extract_recall_terms(text: str) -> List[str]:
+    """Extract filtered alphanumeric search terms and identifiers from text."""
+    if not text:
+        return []
+    terms: List[str] = []
+    for token in _IDENTIFIER_PATTERN.findall(text):
+        lowered = token.lower()
+        if lowered not in _RECALL_STOPWORDS and len(lowered) >= 3:
+            terms.append(lowered)
+    return list(dict.fromkeys(terms))
+
+
+def score_turn_relevance(
+    query_terms: List[str],
+    turn_content: str,
+    recency_index: int = 0,
+    total_turns: int = 1,
+) -> float:
+    """Compute numerical relevance score for turn content against query terms."""
+    if not turn_content:
+        return 0.0
+    turn_terms = set(extract_recall_terms(turn_content))
+    if not turn_terms:
+        return float(recency_index) / float(max(1, total_turns)) * 0.1
+
+    overlap = sum(1.0 for term in query_terms if term in turn_terms)
+    term_score = overlap / float(max(1, len(query_terms)))
+
+    bonus = 0.0
+    for term in query_terms:
+        if ("_" in term or "/" in term or "\\" in term or "." in term) and term in turn_terms:
+            bonus += 0.25
+
+    recency_score = (float(recency_index) / float(max(1, total_turns))) * 0.2
+
+    return term_score + bonus + recency_score
+
+
+class SelectiveRecallEngine:
+    """Selectively retrieves relevant conversation turns based on query terms and context budgets."""
+
+    def __init__(self, default_budget_chars: int = 12000, min_relevance_threshold: float = 0.15) -> None:
+        self.default_budget_chars = default_budget_chars
+        self.min_relevance_threshold = min_relevance_threshold
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset recall engine metrics counters."""
+        self._queries_processed: int = 0
+        self._turns_evaluated: int = 0
+        self._turns_recalled: int = 0
+        self._turns_omitted: int = 0
+        self._chars_saved: int = 0
+
+    def recall(
+        self,
+        messages: List[Dict[str, Any]],
+        query: str,
+        budget_chars: Optional[int] = None,
+        min_threshold: Optional[float] = None,
+        preserve_recent_count: int = 2,
+    ) -> List[Dict[str, Any]]:
+        """Recall relevant turns from message sequence within character budget."""
+        self._queries_processed += 1
+        budget = budget_chars if budget_chars is not None else self.default_budget_chars
+        threshold = min_threshold if min_threshold is not None else self.min_relevance_threshold
+
+        if not messages:
+            return []
+        if len(messages) <= 2:
+            return [dict(m) for m in messages]
+
+        pinned_indices: set = set()
+        for idx, m in enumerate(messages):
+            if m.get("role") in ("system", "instruction") or m.get("pinned"):
+                pinned_indices.add(idx)
+
+        tail_start = max(0, len(messages) - preserve_recent_count)
+        for idx in range(tail_start, len(messages)):
+            pinned_indices.add(idx)
+
+        query_terms = extract_recall_terms(query)
+
+        candidate_scores: List[Tuple[int, float]] = []
+        total_intermediate = len(messages)
+        for idx in range(len(messages)):
+            if idx in pinned_indices:
+                continue
+            self._turns_evaluated += 1
+            content = str(messages[idx].get("content", ""))
+            sc = score_turn_relevance(
+                query_terms=query_terms,
+                turn_content=content,
+                recency_index=idx,
+                total_turns=total_intermediate,
+            )
+            candidate_scores.append((idx, sc))
+
+        candidate_scores.sort(key=lambda item: item[1], reverse=True)
+
+        selected_indices = set(pinned_indices)
+        current_chars = sum(len(str(messages[i].get("content", ""))) for i in pinned_indices)
+
+        for idx, sc in candidate_scores:
+            if sc >= threshold:
+                c_len = len(str(messages[idx].get("content", "")))
+                if current_chars + c_len <= budget:
+                    selected_indices.add(idx)
+                    current_chars += c_len
+                    self._turns_recalled += 1
+                else:
+                    self._turns_omitted += 1
+                    self._chars_saved += c_len
+            else:
+                c_len = len(str(messages[idx].get("content", "")))
+                self._turns_omitted += 1
+                self._chars_saved += c_len
+
+        if len(selected_indices) == len(pinned_indices) and candidate_scores:
+            for idx in sorted([idx for idx, _ in candidate_scores], reverse=True):
+                c_len = len(str(messages[idx].get("content", "")))
+                if current_chars + c_len <= budget:
+                    selected_indices.add(idx)
+                    current_chars += c_len
+                    self._turns_recalled += 1
+                    break
+
+        result: List[Dict[str, Any]] = []
+        for idx in sorted(selected_indices):
+            result.append(dict(messages[idx]))
+
+        return result
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return selective recall telemetry metrics."""
+        return {
+            "queries_processed": self._queries_processed,
+            "turns_evaluated": self._turns_evaluated,
+            "turns_recalled": self._turns_recalled,
+            "turns_omitted": self._turns_omitted,
+            "chars_saved": self._chars_saved,
+        }
+
+
+_DEFAULT_SELECTIVE_RECALL = SelectiveRecallEngine()
+
+
+def get_default_selective_recall() -> SelectiveRecallEngine:
+    """Return default singleton selective recall engine."""
+    return _DEFAULT_SELECTIVE_RECALL
+
+
+def selective_recall_context(
+    messages: List[Dict[str, Any]],
+    query: str,
+    budget_chars: Optional[int] = None,
+    min_threshold: Optional[float] = None,
+    preserve_recent_count: int = 2,
+) -> List[Dict[str, Any]]:
+    """Recall relevant turns from conversation history using default engine."""
+    return _DEFAULT_SELECTIVE_RECALL.recall(
+        messages=messages,
+        query=query,
+        budget_chars=budget_chars,
+        min_threshold=min_threshold,
+        preserve_recent_count=preserve_recent_count,
+    )
+
+
+def reset_selective_recall() -> None:
+    """Reset global selective recall engine state."""
+    _DEFAULT_SELECTIVE_RECALL.reset()
+
+
 _CONTEXT_MARKERS = (
     "context window",
     "context length",
