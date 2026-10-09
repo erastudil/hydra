@@ -5,6 +5,7 @@ and background daemon thread for stderr to prevent pipe deadlocks.
 """
 
 import fnmatch
+import hashlib
 import json
 import os
 import queue
@@ -192,8 +193,13 @@ def format_qualified_tool_name(
 class McpNamespaceRouter:
     """Multi-namespace router managing server namespaces, aliases, and tool dispatch."""
 
-    def __init__(self, separator: str = DEFAULT_NAMESPACE_SEPARATOR) -> None:
+    def __init__(
+        self,
+        separator: str = DEFAULT_NAMESPACE_SEPARATOR,
+        manifest_cache: Optional[Any] = None,
+    ) -> None:
         self.separator = separator
+        self.manifest_cache = manifest_cache
         self.reset()
 
     def reset(self) -> None:
@@ -289,6 +295,8 @@ class McpNamespaceRouter:
         **kwargs: Any,
     ) -> Any:
         """Register lazily-spawned MCP client under namespace."""
+        if "manifest_cache" not in kwargs and self.manifest_cache is not None:
+            kwargs["manifest_cache"] = self.manifest_cache
         lazy_client = McpLazyClient(
             factory_or_command=factory_or_command,
             args=args,
@@ -446,6 +454,220 @@ class McpHeartbeatMonitor:
         }
 
 
+def compute_server_fingerprint(
+    command: str,
+    args: Optional[List[str]] = None,
+    env: Optional[Dict[str, str]] = None,
+    cwd: Optional[str] = None,
+) -> str:
+    """Compute deterministic SHA-256 fingerprint from server execution specification."""
+    parts = [
+        str(command).strip(),
+        json.dumps(list(args or []), sort_keys=True),
+        json.dumps(dict(env or {}), sort_keys=True),
+        str(cwd or "").strip(),
+    ]
+    raw = "|".join(parts).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+class McpManifestCache:
+    """
+    Thread-safe manifest cache for Model Context Protocol tools and server capabilities.
+    Maintains cached tool schemas with fingerprint-based invalidation and TTL expiration.
+    Supports atomic persistence to disk and memory caching.
+    """
+
+    def __init__(
+        self,
+        cache_file: Optional[str] = None,
+        default_ttl: float = 3600.0,
+        enabled: bool = True,
+    ) -> None:
+        self.cache_file = cache_file
+        self.default_ttl = float(default_ttl)
+        self.enabled = bool(enabled)
+        self._entries: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        self._hits: int = 0
+        self._misses: int = 0
+        self._writes: int = 0
+        self._evictions: int = 0
+
+        if self.cache_file and os.path.isfile(self.cache_file):
+            self.load()
+
+    def get(
+        self,
+        server_name: str,
+        fingerprint: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Retrieve valid cached manifest entry; return None when expired or mismatched."""
+        if not self.enabled:
+            return None
+
+        clean_name = server_name.strip().lower()
+        now = time.time()
+        with self._lock:
+            entry = self._entries.get(clean_name)
+            if not entry:
+                self._misses += 1
+                return None
+
+            expires_at = entry.get("expires_at", 0)
+            if expires_at and now > expires_at:
+                del self._entries[clean_name]
+                self._evictions += 1
+                self._misses += 1
+                return None
+
+            if fingerprint is not None and entry.get("fingerprint") != fingerprint:
+                del self._entries[clean_name]
+                self._evictions += 1
+                self._misses += 1
+                return None
+
+            self._hits += 1
+            return {
+                "tools": list(entry.get("tools") or []),
+                "capabilities": dict(entry.get("capabilities") or {}),
+                "server_info": dict(entry.get("server_info") or {}),
+                "fingerprint": entry.get("fingerprint"),
+                "timestamp": entry.get("timestamp"),
+                "expires_at": entry.get("expires_at"),
+            }
+
+    def put(
+        self,
+        server_name: str,
+        tools: List[Dict[str, Any]],
+        fingerprint: Optional[str] = None,
+        capabilities: Optional[Dict[str, Any]] = None,
+        server_info: Optional[Dict[str, Any]] = None,
+        ttl: Optional[float] = None,
+    ) -> None:
+        """Store server manifest entry with fingerprint and expiration window."""
+        if not self.enabled:
+            return
+
+        clean_name = server_name.strip().lower()
+        now = time.time()
+        lifetime = float(ttl) if ttl is not None and ttl > 0 else self.default_ttl
+        expires_at = now + lifetime if lifetime > 0 else 0
+
+        entry = {
+            "tools": [dict(t) for t in tools],
+            "capabilities": dict(capabilities or {}),
+            "server_info": dict(server_info or {}),
+            "fingerprint": fingerprint,
+            "timestamp": now,
+            "expires_at": expires_at,
+        }
+
+        with self._lock:
+            self._entries[clean_name] = entry
+            self._writes += 1
+
+        if self.cache_file:
+            self.save()
+
+    def invalidate(self, server_name: str) -> bool:
+        """Invalidate and remove cached manifest entry for named server."""
+        clean_name = server_name.strip().lower()
+        with self._lock:
+            if clean_name in self._entries:
+                del self._entries[clean_name]
+                self._evictions += 1
+                if self.cache_file:
+                    self.save()
+                return True
+            return False
+
+    def clear(self) -> None:
+        """Clear all cached manifest entries and reset telemetry."""
+        with self._lock:
+            self._entries.clear()
+            self._hits = 0
+            self._misses = 0
+            self._writes = 0
+            self._evictions = 0
+            if self.cache_file and os.path.isfile(self.cache_file):
+                try:
+                    os.remove(self.cache_file)
+                except Exception:
+                    pass
+
+    def load(self) -> bool:
+        """Load cached manifest entries from persistent JSON cache file."""
+        if not self.cache_file or not os.path.isfile(self.cache_file):
+            return False
+        try:
+            with open(self.cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                with self._lock:
+                    self._entries = data.get("entries", {})
+                return True
+        except Exception:
+            return False
+        return False
+
+    def save(self) -> bool:
+        """Atomically persist cached manifest entries to JSON cache file."""
+        if not self.cache_file:
+            return False
+        payload = {
+            "version": "1.0",
+            "entries": self._entries,
+            "saved_at": time.time(),
+        }
+        target_dir = os.path.dirname(self.cache_file)
+        if target_dir:
+            os.makedirs(target_dir, exist_ok=True)
+        tmp_file = f"{self.cache_file}.tmp.{os.getpid()}"
+        try:
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp_file, self.cache_file)
+            return True
+        except Exception:
+            if os.path.exists(tmp_file):
+                try:
+                    os.remove(tmp_file)
+                except Exception:
+                    pass
+            return False
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return manifest cache performance and capacity metrics."""
+        with self._lock:
+            total_reqs = self._hits + self._misses
+            hit_ratio = (self._hits / total_reqs) if total_reqs > 0 else 0.0
+            return {
+                "enabled": self.enabled,
+                "cached_servers_count": len(self._entries),
+                "hits": self._hits,
+                "misses": self._misses,
+                "writes": self._writes,
+                "evictions": self._evictions,
+                "hit_ratio": round(hit_ratio, 4),
+                "cached_servers": sorted(self._entries.keys()),
+            }
+
+
+_DEFAULT_MANIFEST_CACHE = McpManifestCache()
+
+
+def get_default_manifest_cache() -> McpManifestCache:
+    """Return default singleton MCP manifest cache."""
+    return _DEFAULT_MANIFEST_CACHE
+
+
+def reset_manifest_cache() -> None:
+    """Reset global MCP manifest cache state."""
+    _DEFAULT_MANIFEST_CACHE.clear()
+
+
 class McpSubprocessClient:
     """
     MCP stdio subprocess client implementing JSON-RPC 2.0.
@@ -464,6 +686,7 @@ class McpSubprocessClient:
         namespace: Optional[str] = None,
         lazy: bool = False,
         predeclared_tools: Optional[List[Dict[str, Any]]] = None,
+        manifest_cache: Optional[McpManifestCache] = None,
     ):
         self.command = command
         self.args: List[str] = list(args) if args else []
@@ -480,6 +703,7 @@ class McpSubprocessClient:
         self.predeclared_tools: Optional[List[Dict[str, Any]]] = (
             [dict(t) for t in predeclared_tools] if predeclared_tools is not None else None
         )
+        self.manifest_cache = manifest_cache
         self.spawn_count: int = 0
         self.last_spawn_time: Optional[float] = None
 
@@ -718,14 +942,36 @@ class McpSubprocessClient:
         """List all tools exposed by the MCP server."""
         if self.lazy and self.predeclared_tools is not None and not self.is_running:
             return [dict(t) for t in self.predeclared_tools]
+
+        fp = compute_server_fingerprint(self.command, self.args, self.env, self.cwd)
+        name_key = self.namespace or self.command
+
+        if self.manifest_cache:
+            cached = self.manifest_cache.get(name_key, fingerprint=fp)
+            if cached and cached.get("tools"):
+                if self.lazy and not self.is_running:
+                    return cached["tools"]
+
         if self.lazy and not self.is_running:
             self.ensure_started()
+
         result = self._send_rpc("tools/list", {})
+        tools: List[Dict[str, Any]] = []
         if isinstance(result, dict):
-            return result.get("tools", [])
-        if isinstance(result, list):
-            return result
-        return []
+            tools = result.get("tools", [])
+        elif isinstance(result, list):
+            tools = result
+
+        if self.manifest_cache and tools:
+            self.manifest_cache.put(
+                name_key,
+                tools=tools,
+                fingerprint=fp,
+                capabilities=self.server_capabilities,
+                server_info=self.server_info,
+            )
+
+        return tools
 
     def qualify_tool_name(self, tool_name: str, separator: str = DEFAULT_NAMESPACE_SEPARATOR) -> str:
         """Qualify tool name with client namespace if configured."""
@@ -905,6 +1151,7 @@ class McpLazyClient:
         namespace: Optional[str] = None,
         predeclared_tools: Optional[List[Dict[str, Any]]] = None,
         auto_start: bool = True,
+        manifest_cache: Optional[McpManifestCache] = None,
     ) -> None:
         self.factory_or_command = factory_or_command
         self.args: List[str] = list(args) if args else []
@@ -918,6 +1165,7 @@ class McpLazyClient:
             [dict(t) for t in predeclared_tools] if predeclared_tools else None
         )
         self.auto_start = bool(auto_start)
+        self.manifest_cache = manifest_cache
 
         self._client: Optional[Any] = None
         self._lock = threading.Lock()
@@ -977,6 +1225,12 @@ class McpLazyClient:
         """List exposed tools; return predeclared tools without spawning when available."""
         if not self.is_spawned and self.predeclared_tools is not None:
             return [dict(t) for t in self.predeclared_tools]
+        if not self.is_spawned and self.manifest_cache:
+            name_key = self.namespace or str(self.factory_or_command)
+            fp = compute_server_fingerprint(str(self.factory_or_command), self.args, self.env, self.cwd) if not callable(self.factory_or_command) else None
+            cached = self.manifest_cache.get(name_key, fingerprint=fp)
+            if cached and cached.get("tools"):
+                return cached["tools"]
         client = self.ensure_started()
         if hasattr(client, "list_tools"):
             return client.list_tools()

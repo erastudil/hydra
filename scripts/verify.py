@@ -5244,6 +5244,91 @@ def mcp_registry_discovery_contracts():
 
 
 @check
+def mcp_manifest_cache_contracts():
+    import json
+    import os
+    import tempfile
+    import time
+    from hydra_cli.mcp import (
+        McpManifestCache,
+        McpLazyClient,
+        compute_server_fingerprint,
+        get_default_manifest_cache,
+        reset_manifest_cache,
+    )
+
+    reset_manifest_cache()
+
+    # 1. Fingerprint deterministic hashing
+    fp1 = compute_server_fingerprint("python", ["-c", "pass"], {"ENV_A": "1"}, "/home")
+    fp2 = compute_server_fingerprint("python", ["-c", "pass"], {"ENV_A": "1"}, "/home")
+    fp3 = compute_server_fingerprint("python", ["-c", "pass"], {"ENV_A": "2"}, "/home")
+    assert fp1 == fp2
+    assert fp1 != fp3
+
+    # 2. Manifest cache lifecycle & persistence
+    with tempfile.TemporaryDirectory() as tmp:
+        cache_file = os.path.join(tmp, "manifest_cache.json")
+        cache = McpManifestCache(cache_file=cache_file, default_ttl=3600.0)
+
+        # Miss on empty cache
+        assert cache.get("server_1") is None
+
+        # Put entry
+        tools_list = [{"name": "echo", "description": "Echo tool"}]
+        cache.put("server_1", tools_list, fingerprint=fp1, capabilities={"tools": True})
+
+        # Hit
+        hit_entry = cache.get("server_1", fingerprint=fp1)
+        assert hit_entry is not None
+        assert hit_entry["tools"] == tools_list
+        assert hit_entry["capabilities"] == {"tools": True}
+
+        # Fingerprint mismatch eviction
+        assert cache.get("server_1", fingerprint=fp3) is None
+        assert cache.get("server_1") is None
+
+        # TTL expiration
+        cache.put("server_exp", tools_list, ttl=0.04)
+        assert cache.get("server_exp") is not None
+        time.sleep(0.05)
+        assert cache.get("server_exp") is None
+
+        # Disk reload
+        cache.put("server_disk", tools_list, fingerprint=fp1)
+        cache2 = McpManifestCache(cache_file=cache_file)
+        hit_reloaded = cache2.get("server_disk", fingerprint=fp1)
+        assert hit_reloaded is not None
+        assert hit_reloaded["tools"] == tools_list
+
+        # 3. Integration with McpLazyClient
+        lazy_c = McpLazyClient(
+            factory_or_command="python",
+            args=["-c", "pass"],
+            env={"ENV_A": "1"},
+            cwd="/home",
+            namespace="server_disk",
+            manifest_cache=cache2,
+        )
+        assert lazy_c.is_spawned is False
+        tools_retrieved = lazy_c.list_tools()
+        assert tools_retrieved == tools_list
+        assert lazy_c.is_spawned is False
+
+        # 4. Invalidation and metrics
+        assert cache2.invalidate("server_disk") is True
+        assert cache2.get("server_disk") is None
+
+        met = cache.get_metrics()
+        assert met["hits"] >= 2
+        assert met["misses"] >= 3
+        assert met["writes"] >= 3
+        assert met["evictions"] >= 2
+
+    reset_manifest_cache()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
