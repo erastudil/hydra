@@ -850,9 +850,13 @@ class PrefixIsolationManager:
 
         template_id = None
         template_hash = None
+        preamble_frozen = False
+        preamble_hash = None
         if messages and isinstance(messages[0], dict):
             template_id = messages[0].get("_template_id")
             template_hash = messages[0].get("_template_hash")
+            preamble_frozen = bool(messages[0].get("_preamble_frozen") or messages[0].get("_frozen"))
+            preamble_hash = messages[0].get("_preamble_hash")
 
         return {
             "messages": isolated_messages,
@@ -864,6 +868,8 @@ class PrefixIsolationManager:
             "cache_hit_count": self._prefix_hits.get(prefix_hash, 0) if prefix_hash else 0,
             "template_id": template_id,
             "template_hash": template_hash,
+            "preamble_frozen": preamble_frozen,
+            "preamble_hash": preamble_hash,
         }
 
 
@@ -913,6 +919,9 @@ def attach_prefix_isolation(
         payload["_template_hash"] = isolated["template_hash"]
     if isolated.get("template_id"):
         payload["_template_id"] = isolated["template_id"]
+    if isolated.get("preamble_hash"):
+        payload["_preamble_hash"] = isolated["preamble_hash"]
+        payload["_preamble_frozen"] = True
     payload["_cache_boundary"] = evaluate_cache_boundary(isolated["prefix_tokens"], provider_or_url=url)
 
 
@@ -1490,6 +1499,198 @@ def align_cache_messages_boundary(
 ) -> Dict[str, Any]:
     """Determine optimal message boundary index for prompt cache placement."""
     return _DEFAULT_CACHE_BOUNDARY_ALIGNER.align_messages_boundary(messages, provider_or_url=provider_or_url)
+
+
+class PreambleFreezer:
+    """Enforce immutable preamble blocks and verify prompt cache freeze invariants."""
+
+    def __init__(self) -> None:
+        self._frozen_catalog: Dict[str, Dict[str, Any]] = {}
+        self._hit_counters: Dict[str, int] = {}
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        return max(1, len(text) // 4) if text else 0
+
+    def freeze_preamble(
+        self,
+        messages: List[Dict[str, Any]],
+        lock_id: Optional[str] = None,
+        attach_cache_control: bool = True,
+    ) -> Dict[str, Any]:
+        """Extract static preamble messages and freeze into immutable byte-stable block."""
+        if not messages:
+            return {
+                "frozen": False,
+                "preamble_hash": "",
+                "preamble_tokens": 0,
+                "lock_id": "",
+                "frozen_messages": [],
+                "dynamic_messages": [],
+                "all_messages": [],
+            }
+
+        preamble_msgs: List[Dict[str, Any]] = []
+        dynamic_msgs: List[Dict[str, Any]] = []
+
+        collecting = True
+        for m in messages:
+            role = str(m.get("role", ""))
+            if collecting and role in ("system", "developer"):
+                preamble_msgs.append(dict(m))
+            else:
+                collecting = False
+                dynamic_msgs.append(dict(m))
+
+        if not preamble_msgs:
+            return {
+                "frozen": False,
+                "preamble_hash": "",
+                "preamble_tokens": 0,
+                "lock_id": "",
+                "frozen_messages": [],
+                "dynamic_messages": [dict(m) for m in messages],
+                "all_messages": [dict(m) for m in messages],
+            }
+
+        serialized = []
+        for m in preamble_msgs:
+            role = str(m.get("role", ""))
+            content = str(m.get("content", ""))
+            serialized.append(f"{role}:{content}")
+
+        raw_block = "\n---\n".join(serialized).encode("utf-8")
+        preamble_hash = hashlib.sha256(raw_block).hexdigest()[:16]
+        assigned_lock = lock_id or f"lock_{preamble_hash[:8]}"
+
+        self._hit_counters[preamble_hash] = self._hit_counters.get(preamble_hash, 0) + 1
+
+        frozen_output = []
+        for idx, m in enumerate(preamble_msgs):
+            item = dict(m)
+            item["_frozen"] = True
+            item["_preamble_frozen"] = True
+            item["_preamble_hash"] = preamble_hash
+            item["_lock_id"] = assigned_lock
+            if attach_cache_control and idx == len(preamble_msgs) - 1:
+                item["cache_control"] = {"type": "ephemeral"}
+            frozen_output.append(item)
+
+        total_tokens = sum(self._estimate_tokens(str(m.get("content", ""))) for m in preamble_msgs)
+
+        all_msgs = list(frozen_output) + [dict(m) for m in dynamic_msgs]
+
+        return {
+            "frozen": True,
+            "preamble_hash": preamble_hash,
+            "preamble_tokens": total_tokens,
+            "lock_id": assigned_lock,
+            "frozen_messages": frozen_output,
+            "dynamic_messages": dynamic_msgs,
+            "all_messages": all_msgs,
+            "freeze_hit_count": self._hit_counters[preamble_hash],
+        }
+
+    def is_preamble_frozen(self, messages: List[Dict[str, Any]]) -> bool:
+        """Check whether leading message marks frozen preamble block."""
+        if not messages or not isinstance(messages[0], dict):
+            return False
+        return bool(messages[0].get("_preamble_frozen") or messages[0].get("_frozen"))
+
+    def verify_freeze_integrity(self, messages: List[Dict[str, Any]], expected_hash: str) -> bool:
+        """Verify cryptographic digest integrity of frozen preamble against expected digest."""
+        if not messages:
+            return False
+        frozen_res = self.freeze_preamble(messages, attach_cache_control=False)
+        return frozen_res["preamble_hash"] == expected_hash
+
+    def register_frozen_preamble(self, name: str, content: str, role: str = "system") -> Dict[str, Any]:
+        """Register static preamble content in frozen catalog."""
+        msg = [{"role": role, "content": content}]
+        res = self.freeze_preamble(msg, lock_id=f"cat_{name}")
+        record = {
+            "name": name,
+            "content": content,
+            "role": role,
+            "preamble_hash": res["preamble_hash"],
+            "preamble_tokens": res["preamble_tokens"],
+            "lock_id": res["lock_id"],
+        }
+        self._frozen_catalog[name] = record
+        return record
+
+    def get_frozen_preamble(self, name: str) -> Optional[Dict[str, Any]]:
+        """Retrieve registered frozen preamble entry from catalog."""
+        return self._frozen_catalog.get(name)
+
+    def recombine_with_frozen(
+        self,
+        name_or_content: str,
+        dialogue_messages: List[Dict[str, Any]],
+        role: str = "system",
+    ) -> List[Dict[str, Any]]:
+        """Recombine frozen preamble with dynamic dialogue turns."""
+        entry = self.get_frozen_preamble(name_or_content)
+        content = entry["content"] if entry else name_or_content
+        used_role = entry["role"] if entry else role
+
+        preamble = [{"role": used_role, "content": content}]
+        frozen_res = self.freeze_preamble(preamble, lock_id=name_or_content if entry else None)
+        return frozen_res["all_messages"] + [dict(m) for m in dialogue_messages]
+
+
+_DEFAULT_PREAMBLE_FREEZER = PreambleFreezer()
+
+
+def get_default_preamble_freezer() -> PreambleFreezer:
+    """Return default singleton preamble freezer instance."""
+    return _DEFAULT_PREAMBLE_FREEZER
+
+
+def freeze_prompt_preamble(
+    messages: List[Dict[str, Any]],
+    lock_id: Optional[str] = None,
+    attach_cache_control: bool = True,
+) -> Dict[str, Any]:
+    """Freeze static preamble messages into immutable cacheable prefix block."""
+    return _DEFAULT_PREAMBLE_FREEZER.freeze_preamble(
+        messages,
+        lock_id=lock_id,
+        attach_cache_control=attach_cache_control,
+    )
+
+
+def is_preamble_frozen(messages: List[Dict[str, Any]]) -> bool:
+    """Check whether leading message in message list is frozen."""
+    return _DEFAULT_PREAMBLE_FREEZER.is_preamble_frozen(messages)
+
+
+def verify_preamble_freeze(messages: List[Dict[str, Any]], expected_hash: str) -> bool:
+    """Verify integrity of frozen preamble against expected hash."""
+    return _DEFAULT_PREAMBLE_FREEZER.verify_freeze_integrity(messages, expected_hash)
+
+
+def register_frozen_preamble(name: str, content: str, role: str = "system") -> Dict[str, Any]:
+    """Register named static preamble in global frozen catalog."""
+    return _DEFAULT_PREAMBLE_FREEZER.register_frozen_preamble(name, content, role=role)
+
+
+def get_frozen_preamble(name: str) -> Optional[Dict[str, Any]]:
+    """Retrieve named frozen preamble entry from catalog."""
+    return _DEFAULT_PREAMBLE_FREEZER.get_frozen_preamble(name)
+
+
+def recombine_frozen_preamble(
+    name_or_content: str,
+    dialogue_messages: List[Dict[str, Any]],
+    role: str = "system",
+) -> List[Dict[str, Any]]:
+    """Recombine registered or raw frozen preamble with dialogue turns."""
+    return _DEFAULT_PREAMBLE_FREEZER.recombine_with_frozen(
+        name_or_content,
+        dialogue_messages,
+        role=role,
+    )
 
 
 def adapt_model_for_url(url: str, model: str) -> str:

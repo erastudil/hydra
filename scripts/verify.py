@@ -3586,6 +3586,63 @@ def boundary_align_contracts():
 
 
 @check
+def preamble_freeze_contracts():
+    from hydra_cli.providers import (
+        PreambleFreezer,
+        freeze_prompt_preamble,
+        is_preamble_frozen,
+        verify_preamble_freeze,
+        register_frozen_preamble,
+        get_frozen_preamble,
+        recombine_frozen_preamble,
+        isolate_cache_prefix,
+        attach_prefix_isolation,
+    )
+
+    # 1. Preamble freeze execution
+    msgs = [
+        {"role": "system", "content": "You are Hydra engine genome. Rules invariant."},
+        {"role": "user", "content": "Query 1"},
+    ]
+
+    res = freeze_prompt_preamble(msgs)
+    assert res["frozen"] is True
+    assert res["preamble_hash"]
+    assert res["preamble_tokens"] > 0
+    assert res["all_messages"][0]["_frozen"] is True
+    assert res["all_messages"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "_frozen" not in res["all_messages"][1]
+
+    # 2. Frozen check & integrity
+    assert is_preamble_frozen(res["all_messages"]) is True
+    assert is_preamble_frozen(msgs) is False
+
+    assert verify_preamble_freeze(res["all_messages"], res["preamble_hash"]) is True
+    assert verify_preamble_freeze(res["all_messages"], "invalid_hash") is False
+
+    # 3. Catalog and recombine
+    cat = register_frozen_preamble("hydra_genome", "Sovereign Hydra Agent Genome v2.2.0")
+    assert cat["name"] == "hydra_genome"
+    assert get_frozen_preamble("hydra_genome") is not None
+
+    recombined = recombine_frozen_preamble("hydra_genome", [{"role": "user", "content": "run task"}])
+    assert len(recombined) == 2
+    assert recombined[0]["_preamble_frozen"] is True
+    assert "Sovereign Hydra Agent Genome" in recombined[0]["content"]
+    assert recombined[1]["content"] == "run task"
+
+    # 4. Integration with prefix isolation
+    iso = isolate_cache_prefix(res["all_messages"])
+    assert iso["preamble_frozen"] is True
+    assert iso["preamble_hash"] == res["preamble_hash"]
+
+    payload = {"messages": [m.copy() for m in res["all_messages"]]}
+    attach_prefix_isolation(payload)
+    assert payload.get("_preamble_frozen") is True
+    assert payload.get("_preamble_hash") == res["preamble_hash"]
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
