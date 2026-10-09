@@ -3790,6 +3790,40 @@ def kv_reuse_contracts():
 
 
 @check
+def savings_audit_contracts():
+    from hydra_cli.providers import (
+        CacheSavingsAuditor,
+        audit_cache_savings,
+        record_cache_savings_audit,
+        get_cache_savings_audit_summary,
+        reset_cache_savings_auditor,
+    )
+
+    reset_cache_savings_auditor()
+
+    # 1. Calculation check
+    calc = audit_cache_savings("anthropic", "anthropic/claude-3.5-sonnet", 10_000, 8_000)
+    assert calc["gross_cost_usd"] == 0.030
+    assert calc["net_cost_usd"] == 0.0084
+    assert calc["saved_cost_usd"] == 0.0216
+    assert calc["savings_ratio"] == 0.72
+
+    # 2. Record transaction
+    rec = record_cache_savings_audit("anthropic", "anthropic/claude-3.5-sonnet", 10_000, 8_000)
+    assert rec["saved_cost_usd"] == 0.0216
+
+    # 3. Summary check
+    summary = get_cache_savings_audit_summary()
+    assert summary["total_queries"] == 1
+    assert summary["total_prompt_tokens"] == 10_000
+    assert summary["total_cached_tokens"] == 8_000
+    assert summary["saved_cost_usd"] == 0.0216
+    assert summary["overall_savings_pct"] == 72.0
+
+    reset_cache_savings_auditor()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
