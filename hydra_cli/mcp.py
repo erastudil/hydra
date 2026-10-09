@@ -299,6 +299,15 @@ class McpNamespaceRouter:
         self.register_client(namespace, lazy_client, aliases=aliases)
         return lazy_client
 
+    def discover_and_register(
+        self,
+        discoverer: Optional[Any] = None,
+        lazy: bool = True,
+    ) -> int:
+        """Discover server configurations and register into router."""
+        disc = discoverer or get_default_discoverer()
+        return disc.load_into_router(self, lazy=lazy)
+
     def get_metrics(self) -> Dict[str, Any]:
         """Return telemetry counters for namespace routing."""
         lazy_count = sum(
@@ -1063,3 +1072,253 @@ class McpLazyClient:
             self.close()
         except Exception:
             pass
+
+
+class McpRegistryDiscoverer:
+    """
+    Multi-source discovery engine for Model Context Protocol server configurations.
+    Discovers, parses, normalizes, and merges server declarations across workspace,
+    user home, desktop clients, and environment variables with strict precedence.
+    """
+
+    def __init__(
+        self,
+        search_paths: Optional[List[str]] = None,
+        cwd: Optional[str] = None,
+        home: Optional[str] = None,
+    ) -> None:
+        self.search_paths: List[str] = list(search_paths) if search_paths else []
+        self.cwd: str = cwd or os.getcwd()
+        self.home: str = home or os.path.expanduser("~")
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset discovered servers, scanned files, and discovery metrics."""
+        self._discovered_servers: Dict[str, Dict[str, Any]] = {}
+        self._scanned_files: List[str] = []
+        self._errors: Dict[str, str] = {}
+        self._discovery_timestamp: Optional[float] = None
+
+    def find_candidate_locations(self) -> List[str]:
+        """Collect potential MCP configuration file paths in precedence order."""
+        candidates: List[str] = []
+
+        # User home locations
+        candidates.append(os.path.join(self.home, ".hydra", "mcp_servers.json"))
+        candidates.append(os.path.join(self.home, ".config", "hydra", "mcp_servers.json"))
+
+        # Desktop client paths
+        if sys.platform == "win32":
+            appdata = os.environ.get("APPDATA")
+            if appdata:
+                candidates.append(os.path.join(appdata, "Claude", "claude_desktop_config.json"))
+                candidates.append(os.path.join(appdata, "antigravity", "mcp_config.json"))
+        else:
+            candidates.append(os.path.join(self.home, ".config", "Claude", "claude_desktop_config.json"))
+
+        # Upward project hierarchy from cwd
+        curr = os.path.abspath(self.cwd)
+        visited = set()
+        while curr and curr not in visited:
+            visited.add(curr)
+            candidates.append(os.path.join(curr, ".hydra", "mcp_servers.json"))
+            candidates.append(os.path.join(curr, "mcp_servers.json"))
+            candidates.append(os.path.join(curr, "mcp.json"))
+            parent = os.path.dirname(curr)
+            if parent == curr:
+                break
+            curr = parent
+
+        # Explicit search paths
+        for path in self.search_paths:
+            candidates.append(os.path.abspath(path))
+
+        # Environment variable override file
+        env_file = os.environ.get("HYDRA_MCP_CONFIG")
+        if env_file:
+            candidates.append(os.path.abspath(env_file))
+
+        # Deduplicate while preserving precedence ordering
+        seen = set()
+        unique_candidates = []
+        for p in candidates:
+            norm = os.path.normpath(p)
+            if norm not in seen:
+                seen.add(norm)
+                unique_candidates.append(norm)
+
+        return unique_candidates
+
+    def normalize_server_entry(self, name: str, raw_config: Any) -> Optional[Dict[str, Any]]:
+        """Normalize raw server dictionary into canonical server configuration format."""
+        if not isinstance(raw_config, dict):
+            return None
+
+        if raw_config.get("disabled") is True or raw_config.get("enabled") is False:
+            return None
+
+        cmd = raw_config.get("command")
+        if not cmd or not str(cmd).strip():
+            return None
+
+        clean_name = str(name).strip().lower()
+        if not clean_name:
+            return None
+
+        normalized: Dict[str, Any] = {
+            "name": clean_name,
+            "command": str(cmd).strip(),
+            "args": list(raw_config.get("args") or []),
+            "env": dict(raw_config.get("env") or {}),
+            "cwd": raw_config.get("cwd"),
+            "timeout": float(raw_config.get("timeout", DEFAULT_RPC_TIMEOUT)),
+        }
+        if "env_passthrough" in raw_config:
+            normalized["env_passthrough"] = list(raw_config["env_passthrough"])
+        if "predeclared_tools" in raw_config:
+            normalized["predeclared_tools"] = list(raw_config["predeclared_tools"])
+        if "aliases" in raw_config:
+            normalized["aliases"] = list(raw_config["aliases"])
+
+        return normalized
+
+    def parse_file(self, file_path: str) -> Dict[str, Dict[str, Any]]:
+        """Parse configuration file and extract normalized server configurations."""
+        if not os.path.isfile(file_path):
+            return {}
+
+        self._scanned_files.append(file_path)
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            self._errors[file_path] = str(e)
+            return {}
+
+        if not isinstance(data, dict):
+            return {}
+
+        raw_servers = data.get("mcpServers") or data.get("servers") or data
+        if not isinstance(raw_servers, dict):
+            return {}
+
+        discovered: Dict[str, Dict[str, Any]] = {}
+        for s_name, s_val in raw_servers.items():
+            norm = self.normalize_server_entry(s_name, s_val)
+            if norm:
+                discovered[norm["name"]] = norm
+
+        return discovered
+
+    def discover_all(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Execute full discovery across candidate locations and environment variables.
+        Applies hierarchical merging so higher precedence entries overwrite lower.
+        """
+        self._discovery_timestamp = time.time()
+        merged: Dict[str, Dict[str, Any]] = {}
+
+        candidate_files = self.find_candidate_locations()
+        for filepath in candidate_files:
+            file_servers = self.parse_file(filepath)
+            for s_name, s_config in file_servers.items():
+                s_copy = dict(s_config)
+                s_copy["_source"] = filepath
+                merged[s_name] = s_copy
+
+        env_inline = os.environ.get("HYDRA_MCP_SERVERS")
+        if env_inline:
+            try:
+                raw_env_data = json.loads(env_inline)
+                if isinstance(raw_env_data, dict):
+                    env_servers = raw_env_data.get("mcpServers") or raw_env_data.get("servers") or raw_env_data
+                    if isinstance(env_servers, dict):
+                        for s_name, s_val in env_servers.items():
+                            norm = self.normalize_server_entry(s_name, s_val)
+                            if norm:
+                                norm["_source"] = "HYDRA_MCP_SERVERS"
+                                merged[norm["name"]] = norm
+            except Exception as e:
+                self._errors["HYDRA_MCP_SERVERS"] = str(e)
+
+        self._discovered_servers = merged
+        return dict(self._discovered_servers)
+
+    def load_into_router(
+        self,
+        router: McpNamespaceRouter,
+        lazy: bool = True,
+    ) -> int:
+        """Register all discovered servers into an McpNamespaceRouter."""
+        if not self._discovered_servers:
+            self.discover_all()
+
+        loaded_count = 0
+        for s_name, s_conf in self._discovered_servers.items():
+            aliases = s_conf.get("aliases")
+            predeclared = s_conf.get("predeclared_tools")
+            cmd = s_conf["command"]
+            args = s_conf.get("args")
+            env = s_conf.get("env")
+            cwd = s_conf.get("cwd")
+            timeout = s_conf.get("timeout")
+
+            if lazy:
+                router.register_lazy_client(
+                    namespace=s_name,
+                    factory_or_command=cmd,
+                    args=args,
+                    aliases=aliases,
+                    predeclared_tools=predeclared,
+                    env=env,
+                    cwd=cwd,
+                    timeout=timeout,
+                )
+            else:
+                client = McpSubprocessClient(
+                    command=cmd,
+                    args=args,
+                    env=env,
+                    cwd=cwd,
+                    timeout=timeout,
+                    namespace=s_name,
+                    lazy=False,
+                )
+                router.register_client(s_name, client, aliases=aliases)
+
+            loaded_count += 1
+        return loaded_count
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return discovery telemetry counters and diagnostic state."""
+        return {
+            "discovered_servers_count": len(self._discovered_servers),
+            "scanned_files_count": len(self._scanned_files),
+            "errors_count": len(self._errors),
+            "scanned_files": list(self._scanned_files),
+            "errors": dict(self._errors),
+            "last_discovery_time": self._discovery_timestamp,
+        }
+
+
+_DEFAULT_DISCOVERER = McpRegistryDiscoverer()
+
+
+def get_default_discoverer() -> McpRegistryDiscoverer:
+    """Return default singleton MCP registry discoverer."""
+    return _DEFAULT_DISCOVERER
+
+
+def reset_discoverer() -> None:
+    """Reset global MCP registry discoverer state."""
+    _DEFAULT_DISCOVERER.reset()
+
+
+def discover_mcp_configs(
+    search_paths: Optional[List[str]] = None,
+    cwd: Optional[str] = None,
+    home: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Discover and return normalized MCP server configurations."""
+    discoverer = McpRegistryDiscoverer(search_paths=search_paths, cwd=cwd, home=home)
+    return discoverer.discover_all()

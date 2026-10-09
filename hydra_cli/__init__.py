@@ -48,7 +48,7 @@ from hydra_cli.config import (
     IMMUTABLE_AGENT_INVARIANTS,
     build_cached_system_prompt,
 )
-from hydra_cli.mcp import McpHeartbeatMonitor, McpLazyClient, McpNamespaceRouter, McpSubprocessClient, McpTimeoutGuard, format_qualified_tool_name, parse_qualified_tool_name
+from hydra_cli.mcp import (McpHeartbeatMonitor, McpLazyClient, McpNamespaceRouter, McpRegistryDiscoverer, McpSubprocessClient, McpTimeoutGuard, discover_mcp_configs, format_qualified_tool_name, get_default_discoverer, parse_qualified_tool_name, reset_discoverer)
 from hydra_cli.mcp_registry import McpRegistry
 from hydra_cli.native_tools import NativeToolRegistry
 from hydra_cli.providers import complete
@@ -119,6 +119,10 @@ __all__ = [
     "McpNamespaceRouter",
     "McpTimeoutGuard",
     "McpLazyClient",
+    "McpRegistryDiscoverer",
+    "discover_mcp_configs",
+    "get_default_discoverer",
+    "reset_discoverer",
     "parse_qualified_tool_name",
     "format_qualified_tool_name",
     "McpRegistry",

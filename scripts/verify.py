@@ -5165,6 +5165,85 @@ def mcp_lazy_spawning_contracts():
 
 
 @check
+def mcp_registry_discovery_contracts():
+    import json
+    import os
+    import tempfile
+    from hydra_cli.mcp import (
+        McpNamespaceRouter,
+        McpRegistryDiscoverer,
+        discover_mcp_configs,
+        get_default_discoverer,
+        reset_discoverer,
+    )
+
+    reset_discoverer()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        home_dir = os.path.join(tmp, "user_home")
+        os.makedirs(os.path.join(home_dir, ".hydra"))
+        home_cfg = os.path.join(home_dir, ".hydra", "mcp_servers.json")
+        with open(home_cfg, "w", encoding="utf-8") as f:
+            json.dump({
+                "mcpServers": {
+                    "shared_srv": {"command": "echo_home", "args": []},
+                    "home_only": {"command": "echo_h", "args": []},
+                }
+            }, f)
+
+        proj_dir = os.path.join(tmp, "workspace", "repo")
+        nested_dir = os.path.join(proj_dir, "deep", "subfolder")
+        os.makedirs(nested_dir)
+        proj_cfg = os.path.join(proj_dir, "mcp.json")
+        with open(proj_cfg, "w", encoding="utf-8") as f:
+            json.dump({
+                "servers": {
+                    "shared_srv": {"command": "echo_project", "args": ["--proj"]},
+                    "disabled_srv": {"command": "ignore_me", "disabled": True},
+                    "proj_only": {
+                        "command": "python",
+                        "predeclared_tools": [{"name": "proj_tool"}],
+                        "aliases": ["project_alias"],
+                    },
+                }
+            }, f)
+
+        corrupt_file = os.path.join(tmp, "corrupt.json")
+        with open(corrupt_file, "w", encoding="utf-8") as f:
+            f.write("{invalid json")
+
+        disc = McpRegistryDiscoverer(
+            search_paths=[corrupt_file],
+            cwd=nested_dir,
+            home=home_dir,
+        )
+
+        servers = disc.discover_all()
+        assert "shared_srv" in servers
+        assert servers["shared_srv"]["command"] == "echo_project"
+        assert servers["home_only"]["command"] == "echo_h"
+        assert "disabled_srv" not in servers
+        assert "proj_only" in servers
+        assert servers["proj_only"]["aliases"] == ["project_alias"]
+
+        metrics = disc.get_metrics()
+        assert metrics["discovered_servers_count"] >= 3
+        assert metrics["errors_count"] == 1
+
+        router = McpNamespaceRouter()
+        disc.load_into_router(router, lazy=True)
+        all_tools = router.list_all_tools()
+        tool_names = [t["name"] for t in all_tools]
+        assert "proj_only__proj_tool" in tool_names
+        assert router.resolve_namespace("project_alias") == "proj_only"
+
+        helper_servers = discover_mcp_configs(cwd=nested_dir, home=home_dir)
+        assert "shared_srv" in helper_servers
+
+    reset_discoverer()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
