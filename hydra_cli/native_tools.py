@@ -875,6 +875,207 @@ class AstDocstringLinter:
 
 
 
+class AstConstantFolder:
+    """AST visitor evaluating compile-time constant expressions and performing surgical replacements."""
+
+    def __init__(self, max_pow: int = 32, max_str_len: int = 10000):
+        self.max_pow = max_pow
+        self.max_str_len = max_str_len
+
+    def _eval_node(self, node: ast.AST):
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, (int, float, bool, str)):
+                return True, node.value
+            return False, None
+        if isinstance(node, ast.UnaryOp):
+            ok, val = self._eval_node(node.operand)
+            if not ok:
+                return False, None
+            try:
+                if isinstance(node.op, ast.UAdd):
+                    return True, +val
+                elif isinstance(node.op, ast.USub):
+                    return True, -val
+                elif isinstance(node.op, ast.Not):
+                    return True, not val
+                elif isinstance(node.op, ast.Invert) and isinstance(val, int):
+                    return True, ~val
+            except Exception:
+                return False, None
+        elif isinstance(node, ast.BinOp):
+            ok_l, val_l = self._eval_node(node.left)
+            ok_r, val_r = self._eval_node(node.right)
+            if not (ok_l and ok_r):
+                return False, None
+            try:
+                if isinstance(node.op, ast.Add):
+                    if isinstance(val_l, str) and isinstance(val_r, str) and len(val_l) + len(val_r) <= self.max_str_len:
+                        return True, val_l + val_r
+                    if isinstance(val_l, (int, float)) and isinstance(val_r, (int, float)):
+                        return True, val_l + val_r
+                elif isinstance(node.op, ast.Sub):
+                    if isinstance(val_l, (int, float)) and isinstance(val_r, (int, float)):
+                        return True, val_l - val_r
+                elif isinstance(node.op, ast.Mult):
+                    if isinstance(val_l, (int, float)) and isinstance(val_r, (int, float)):
+                        return True, val_l * val_r
+                    if isinstance(val_l, str) and isinstance(val_r, int) and 0 <= val_r <= 1000 and len(val_l) * val_r <= self.max_str_len:
+                        return True, val_l * val_r
+                    if isinstance(val_r, str) and isinstance(val_l, int) and 0 <= val_l <= 1000 and len(val_r) * val_l <= self.max_str_len:
+                        return True, val_l * val_r
+                elif isinstance(node.op, ast.Div):
+                    if isinstance(val_l, (int, float)) and isinstance(val_r, (int, float)) and val_r != 0:
+                        return True, val_l / val_r
+                elif isinstance(node.op, ast.FloorDiv):
+                    if isinstance(val_l, (int, float)) and isinstance(val_r, (int, float)) and val_r != 0:
+                        return True, val_l // val_r
+                elif isinstance(node.op, ast.Mod):
+                    if isinstance(val_l, (int, float)) and isinstance(val_r, (int, float)) and val_r != 0:
+                        return True, val_l % val_r
+                elif isinstance(node.op, ast.Pow):
+                    if isinstance(val_l, (int, float)) and isinstance(val_r, int) and 0 <= val_r <= self.max_pow:
+                        return True, val_l ** val_r
+                elif isinstance(node.op, ast.BitAnd):
+                    if isinstance(val_l, int) and isinstance(val_r, int):
+                        return True, val_l & val_r
+                elif isinstance(node.op, ast.BitOr):
+                    if isinstance(val_l, int) and isinstance(val_r, int):
+                        return True, val_l | val_r
+                elif isinstance(node.op, ast.BitXor):
+                    if isinstance(val_l, int) and isinstance(val_r, int):
+                        return True, val_l ^ val_r
+                elif isinstance(node.op, ast.LShift):
+                    if isinstance(val_l, int) and isinstance(val_r, int) and 0 <= val_r <= 64:
+                        return True, val_l << val_r
+                elif isinstance(node.op, ast.RShift):
+                    if isinstance(val_l, int) and isinstance(val_r, int) and 0 <= val_r <= 64:
+                        return True, val_l >> val_r
+            except Exception:
+                return False, None
+        elif isinstance(node, ast.BoolOp):
+            vals = []
+            for v in node.values:
+                ok, val = self._eval_node(v)
+                if not ok:
+                    return False, None
+                vals.append(val)
+            try:
+                if isinstance(node.op, ast.And):
+                    res = vals[0]
+                    for item in vals[1:]:
+                        res = res and item
+                    return True, res
+                elif isinstance(node.op, ast.Or):
+                    res = vals[0]
+                    for item in vals[1:]:
+                        res = res or item
+                    return True, res
+            except Exception:
+                return False, None
+        return False, None
+
+    def fold_source(self, source: str, auto_fix: bool = False) -> Dict[str, Any]:
+        """Evaluate compile-time constant expressions and optionally fold in place."""
+        newline = "\r\n" if "\r\n" in source else "\n"
+        code = source.replace("\r\n", "\n")
+        has_bom = code.startswith("\ufeff")
+        if has_bom:
+            code = code[1:]
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        parent_map = {}
+        for parent in ast.walk(tree):
+            for child in ast.iter_child_nodes(parent):
+                parent_map[child] = parent
+
+        candidates = []
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.BinOp, ast.UnaryOp, ast.BoolOp)):
+                ok, val = self._eval_node(node)
+                if ok:
+                    candidates.append((node, val))
+
+        candidate_nodes = {c[0] for c in candidates}
+        top_candidates = []
+        for node, val in candidates:
+            cur = parent_map.get(node)
+            is_sub = False
+            while cur is not None:
+                if cur in candidate_nodes:
+                    is_sub = True
+                    break
+                cur = parent_map.get(cur)
+            if not is_sub:
+                top_candidates.append((node, val))
+
+        foldable_items = []
+        replacements = []
+
+        code_lines = code.split("\n")
+
+        for node, val in top_candidates:
+            sl = node.lineno
+            sc = node.col_offset
+            el = getattr(node, "end_lineno", sl)
+            ec = getattr(node, "end_col_offset", sc)
+            rep_str = repr(val)
+            foldable_items.append({
+                "lineno": sl,
+                "col_offset": sc,
+                "end_lineno": el,
+                "end_col_offset": ec,
+                "value": rep_str,
+                "type": type(val).__name__,
+            })
+            replacements.append((sl, sc, el, ec, rep_str))
+
+        foldable_items.sort(key=lambda item: (item["lineno"], item["col_offset"]))
+
+        if not auto_fix or not replacements:
+            return {
+                "isError": False,
+                "foldable_count": len(foldable_items),
+                "foldable_items": foldable_items,
+                "changed": False,
+                "folded_code": source,
+                "clean": len(foldable_items) == 0,
+            }
+
+        replacements.sort(key=lambda r: (r[0], r[1]), reverse=True)
+        work_lines = list(code_lines)
+
+        for sl, sc, el, ec, rep_str in replacements:
+            if sl == el:
+                if 1 <= sl <= len(work_lines):
+                    line = work_lines[sl - 1]
+                    work_lines[sl - 1] = line[:sc] + rep_str + line[ec:]
+            else:
+                if 1 <= sl <= len(work_lines) and 1 <= el <= len(work_lines):
+                    prefix = work_lines[sl - 1][:sc]
+                    suffix = work_lines[el - 1][ec:]
+                    work_lines[sl - 1 : el] = [prefix + rep_str + suffix]
+
+        cleaned = "\n".join(work_lines)
+        if newline == "\r\n":
+            cleaned = cleaned.replace("\n", "\r\n")
+        if has_bom:
+            cleaned = "\ufeff" + cleaned
+
+        return {
+            "isError": False,
+            "foldable_count": len(foldable_items),
+            "foldable_items": foldable_items,
+            "changed": (cleaned != source),
+            "folded_code": cleaned,
+            "clean": len(foldable_items) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -937,6 +1138,8 @@ class NativeToolRegistry:
             "lint_docstrings": self.lint_docstrings,
             "check_docstrings": self.lint_docstrings,
             "docstring_linter": self.lint_docstrings,
+            "fold_constants": self.fold_constants,
+            "constant_folder": self.fold_constants,
         }
 
     @property
@@ -1797,6 +2000,109 @@ class NativeToolRegistry:
             "clean": len(all_violations) == 0,
         }
 
+    def fold_constants(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        auto_fix: bool = False,
+        in_place: bool = False,
+        max_pow: int = 32,
+        max_str_len: int = 10000,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate and optionally fold compile-time constant expressions in Python source code.
+        Replaces deterministic arithmetic and boolean literals with evaluated constants.
+        """
+        folder = AstConstantFolder(max_pow=max_pow, max_str_len=max_str_len)
+
+        if source is not None:
+            return folder.fold_source(source, auto_fix=auto_fix)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = folder.fold_source(content, auto_fix=auto_fix)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            if in_place and auto_fix and res["changed"]:
+                tmp_path = target_path + f".tmp.{uuid.uuid4().hex[:8]}"
+                try:
+                    with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+                        f.write(res["folded_code"])
+                    os.replace(tmp_path, target_path)
+                except Exception as exc:
+                    if os.path.exists(tmp_path):
+                        try:
+                            os.remove(tmp_path)
+                        except OSError:
+                            pass
+                    return {"isError": True, "error": f"Failed writing folded file: {exc}"}
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        total_foldable = 0
+        all_foldable = []
+        files_modified = 0
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = folder.fold_source(file_code, auto_fix=auto_fix)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                if rep["foldable_count"] > 0:
+                    file_metrics[rel_p] = rep["foldable_count"]
+                    total_foldable += rep["foldable_count"]
+                    for item in rep["foldable_items"]:
+                        item_copy = dict(item)
+                        item_copy["file"] = rel_p
+                        all_foldable.append(item_copy)
+                    if in_place and auto_fix and rep["changed"]:
+                        tmp_p = file_path + f".tmp.{uuid.uuid4().hex[:8]}"
+                        try:
+                            with open(tmp_p, "w", encoding="utf-8", newline="") as f:
+                                f.write(rep["folded_code"])
+                            os.replace(tmp_p, file_path)
+                            files_modified += 1
+                        except Exception:
+                            if os.path.exists(tmp_p):
+                                try:
+                                    os.remove(tmp_p)
+                                except OSError:
+                                    pass
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_foldable": total_foldable,
+            "files_with_foldable": len(file_metrics),
+            "files_modified": files_modified,
+            "summary": file_metrics,
+            "foldable_items": all_foldable,
+            "clean": total_foldable == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -2098,6 +2404,34 @@ class NativeToolRegistry:
                             "min_coverage": {
                                 "type": "number",
                                 "description": "Minimum type coverage percentage threshold. Default 0.0.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "fold_constants",
+                    "description": "Evaluate and optionally fold compile-time constant arithmetic and boolean expressions in Python code.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to inspect. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to inspect.",
+                            },
+                            "auto_fix": {
+                                "type": "boolean",
+                                "description": "Whether to replace constant expressions with evaluated values. Default false.",
+                            },
+                            "in_place": {
+                                "type": "boolean",
+                                "description": "Whether to rewrite target file in place when auto_fix is enabled. Default false.",
                             },
                         },
                     },

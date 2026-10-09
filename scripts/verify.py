@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and len(names) == 18
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and len(names) == 19
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -2584,6 +2584,70 @@ def ast_docstring_linter_contracts():
         assert not f_res["isError"]
         assert f_res["clean"] is True
         assert f_res["coverage_pct"] == 100.0
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+@check
+def ast_constant_folder_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstConstantFolder, NativeToolRegistry
+
+    folder = AstConstantFolder()
+
+    sample = (
+        "seconds = 60 * 60 * 24  # full day\n"
+        'greeting = "hello " + "world"\n'
+        "calc = 100 - 25\n"
+        "div = 10 / 2\n"
+        "val = 2 ** 8\n"
+        "flag = True and False\n"
+        "zero_div = 1 / 0\n"
+    )
+
+    res = folder.fold_source(sample, auto_fix=False)
+    assert not res["isError"]
+    assert res["foldable_count"] == 6
+    assert res["clean"] is False
+    assert res["changed"] is False
+
+    fixed_res = folder.fold_source(sample, auto_fix=True)
+    assert not fixed_res["isError"]
+    assert fixed_res["changed"] is True
+    assert "seconds = 86400  # full day" in fixed_res["folded_code"]
+    assert "greeting = 'hello world'" in fixed_res["folded_code"]
+    assert "calc = 75" in fixed_res["folded_code"]
+    assert "div = 5.0" in fixed_res["folded_code"]
+    assert "val = 256" in fixed_res["folded_code"]
+    assert "flag = False" in fixed_res["folded_code"]
+    assert "zero_div = 1 / 0" in fixed_res["folded_code"]
+
+    idem_res = folder.fold_source(fixed_res["folded_code"], auto_fix=True)
+    assert not idem_res["isError"]
+    assert idem_res["foldable_count"] == 0
+    assert idem_res["changed"] is False
+    assert idem_res["clean"] is True
+
+    reg = NativeToolRegistry()
+    assert reg.has_tool("fold_constants")
+    assert reg.has_tool("constant_folder")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "fold_constants" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(sample)
+        tmp_file = f.name
+    try:
+        f_res = reg.dispatch("fold_constants", {"path": tmp_file, "auto_fix": True, "in_place": True})
+        assert not f_res["isError"]
+        assert f_res["foldable_count"] == 6
+        assert f_res["changed"] is True
+        with open(tmp_file, "r", encoding="utf-8") as rf:
+            disk_code = rf.read()
+        assert "seconds = 86400  # full day" in disk_code
     finally:
         if os.path.exists(tmp_file):
             os.remove(tmp_file)
