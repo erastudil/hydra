@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and len(names) == 20
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and len(names) == 21
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -2711,6 +2711,67 @@ def ast_mock_test_banning_contracts():
         assert not f_res["isError"]
         assert f_res["violations_count"] == 9
         assert f_res["clean"] is False
+    finally:
+        if os.path.exists(tmp_file):
+            os.remove(tmp_file)
+
+
+@check
+def ast_ponytail_analyzer_contracts():
+    import os, tempfile
+    from hydra_cli.native_tools import AstPonytailAnalyzer, NativeToolRegistry
+
+    analyzer = AstPonytailAnalyzer(max_chain_depth=4)
+
+    sample = (
+        "class Formatter:\n"
+        '    """Format helper."""\n'
+        "    def format_text(self, text: str) -> str:\n"
+        "        res = text.strip()\n"
+        "        return res\n\n"
+        "def call_remote(a, b):\n"
+        "    return send_request(a, b)\n\n"
+        "val = a.b.c.d.e.f\n"
+    )
+
+    res = analyzer.analyze_source(sample)
+    assert not res["isError"]
+    assert res["violations_count"] == 4
+    assert res["clean"] is False
+
+    kinds = {v["kind"] for v in res["violations"]}
+    assert "ceremonial_class" in kinds
+    assert "redundant_return_assignment" in kinds
+    assert "ceremonial_forwarder" in kinds
+    assert "deep_call_chain" in kinds
+
+    clean_sample = (
+        "def execute_task(x: int, y: int) -> int:\n"
+        "    return x * 2 + y\n"
+    )
+    clean_res = analyzer.analyze_source(clean_sample)
+    assert not clean_res["isError"]
+    assert clean_res["violations_count"] == 0
+    assert clean_res["clean"] is True
+    assert clean_res["ponytail_score"] == 100.0
+
+    reg = NativeToolRegistry()
+    assert reg.has_tool("analyze_ponytail")
+    assert reg.has_tool("ponytail_analyzer")
+    assert reg.has_tool("check_ponytail")
+
+    openai_tools = reg.get_openai_tools()
+    tool_names = [t["function"]["name"] for t in openai_tools]
+    assert "analyze_ponytail" in tool_names
+
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
+        f.write(clean_sample)
+        tmp_file = f.name
+    try:
+        f_res = reg.dispatch("analyze_ponytail", {"path": tmp_file})
+        assert not f_res["isError"]
+        assert f_res["violations_count"] == 0
+        assert f_res["clean"] is True
     finally:
         if os.path.exists(tmp_file):
             os.remove(tmp_file)

@@ -1235,6 +1235,132 @@ class AstMockTestDetector:
 
 
 
+class AstPonytailAnalyzer:
+    """AST visitor evaluating code indirection, ceremonial wrappers, and ponytail wu wei compliance."""
+
+    def __init__(self, max_chain_depth: int = 4):
+        self.max_chain_depth = max_chain_depth
+
+    def analyze_source(self, source: str) -> Dict[str, Any]:
+        """Analyze Python source for ceremonial wrappers, redundant assignments, and indirection."""
+        code = source.replace("\r\n", "\n")
+        if code.startswith("\ufeff"):
+            code = code[1:]
+
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as exc:
+            return {"isError": True, "error": f"SyntaxError: {exc.msg} at line {exc.lineno}"}
+
+        violations: List[Dict[str, Any]] = []
+        total_functions = 0
+        total_classes = 0
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                total_classes += 1
+                methods = [m for m in node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
+                non_doc_body = [
+                    s for s in node.body
+                    if not (isinstance(s, ast.Expr) and isinstance(getattr(s, "value", None), ast.Constant))
+                ]
+                if len(methods) == 1 and len(non_doc_body) == 1:
+                    m = methods[0]
+                    if m.name != "__init__":
+                        violations.append({
+                            "kind": "ceremonial_class",
+                            "name": node.name,
+                            "lineno": node.lineno,
+                            "col_offset": getattr(node, "col_offset", 0),
+                            "message": f"Class '{node.name}' wraps single method '{m.name}' without state; convert to pure function.",
+                        })
+
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                total_functions += 1
+                non_doc_body = [
+                    s for s in node.body
+                    if not (isinstance(s, ast.Expr) and isinstance(getattr(s, "value", None), ast.Constant))
+                ]
+                if len(non_doc_body) == 1 and isinstance(non_doc_body[0], ast.Return):
+                    ret_val = non_doc_body[0].value
+                    if isinstance(ret_val, ast.Call):
+                        fn_args = [a.arg for a in node.args.args if a.arg not in ("self", "cls")]
+                        call_args = []
+                        all_names = True
+                        for a in ret_val.args:
+                            if isinstance(a, ast.Name):
+                                call_args.append(a.id)
+                            else:
+                                all_names = False
+                        if all_names and fn_args and fn_args == call_args:
+                            target_name = "target"
+                            if isinstance(ret_val.func, ast.Name):
+                                target_name = ret_val.func.id
+                            elif isinstance(ret_val.func, ast.Attribute):
+                                target_name = ret_val.func.attr
+                            violations.append({
+                                "kind": "ceremonial_forwarder",
+                                "name": node.name,
+                                "lineno": node.lineno,
+                                "col_offset": getattr(node, "col_offset", 0),
+                                "message": f"Function '{node.name}' performs ceremonial pass-through forwarding to '{target_name}'.",
+                            })
+
+                for i in range(len(node.body) - 1):
+                    stmt1 = node.body[i]
+                    stmt2 = node.body[i + 1]
+                    if isinstance(stmt1, ast.Assign) and len(stmt1.targets) == 1 and isinstance(stmt1.targets[0], ast.Name):
+                        assigned_var = stmt1.targets[0].id
+                        if isinstance(stmt2, ast.Return) and isinstance(stmt2.value, ast.Name) and stmt2.value.id == assigned_var:
+                            violations.append({
+                                "kind": "redundant_return_assignment",
+                                "name": assigned_var,
+                                "lineno": stmt1.lineno,
+                                "col_offset": getattr(stmt1, "col_offset", 0),
+                                "message": f"Redundant intermediate variable '{assigned_var}' immediately returned at line {stmt2.lineno}.",
+                            })
+
+            elif isinstance(node, ast.Attribute):
+                depth = 1
+                cur = node.value
+                while isinstance(cur, ast.Attribute):
+                    depth += 1
+                    cur = cur.value
+                if depth > self.max_chain_depth:
+                    violations.append({
+                        "kind": "deep_call_chain",
+                        "name": f"depth_{depth}",
+                        "lineno": node.lineno,
+                        "col_offset": getattr(node, "col_offset", 0),
+                        "message": f"Attribute access chain depth {depth} exceeds threshold {self.max_chain_depth}.",
+                    })
+
+        seen_chains = set()
+        unique_violations = []
+        for v in violations:
+            if v["kind"] == "deep_call_chain":
+                key = (v["lineno"], v["col_offset"])
+                if key in seen_chains:
+                    continue
+                seen_chains.add(key)
+            unique_violations.append(v)
+
+        unique_violations.sort(key=lambda item: (item["lineno"], item["col_offset"], item["kind"]))
+
+        score = max(0.0, round(100.0 - (len(unique_violations) * 10.0), 1))
+
+        return {
+            "isError": False,
+            "total_functions": total_functions,
+            "total_classes": total_classes,
+            "violations_count": len(unique_violations),
+            "ponytail_score": score,
+            "violations": unique_violations,
+            "clean": len(unique_violations) == 0,
+        }
+
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -1302,6 +1428,9 @@ class NativeToolRegistry:
             "ban_mock_tests": self.ban_mock_tests,
             "check_mock_tests": self.ban_mock_tests,
             "detect_mock_tests": self.ban_mock_tests,
+            "analyze_ponytail": self.analyze_ponytail,
+            "ponytail_analyzer": self.analyze_ponytail,
+            "check_ponytail": self.analyze_ponytail,
         }
 
     @property
@@ -2336,6 +2465,78 @@ class NativeToolRegistry:
             "clean": total_violations == 0,
         }
 
+    def analyze_ponytail(
+        self,
+        path: Optional[str] = None,
+        source: Optional[str] = None,
+        max_chain_depth: int = 4,
+    ) -> Dict[str, Any]:
+        """
+        Evaluate code indirection, ceremonial wrappers, and ponytail wu wei compliance.
+        Flags pass-through forwarders, redundant assignments, and sprawling chains.
+        """
+        analyzer = AstPonytailAnalyzer(max_chain_depth=max_chain_depth)
+
+        if source is not None:
+            return analyzer.analyze_source(source)
+
+        target_path = os.path.abspath(os.path.join(self.cwd, path or "."))
+        if not os.path.exists(target_path):
+            return {"isError": True, "error": f"Path not found: {path or '.'}"}
+
+        if os.path.isfile(target_path):
+            try:
+                with open(target_path, "r", encoding="utf-8-sig") as f:
+                    content = f.read()
+            except Exception as exc:
+                return {"isError": True, "error": f"Failed reading file: {exc}"}
+            res = analyzer.analyze_source(content)
+            if res.get("isError"):
+                return res
+            res["path"] = target_path
+            return res
+
+        # Directory recursive scan
+        files_scanned = 0
+        total_violations = 0
+        all_violations = []
+        file_metrics = {}
+
+        for root, dirs, files in os.walk(target_path):
+            dirs[:] = [d for d in dirs if d not in self.IGNORED_DIRS and not d.startswith(".")]
+            for filename in files:
+                if not filename.endswith(".py"):
+                    continue
+                file_path = os.path.join(root, filename)
+                files_scanned += 1
+                try:
+                    with open(file_path, "r", encoding="utf-8-sig") as f:
+                        file_code = f.read()
+                except Exception:
+                    continue
+                rep = analyzer.analyze_source(file_code)
+                if rep.get("isError"):
+                    continue
+                rel_p = os.path.relpath(file_path, target_path)
+                if rep["violations_count"] > 0:
+                    file_metrics[rel_p] = rep["violations_count"]
+                    total_violations += rep["violations_count"]
+                    for item in rep["violations"]:
+                        item_copy = dict(item)
+                        item_copy["file"] = rel_p
+                        all_violations.append(item_copy)
+
+        return {
+            "isError": False,
+            "path": target_path,
+            "files_scanned": files_scanned,
+            "total_violations": total_violations,
+            "files_with_violations": len(file_metrics),
+            "summary": file_metrics,
+            "violations": all_violations,
+            "clean": total_violations == 0,
+        }
+
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
@@ -2637,6 +2838,30 @@ class NativeToolRegistry:
                             "min_coverage": {
                                 "type": "number",
                                 "description": "Minimum type coverage percentage threshold. Default 0.0.",
+                            },
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "analyze_ponytail",
+                    "description": "Evaluate code indirection, ceremonial wrappers, and ponytail wu wei compliance.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "Optional file or directory path to inspect. Defaults to workspace root.",
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Optional raw Python source code string to inspect.",
+                            },
+                            "max_chain_depth": {
+                                "type": "integer",
+                                "description": "Maximum allowed attribute access chain depth. Default 4.",
                             },
                         },
                     },
