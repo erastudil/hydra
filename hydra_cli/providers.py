@@ -687,6 +687,82 @@ def attach_tool_capability(url: str, payload: Dict[str, Any]) -> None:
 
 
 
+
+class TimestampSanitizer:
+    """Detects and strips volatile timestamps from prompt text and prefix messages."""
+
+    PATTERNS = [
+        re.compile(r"timestamp=[\w\-:+.]+"),
+        re.compile(r"\[\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\]"),
+        re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b"),
+        re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
+        re.compile(r"\[\d{2}:\d{2}:\d{2}(?:\.\d+)?\]"),
+        re.compile(r"\b\d{2}:\d{2}:\d{2}\b"),
+    ]
+
+    @classmethod
+    def strip_text(cls, text: str, replacement: str = "") -> Tuple[str, List[str]]:
+        """Strip volatile timestamps from a string and return cleaned text and extracted timestamps."""
+        if not text:
+            return "", []
+        extracted = []
+        cleaned = text
+        for p in cls.PATTERNS:
+            for m in p.finditer(cleaned):
+                extracted.append(m.group(0))
+            cleaned = p.sub(replacement, cleaned)
+        cleaned = re.sub(r"[ \t]+", " ", cleaned)
+        cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned).strip()
+        return cleaned, extracted
+
+    @classmethod
+    def sanitize_messages(
+        cls,
+        messages: List[Dict[str, Any]],
+        target_roles: Tuple[str, ...] = ("system", "developer"),
+        replacement: str = "",
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Strip timestamps from messages with matching roles to preserve cache prefix invariants."""
+        all_extracted: List[str] = []
+        sanitized_messages: List[Dict[str, Any]] = []
+        modified_count = 0
+
+        for m in messages:
+            role = m.get("role", "")
+            content = m.get("content", "")
+            if role in target_roles and isinstance(content, str):
+                cleaned_text, extracted = cls.strip_text(content, replacement=replacement)
+                if extracted:
+                    modified_count += 1
+                    all_extracted.extend(extracted)
+                    msg_copy = dict(m)
+                    msg_copy["content"] = cleaned_text
+                    sanitized_messages.append(msg_copy)
+                    continue
+            sanitized_messages.append(dict(m))
+
+        metrics = {
+            "timestamps_stripped": len(all_extracted),
+            "modified_messages": modified_count,
+            "extracted": all_extracted,
+        }
+        return sanitized_messages, metrics
+
+
+def strip_timestamps(text: str, replacement: str = "") -> Tuple[str, List[str]]:
+    """Strip volatile timestamps from text using compiled temporal patterns."""
+    return TimestampSanitizer.strip_text(text, replacement=replacement)
+
+
+def sanitize_messages_timestamps(
+    messages: List[Dict[str, Any]],
+    target_roles: Tuple[str, ...] = ("system", "developer"),
+    replacement: str = "",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Sanitize timestamps from messages to preserve prompt cache stability."""
+    return TimestampSanitizer.sanitize_messages(messages, target_roles=target_roles, replacement=replacement)
+
+
 class PrefixIsolationManager:
     """Manager for prompt prefix isolation, token cache boundary alignment, and prefix hashing."""
 
@@ -718,6 +794,7 @@ class PrefixIsolationManager:
         self,
         messages: List[Dict[str, Any]],
         attach_cache_control: bool = False,
+        strip_timestamps: bool = True,
     ) -> Dict[str, Any]:
         """
         Partition messages into static prefix and dynamic suffix turns.
@@ -751,6 +828,9 @@ class PrefixIsolationManager:
             if len(messages) > 1 and self.estimate_tokens(first_content) >= self.min_prefix_tokens:
                 prefix_msgs.append(dict(messages[0]))
                 dynamic_msgs = [dict(m) for m in messages[1:]]
+
+        if strip_timestamps and prefix_msgs:
+            prefix_msgs, _ = TimestampSanitizer.sanitize_messages(prefix_msgs)
 
         prefix_text = " ".join(str(m.get("content", "")) for m in prefix_msgs)
         prefix_tokens = self.estimate_tokens(prefix_text)
@@ -786,10 +866,15 @@ def isolate_cache_prefix(
     messages: List[Dict[str, Any]],
     attach_cache_control: bool = False,
     min_prefix_tokens: int = 64,
+    strip_timestamps: bool = True,
 ) -> Dict[str, Any]:
     """Isolate static prompt prefix from dynamic suffix turns for token cache efficiency."""
     manager = PrefixIsolationManager(min_prefix_tokens=min_prefix_tokens)
-    return manager.isolate_prefix(messages, attach_cache_control=attach_cache_control)
+    return manager.isolate_prefix(
+        messages,
+        attach_cache_control=attach_cache_control,
+        strip_timestamps=strip_timestamps,
+    )
 
 
 def attach_prefix_isolation(

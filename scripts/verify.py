@@ -3378,6 +3378,49 @@ def kv_fingerprint_contracts():
 
 
 @check
+def timestamp_strip_contracts():
+    from hydra_cli.providers import (
+        TimestampSanitizer,
+        strip_timestamps,
+        sanitize_messages_timestamps,
+        PrefixIsolationManager,
+    )
+
+    # 1. Text stripping
+    sample_text = "[Message] timestamp=2026-10-09T20:48:28Z sender=agent at 2026-10-09 15:30:00."
+    cleaned, extracted = strip_timestamps(sample_text)
+    assert len(extracted) >= 2
+    assert "timestamp=" not in cleaned
+    assert "2026-10-09" not in cleaned
+
+    # 2. Message sanitization
+    msgs = [
+        {"role": "system", "content": "You are Hydra engine. timestamp=2026-10-09T12:00:00Z."},
+        {"role": "user", "content": "User input at 2026-10-09T12:01:00Z."},
+    ]
+    sanitized, metrics = sanitize_messages_timestamps(msgs)
+    assert metrics["timestamps_stripped"] == 1
+    assert "timestamp=" not in sanitized[0]["content"]
+    assert "2026-10-09" in sanitized[1]["content"]
+
+    # 3. Prefix hash invariance across turns with varying timestamps
+    turn1_msgs = [
+        {"role": "system", "content": "Static instructions. [2026-10-09T10:00:00Z] Active."},
+        {"role": "user", "content": "First turn."},
+    ]
+    turn2_msgs = [
+        {"role": "system", "content": "Static instructions. [2026-10-09T11:00:00Z] Active."},
+        {"role": "user", "content": "Second turn."},
+    ]
+    mgr = PrefixIsolationManager()
+    res1 = mgr.isolate_prefix(turn1_msgs, strip_timestamps=True)
+    res2 = mgr.isolate_prefix(turn2_msgs, strip_timestamps=True)
+
+    assert res1["prefix_hash"] == res2["prefix_hash"]
+    assert res2["cache_hit_count"] == 2
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
