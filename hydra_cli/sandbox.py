@@ -16,6 +16,12 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hydra_cli.config import sensitive_env_key
+from hydra_cli.browser import (
+    DomIdleLatch,
+    create_dom_idle_latch,
+    get_default_dom_idle_latch,
+    reset_dom_idle_latch,
+)
 
 
 class SandboxConfig:

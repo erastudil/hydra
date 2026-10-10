@@ -6077,6 +6077,115 @@ def mcp_log_bridge_contracts():
 
 
 @check
+def dom_idle_latch_contracts():
+    from hydra_cli.browser import (
+        DomIdleLatch,
+        create_dom_idle_latch,
+        get_default_dom_idle_latch,
+        reset_dom_idle_latch,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import DomIdleLatch as SandboxDomIdleLatch
+    from hydra_cli import DomIdleLatch as RootDomIdleLatch
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxDomIdleLatch is DomIdleLatch
+    assert RootDomIdleLatch is DomIdleLatch
+
+    reset_dom_idle_latch()
+
+    # 2. Construction and default parameters
+    latch = create_dom_idle_latch(default_idle_ms=150.0, default_max_timeout_ms=4000.0)
+    assert latch.default_idle_ms == 150.0
+    assert latch.default_max_timeout_ms == 4000.0
+
+    # 3. None target boundary check
+    none_res = latch.wait_until_idle(None)
+    assert none_res["is_idle"] is False
+    assert "compliance : not possible" in none_res["error"]
+
+    # 4. Mock page evaluation
+    class MockPlaywrightPage:
+        def __init__(self, is_idle=True, mutations=3):
+            self._is_idle = is_idle
+            self._mutations = mutations
+            self.scripts_run = []
+
+        def evaluate(self, script):
+            self.scripts_run.append(script)
+            return {
+                "is_idle": self._is_idle,
+                "mutations_observed": self._mutations,
+                "ready_state": "complete",
+            }
+
+    mock_page = MockPlaywrightPage(is_idle=True, mutations=4)
+    res = latch.wait_until_idle(mock_page, idle_timeout_ms=100.0, max_timeout_ms=2000.0)
+    assert res["is_idle"] is True
+    assert res["mutations_observed"] == 4
+    assert res["ready_state"] == "complete"
+    assert len(mock_page.scripts_run) == 1
+
+    # Simulated timeout evaluation
+    timeout_mock = MockPlaywrightPage(is_idle=False, mutations=12)
+    t_res = latch.wait_until_idle(timeout_mock)
+    assert t_res["is_idle"] is False
+    assert t_res["mutations_observed"] == 12
+
+    # 5. HTML structure and depth measurement
+    sample_html = "<html><head><title>Test</title></head><body><main><div><p><span>Hello</span></p></div></main></body></html>"
+    depth = latch.measure_dom_depth(sample_html)
+    assert depth >= 6
+
+    span_count = latch.count_elements(sample_html, tag="span")
+    assert span_count == 1
+    total_elements = latch.count_elements(sample_html)
+    assert total_elements >= 7
+
+    # 6. Stability snapshot evaluation
+    stable = latch.evaluate_stability([sample_html, sample_html, sample_html])
+    assert stable is True
+
+    mutated_html = "<html><body><div><span>Modified</span></div></body></html>"
+    unstable = latch.evaluate_stability([sample_html, mutated_html])
+    assert unstable is False
+
+    # 7. Browser action integration
+    if not PLAYWRIGHT_AVAILABLE:
+        act_res = dispatch_browser_action("wait_idle")
+        assert act_res["isError"] is True
+        assert "Playwright uninstalled" in act_res["error"]
+    else:
+        # Playwright available test
+        pass
+
+    # 8. Telemetry metrics and reset
+    met = latch.get_metrics()
+    assert met["total_latches"] >= 3
+    assert met["successful_latches"] >= 1
+    assert met["timed_out_latches"] >= 1
+    assert met["total_wait_ms"] >= 0.0
+
+    latch.reset_metrics()
+    clean_met = latch.get_metrics()
+    assert clean_met["total_latches"] == 0
+    assert clean_met["successful_latches"] == 0
+    assert clean_met["timed_out_latches"] == 0
+
+    latch.reset()
+    assert latch.get_metrics()["total_latches"] == 0
+
+    # 9. Default singleton and helpers
+    reset_dom_idle_latch()
+    default_latch = get_default_dom_idle_latch()
+    assert default_latch is not None
+    assert default_latch.default_idle_ms == 200.0
+
+    reset_dom_idle_latch()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

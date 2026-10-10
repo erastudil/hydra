@@ -1,4 +1,13 @@
-﻿"""
+from hydra_cli.browser import (
+    DomIdleLatch,
+    create_dom_idle_latch,
+    get_default_dom_idle_latch,
+    reset_dom_idle_latch,
+    dispatch_browser_action,
+    get_browser_session,
+    close_browser_session,
+)
+"""
 Hydra — Sovereign Multi-Headed AI Summoning CLI
 """
 
@@ -149,6 +158,10 @@ __all__ = [
     "CommandInspector",
     "EnvironmentScrubber",
     "SandboxExecutionResult",
+    "DomIdleLatch",
+    "create_dom_idle_latch",
+    "get_default_dom_idle_latch",
+    "reset_dom_idle_latch",
     "SandboxRunner",
     "run_hermes",
     "run_pi",
