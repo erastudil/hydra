@@ -9054,6 +9054,137 @@ def backpressure_pause_contracts():
 
 
 @check
+def reconnect_backoff_contracts():
+    from hydra_cli.providers import (
+        StreamReconnectBackoff,
+        create_reconnect_backoff,
+        get_default_reconnect_backoff,
+        reset_reconnect_backoff,
+    )
+    from hydra_cli import (
+        StreamReconnectBackoff as RootStreamReconnectBackoff,
+        create_reconnect_backoff as root_create_reconnect_backoff,
+        get_default_reconnect_backoff as root_get_default_reconnect_backoff,
+        reset_reconnect_backoff as root_reset_reconnect_backoff,
+    )
+
+    # 1. Re-exports parity
+    assert RootStreamReconnectBackoff is StreamReconnectBackoff
+    assert root_create_reconnect_backoff is create_reconnect_backoff
+    assert root_get_default_reconnect_backoff is get_default_reconnect_backoff
+    assert root_reset_reconnect_backoff is reset_reconnect_backoff
+
+    # 2. Deterministic delay computation without jitter
+    backoff = create_reconnect_backoff(
+        initial_delay=0.5,
+        multiplier=2.0,
+        max_delay=5.0,
+        max_retries=3,
+        jitter=False,
+    )
+    assert backoff.compute_delay(0) == 0.0
+    assert backoff.compute_delay(1) == 0.5
+    assert backoff.compute_delay(2) == 1.0
+    assert backoff.compute_delay(3) == 2.0
+    assert backoff.compute_delay(4) == 4.0
+    assert backoff.compute_delay(5) == 5.0
+    assert backoff.compute_delay(10) == 5.0
+
+    # 3. Jittered delay computation with seed
+    j_backoff = create_reconnect_backoff(
+        initial_delay=1.0,
+        multiplier=2.0,
+        max_delay=10.0,
+        max_retries=3,
+        jitter=True,
+    )
+    delay1 = j_backoff.compute_delay(1, rng_seed=42)
+    delay2 = j_backoff.compute_delay(1, rng_seed=42)
+    assert delay1 == delay2
+    assert 0.5 <= delay1 <= 1.5
+
+    # 4. Successful execute_with_retry without faults
+    retry_ctrl = create_reconnect_backoff(initial_delay=0.1, max_retries=3, jitter=False)
+    res = retry_ctrl.execute_with_retry(lambda: "direct_success")
+    assert res == "direct_success"
+
+    # 5. Retry recovery on transient error
+    attempts = [0]
+    sleeps = []
+
+    def flaky_op():
+        attempts[0] += 1
+        if attempts[0] < 3:
+            raise ConnectionResetError("network dropped")
+        return "reconnected"
+
+    res_flaky = retry_ctrl.execute_with_retry(
+        flaky_op,
+        retryable_exceptions=(ConnectionResetError,),
+        sleeper=lambda s: sleeps.append(s),
+    )
+    assert res_flaky == "reconnected"
+    assert attempts[0] == 3
+    assert len(sleeps) == 2
+
+    # 6. Retry exhaustion error
+    exhaust_attempts = [0]
+
+    def failing_op():
+        exhaust_attempts[0] += 1
+        raise TimeoutError("exhausted")
+
+    failed = False
+    try:
+        retry_ctrl.execute_with_retry(
+            failing_op,
+            retryable_exceptions=(TimeoutError,),
+            sleeper=lambda s: None,
+        )
+    except TimeoutError:
+        failed = True
+    assert failed is True
+    assert exhaust_attempts[0] == 4
+
+    # 7. Stream generator wrapping with reconnect
+    stream_attempts = [0]
+
+    def stream_producer():
+        stream_attempts[0] += 1
+        if stream_attempts[0] == 1:
+            raise ConnectionError("stream drop")
+        return ["chunkA", "chunkB", "chunkC"]
+
+    stream_ctrl = create_reconnect_backoff(initial_delay=0.05, max_retries=2, jitter=False)
+    tokens = list(stream_ctrl.wrap_stream(
+        stream_producer,
+        retryable_exceptions=(ConnectionError,),
+        sleeper=lambda s: None,
+    ))
+    assert tokens == ["chunkA", "chunkB", "chunkC"]
+    assert stream_attempts[0] == 2
+
+    # 8. Telemetry metrics and reset
+    metrics = stream_ctrl.get_metrics()
+    assert metrics["reconnect_attempts"] >= 1
+    assert metrics["reconnect_successes"] >= 1
+    assert metrics["total_attempts"] >= 2
+
+    stream_ctrl.reset_metrics()
+    clean_metrics = stream_ctrl.get_metrics()
+    assert clean_metrics["total_attempts"] == 0
+    assert clean_metrics["reconnect_attempts"] == 0
+    assert clean_metrics["reconnect_successes"] == 0
+    assert clean_metrics["reconnect_failures"] == 0
+
+    # 9. Singleton lifecycle
+    reset_reconnect_backoff()
+    default_ctrl = get_default_reconnect_backoff()
+    assert default_ctrl is not None
+    reset_reconnect_backoff()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

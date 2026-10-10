@@ -216,6 +216,10 @@ from hydra_cli.providers import (
     create_backpressure_controller,
     get_default_backpressure_controller,
     reset_backpressure_controller,
+    StreamReconnectBackoff,
+    create_reconnect_backoff,
+    get_default_reconnect_backoff,
+    reset_reconnect_backoff,
 )
 from hydra_cli.sandbox import (
     CommandInspector,
@@ -393,5 +397,9 @@ __all__ = [
     "create_backpressure_controller",
     "get_default_backpressure_controller",
     "reset_backpressure_controller",
+    "StreamReconnectBackoff",
+    "create_reconnect_backoff",
+    "get_default_reconnect_backoff",
+    "reset_reconnect_backoff",
     "__version__",
 ]

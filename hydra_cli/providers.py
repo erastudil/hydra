@@ -4794,3 +4794,175 @@ def create_backpressure_controller(
         high_watermark=high_watermark,
         low_watermark=low_watermark,
     )
+
+
+class StreamReconnectBackoff:
+    """
+    Streaming throughput reconnect backoff controller for resilient inference transport.
+    Manages exponential backoff with optional decorrelated jitter across transport faults.
+    """
+
+    def __init__(
+        self,
+        initial_delay: float = 0.5,
+        multiplier: float = 2.0,
+        max_delay: float = 30.0,
+        max_retries: int = 3,
+        jitter: bool = True,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._initial_delay = max(0.01, float(initial_delay))
+        self._multiplier = max(1.0, float(multiplier))
+        self._max_delay = max(self._initial_delay, float(max_delay))
+        self._max_retries = max(0, int(max_retries))
+        self._jitter = bool(jitter)
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_attempts: int = 0
+            self._reconnect_attempts: int = 0
+            self._reconnect_successes: int = 0
+            self._reconnect_failures: int = 0
+            self._total_backoff_sleep_ms: float = 0.0
+            self._last_backoff_delay_sec: float = 0.0
+
+    def compute_delay(self, attempt: int, rng_seed: Optional[int] = None) -> float:
+        """Compute exponential backoff delay seconds for retry attempt index."""
+        if attempt <= 0:
+            return 0.0
+        exp_factor = self._multiplier ** (attempt - 1)
+        base_delay = min(self._max_delay, self._initial_delay * exp_factor)
+        if not self._jitter:
+            return round(base_delay, 4)
+        rng = random.Random(rng_seed) if rng_seed is not None else random
+        jitter_factor = rng.uniform(0.5, 1.5)
+        jittered_delay = min(self._max_delay, base_delay * jitter_factor)
+        return round(jittered_delay, 4)
+
+    def record_attempt(self, success: bool, delay: float = 0.0) -> None:
+        """Record outcome and backoff sleep telemetry for retry cycle."""
+        with self._lock:
+            self._total_attempts += 1
+            if delay > 0.0:
+                self._reconnect_attempts += 1
+                self._last_backoff_delay_sec = delay
+                self._total_backoff_sleep_ms += delay * 1000.0
+            if success:
+                if self._reconnect_attempts > 0:
+                    self._reconnect_successes += 1
+            else:
+                if delay == 0.0 and self._reconnect_attempts > 0:
+                    self._reconnect_failures += 1
+
+    def execute_with_retry(
+        self,
+        operation: Callable[[], Any],
+        retryable_exceptions: Tuple[Type[Exception], ...] = (Exception,),
+        sleeper: Optional[Callable[[float], None]] = None,
+    ) -> Any:
+        """Execute callable target with automatic reconnect backoff across retryable faults."""
+        sleep_func = sleeper if sleeper is not None else time.sleep
+        attempt = 0
+        while True:
+            with self._lock:
+                self._total_attempts += 1
+            try:
+                result = operation()
+                with self._lock:
+                    if attempt > 0:
+                        self._reconnect_successes += 1
+                return result
+            except retryable_exceptions as exc:
+                attempt += 1
+                if attempt > self._max_retries:
+                    with self._lock:
+                        self._reconnect_failures += 1
+                    raise exc
+                delay = self.compute_delay(attempt)
+                with self._lock:
+                    self._reconnect_attempts += 1
+                    self._last_backoff_delay_sec = delay
+                    self._total_backoff_sleep_ms += delay * 1000.0
+                sleep_func(delay)
+
+    def wrap_stream(
+        self,
+        stream_factory: Callable[[], Iterable[str]],
+        retryable_exceptions: Tuple[Type[Exception], ...] = (Exception,),
+        sleeper: Optional[Callable[[float], None]] = None,
+    ) -> Generator[str, None, None]:
+        """Wrap stream generator with automatic reconnect backoff on transport drop."""
+        sleep_func = sleeper if sleeper is not None else time.sleep
+        attempt = 0
+        while True:
+            with self._lock:
+                self._total_attempts += 1
+            try:
+                stream = stream_factory()
+                for chunk in stream:
+                    yield chunk
+                with self._lock:
+                    if attempt > 0:
+                        self._reconnect_successes += 1
+                return
+            except retryable_exceptions as exc:
+                attempt += 1
+                if attempt > self._max_retries:
+                    with self._lock:
+                        self._reconnect_failures += 1
+                    raise exc
+                delay = self.compute_delay(attempt)
+                with self._lock:
+                    self._reconnect_attempts += 1
+                    self._last_backoff_delay_sec = delay
+                    self._total_backoff_sleep_ms += delay * 1000.0
+                sleep_func(delay)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            return {
+                "initial_delay": self._initial_delay,
+                "multiplier": self._multiplier,
+                "max_delay": self._max_delay,
+                "max_retries": self._max_retries,
+                "jitter": self._jitter,
+                "total_attempts": self._total_attempts,
+                "reconnect_attempts": self._reconnect_attempts,
+                "reconnect_successes": self._reconnect_successes,
+                "reconnect_failures": self._reconnect_failures,
+                "total_backoff_sleep_ms": round(self._total_backoff_sleep_ms, 2),
+                "last_backoff_delay_sec": round(self._last_backoff_delay_sec, 4),
+            }
+
+
+_DEFAULT_RECONNECT_BACKOFF = StreamReconnectBackoff()
+
+
+def get_default_reconnect_backoff() -> StreamReconnectBackoff:
+    """Return default singleton stream reconnect backoff controller."""
+    return _DEFAULT_RECONNECT_BACKOFF
+
+
+def reset_reconnect_backoff() -> None:
+    """Reset global stream reconnect backoff controller telemetry."""
+    _DEFAULT_RECONNECT_BACKOFF.reset_metrics()
+
+
+def create_reconnect_backoff(
+    initial_delay: float = 0.5,
+    multiplier: float = 2.0,
+    max_delay: float = 30.0,
+    max_retries: int = 3,
+    jitter: bool = True,
+) -> StreamReconnectBackoff:
+    """Instantiate a new dedicated stream reconnect backoff controller."""
+    return StreamReconnectBackoff(
+        initial_delay=initial_delay,
+        multiplier=multiplier,
+        max_delay=max_delay,
+        max_retries=max_retries,
+        jitter=jitter,
+    )
