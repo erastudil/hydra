@@ -8541,6 +8541,99 @@ def history_dedup_contracts():
 
 
 @check
+def menu_pager_contracts():
+    from hydra_cli.repl import (
+        ReplMenuPager,
+        create_menu_pager,
+        get_default_menu_pager,
+        reset_menu_pager,
+        ReplSession,
+    )
+    from hydra_cli import (
+        ReplMenuPager as RootReplMenuPager,
+        create_menu_pager as root_create_menu_pager,
+        get_default_menu_pager as root_get_default_menu_pager,
+        reset_menu_pager as root_reset_menu_pager,
+    )
+
+    # 1. Re-exports parity
+    assert RootReplMenuPager is ReplMenuPager
+    assert root_create_menu_pager is create_menu_pager
+    assert root_get_default_menu_pager is get_default_menu_pager
+    assert root_reset_menu_pager is reset_menu_pager
+
+    # 2. Basic pagination mechanics
+    pager = create_menu_pager(page_size=5)
+    items = [f"item-{i}" for i in range(1, 26)]
+    pager.set_items(items)
+    assert pager.total_pages() == 5
+    assert pager.current_page_index() == 0
+    assert pager.get_page_size() == 5
+    assert pager.get_page_slice() == ["item-1", "item-2", "item-3", "item-4", "item-5"]
+
+    # 3. Bidirectional navigation
+    assert pager.prev_page() is False
+    assert pager.next_page() is True
+    assert pager.current_page_index() == 1
+    assert pager.get_page_slice() == ["item-6", "item-7", "item-8", "item-9", "item-10"]
+
+    assert pager.set_page(4) is True
+    assert pager.current_page_index() == 4
+    assert pager.next_page() is False
+    assert pager.prev_page() is True
+    assert pager.current_page_index() == 3
+
+    # 4. Jump and boundary safety
+    assert pager.set_page(10) is False
+    assert pager.set_page(-1) is False
+    assert pager.get_page_slice(100) == []
+
+    # 5. Formatted output and indicator
+    indicator = pager.get_page_indicator()
+    assert "Page 4/5" in indicator
+    assert "25 items" in indicator
+    formatted = pager.format_page(header="Candidate Options:")
+    assert "Candidate Options:" in formatted
+    assert "Page 4/5" in formatted
+
+    # 6. Empty items handling
+    empty_pager = create_menu_pager(page_size=5)
+    assert empty_pager.total_pages() == 1
+    assert empty_pager.get_page_slice() == []
+    assert empty_pager.next_page() is False
+    assert empty_pager.prev_page() is False
+
+    # 7. Page size reconfiguration
+    pager.set_page_size(10)
+    assert pager.get_page_size() == 10
+    assert pager.total_pages() == 3
+    assert pager.current_page_index() == 0
+
+    # 8. Session integration
+    session = ReplSession()
+    assert hasattr(session, "menu_pager")
+    assert isinstance(session.menu_pager, ReplMenuPager)
+
+    # 9. Telemetry metrics and reset
+    metrics = pager.get_metrics()
+    assert metrics["total_pages"] == 3
+    assert metrics["page_advances"] >= 1
+    assert metrics["page_retreats"] >= 1
+    assert metrics["direct_jumps"] >= 1
+
+    pager.reset_metrics()
+    clean_metrics = pager.get_metrics()
+    assert clean_metrics["page_advances"] == 0
+    assert clean_metrics["page_retreats"] == 0
+
+    # 10. Singleton lifecycle
+    reset_menu_pager()
+    default_pager = get_default_menu_pager()
+    assert default_pager is not None
+    reset_menu_pager()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

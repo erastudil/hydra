@@ -129,6 +129,12 @@ COMMAND_HINTS: Dict[str, Dict[str, Any]] = {
         "description": "View or manage REPL command history",
         "choices": ["10", "20", "50", "clear"],
     },
+    "/page": {
+        "parameter": "[next | prev | <number>]",
+        "hint_text": "next | prev | number",
+        "description": "Navigate paged REPL menu completions",
+        "choices": ["next", "prev", "1", "2"],
+    },
 }
 
 
@@ -977,9 +983,161 @@ def create_history_dedup(
     return ReplHistoryDedup(max_size=max_size, strategy=strategy)
 
 
+class ReplMenuPager:
+    """
+    Pagination and bounded viewing manager for REPL completions and menu lists.
+    Slices candidate entries into fixed-size windows with bidirectional navigation.
+    """
+
+    def __init__(self, page_size: int = 10) -> None:
+        self._lock = threading.RLock()
+        self._page_size = max(1, page_size)
+        self._items: List[Any] = []
+        self._current_page: int = 0
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._page_advances: int = 0
+            self._page_retreats: int = 0
+            self._direct_jumps: int = 0
+
+    def get_page_size(self) -> int:
+        """Return active page size."""
+        with self._lock:
+            return self._page_size
+
+    def set_page_size(self, size: int) -> None:
+        """Configure page size and reset current page index."""
+        with self._lock:
+            self._page_size = max(1, size)
+            self._current_page = 0
+
+    def set_items(self, items: List[Any]) -> None:
+        """Load candidate items and reset page index to first page."""
+        with self._lock:
+            self._items = list(items)
+            self._current_page = 0
+
+    def total_pages(self) -> int:
+        """Return total page count for current items."""
+        with self._lock:
+            if not self._items:
+                return 1
+            return (len(self._items) + self._page_size - 1) // self._page_size
+
+    def current_page_index(self) -> int:
+        """Return zero-indexed active page number."""
+        with self._lock:
+            return self._current_page
+
+    def next_page(self) -> bool:
+        """Advance to next page. Return True on success, False if already on final page."""
+        with self._lock:
+            tot = self.total_pages()
+            if self._current_page < tot - 1:
+                self._current_page += 1
+                self._page_advances += 1
+                return True
+            return False
+
+    def prev_page(self) -> bool:
+        """Retreat to previous page. Return True on success, False if already on first page."""
+        with self._lock:
+            if self._current_page > 0:
+                self._current_page -= 1
+                self._page_retreats += 1
+                return True
+            return False
+
+    def set_page(self, page_index: int) -> bool:
+        """Jump directly to target page index. Return True if valid, False if out of range."""
+        with self._lock:
+            tot = self.total_pages()
+            if 0 <= page_index < tot:
+                self._current_page = page_index
+                self._direct_jumps += 1
+                return True
+            return False
+
+    def get_page_slice(self, page_index: Optional[int] = None) -> List[Any]:
+        """Return slice of items belonging to specified or current page index."""
+        with self._lock:
+            idx = page_index if page_index is not None else self._current_page
+            tot = self.total_pages()
+            if idx < 0 or idx >= tot or not self._items:
+                return []
+            start = idx * self._page_size
+            end = start + self._page_size
+            return self._items[start:end]
+
+    def get_page_indicator(self) -> str:
+        """Return formatted page indicator string."""
+        with self._lock:
+            tot = self.total_pages()
+            curr = self._current_page + 1
+            count = len(self._items)
+            return f"Page {curr}/{tot} ({count} items)"
+
+    def format_page(
+        self,
+        page_index: Optional[int] = None,
+        header: Optional[str] = None,
+    ) -> str:
+        """Format paged items into readable string block with header and navigation indicator."""
+        with self._lock:
+            items = self.get_page_slice(page_index)
+            idx = page_index if page_index is not None else self._current_page
+            start_num = idx * self._page_size + 1
+            lines: List[str] = []
+            if header:
+                lines.append(header)
+            if not items:
+                lines.append("  (no items)")
+            else:
+                for i, it in enumerate(items, start_num):
+                    lines.append(f"  {i:>3}. {it}")
+            lines.append(f"--- {self.get_page_indicator()} ---")
+            return "\n".join(lines)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            return {
+                "total_pages": self.total_pages(),
+                "current_page": self._current_page,
+                "page_size": self._page_size,
+                "item_count": len(self._items),
+                "page_advances": self._page_advances,
+                "page_retreats": self._page_retreats,
+                "direct_jumps": self._direct_jumps,
+            }
+
+
+_DEFAULT_MENU_PAGER = ReplMenuPager()
+
+
+def get_default_menu_pager() -> ReplMenuPager:
+    """Return default singleton menu pager engine."""
+    return _DEFAULT_MENU_PAGER
+
+
+def reset_menu_pager() -> None:
+    """Reset global menu pager telemetry and state."""
+    _DEFAULT_MENU_PAGER.set_items([])
+    _DEFAULT_MENU_PAGER.reset_metrics()
+
+
+def create_menu_pager(page_size: int = 10) -> ReplMenuPager:
+    """Instantiate a new dedicated menu pager manager."""
+    return ReplMenuPager(page_size=page_size)
+
+
 class ReplSession:
     def __init__(self) -> None:
         self.history: ReplHistoryDedup = get_default_history_dedup()
+        self.menu_pager: ReplMenuPager = get_default_menu_pager()
         self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "sonnet 5.5").strip() or "sonnet 5.5"
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.effort: Optional[str] = None
@@ -1128,6 +1286,33 @@ def _handle_slash(session: ReplSession, line: str) -> Tuple[Optional[int], bool]
         print(f"REPL history entries:")
         for idx, item in enumerate(entries, 1):
             print(f"  {idx:>3}  {item}")
+        return None, True
+
+    if cmd in ("/page", "/pager"):
+        if not args:
+            print(session.menu_pager.format_page())
+            return None, True
+        sub = args[0].lower()
+        if sub in ("next", "n"):
+            advanced = session.menu_pager.next_page()
+            if not advanced:
+                print("Already on final page.")
+            else:
+                print(session.menu_pager.format_page())
+        elif sub in ("prev", "p", "back"):
+            retreated = session.menu_pager.prev_page()
+            if not retreated:
+                print("Already on first page.")
+            else:
+                print(session.menu_pager.format_page())
+        elif sub.isdigit():
+            target_p = int(sub) - 1
+            if session.menu_pager.set_page(target_p):
+                print(session.menu_pager.format_page())
+            else:
+                print(f"Invalid page number: {sub}")
+        else:
+            print("Usage: /page [next | prev | <number>]")
         return None, True
 
     if cmd in ("/shortcuts", "/keys"):
