@@ -5937,6 +5937,146 @@ def mcp_rate_limiter_contracts():
 
 
 @check
+def mcp_log_bridge_contracts():
+    import time
+    from hydra_cli.mcp import (
+        McpLogBridge,
+        McpLogEntry,
+        McpLogLevel,
+        McpNamespaceRouter,
+        McpResultSanitizer,
+        McpSubprocessClient,
+        create_log_bridge,
+        get_default_log_bridge,
+        reset_log_bridge,
+        reset_namespace_router,
+    )
+
+    reset_log_bridge()
+    reset_namespace_router()
+
+    # 1. Log level enum and severity ordering
+    assert McpLogLevel.DEBUG == "debug"
+    assert McpLogLevel.INFO == "info"
+    assert McpLogLevel.NOTICE == "notice"
+    assert McpLogLevel.WARNING == "warning"
+    assert McpLogLevel.ERROR == "error"
+    assert McpLogLevel.CRITICAL == "critical"
+    assert McpLogLevel.ALERT == "alert"
+    assert McpLogLevel.EMERGENCY == "emergency"
+
+    # 2. Severity filtering and buffering
+    bridge = create_log_bridge(min_level=McpLogLevel.WARNING, max_entries=50)
+    assert bridge.debug("debug message", logger="test") is None
+    assert bridge.info("info message", logger="test") is None
+
+    warn_entry = bridge.warning("Memory threshold warning", logger="monitor")
+    assert warn_entry is not None
+    assert warn_entry.level == McpLogLevel.WARNING
+    assert warn_entry.logger == "monitor"
+
+    err_entry = bridge.error("Disk read failed", logger="storage", data={"code": 503})
+    assert err_entry is not None
+    assert err_entry.level == McpLogLevel.ERROR
+    assert err_entry.data["code"] == 503
+
+    all_logs = bridge.get_entries()
+    assert len(all_logs) == 2
+    assert all_logs[0]["level"] == "warning"
+    assert all_logs[1]["level"] == "error"
+
+    storage_logs = bridge.get_entries(logger="storage")
+    assert len(storage_logs) == 1
+    assert storage_logs[0]["logger"] == "storage"
+
+    err_logs = bridge.get_entries(min_level="error")
+    assert len(err_logs) == 1
+    assert err_logs[0]["level"] == "error"
+
+    # 3. Notification and stderr parsing
+    bridge_all = create_log_bridge(min_level=McpLogLevel.DEBUG)
+    notif = bridge_all.ingest_notification({
+        "level": "notice",
+        "logger": "auth_svc",
+        "data": {"user": "developer_1", "action": "login"},
+    })
+    assert notif is not None
+    assert notif.level == McpLogLevel.NOTICE
+    assert notif.logger == "auth_svc"
+
+    err_line = bridge_all.ingest_stderr("[ERROR] Connection refused by peer", logger="srv")
+    assert err_line is not None
+    assert err_line.level == McpLogLevel.ERROR
+
+    dbg_line = bridge_all.ingest_stderr("DEBUG: payload parsed successfully", logger="srv")
+    assert dbg_line is not None
+    assert dbg_line.level == McpLogLevel.DEBUG
+
+    # 4. Subscriber handler dispatch
+    received_events = []
+    bridge_all.add_handler(lambda e: received_events.append((e.level.value, e.logger)))
+    bridge_all.info("Handler test message", logger="dispatch")
+    assert len(received_events) == 1
+    assert received_events[0] == ("info", "dispatch")
+
+    # 5. Sanitizer integration
+    san = McpResultSanitizer()
+    clean_bridge = create_log_bridge(min_level=McpLogLevel.DEBUG, sanitizer=san)
+    dirty_msg = chr(27) + "[31mToken exposed: sk-1234567890abcdef1234567890" + chr(27) + "[0m"
+    clean_entry = clean_bridge.error(dirty_msg, logger="sec")
+    assert clean_entry is not None
+    assert "[REDACTED_API_KEY]" in clean_entry.message
+    assert "sk-1234567890abcdef" not in clean_entry.message
+    assert chr(27) not in clean_entry.message
+
+    # 6. Telemetry metrics and reset
+    met = bridge_all.get_metrics()
+    assert met["total_ingested"] >= 4
+    assert met["buffered_entries"] >= 4
+    assert met["handlers_count"] == 1
+    assert met["levels"]["error"] >= 1
+    assert met["levels"]["debug"] >= 1
+
+    bridge_all.reset_metrics()
+    clean_met = bridge_all.get_metrics()
+    assert clean_met["total_ingested"] == 0
+    assert clean_met["total_dropped"] == 0
+
+    bridge_all.clear()
+    assert len(bridge_all.get_entries()) == 0
+
+    bridge_all.reset()
+    assert bridge_all.get_metrics()["buffered_entries"] == 0
+
+    # 7. Router integration
+    router = McpNamespaceRouter()
+    r_bridge = create_log_bridge(min_level=McpLogLevel.INFO)
+    router.set_log_bridge(r_bridge)
+    r_bridge.info("Router test event", logger="playwright")
+    r_logs = router.get_logs(namespace="playwright")
+    assert len(r_logs) == 1
+    assert r_logs[0]["message"] == "Router test event"
+
+    # 8. Client set_log_bridge integration
+    client = McpSubprocessClient("python", ["-c", "pass"], timeout=5.0)
+    client.set_log_bridge(r_bridge)
+    assert client.log_bridge is r_bridge
+
+    # 9. Default singleton and top-level helpers
+    reset_log_bridge()
+    def_bridge = get_default_log_bridge()
+    assert def_bridge is not None
+    assert def_bridge.is_enabled_for("info") is True
+    def_bridge.info("Default singleton test")
+    assert len(def_bridge.get_entries()) == 1
+    reset_log_bridge()
+    assert len(def_bridge.get_entries()) == 0
+
+    reset_log_bridge()
+    reset_namespace_router()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

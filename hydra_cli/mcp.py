@@ -439,6 +439,318 @@ def create_rate_limiter(
         raise_on_limit=raise_on_limit,
     )
 
+class McpLogLevel(str, enum.Enum):
+    """
+    Standard Model Context Protocol log level enumeration.
+    Ordered monotonically from least to most severe.
+    """
+    DEBUG = "debug"
+    INFO = "info"
+    NOTICE = "notice"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
+    ALERT = "alert"
+    EMERGENCY = "emergency"
+
+
+_LOG_LEVEL_SEVERITY: Dict[McpLogLevel, int] = {
+    McpLogLevel.DEBUG: 10,
+    McpLogLevel.INFO: 20,
+    McpLogLevel.NOTICE: 25,
+    McpLogLevel.WARNING: 30,
+    McpLogLevel.ERROR: 40,
+    McpLogLevel.CRITICAL: 50,
+    McpLogLevel.ALERT: 60,
+    McpLogLevel.EMERGENCY: 70,
+}
+
+
+def _coerce_log_level(level: Union[McpLogLevel, str]) -> McpLogLevel:
+    """Coerce string or enum instance to canonical McpLogLevel."""
+    if isinstance(level, McpLogLevel):
+        return level
+    clean = str(level).strip().lower()
+    if clean in ("warn", "warning"):
+        return McpLogLevel.WARNING
+    if clean in ("err", "error"):
+        return McpLogLevel.ERROR
+    if clean in ("crit", "critical"):
+        return McpLogLevel.CRITICAL
+    if clean in ("emerg", "emergency", "fatal"):
+        return McpLogLevel.EMERGENCY
+    try:
+        return McpLogLevel(clean)
+    except (ValueError, KeyError):
+        return McpLogLevel.INFO
+
+
+@dataclass
+class McpLogEntry:
+    """
+    Immutable representation of single MCP log event record.
+    """
+    level: McpLogLevel
+    logger: str
+    message: str
+    timestamp: float = field(default_factory=time.time)
+    data: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize log entry to standard dictionary format."""
+        out: Dict[str, Any] = {
+            "level": self.level.value,
+            "logger": self.logger,
+            "message": self.message,
+            "timestamp": self.timestamp,
+        }
+        if self.data is not None:
+            out["data"] = dict(self.data)
+        return out
+
+
+class McpLogBridge:
+    """
+    Bridges MCP notifications/message and process stderr streams into unified telemetry.
+    Supports level filtering, handler subscriptions, ring buffering, and result sanitization.
+    """
+
+    def __init__(
+        self,
+        min_level: Union[McpLogLevel, str] = McpLogLevel.INFO,
+        max_entries: int = 1000,
+        sanitizer: Optional[Any] = None,
+    ) -> None:
+        self.min_level: McpLogLevel = _coerce_log_level(min_level)
+        self.max_entries: int = max(10, int(max_entries))
+        self.sanitizer: Optional[Any] = sanitizer
+        self._lock = threading.RLock()
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset log buffer, telemetry counters, and handlers."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._entries: List[McpLogEntry] = []
+            self._handlers: List[Callable[[McpLogEntry], None]] = []
+            self._level_counts: Dict[str, int] = {lvl.value: 0 for lvl in McpLogLevel}
+            self._total_ingested: int = 0
+            self._total_dropped: int = 0
+
+    def add_handler(self, handler: Callable[[McpLogEntry], None]) -> None:
+        """Register subscriber callback invoked upon each accepted log entry."""
+        with self._lock:
+            self._handlers.append(handler)
+
+    def is_enabled_for(self, level: Union[McpLogLevel, str]) -> bool:
+        """Return true when specified level meets or exceeds configured min_level."""
+        lvl = _coerce_log_level(level)
+        return _LOG_LEVEL_SEVERITY[lvl] >= _LOG_LEVEL_SEVERITY[self.min_level]
+
+    def log(
+        self,
+        level: Union[McpLogLevel, str],
+        message: str,
+        logger: str = "root",
+        data: Optional[Dict[str, Any]] = None,
+    ) -> Optional[McpLogEntry]:
+        """Record structured log event if severity satisfies threshold."""
+        lvl = _coerce_log_level(level)
+        now = time.time()
+
+        with self._lock:
+            self._total_ingested += 1
+            if not self.is_enabled_for(lvl):
+                self._total_dropped += 1
+                return None
+
+            clean_msg = str(message).strip()
+            if self.sanitizer and hasattr(self.sanitizer, "sanitize_text"):
+                clean_msg = self.sanitizer.sanitize_text(clean_msg)
+
+            clean_data = dict(data) if data is not None else None
+            if self.sanitizer and clean_data and hasattr(self.sanitizer, "sanitize"):
+                clean_data = self.sanitizer.sanitize(clean_data)
+
+            entry = McpLogEntry(
+                level=lvl,
+                logger=str(logger).strip() or "root",
+                message=clean_msg,
+                timestamp=now,
+                data=clean_data,
+            )
+
+            self._entries.append(entry)
+            if len(self._entries) > self.max_entries:
+                self._entries = self._entries[-self.max_entries:]
+
+            self._level_counts[lvl.value] = self._level_counts.get(lvl.value, 0) + 1
+
+            for handler in self._handlers:
+                try:
+                    handler(entry)
+                except Exception:
+                    pass
+
+            return entry
+
+    def debug(self, message: str, logger: str = "root", data: Optional[Dict[str, Any]] = None) -> Optional[McpLogEntry]:
+        """Record debug level log message."""
+        return self.log(McpLogLevel.DEBUG, message, logger=logger, data=data)
+
+    def info(self, message: str, logger: str = "root", data: Optional[Dict[str, Any]] = None) -> Optional[McpLogEntry]:
+        """Record info level log message."""
+        return self.log(McpLogLevel.INFO, message, logger=logger, data=data)
+
+    def warning(self, message: str, logger: str = "root", data: Optional[Dict[str, Any]] = None) -> Optional[McpLogEntry]:
+        """Record warning level log message."""
+        return self.log(McpLogLevel.WARNING, message, logger=logger, data=data)
+
+    def error(self, message: str, logger: str = "root", data: Optional[Dict[str, Any]] = None) -> Optional[McpLogEntry]:
+        """Record error level log message."""
+        return self.log(McpLogLevel.ERROR, message, logger=logger, data=data)
+
+    def critical(self, message: str, logger: str = "root", data: Optional[Dict[str, Any]] = None) -> Optional[McpLogEntry]:
+        """Record critical level log message."""
+        return self.log(McpLogLevel.CRITICAL, message, logger=logger, data=data)
+
+    def ingest_notification(
+        self,
+        params: Dict[str, Any],
+        default_logger: str = "server",
+    ) -> Optional[McpLogEntry]:
+        """Parse and ingest JSON-RPC notifications/message payload."""
+        if not isinstance(params, dict):
+            return None
+
+        raw_level = params.get("level", "info")
+        raw_logger = params.get("logger") or default_logger
+        raw_data = params.get("data")
+        msg = ""
+
+        if isinstance(raw_data, str):
+            msg = raw_data
+            data_payload = None
+        elif isinstance(raw_data, dict):
+            msg = str(raw_data.get("message") or raw_data.get("msg") or raw_data.get("text") or "")
+            data_payload = raw_data
+        else:
+            msg = str(raw_data or params.get("message") or "")
+            data_payload = None
+
+        if not msg:
+            msg = str(params.get("message") or "")
+
+        return self.log(
+            level=raw_level,
+            message=msg,
+            logger=raw_logger,
+            data=data_payload,
+        )
+
+    def ingest_stderr(
+        self,
+        line: str,
+        logger: str = "stderr",
+        level: Optional[Union[McpLogLevel, str]] = None,
+    ) -> Optional[McpLogEntry]:
+        """Parse raw process stderr line and extract log severity."""
+        raw = line.strip()
+        if not raw:
+            return None
+
+        detected_level = McpLogLevel.INFO if level is None else _coerce_log_level(level)
+
+        if level is None:
+            upper = raw.upper()
+            if upper.startswith("[DEBUG]") or " DEBUG " in upper or upper.startswith("DEBUG:"):
+                detected_level = McpLogLevel.DEBUG
+            elif upper.startswith("[WARN]") or upper.startswith("[WARNING]") or " WARN " in upper or upper.startswith("WARN:"):
+                detected_level = McpLogLevel.WARNING
+            elif upper.startswith("[ERROR]") or " ERROR " in upper or upper.startswith("ERROR:"):
+                detected_level = McpLogLevel.ERROR
+            elif upper.startswith("[FATAL]") or upper.startswith("[CRITICAL]") or " CRITICAL " in upper:
+                detected_level = McpLogLevel.CRITICAL
+
+        return self.log(
+            level=detected_level,
+            message=raw,
+            logger=logger,
+        )
+
+    def get_entries(
+        self,
+        min_level: Optional[Union[McpLogLevel, str]] = None,
+        logger: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return serialized list of recorded log events matching optional filters."""
+        threshold_val = _LOG_LEVEL_SEVERITY[_coerce_log_level(min_level)] if min_level else None
+        target_logger = logger.strip().lower() if logger else None
+
+        with self._lock:
+            filtered = []
+            for entry in self._entries:
+                if threshold_val is not None:
+                    if _LOG_LEVEL_SEVERITY[entry.level] < threshold_val:
+                        continue
+                if target_logger is not None:
+                    if entry.logger.strip().lower() != target_logger:
+                        continue
+                filtered.append(entry.to_dict())
+
+            if limit is not None and limit > 0:
+                return filtered[-limit:]
+            return filtered
+
+    def clear(self) -> None:
+        """Clear recorded log entries."""
+        with self._lock:
+            self._entries.clear()
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return log bridge telemetry counters and distribution metrics."""
+        with self._lock:
+            return {
+                "min_level": self.min_level.value,
+                "total_ingested": self._total_ingested,
+                "total_dropped": self._total_dropped,
+                "buffered_entries": len(self._entries),
+                "handlers_count": len(self._handlers),
+                "levels": dict(self._level_counts),
+            }
+
+    def reset_metrics(self) -> None:
+        """Reset telemetry counters preserving buffered logs and handlers."""
+        with self._lock:
+            self._total_ingested = 0
+            self._total_dropped = 0
+            self._level_counts = {lvl.value: 0 for lvl in McpLogLevel}
+
+
+_DEFAULT_LOG_BRIDGE = McpLogBridge()
+
+
+def get_default_log_bridge() -> McpLogBridge:
+    """Return default singleton MCP log bridge."""
+    return _DEFAULT_LOG_BRIDGE
+
+
+def reset_log_bridge() -> None:
+    """Reset global MCP log bridge state."""
+    _DEFAULT_LOG_BRIDGE.reset()
+
+
+def create_log_bridge(
+    min_level: Union[McpLogLevel, str] = McpLogLevel.INFO,
+    max_entries: int = 1000,
+    sanitizer: Optional[Any] = None,
+) -> McpLogBridge:
+    """Instantiate a new dedicated MCP log bridge."""
+    return McpLogBridge(min_level=min_level, max_entries=max_entries, sanitizer=sanitizer)
+
+
+
+
 
 
 
@@ -485,16 +797,33 @@ class McpNamespaceRouter:
         manifest_cache: Optional[Any] = None,
         result_sanitizer: Optional[Any] = None,
         rate_limiter: Optional[Any] = None,
+        log_bridge: Optional[Any] = None,
     ) -> None:
         self.separator = separator
         self.manifest_cache = manifest_cache
         self.result_sanitizer = result_sanitizer
         self.rate_limiter = rate_limiter
+        self.log_bridge = log_bridge
         self.reset()
 
     def set_rate_limiter(self, rate_limiter: Optional[Any]) -> None:
         """Configure rate limiter on namespace router."""
         self.rate_limiter = rate_limiter
+
+    def set_log_bridge(self, log_bridge: Optional[Any]) -> None:
+        """Configure log bridge on namespace router."""
+        self.log_bridge = log_bridge
+
+    def get_logs(
+        self,
+        namespace: Optional[str] = None,
+        min_level: Optional[Union[Any, str]] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve collected log entries from attached log bridge."""
+        if self.log_bridge:
+            return self.log_bridge.get_entries(min_level=min_level, logger=namespace, limit=limit)
+        return []
 
     def reset(self) -> None:
         """Reset all registered namespaces, aliases, and counters."""
@@ -2111,6 +2440,7 @@ class McpSubprocessClient:
         self._heartbeat_monitor: Optional[McpHeartbeatMonitor] = None
         self._timeout_guard: McpTimeoutGuard = McpTimeoutGuard(default_timeout=self.timeout)
         self.rate_limiter: Optional[Any] = None
+        self.log_bridge: Optional[Any] = None
         self.lifecycle: McpLifecycleFSM = create_lifecycle_fsm(name=self.namespace or self.command or "subprocess")
         self.lifecycle.bind_client(self)
 
@@ -2151,6 +2481,8 @@ class McpSubprocessClient:
                 self._stderr_lines.append(stripped)
                 if len(self._stderr_lines) > 500:
                     self._stderr_lines.pop(0)
+                if hasattr(self, "log_bridge") and self.log_bridge:
+                    self.log_bridge.ingest_stderr(stripped, logger=self.namespace or "stderr")
         except Exception:
             pass
 
@@ -2314,6 +2646,11 @@ class McpSubprocessClient:
                 if not isinstance(res, dict):
                     continue
 
+                if res.get("method") == "notifications/message" or "notifications/" in str(res.get("method", "")):
+                    if hasattr(self, "log_bridge") and self.log_bridge:
+                        self.log_bridge.ingest_notification(res.get("params", {}), default_logger=self.namespace or "server")
+                    continue
+
                 res_id = res.get("id")
                 if res_id == req_id or str(res_id) == str(req_id):
                     if "error" in res and res["error"]:
@@ -2466,6 +2803,10 @@ class McpSubprocessClient:
         """Configure rate limiter on client."""
         self.rate_limiter = rate_limiter
 
+    def set_log_bridge(self, log_bridge: Optional[Any]) -> None:
+        """Configure log bridge on client."""
+        self.log_bridge = log_bridge
+
     def call_tool(
         self,
         tool_name: str,
@@ -2586,6 +2927,7 @@ class McpLazyClient:
         self.last_spawn_time: Optional[float] = None
         self.total_calls: int = 0
         self.rate_limiter: Optional[Any] = None
+        self.log_bridge: Optional[Any] = None
         self.lifecycle: McpLifecycleFSM = create_lifecycle_fsm(name=self.namespace or "mcp_lazy_client")
         self.lifecycle.bind_client(self)
 
