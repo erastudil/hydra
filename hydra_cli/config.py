@@ -102,6 +102,7 @@ PROVIDER_KEY_NAMES: Dict[str, str] = {
     "runpod": "RUNPOD_API_KEY",
     "modal": "MODAL_ENDPOINT_URL",
     "huggingface": "HF_TOKEN",
+    "local": "LOCAL_AI_BASE or local runner",
 }
 
 DEFAULT_CONTEXT_WINDOW = 131072

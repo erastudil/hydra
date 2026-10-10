@@ -539,6 +539,16 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
     return providers
 
 
+def get_local_provider():
+    url, name = detect_local_endpoint()
+    return {
+        'id': 'local',
+        'name': name,
+        'url': url,
+        'headers': {'Content-Type': 'application/json'},
+    }
+
+
 def providers_for_model(
     model: str,
     providers: Optional[List[Dict[str, Any]]] = None,
@@ -553,6 +563,10 @@ def providers_for_model(
     """
     configured = get_frontier_providers() if providers is None else list(providers)
     allowed = model_providers(model)
+    if "local" in allowed and not any(p.get("id") == "local" for p in configured):
+        loc = get_local_provider()
+        if loc:
+            configured.append(loc)
     if not allowed:
         usable = configured
     else:

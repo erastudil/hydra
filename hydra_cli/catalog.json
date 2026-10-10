@@ -287,6 +287,21 @@
     "open-swarm": {
       "model": "glm-5.3-flash",
       "swarm": "open swarm"
+    },
+    "gemma-e4b": {
+      "title": "Gemma E4B Local Fine-Tune",
+      "model": "gemma-e4b",
+      "provider": "local"
+    },
+    "local-gemma": {
+      "title": "Local Gemma E4B",
+      "model": "gemma-e4b",
+      "provider": "local"
+    },
+    "gemma 4 e4b": {
+      "title": "Gemma 4 E4B",
+      "model": "gemma-e4b",
+      "provider": "local"
     }
   },
   "model_providers": {
@@ -338,6 +353,9 @@
     ],
     "mimo 2.6 flash": [
       "cheaperinference"
+    ],
+    "gemma-e4b": [
+      "local"
     ]
   },
   "swarm": {
@@ -416,7 +434,8 @@
     "google/gemini-3.8-flash": 1000000,
     "glm-5.3-flash": 131072,
     "deepseek-4.1-flash": 131072,
-    "mimo-2.6-flash": 131072
+    "mimo-2.6-flash": 131072,
+    "gemma-e4b": 8192
   },
   "default_orchestrator_model": "glm 5.3 flash",
   "default_agent_model": "glm 5.3 flash",
