@@ -8380,6 +8380,79 @@ def continuation_glyph_contracts():
 
 
 @check
+def alias_expansion_contracts():
+    from hydra_cli.repl import (
+        DEFAULT_MODEL_ALIASES,
+        ReplAliasExpander,
+        create_alias_expander,
+        get_default_alias_expander,
+        reset_alias_expander,
+        ReplSession,
+    )
+    from hydra_cli import (
+        DEFAULT_MODEL_ALIASES as RootDEFAULT_MODEL_ALIASES,
+        ReplAliasExpander as RootReplAliasExpander,
+        create_alias_expander as root_create_alias_expander,
+        get_default_alias_expander as root_get_default_alias_expander,
+        reset_alias_expander as root_reset_alias_expander,
+    )
+
+    assert RootReplAliasExpander is ReplAliasExpander
+    assert root_create_alias_expander is create_alias_expander
+    assert root_get_default_alias_expander is get_default_alias_expander
+    assert root_reset_alias_expander is reset_alias_expander
+    assert RootDEFAULT_MODEL_ALIASES == DEFAULT_MODEL_ALIASES
+
+    assert 'sonnet' in DEFAULT_MODEL_ALIASES
+    assert DEFAULT_MODEL_ALIASES['sonnet'] == 'sonnet 5.5'
+    assert DEFAULT_MODEL_ALIASES['opus'] == 'opus 5.5'
+    assert DEFAULT_MODEL_ALIASES['sol'] == 'gpt 6.1 sol'
+    assert DEFAULT_MODEL_ALIASES['flash'] == 'flash 2.5'
+
+    expander = create_alias_expander()
+    assert expander.expand_alias('sonnet') == 'sonnet 5.5'
+    assert expander.expand_alias('OPUS') == 'opus 5.5'
+    assert expander.expand_alias('sol') == 'gpt 6.1 sol'
+    assert expander.expand_alias('unknown-model-xyz') == 'unknown-model-xyz'
+
+    prompt_text = 'Compare @sonnet and @opus output fidelity against @flash'
+    expanded_text, mentions = expander.expand_prompt_mentions(prompt_text)
+    assert '@sonnet 5.5' in expanded_text
+    assert '@opus 5.5' in expanded_text
+    assert '@flash 2.5' in expanded_text
+    assert len(mentions) == 3
+
+    expander.register_alias('gpt4', 'gpt-4o')
+    assert expander.expand_alias('gpt4') == 'gpt-4o'
+    unreg_ok = expander.unregister_alias('gpt4')
+    assert unreg_ok is True
+    assert expander.unregister_alias('nonexistent-shorthand') is False
+
+    alias_list = expander.list_aliases()
+    assert len(alias_list) >= len(DEFAULT_MODEL_ALIASES)
+    assert any(item['shorthand'] == 'sonnet' and item['canonical'] == 'sonnet 5.5' for item in alias_list)
+
+    session = ReplSession()
+    assert hasattr(session, 'alias_expander')
+    assert isinstance(session.alias_expander, ReplAliasExpander)
+
+    metrics = expander.get_metrics()
+    assert metrics['total_expansions'] >= 4
+    assert metrics['shorthand_lookups'] >= 4
+    assert metrics['mention_expansions'] >= 3
+
+    expander.reset_metrics()
+    clean_metrics = expander.get_metrics()
+    assert clean_metrics['total_expansions'] == 0
+    assert clean_metrics['shorthand_lookups'] == 0
+
+    reset_alias_expander()
+    default_expander = get_default_alias_expander()
+    assert default_expander is not None
+    reset_alias_expander()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

@@ -8,6 +8,7 @@ The 3-head TUI splash + wordmark prints once at start.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import difflib
 import threading
@@ -114,6 +115,12 @@ COMMAND_HINTS: Dict[str, Dict[str, Any]] = {
         "parameter": "",
         "hint_text": "",
         "description": "List registered command shortcuts",
+        "choices": [],
+    },
+    "/alias": {
+        "parameter": "[<shorthand> = <target>]",
+        "hint_text": "shorthand = target",
+        "description": "View or register model alias shorthands",
         "choices": [],
     },
 }
@@ -723,6 +730,132 @@ def create_continuation_manager(
     return ContinuationGlyphManager(glyph=glyph)
 
 
+
+DEFAULT_MODEL_ALIASES: Dict[str, str] = {
+    "sonnet": "sonnet 5.5",
+    "opus": "opus 5.5",
+    "sol": "gpt 6.1 sol",
+    "sol pro": "sol 5.6 pro",
+    "flash": "flash 2.5",
+    "haiku": "haiku 4.5",
+    "qwen": "qwen 3.8",
+    "deepseek": "deepseek 4.1 flash",
+    "glm": "glm 5.3 flash",
+    "mimo": "mimo 2.6 flash",
+}
+
+
+class ReplAliasExpander:
+    """
+    Model alias shorthand resolution and @mention prompt expansion engine for Hydra REPL.
+    Translates abbreviated model names and mention triggers to canonical target aliases.
+    """
+
+    def __init__(self, initial_aliases: Optional[Dict[str, str]] = None) -> None:
+        self._lock = threading.RLock()
+        self._aliases: Dict[str, str] = {k.lower(): v for k, v in DEFAULT_MODEL_ALIASES.items()}
+        if initial_aliases:
+            for k, v in initial_aliases.items():
+                self._aliases[k.lower()] = v
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_expansions: int = 0
+            self._shorthand_lookups: int = 0
+            self._mention_expansions: int = 0
+            self._last_expanded: str = ""
+
+    def register_alias(self, shorthand: str, target: str) -> None:
+        """Register or update model alias shorthand mapping."""
+        with self._lock:
+            self._aliases[shorthand.strip().lower()] = target.strip()
+
+    def unregister_alias(self, shorthand: str) -> bool:
+        """Remove model alias shorthand mapping."""
+        key = shorthand.strip().lower()
+        with self._lock:
+            if key in self._aliases:
+                del self._aliases[key]
+                return True
+            return False
+
+    def expand_alias(self, alias: str) -> str:
+        """Resolve shorthand alias to canonical model alias."""
+        key = alias.strip().lower()
+        with self._lock:
+            self._shorthand_lookups += 1
+            if key in self._aliases:
+                canonical = self._aliases[key]
+                self._total_expansions += 1
+                self._last_expanded = f"{alias}->{canonical}"
+                return canonical
+        return alias.strip()
+
+    def expand_prompt_mentions(self, text: str) -> Tuple[str, List[Tuple[str, str]]]:
+        """Expand prompt-embedded @mention triggers into canonical model aliases."""
+        with self._lock:
+            aliases_copy = dict(self._aliases)
+
+        expansions: List[Tuple[str, str]] = []
+        result = text
+
+        sorted_keys = sorted(aliases_copy.keys(), key=len, reverse=True)
+        for key in sorted_keys:
+            pattern = re.compile(rf"@({re.escape(key)})\b", re.IGNORECASE)
+            matches = pattern.findall(result)
+            if matches:
+                canonical = aliases_copy[key]
+                result = pattern.sub(f"@{canonical}", result)
+                for m in matches:
+                    expansions.append((m, canonical))
+
+        with self._lock:
+            if expansions:
+                self._mention_expansions += len(expansions)
+                self._total_expansions += len(expansions)
+                self._last_expanded = f"mentions:{len(expansions)}"
+
+        return result, expansions
+
+    def list_aliases(self) -> List[Dict[str, str]]:
+        """Return sorted list of registered model alias shorthands."""
+        with self._lock:
+            return [{"shorthand": k, "canonical": self._aliases[k]} for k in sorted(self._aliases.keys())]
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            return {
+                "total_expansions": self._total_expansions,
+                "shorthand_lookups": self._shorthand_lookups,
+                "mention_expansions": self._mention_expansions,
+                "last_expanded": self._last_expanded,
+                "registered_aliases": len(self._aliases),
+            }
+
+
+_DEFAULT_ALIAS_EXPANDER = ReplAliasExpander()
+
+
+def get_default_alias_expander() -> ReplAliasExpander:
+    """Return default singleton alias expander."""
+    return _DEFAULT_ALIAS_EXPANDER
+
+
+def reset_alias_expander() -> None:
+    """Reset global alias expander telemetry."""
+    _DEFAULT_ALIAS_EXPANDER.reset_metrics()
+
+
+def create_alias_expander(
+    initial_aliases: Optional[Dict[str, str]] = None,
+) -> ReplAliasExpander:
+    """Instantiate a new dedicated alias expander."""
+    return ReplAliasExpander(initial_aliases=initial_aliases)
+
+
 class ReplSession:
     def __init__(self) -> None:
         self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "sonnet 5.5").strip() or "sonnet 5.5"
@@ -733,6 +866,7 @@ class ReplSession:
         self.shortcuts: ShortcutRegistry = get_default_shortcut_registry()
         self.fuzzy_search: ReplFuzzySearch = get_default_repl_fuzzy_search()
         self.continuation: ContinuationGlyphManager = get_default_continuation_manager()
+        self.alias_expander: ReplAliasExpander = get_default_alias_expander()
         route = resolve_route(self.alias)
         if route.get("effort"):
             self.effort = route["effort"]
@@ -838,6 +972,25 @@ def _handle_slash(session: ReplSession, line: str) -> Tuple[Optional[int], bool]
         sys.stdout.write("\033[H\033[2J")
         sys.stdout.flush()
         return None, True
+    if cmd == "/alias":
+        if not args:
+            aliases = session.alias_expander.list_aliases()
+            print("Registered model alias shorthands:")
+            for item in aliases:
+                print(f"  {item['shorthand']:<12} -> {item['canonical']}")
+            return None, True
+        sub_line = " ".join(args).strip()
+        if "=" in sub_line:
+            parts_sub = sub_line.split("=", 1)
+            sh_key = parts_sub[0].strip()
+            sh_target = parts_sub[1].strip()
+            session.alias_expander.register_alias(sh_key, sh_target)
+            print(f"Alias registered: {sh_key} -> {sh_target}")
+        else:
+            can = session.alias_expander.expand_alias(sub_line)
+            print(f"Alias '{sub_line}' maps to '{can}'")
+        return None, True
+
     if cmd in ("/shortcuts", "/keys"):
         items = session.shortcuts.list_shortcuts()
         print("Registered REPL shortcuts:")
