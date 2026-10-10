@@ -8453,6 +8453,94 @@ def alias_expansion_contracts():
 
 
 @check
+def history_dedup_contracts():
+    from hydra_cli.repl import (
+        ReplHistoryDedup,
+        create_history_dedup,
+        get_default_history_dedup,
+        reset_history_dedup,
+        ReplSession,
+    )
+    from hydra_cli import (
+        ReplHistoryDedup as RootReplHistoryDedup,
+        create_history_dedup as root_create_history_dedup,
+        get_default_history_dedup as root_get_default_history_dedup,
+        reset_history_dedup as root_reset_history_dedup,
+    )
+
+    # 1. Re-exports parity
+    assert RootReplHistoryDedup is ReplHistoryDedup
+    assert root_create_history_dedup is create_history_dedup
+    assert root_get_default_history_dedup is get_default_history_dedup
+    assert root_reset_history_dedup is reset_history_dedup
+
+    # 2. Consecutive deduplication strategy
+    dedup = create_history_dedup(max_size=10, strategy="consecutive")
+    assert dedup.get_strategy() == "consecutive"
+    assert dedup.record("hello") is True
+    assert dedup.record("hello") is False
+    assert dedup.record("world") is True
+    assert dedup.record("hello") is True
+    assert dedup.get_history() == ["hello", "world", "hello"]
+    assert dedup.count() == 3
+
+    # 3. Erase deduplication strategy
+    erase_dedup = create_history_dedup(max_size=10, strategy="erase")
+    assert erase_dedup.get_strategy() == "erase"
+    assert erase_dedup.record("alpha") is True
+    assert erase_dedup.record("beta") is True
+    assert erase_dedup.record("alpha") is True
+    assert erase_dedup.get_history() == ["beta", "alpha"]
+    assert erase_dedup.count() == 2
+
+    # 4. Strategy modification and none mode
+    dedup.set_strategy("none")
+    assert dedup.get_strategy() == "none"
+    assert dedup.record("repeat") is True
+    assert dedup.record("repeat") is True
+
+    # 5. Empty and whitespace input handling
+    assert dedup.record("") is False
+    assert dedup.record("   ") is False
+
+    # 6. Capacity bounding and rolling eviction
+    capped = create_history_dedup(max_size=3)
+    assert capped.record("one") is True
+    assert capped.record("two") is True
+    assert capped.record("three") is True
+    assert capped.record("four") is True
+    assert capped.get_history() == ["two", "three", "four"]
+
+    # 7. Query limit and clearing
+    assert capped.get_history(limit=2) == ["three", "four"]
+    capped.clear()
+    assert capped.count() == 0
+    assert capped.get_history() == []
+
+    # 8. Session integration
+    session = ReplSession()
+    assert hasattr(session, "history")
+    assert isinstance(session.history, ReplHistoryDedup)
+
+    # 9. Telemetry metrics and reset
+    metrics = dedup.get_metrics()
+    assert metrics["total_recorded"] >= 5
+    assert metrics["duplicates_suppressed"] >= 1
+    assert metrics["history_size"] >= 5
+
+    dedup.reset_metrics()
+    clean_metrics = dedup.get_metrics()
+    assert clean_metrics["total_recorded"] == 0
+    assert clean_metrics["duplicates_suppressed"] == 0
+
+    # 10. Singleton lifecycle
+    reset_history_dedup()
+    default_hist = get_default_history_dedup()
+    assert default_hist is not None
+    reset_history_dedup()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

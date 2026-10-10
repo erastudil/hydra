@@ -123,6 +123,12 @@ COMMAND_HINTS: Dict[str, Dict[str, Any]] = {
         "description": "View or register model alias shorthands",
         "choices": [],
     },
+    "/history": {
+        "parameter": "[limit | clear]",
+        "hint_text": "limit | clear",
+        "description": "View or manage REPL command history",
+        "choices": ["10", "20", "50", "clear"],
+    },
 }
 
 
@@ -856,8 +862,124 @@ def create_alias_expander(
     return ReplAliasExpander(initial_aliases=initial_aliases)
 
 
+class ReplHistoryDedup:
+    """
+    Command history deduplication and telemetry manager for Hydra REPL.
+    Suppresses consecutive duplicates or removes earlier duplicates across sessions.
+    """
+
+    def __init__(
+        self,
+        max_size: int = 1000,
+        strategy: str = "consecutive",
+    ) -> None:
+        self._lock = threading.RLock()
+        self._max_size = max(1, max_size)
+        self._strategy = strategy if strategy in ("consecutive", "erase", "none") else "consecutive"
+        self._history: List[str] = []
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_recorded: int = 0
+            self._duplicates_suppressed: int = 0
+            self._last_entry: str = ""
+
+    def get_strategy(self) -> str:
+        """Return active deduplication strategy."""
+        with self._lock:
+            return self._strategy
+
+    def set_strategy(self, strategy: str) -> None:
+        """Configure deduplication strategy: consecutive, erase, or none."""
+        with self._lock:
+            if strategy in ("consecutive", "erase", "none"):
+                self._strategy = strategy
+
+    def record(self, entry: str) -> bool:
+        """Record command entry into history according to deduplication strategy. Return True if stored, False if suppressed."""
+        cleaned = entry.strip()
+        if not cleaned:
+            return False
+
+        with self._lock:
+            self._total_recorded += 1
+            if self._strategy == "consecutive":
+                if self._history and self._history[-1] == cleaned:
+                    self._duplicates_suppressed += 1
+                    return False
+                self._history.append(cleaned)
+            elif self._strategy == "erase":
+                if cleaned in self._history:
+                    self._history.remove(cleaned)
+                    self._duplicates_suppressed += 1
+                self._history.append(cleaned)
+            else:
+                self._history.append(cleaned)
+
+            if len(self._history) > self._max_size:
+                self._history.pop(0)
+
+            self._last_entry = cleaned
+            return True
+
+    def get_history(self, limit: Optional[int] = None) -> List[str]:
+        """Return history entries up to optional limit."""
+        with self._lock:
+            if limit is not None and limit > 0:
+                return list(self._history[-limit:])
+            return list(self._history)
+
+    def clear(self) -> None:
+        """Clear all entries from active history buffer."""
+        with self._lock:
+            self._history.clear()
+            self._last_entry = ""
+
+    def count(self) -> int:
+        """Return count of current history entries."""
+        with self._lock:
+            return len(self._history)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            return {
+                "total_recorded": self._total_recorded,
+                "duplicates_suppressed": self._duplicates_suppressed,
+                "history_size": len(self._history),
+                "strategy": self._strategy,
+                "last_entry": self._last_entry,
+                "unique_entries": len(set(self._history)),
+            }
+
+
+_DEFAULT_HISTORY_DEDUP = ReplHistoryDedup()
+
+
+def get_default_history_dedup() -> ReplHistoryDedup:
+    """Return default singleton history deduplication engine."""
+    return _DEFAULT_HISTORY_DEDUP
+
+
+def reset_history_dedup() -> None:
+    """Reset global history dedup telemetry and buffer."""
+    _DEFAULT_HISTORY_DEDUP.clear()
+    _DEFAULT_HISTORY_DEDUP.reset_metrics()
+
+
+def create_history_dedup(
+    max_size: int = 1000,
+    strategy: str = "consecutive",
+) -> ReplHistoryDedup:
+    """Instantiate a new dedicated history deduplication manager."""
+    return ReplHistoryDedup(max_size=max_size, strategy=strategy)
+
+
 class ReplSession:
     def __init__(self) -> None:
+        self.history: ReplHistoryDedup = get_default_history_dedup()
         self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "sonnet 5.5").strip() or "sonnet 5.5"
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.effort: Optional[str] = None
@@ -991,6 +1113,23 @@ def _handle_slash(session: ReplSession, line: str) -> Tuple[Optional[int], bool]
             print(f"Alias '{sub_line}' maps to '{can}'")
         return None, True
 
+    if cmd == "/history":
+        if args and args[0].lower() in ("clear", "reset"):
+            session.history.clear()
+            print("REPL history cleared.")
+            return None, True
+        limit = None
+        if args and args[0].isdigit():
+            limit = int(args[0])
+        entries = session.history.get_history(limit=limit)
+        if not entries:
+            print("REPL history empty.")
+            return None, True
+        print(f"REPL history entries:")
+        for idx, item in enumerate(entries, 1):
+            print(f"  {idx:>3}  {item}")
+        return None, True
+
     if cmd in ("/shortcuts", "/keys"):
         items = session.shortcuts.list_shortcuts()
         print("Registered REPL shortcuts:")
@@ -1048,6 +1187,8 @@ def run_repl(initial_argv: Optional[List[str]] = None) -> int:
         text = line.strip()
         if not text:
             continue
+
+        session.history.record(text)
 
         expanded_text, was_expanded = session.shortcuts.expand_shortcut(text)
         if was_expanded:
