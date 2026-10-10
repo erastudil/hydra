@@ -876,6 +876,15 @@ class PlaywrightAutomationBridge:
                 self._page.on("response", _on_response)
             return self._page
 
+    def get_info(self) -> Dict[str, Any]:
+        """Thread-safe query of active browser url and title."""
+        if self._page is None:
+            return {"url": "", "title": ""}
+        try:
+            return self._run(lambda: {"url": self._page.url if self._page else "", "title": self._page.title() if self._page else ""})
+        except Exception:
+            return {"url": "", "title": ""}
+
     def navigate(self, url: str, timeout_ms: int = 30000) -> Dict[str, Any]:
         """Navigate to URL and return title and status."""
         restricted, reason = _is_restricted_url(url)

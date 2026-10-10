@@ -9498,11 +9498,82 @@ def desktop_packaging_and_composite_contracts():
 
 
 @check
+def agent_runner_safety_and_abort_contracts():
+    import subprocess
+    import time
+    from hydra_cli.agent_runner import (
+        AgentState,
+        AutonomousAgentRunner,
+        get_agent_runner,
+        reset_agent_runner,
+    )
+
+    runner = AutonomousAgentRunner(max_steps=2)
+    assert runner.state == AgentState.IDLE
+    assert runner.max_steps == 2
+
+    # Verify strict step limit enforcement
+    dummy_plan = [
+        {"action": "browser_inspect", "selector": "body"},
+        {"action": "browser_inspect", "selector": "body"},
+        {"action": "browser_inspect", "selector": "body"},
+    ]
+    res_limit = runner.run_task("verify step limit", steps=dummy_plan, max_steps=2)
+    assert res_limit["status"] == AgentState.STEP_LIMIT_EXCEEDED
+    assert res_limit["step_count"] == 2
+    assert runner.state == AgentState.STEP_LIMIT_EXCEEDED
+
+    # Verify sub-100ms emergency abort
+    delayed_plan = [
+        {"action": "browser_inspect", "selector": "body", "delay_sec": 2.0},
+        {"action": "browser_inspect", "selector": "body", "delay_sec": 2.0},
+    ]
+    th = runner.run_task_async("verify abort", steps=delayed_plan)
+    time.sleep(0.02)
+    t0 = time.perf_counter()
+    abort_res = runner.abort()
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    th.join(timeout=0.2)
+    assert elapsed_ms < 100.0, f"Abort took {elapsed_ms}ms"
+    assert abort_res["status"] == AgentState.ABORTED
+    assert runner.state == AgentState.ABORTED
+
+    # Verify child process termination
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    runner.track_process(proc)
+    assert proc.poll() is None
+    runner.abort()
+    try:
+        proc.wait(timeout=0.1)
+    except subprocess.TimeoutExpired:
+        pass
+    assert proc.poll() is not None
+
+    # Verify pause and resume controls
+    runner_ctrl = AutonomousAgentRunner(max_steps=5)
+    th2 = runner_ctrl.run_task_async("verify pause", steps=[
+        {"action": "browser_inspect", "selector": "body", "delay_sec": 1.0},
+        {"action": "browser_inspect", "selector": "body", "delay_sec": 1.0},
+    ])
+    time.sleep(0.02)
+    pause_res = runner_ctrl.pause()
+    assert pause_res["status"] == AgentState.PAUSED
+    assert runner_ctrl.state == AgentState.PAUSED
+    resume_res = runner_ctrl.resume()
+    assert resume_res["status"] == AgentState.RUNNING
+    assert runner_ctrl.state == AgentState.RUNNING
+    runner_ctrl.abort()
+    th2.join(timeout=0.2)
+
+    reset_agent_runner()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

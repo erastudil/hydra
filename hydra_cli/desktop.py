@@ -500,6 +500,7 @@ textarea:focus { border-color: var(--accent); }
       <div class="drawer-tab active" id="tab-screen" onclick="switchDrawerTab('screen')">Live Screen</div>
       <div class="drawer-tab" id="tab-term" onclick="switchDrawerTab('term')">Terminal Logs</div>
       <div class="drawer-tab" id="tab-diff" onclick="switchDrawerTab('diff')">Diffs & Code</div>
+      <div class="drawer-tab" id="tab-agent" onclick="switchDrawerTab('agent')">Agent Runner</div>
     </div>
     <div class="drawer-body" id="drawer-screen-content">
       <div class="screen-container" id="screen-container" onmousemove="handleScreenHover(event)" onclick="handleScreenClick(event)">
@@ -532,6 +533,33 @@ textarea:focus { border-color: var(--accent); }
             <div class="diff-line add">+    def extract_table_data(self, selector='table'):</div>
             <div class="diff-line add">+    def safe_drag_and_drop(self, from_coord, to_coord):</div>
           </div>
+        </div>
+      </div>
+    </div>
+    <div class="drawer-body" id="drawer-agent-content" style="display: none; height: 100%; overflow-y: auto; flex-direction: column; gap: 10px;">
+      <div class="agent-panel" style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span style="font-weight: 600; font-size: 13px;">AUTONOMOUS AGENT RUNNER</span>
+          <span id="agent-status-badge" class="badge" style="background: #374151;">IDLE</span>
+        </div>
+        <textarea id="agent-task-input" style="width: 100%; min-height: 60px; background: #0b0f17; border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); padding: 8px; font-family: inherit; font-size: 12px; resize: vertical;" placeholder="Enter autonomous task (e.g. 'Navigate to data:... and extract table')..."></textarea>
+        <div style="display: flex; gap: 6px; align-items: center;">
+          <input type="number" id="agent-max-steps" value="30" min="1" max="100" style="width: 50px; background: #0b0f17; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 4px 6px; font-size: 11px;" title="Max Steps" />
+          <button class="primary" style="flex: 1; padding: 6px 10px; font-size: 12px;" onclick="startAgentTask()">Start Agent</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="pauseAgentTask()" id="btn-agent-pause">Pause</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="resumeAgentTask()" id="btn-agent-resume">Resume</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px; color: var(--error);" onclick="abortAgentTask()" id="btn-agent-abort">Abort</button>
+        </div>
+        <div style="background: #1f2937; border-radius: 4px; height: 6px; width: 100%; overflow: hidden; margin-top: 4px;">
+          <div id="agent-progress-bar" style="background: var(--accent); width: 0%; height: 100%; transition: width 0.3s;"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted);">
+          <span id="agent-step-counter">Step: 0 / 30</span>
+          <span id="agent-elapsed-timer">Elapsed: 0.0s</span>
+        </div>
+        <div style="font-weight: 600; font-size: 12px; margin-top: 4px; color: var(--text-secondary);">ACTION TRACE LOG</div>
+        <div class="trace-log" id="agent-trace-log" style="display: flex; flex-direction: column; gap: 8px; max-height: 380px; overflow-y: auto;">
+          <div style="font-size: 11px; color: var(--text-muted); font-style: italic;">No active agent execution trace. Enter task and start runner.</div>
         </div>
       </div>
     </div>
@@ -625,28 +653,33 @@ function renderSessionMessages(sid) {
 function switchNav(nav) {
   currentNav = nav;
   document.querySelectorAll('.sidebar .nav-item').forEach(el => el.classList.remove('active'));
-  event.target.classList.add('active');
+  if (typeof event !== 'undefined' && event && event.target) {
+    event.target.classList.add('active');
+  }
   const termView = document.getElementById('terminal-view');
-  termView.innerText += `\n[MODE] Switched to mode: ${nav}`;
+  if (termView) termView.innerText += `\n[MODE] Switched to mode: ${nav}`;
+  if (nav === 'agent') {
+    switchDrawerTab('agent');
+  }
 }
 
 function switchDrawerTab(tab) {
   activeDrawerTab = tab;
   document.querySelectorAll('.drawer-tab').forEach(el => el.classList.remove('active'));
-  document.getElementById('drawer-screen-content').style.display = 'none';
-  document.getElementById('drawer-term-content').style.display = 'none';
-  document.getElementById('drawer-diff-content').style.display = 'none';
+  ['screen', 'term', 'diff', 'agent'].forEach(t => {
+    const el = document.getElementById('drawer-' + t + '-content');
+    if (el) el.style.display = 'none';
+  });
 
-  if (tab === 'screen') {
-    document.getElementById('tab-screen').classList.add('active');
-    document.getElementById('drawer-screen-content').style.display = 'flex';
-  } else if (tab === 'term') {
-    document.getElementById('tab-term').classList.add('active');
-    document.getElementById('drawer-term-content').style.display = 'flex';
-  } else if (tab === 'diff') {
-    document.getElementById('tab-diff').classList.add('active');
-    document.getElementById('drawer-diff-content').style.display = 'flex';
+  const tabEl = document.getElementById('tab-' + tab);
+  if (tabEl) tabEl.classList.add('active');
+  const contentEl = document.getElementById('drawer-' + tab + '-content');
+  if (contentEl) contentEl.style.display = 'flex';
+
+  if (tab === 'diff') {
     fetchDiffs();
+  } else if (tab === 'agent') {
+    pollAgentStatus();
   }
 }
 
@@ -855,6 +888,142 @@ async function dispatchPrompt() {
 function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
+
+let agentPollTimer = null;
+
+async function startAgentTask() {
+  const taskInput = document.getElementById('agent-task-input');
+  const promptInput = document.getElementById('prompt-input');
+  const task = (taskInput && taskInput.value.trim()) || (promptInput && promptInput.value.trim()) || '';
+  if (!task) return;
+  const maxSteps = parseInt(document.getElementById('agent-max-steps').value || '30', 10);
+  const model = document.getElementById('model-select').value || 'sonnet 5.5';
+
+  const badge = document.getElementById('agent-status-badge');
+  if (badge) { badge.innerText = 'STARTING'; badge.style.background = '#2563eb'; }
+
+  try {
+    const res = await fetch('/api/agent/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task, model, max_steps: maxSteps })
+    });
+    const data = await res.json();
+    if (data.isError) {
+      if (badge) { badge.innerText = 'ERROR'; badge.style.background = 'var(--error)'; }
+      alert('Agent failed to start: ' + data.error);
+      return;
+    }
+    if (badge) { badge.innerText = 'RUNNING'; badge.style.background = 'var(--accent)'; }
+    startAgentPolling();
+  } catch (err) {
+    if (badge) { badge.innerText = 'ERROR'; badge.style.background = 'var(--error)'; }
+  }
+}
+
+async function pauseAgentTask() {
+  await fetch('/api/agent/pause', { method: 'POST' });
+  const badge = document.getElementById('agent-status-badge');
+  if (badge) { badge.innerText = 'PAUSED'; badge.style.background = '#f59e0b'; }
+}
+
+async function resumeAgentTask() {
+  await fetch('/api/agent/resume', { method: 'POST' });
+  const badge = document.getElementById('agent-status-badge');
+  if (badge) { badge.innerText = 'RUNNING'; badge.style.background = 'var(--accent)'; }
+}
+
+async function abortAgentTask() {
+  await fetch('/api/agent/abort', { method: 'POST' });
+  const badge = document.getElementById('agent-status-badge');
+  if (badge) { badge.innerText = 'ABORTED'; badge.style.background = 'var(--error)'; }
+  stopAgentPolling();
+}
+
+function startAgentPolling() {
+  if (agentPollTimer) clearInterval(agentPollTimer);
+  agentPollTimer = setInterval(pollAgentStatus, 500);
+}
+
+function stopAgentPolling() {
+  if (agentPollTimer) {
+    clearInterval(agentPollTimer);
+    agentPollTimer = null;
+  }
+}
+
+async function pollAgentStatus() {
+  try {
+    const res = await fetch('/api/agent/status');
+    const st = await res.json();
+    renderAgentStatus(st);
+    if (st.status === 'COMPLETED' || st.status === 'FAILED' || st.status === 'ABORTED') {
+      stopAgentPolling();
+    }
+  } catch (e) {}
+}
+
+function renderAgentStatus(st) {
+  const badge = document.getElementById('agent-status-badge');
+  if (badge) {
+    badge.innerText = st.status;
+    if (st.status === 'RUNNING') badge.style.background = 'var(--accent)';
+    else if (st.status === 'PAUSED') badge.style.background = '#f59e0b';
+    else if (st.status === 'COMPLETED') badge.style.background = '#10b981';
+    else if (st.status === 'FAILED' || st.status === 'ABORTED') badge.style.background = 'var(--error)';
+  }
+
+  const pBar = document.getElementById('agent-progress-bar');
+  if (pBar && st.max_steps) {
+    const pct = Math.min(100, Math.round((st.current_step / st.max_steps) * 100));
+    pBar.style.width = `${pct}%`;
+  }
+
+  const stepCounter = document.getElementById('agent-step-counter');
+  if (stepCounter) stepCounter.innerText = `Step: ${st.current_step} / ${st.max_steps}`;
+
+  const timer = document.getElementById('agent-elapsed-timer');
+  if (timer) timer.innerText = `Elapsed: ${st.elapsed_sec}s`;
+
+  if (st.highlights && st.highlights.length) {
+    const canvas = document.getElementById('screen-overlay-canvas');
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      st.highlights.forEach(h => {
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(h.x, h.y, h.width, h.height);
+        ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
+        ctx.fillRect(h.x, h.y, h.width, h.height);
+        ctx.fillStyle = '#fca5a5';
+        ctx.font = '10px monospace';
+        ctx.fillText(h.label || 'Target', h.x + 2, h.y - 4);
+      });
+    }
+  }
+
+  const traceLog = document.getElementById('agent-trace-log');
+  if (traceLog && st.actions && st.actions.length) {
+    traceLog.innerHTML = '';
+    st.actions.forEach(a => {
+      const card = document.createElement('div');
+      card.style.cssText = 'background: #111827; border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-family: var(--font-mono); font-size: 11px;';
+      const statusColor = a.status === 'success' ? '#10b981' : (a.status === 'error' ? '#ef4444' : '#9ca3af');
+      card.innerHTML = `
+        <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+          <span style="font-weight: 600; color: var(--accent);">Step ${a.step}: ${escapeHtml(a.action)}</span>
+          <span style="color: ${statusColor}; font-weight: 600;">${a.status.toUpperCase()} (${a.duration_sec}s)</span>
+        </div>
+        <div style="color: var(--text-secondary); margin-bottom: 4px;">Thought: ${escapeHtml(a.thought || '')}</div>
+        <div style="color: var(--text-muted); font-size: 10px; word-break: break-all;">Args: ${escapeHtml(JSON.stringify(a.arguments || {}))}</div>
+      `;
+      traceLog.appendChild(card);
+    });
+    traceLog.scrollTop = traceLog.scrollHeight;
+  }
+}
+
 </script>
 </body>
 </html>
@@ -999,6 +1168,50 @@ def create_desktop_app() -> Any:
         res = await asyncio.to_thread(engine.dispatch, action, **body_params)
         return res
 
+    @app.post("/api/agent/run")
+    @app.post("/api/agent/start")
+    async def agent_start(req: Request):
+        from hydra_cli.agent_runner import get_agent_runner
+        body = await req.json()
+        task = body.get("task", "")
+        model = body.get("model", "sonnet 5.5")
+        steps = body.get("steps")
+        max_steps = int(body.get("max_steps", 30))
+        timeout_sec = float(body.get("timeout_sec", 300.0))
+        async_run = bool(body.get("async", False))
+
+        runner = get_agent_runner()
+        if async_run:
+            runner.run_task_async(task_description=task, steps=steps, max_steps=max_steps, timeout_sec=timeout_sec)
+            return {"isError": False, "status": "running", "task": task, "async": True}
+        res = await asyncio.to_thread(runner.run_task, task_description=task, steps=steps, max_steps=max_steps, timeout_sec=timeout_sec)
+        return res
+
+    @app.post("/api/agent/pause")
+    async def agent_pause():
+        from hydra_cli.agent_runner import get_agent_runner
+        runner = get_agent_runner()
+        return runner.pause()
+
+    @app.post("/api/agent/resume")
+    async def agent_resume():
+        from hydra_cli.agent_runner import get_agent_runner
+        runner = get_agent_runner()
+        return runner.resume()
+
+    @app.get("/api/agent/status")
+    async def agent_status():
+        from hydra_cli.agent_runner import get_agent_runner
+        runner = get_agent_runner()
+        return runner.get_status()
+
+    @app.post("/api/agent/abort")
+    async def agent_abort():
+        from hydra_cli.agent_runner import get_agent_runner
+        runner = get_agent_runner()
+        return runner.abort()
+
+
     @app.get("/v1/models")
     async def v1_models():
         from hydra_cli.serve import get_registered_models
@@ -1095,6 +1308,7 @@ def create_desktop_app() -> Any:
         }
     ]
 
+
     @app.get("/api/diffs")
     async def get_diffs():
         return {"diffs": _diff_records, "count": len(_diff_records)}
@@ -1110,7 +1324,20 @@ def create_desktop_app() -> Any:
     @app.websocket("/ws/desktop")
     async def websocket_endpoint(ws: WebSocket):
         await ws.accept()
+        unsub_agent = None
         try:
+            loop = asyncio.get_running_loop()
+            from hydra_cli.agent_runner import get_agent_runner
+            runner = get_agent_runner()
+
+            def _ws_agent_cb(ev):
+                try:
+                    asyncio.run_coroutine_threadsafe(ws.send_text(json.dumps(ev)), loop)
+                except Exception:
+                    pass
+
+            unsub_agent = runner.subscribe(_ws_agent_cb)
+
             while True:
                 msg_raw = await ws.receive_text()
                 try:
@@ -1126,10 +1353,18 @@ def create_desktop_app() -> Any:
                         engine = get_computer_use_engine()
                         cap = engine.screen.capture(as_base64=True)
                         await ws.send_text(json.dumps({"event": "screen", "data": cap}))
+                    elif action == "agent_abort":
+                        res = runner.abort()
+                        await ws.send_text(json.dumps({"event": "agent_aborted", "data": res}))
+                    elif action == "agent_status":
+                        await ws.send_text(json.dumps({"event": "agent_status", "data": runner.get_status()}))
                 except Exception as inner_exc:
                     await ws.send_text(json.dumps({"event": "error", "message": str(inner_exc)}))
         except WebSocketDisconnect:
             pass
+        finally:
+            if unsub_agent:
+                unsub_agent()
 
     return app
 

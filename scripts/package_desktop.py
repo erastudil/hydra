@@ -27,6 +27,7 @@ def run_checks() -> int:
     required_files = [
         os.path.join(repo_root, "hydra_cli", "desktop.py"),
         os.path.join(repo_root, "hydra_cli", "computer_use.py"),
+        os.path.join(repo_root, "hydra_cli", "agent_runner.py"),
         os.path.join(repo_root, "desktop", "__init__.py"),
         os.path.join(repo_root, "desktop", "README.md"),
         os.path.join(repo_root, "desktop", "SPEC.md"),
@@ -57,6 +58,11 @@ def run_checks() -> int:
         "diff-card",
         "fetchDiffs",
         "/api/diffs",
+        "agent-panel",
+        "agent-trace-log",
+        "startAgentTask",
+        "pauseAgentTask",
+        "/api/agent/run",
     ]
     for tok in html_tokens:
         if tok not in html:
@@ -78,6 +84,11 @@ def run_checks() -> int:
         "/api/browser/action",
         "/api/diffs",
         "/api/diffs/record",
+        "/api/agent/run",
+        "/api/agent/pause",
+        "/api/agent/resume",
+        "/api/agent/abort",
+        "/api/agent/status",
         "/ws/desktop",
         "/v1/models",
         "/v1/chat/completions",
@@ -122,7 +133,29 @@ def run_checks() -> int:
         print("error : /api/computer/screen failed to return png bytes.\n")
         return 1
 
-    print("endpoint execution verification : status, diffs, and screen endpoints functioning deterministically.\n")
+        # Agent endpoints check
+    ag_st = client.get("/api/agent/status")
+    if ag_st.status_code != 200:
+        print("error : /api/agent/status failed.\n")
+        return 1
+    ag_run = client.post("/api/agent/run", json={"task": "verification gate check", "max_steps": 5, "async": True})
+    if ag_run.status_code != 200 or ag_run.json().get("status") not in ("started", "running"):
+        print("error : /api/agent/run failed.\n")
+        return 1
+    ag_pause = client.post("/api/agent/pause")
+    if ag_pause.status_code != 200:
+        print("error : /api/agent/pause failed.\n")
+        return 1
+    ag_resume = client.post("/api/agent/resume")
+    if ag_resume.status_code != 200:
+        print("error : /api/agent/resume failed.\n")
+        return 1
+    ag_abort = client.post("/api/agent/abort")
+    if ag_abort.status_code != 200 or not ag_abort.json().get("status") == "aborted":
+        print("error : /api/agent/abort failed.\n")
+        return 1
+
+    print("endpoint execution verification : status, diffs, screen, and agent endpoints functioning deterministically.\n")
 
     # 5. Composite Computer Use Primitives Verification
     from hydra_cli.computer_use import get_computer_use_engine
