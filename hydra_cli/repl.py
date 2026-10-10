@@ -109,6 +109,12 @@ COMMAND_HINTS: Dict[str, Dict[str, Any]] = {
         "description": "Display help message",
         "choices": [],
     },
+    "/shortcuts": {
+        "parameter": "",
+        "hint_text": "",
+        "description": "List registered command shortcuts",
+        "choices": [],
+    },
 }
 
 
@@ -274,6 +280,142 @@ def create_repl_parameter_hints(
     return ReplParameterHints(custom_hints=custom_hints)
 
 
+
+DEFAULT_SHORTCUTS: Dict[str, Dict[str, str]] = {
+    "!m": {"expansion": "/models", "description": "List registered models"},
+    "!s": {"expansion": "/status", "description": "Show session status"},
+    "!c": {"expansion": "/clear", "description": "Clear screen buffer"},
+    "!b": {"expansion": "/banner", "description": "Reprint TUI splash banner"},
+    "!h": {"expansion": "/help", "description": "Show help documentation"},
+    "!q": {"expansion": "/quit", "description": "Quit REPL session"},
+    "/m": {"expansion": "/model", "description": "Shortcut for /model"},
+    "/e": {"expansion": "/effort", "description": "Shortcut for /effort"},
+    "/sys": {"expansion": "/system", "description": "Shortcut for /system"},
+}
+
+
+class ShortcutRegistry:
+    """
+    Keyboard and command prefix shortcut expansion registry for Hydra REPL.
+    Translates abbreviated prefixes and command shortcuts into canonical slash commands.
+    """
+
+    def __init__(self, initial_shortcuts: Optional[Dict[str, Dict[str, str]]] = None) -> None:
+        self._lock = threading.RLock()
+        self._shortcuts: Dict[str, Dict[str, str]] = {k: dict(v) for k, v in DEFAULT_SHORTCUTS.items()}
+        if initial_shortcuts:
+            for k, v in initial_shortcuts.items():
+                self._shortcuts[k.lower()] = dict(v)
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_lookups: int = 0
+            self._total_expansions: int = 0
+            self._last_expanded: str = ""
+
+    def register_shortcut(self, trigger: str, expansion: str, description: str = "") -> None:
+        """Register or update shortcut trigger mapping."""
+        clean_trigger = trigger.strip().lower()
+        clean_exp = expansion.strip()
+        with self._lock:
+            self._shortcuts[clean_trigger] = {
+                "expansion": clean_exp,
+                "description": description.strip() or f"Shortcut for {clean_exp}",
+            }
+
+    def unregister_shortcut(self, trigger: str) -> bool:
+        """Remove shortcut trigger mapping."""
+        clean_trigger = trigger.strip().lower()
+        with self._lock:
+            if clean_trigger in self._shortcuts:
+                del self._shortcuts[clean_trigger]
+                return True
+            return False
+
+    def has_shortcut(self, trigger: str) -> bool:
+        """Return true when trigger exists in registry."""
+        with self._lock:
+            return trigger.strip().lower() in self._shortcuts
+
+    def get_shortcut(self, trigger: str) -> Optional[Dict[str, str]]:
+        """Return shortcut metadata dictionary for trigger."""
+        with self._lock:
+            return self._shortcuts.get(trigger.strip().lower())
+
+    def expand_shortcut(self, line: str) -> Tuple[str, bool]:
+        """Expand command shortcut in input line."""
+        clean = line.strip()
+        with self._lock:
+            self._total_lookups += 1
+
+        if not clean:
+            return line, False
+
+        parts = clean.split(maxsplit=1)
+        trigger = parts[0].lower()
+        trailing = parts[1] if len(parts) > 1 else ""
+
+        with self._lock:
+            entry = self._shortcuts.get(trigger)
+
+        if entry is None:
+            return line, False
+
+        expansion = entry["expansion"]
+        expanded_line = f"{expansion} {trailing}".strip() if trailing else expansion
+
+        with self._lock:
+            self._total_expansions += 1
+            self._last_expanded = trigger
+
+        return expanded_line, True
+
+    def list_shortcuts(self) -> List[Dict[str, str]]:
+        """Return sorted list of registered shortcuts."""
+        with self._lock:
+            res = []
+            for k in sorted(self._shortcuts.keys()):
+                v = self._shortcuts[k]
+                res.append({
+                    "trigger": k,
+                    "expansion": v["expansion"],
+                    "description": v.get("description", ""),
+                })
+            return res
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            return {
+                "total_lookups": self._total_lookups,
+                "total_expansions": self._total_expansions,
+                "last_expanded": self._last_expanded,
+                "registered_shortcuts": len(self._shortcuts),
+            }
+
+
+_DEFAULT_SHORTCUT_REGISTRY = ShortcutRegistry()
+
+
+def get_default_shortcut_registry() -> ShortcutRegistry:
+    """Return default singleton shortcut registry."""
+    return _DEFAULT_SHORTCUT_REGISTRY
+
+
+def reset_shortcut_registry() -> None:
+    """Reset global shortcut registry telemetry."""
+    _DEFAULT_SHORTCUT_REGISTRY.reset_metrics()
+
+
+def create_shortcut_registry(
+    initial_shortcuts: Optional[Dict[str, Dict[str, str]]] = None,
+) -> ShortcutRegistry:
+    """Instantiate a new dedicated shortcut registry."""
+    return ShortcutRegistry(initial_shortcuts=initial_shortcuts)
+
+
 class ReplSession:
     def __init__(self) -> None:
         self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "sonnet 5.5").strip() or "sonnet 5.5"
@@ -281,6 +423,7 @@ class ReplSession:
         self.effort: Optional[str] = None
         self.reasoning_mode: Optional[str] = None
         self.hints: ReplParameterHints = get_default_repl_parameter_hints()
+        self.shortcuts: ShortcutRegistry = get_default_shortcut_registry()
         route = resolve_route(self.alias)
         if route.get("effort"):
             self.effort = route["effort"]
@@ -386,6 +529,12 @@ def _handle_slash(session: ReplSession, line: str) -> Tuple[Optional[int], bool]
         sys.stdout.write("\033[H\033[2J")
         sys.stdout.flush()
         return None, True
+    if cmd in ("/shortcuts", "/keys"):
+        items = session.shortcuts.list_shortcuts()
+        print("Registered REPL shortcuts:")
+        for it in items:
+            print(f"  {it['trigger']:<6} -> {it['expansion']:<16} : {it['description']}")
+        return None, True
     if cmd in ("/quit", "/exit", "/q"):
         return 0, True
 
@@ -437,6 +586,10 @@ def run_repl(initial_argv: Optional[List[str]] = None) -> int:
         text = line.strip()
         if not text:
             continue
+
+        expanded_text, was_expanded = session.shortcuts.expand_shortcut(text)
+        if was_expanded:
+            text = expanded_text
 
         code, handled = _handle_slash(session, text)
         if handled:

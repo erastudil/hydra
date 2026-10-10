@@ -8143,6 +8143,100 @@ def repl_parameter_hints_contracts():
 
 
 @check
+def shortcut_registry_contracts():
+    from hydra_cli.repl import (
+        DEFAULT_SHORTCUTS,
+        ShortcutRegistry,
+        ReplSession,
+        _handle_slash,
+        create_shortcut_registry,
+        get_default_shortcut_registry,
+        reset_shortcut_registry,
+    )
+    from hydra_cli import (
+        ShortcutRegistry as RootShortcutRegistry,
+        create_shortcut_registry as root_create_shortcut_registry,
+    )
+
+    # 1. Re-exports parity
+    assert RootShortcutRegistry is ShortcutRegistry
+    assert root_create_shortcut_registry is create_shortcut_registry
+
+    # 2. Default shortcuts presence
+    assert "!m" in DEFAULT_SHORTCUTS
+    assert "!s" in DEFAULT_SHORTCUTS
+    assert "!c" in DEFAULT_SHORTCUTS
+    assert "!b" in DEFAULT_SHORTCUTS
+    assert "!h" in DEFAULT_SHORTCUTS
+    assert "!q" in DEFAULT_SHORTCUTS
+    assert "/m" in DEFAULT_SHORTCUTS
+    assert "/e" in DEFAULT_SHORTCUTS
+
+    # 3. Expansion mechanics
+    reg = create_shortcut_registry()
+    exp_m, changed_m = reg.expand_shortcut("!m")
+    assert changed_m is True
+    assert exp_m == "/models"
+
+    exp_model, changed_model = reg.expand_shortcut("/m opus 5.5")
+    assert changed_model is True
+    assert exp_model == "/model opus 5.5"
+
+    exp_plain, changed_plain = reg.expand_shortcut("regular prompt")
+    assert changed_plain is False
+    assert exp_plain == "regular prompt"
+
+    exp_empty, changed_empty = reg.expand_shortcut("")
+    assert changed_empty is False
+
+    # 4. Custom registration and unregistration
+    reg.register_shortcut("!v", "/version", "Show system version")
+    assert reg.has_shortcut("!v") is True
+    assert reg.get_shortcut("!v")["expansion"] == "/version"
+
+    exp_v, changed_v = reg.expand_shortcut("!v")
+    assert changed_v is True
+    assert exp_v == "/version"
+
+    assert reg.unregister_shortcut("!v") is True
+    assert reg.has_shortcut("!v") is False
+    assert reg.unregister_shortcut("!nonexistent") is False
+
+    # 5. Listing shortcuts
+    items = reg.list_shortcuts()
+    assert len(items) >= 8
+    triggers = [i["trigger"] for i in items]
+    assert "!m" in triggers
+    assert "/m" in triggers
+
+    # 6. Session integration
+    session = ReplSession()
+    assert hasattr(session, "shortcuts")
+    assert isinstance(session.shortcuts, ShortcutRegistry)
+
+    # Test /shortcuts slash command
+    code, handled = _handle_slash(session, "/shortcuts")
+    assert handled is True
+    assert code is None
+
+    # 7. Metrics and lifecycle
+    metrics = reg.get_metrics()
+    assert metrics["total_lookups"] >= 5
+    assert metrics["total_expansions"] >= 3
+    assert metrics["last_expanded"] == "!v"
+
+    reg.reset_metrics()
+    clean_metrics = reg.get_metrics()
+    assert clean_metrics["total_lookups"] == 0
+    assert clean_metrics["total_expansions"] == 0
+
+    reset_shortcut_registry()
+    default_reg = get_default_shortcut_registry()
+    assert default_reg is not None
+    reset_shortcut_registry()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

@@ -69,11 +69,16 @@ __author__ = "erastudil"
 
 from hydra_cli.repl import (
     COMMAND_HINTS,
+    DEFAULT_SHORTCUTS,
     ReplParameterHints,
     ReplSession,
+    ShortcutRegistry,
     create_repl_parameter_hints,
+    create_shortcut_registry,
     get_default_repl_parameter_hints,
+    get_default_shortcut_registry,
     reset_repl_parameter_hints,
+    reset_shortcut_registry,
     run_repl,
 )
 from hydra_cli.agent import (
