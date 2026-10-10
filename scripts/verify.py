@@ -9849,12 +9849,112 @@ def desktop_tool_presets_and_markdown_report_contracts():
     assert disp_prof.get("profile") == "full"
 
 
+
+@check
+def desktop_scheduled_jobs_and_workflow_templates_contracts():
+    from hydra_cli.agent_runner import (
+        JobStatus,
+        ScheduledJob,
+        WorkflowTemplate,
+        get_job_scheduler,
+        get_workflow_template,
+        interpolate_workflow_template,
+        list_workflow_templates,
+        reset_job_scheduler,
+    )
+    from hydra_cli.desktop import (
+        COMMAND_PALETTE_ACTIONS,
+        dispatch_command_palette_action,
+    )
+
+    reset_job_scheduler()
+    try:
+        # 1. Template catalog and parameter sanitization
+        templates = list_workflow_templates()
+        assert len(templates) >= 5
+        t_web = get_workflow_template("web_extract")
+        assert t_web is not None
+        assert t_web.tool_profile == "browser_only"
+
+        # Interpolation with default parameter
+        res_ok = interpolate_workflow_template("web_extract", {"url": "https://example.com"})
+        assert not res_ok.get("isError")
+        assert "https://example.com" in res_ok["rendered_prompt"]
+
+        # Missing required parameter fails
+        res_miss = interpolate_workflow_template("web_extract", {})
+        assert res_miss.get("isError") is True
+
+        # Path traversal attack defense
+        res_trav = interpolate_workflow_template("file_audit", {"path": "../../etc/shadow"})
+        assert res_trav.get("isError") is True
+        assert "path traversal" in res_trav.get("error", "").lower()
+
+        # 2. Scheduled job creation, execution, and cancellation
+        scheduler = get_job_scheduler()
+        job = scheduler.schedule_job(
+            name="Verify Probe Job",
+            task="Verify step",
+            steps=[{"action": "browser_inspect", "selector": "body"}],
+            auto_arm=False,
+        )
+        assert job.status == JobStatus.SCHEDULED
+        assert job.run_count == 0
+
+        # Run job
+        res_job = job.run()
+        assert not res_job.get("isError")
+        assert job.run_count == 1
+        assert job.status == JobStatus.COMPLETED
+
+        # Concurrent isolation lock check
+        rec_job = scheduler.schedule_job(
+            name="Recurring Lock Test",
+            task="Poll",
+            steps=[{"action": "browser_inspect", "selector": "body"}],
+            auto_arm=False,
+            recurring=True,
+            interval_sec=0.1,
+        )
+        assert rec_job._isolation_lock.acquire(blocking=False) is True
+        res_blocked = rec_job.run()
+        assert res_blocked.get("isError") is True
+        assert res_blocked.get("concurrent_blocked") is True
+        rec_job._isolation_lock.release()
+
+        # Cancellation disarms timer
+        delay_job = scheduler.schedule_job(
+            name="Delayed Cancel Test",
+            task="Wait",
+            steps=[{"action": "browser_inspect", "selector": "body"}],
+            delay_sec=30.0,
+            auto_arm=True,
+        )
+        assert delay_job._timer is not None
+        scheduler.cancel_job(delay_job.job_id)
+        assert delay_job.status == JobStatus.CANCELLED
+        assert delay_job._timer is None
+
+        # 3. Command palette dispatch
+        assert "templates:list" in COMMAND_PALETTE_ACTIONS
+        assert "jobs:list" in COMMAND_PALETTE_ACTIONS
+        assert "jobs:clear" in COMMAND_PALETTE_ACTIONS
+
+        disp_tpl = dispatch_command_palette_action("templates:list")
+        assert len(disp_tpl.get("templates", [])) >= 5
+
+        disp_clear = dispatch_command_palette_action("jobs:clear")
+        assert disp_clear.get("cleared") is True
+    finally:
+        reset_job_scheduler()
+
+
 @check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

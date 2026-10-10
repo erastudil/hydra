@@ -590,6 +590,8 @@ textarea:focus { border-color: var(--accent); }
           <button class="secondary" style="padding: 6px 8px; font-size: 12px; color: var(--error);" onclick="abortAgentTask()" id="btn-agent-abort">Abort</button>
           <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="exportAgentTrace()" id="btn-agent-export">Export Trace</button>
           <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="exportAgentMarkdown()" id="btn-agent-export-markdown">Export Markdown</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="openTemplatesModal()" id="btn-agent-templates" title="Workflow Templates">📋 Templates</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="openJobsModal()" id="btn-agent-jobs" title="Scheduled Agent Jobs">⏱ Jobs</button>
         </div>
         <div style="background: #1f2937; border-radius: 4px; height: 6px; width: 100%; overflow: hidden; margin-top: 4px;">
           <div id="agent-progress-bar" style="background: var(--accent); width: 0%; height: 100%; transition: width 0.3s;"></div>
@@ -606,6 +608,60 @@ textarea:focus { border-color: var(--accent); }
     </div>
   </div>
 </div>
+<!-- Workflow Templates Modal -->
+<div id="workflow-templates-modal" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 99999; justify-content: center; align-items: flex-start; padding-top: 10vh;" onclick="handleTemplatesBackdropClick(event)">
+  <div class="palette-container" style="background: #0f172a; border: 1px solid var(--accent); border-radius: 8px; width: 700px; max-width: 90vw; box-shadow: 0 12px 35px rgba(0,0,0,0.85); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); background: #111827;">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="color: var(--accent); font-weight: 700; font-size: 15px;">📋</span>
+        <span style="font-weight: 600; font-size: 14px;">WORKFLOW TEMPLATES CATALOG</span>
+      </div>
+      <button class="secondary" style="padding: 2px 8px; font-size: 11px;" onclick="closeTemplatesModal()">✕</button>
+    </div>
+    <div style="padding: 10px 16px; border-bottom: 1px solid var(--border); background: #0b0f17;">
+      <input type="text" id="template-search-input" placeholder="Search workflow templates..." style="width: 100%; background: #1f2937; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 6px 10px; font-size: 12px;" oninput="filterTemplates()" />
+    </div>
+    <div id="templates-list" style="max-height: 420px; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px;">
+    </div>
+  </div>
+</div>
+
+<!-- Scheduled Agent Jobs Modal -->
+<div id="scheduled-jobs-modal" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 99999; justify-content: center; align-items: flex-start; padding-top: 8vh;" onclick="handleJobsBackdropClick(event)">
+  <div class="palette-container" style="background: #0f172a; border: 1px solid var(--accent); border-radius: 8px; width: 750px; max-width: 92vw; box-shadow: 0 12px 35px rgba(0,0,0,0.85); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); background: #111827;">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="color: var(--accent); font-weight: 700; font-size: 15px;">⏱</span>
+        <span style="font-weight: 600; font-size: 14px;">SCHEDULED AGENT JOBS</span>
+      </div>
+      <button class="secondary" style="padding: 2px 8px; font-size: 11px;" onclick="closeJobsModal()">✕</button>
+    </div>
+    <div style="padding: 12px 16px; border-bottom: 1px solid var(--border); background: #0b0f17; display: flex; flex-direction: column; gap: 8px;">
+      <div style="font-weight: 600; font-size: 12px; color: var(--text-secondary);">CREATE NEW SCHEDULED JOB</div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <input type="text" id="job-name-input" placeholder="Job Name (e.g. Daily Invariant Audit)" style="flex: 1; min-width: 180px; background: #1f2937; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;" />
+        <input type="number" id="job-interval-input" value="60" min="5" placeholder="Interval (sec)" style="width: 100px; background: #1f2937; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;" title="Interval in seconds" />
+        <select id="job-profile-select" style="background: #1f2937; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;">
+          <option value="full_automation">Full Automation</option>
+          <option value="browser_only">Browser Only</option>
+          <option value="workspace_only">Workspace Only</option>
+          <option value="minimal">Minimal</option>
+        </select>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <input type="text" id="job-task-input" placeholder="Task description (e.g. Inspect workspace and generate report)..." style="flex: 1; background: #1f2937; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;" />
+        <button class="primary" style="padding: 5px 12px; font-size: 12px;" onclick="createScheduledJob()">Schedule</button>
+      </div>
+    </div>
+    <div style="padding: 12px 16px; max-height: 380px; overflow-y: auto;">
+      <div style="font-weight: 600; font-size: 12px; margin-bottom: 8px; color: var(--text-secondary);">ACTIVE SCHEDULED JOBS</div>
+      <div id="scheduled-jobs-list" style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 11px; color: var(--text-muted); font-style: italic;">No scheduled jobs active. Create a job above.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Command Palette Modal -->
 <div id="command-palette-modal" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 99999; justify-content: center; align-items: flex-start; padding-top: 15vh;" onclick="handlePaletteBackdropClick(event)">
   <div class="palette-container" style="background: #0f172a; border: 1px solid var(--accent); border-radius: 8px; width: 620px; max-width: 90vw; box-shadow: 0 12px 35px rgba(0,0,0,0.85); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
@@ -1231,6 +1287,185 @@ function setModelAlias(m) {
   if (sel) sel.value = m;
 }
 
+// Workflow Templates Catalog
+let workflowTemplatesCache = [];
+
+async function openTemplatesModal() {
+  const modal = document.getElementById('workflow-templates-modal');
+  if (modal) modal.style.display = 'flex';
+  try {
+    const res = await fetch('/api/agent/templates');
+    const data = await res.json();
+    workflowTemplatesCache = data.catalog || Object.values(data.templates || {});
+    renderTemplatesList(workflowTemplatesCache);
+  } catch (err) {
+    console.error('Failed to load templates', err);
+  }
+}
+
+function closeTemplatesModal() {
+  const modal = document.getElementById('workflow-templates-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+function handleTemplatesBackdropClick(e) {
+  if (e.target.id === 'workflow-templates-modal') closeTemplatesModal();
+}
+
+function filterTemplates() {
+  const q = (document.getElementById('template-search-input')?.value || '').toLowerCase();
+  const filtered = workflowTemplatesCache.filter(t => 
+    t.name.toLowerCase().includes(q) ||
+    (t.category || '').toLowerCase().includes(q) ||
+    t.description.toLowerCase().includes(q)
+  );
+  renderTemplatesList(filtered);
+}
+
+function renderTemplatesList(templates) {
+  const container = document.getElementById('templates-list');
+  if (!container) return;
+  if (!templates.length) {
+    container.innerHTML = '<div style="font-size: 12px; color: var(--text-muted); padding: 12px;">No matching templates found.</div>';
+    return;
+  }
+  container.innerHTML = templates.map(t => `
+    <div class="diff-card" style="padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-weight: 600; font-size: 13px; color: var(--accent);">${t.name}</span>
+          <span class="badge" style="background: #1e293b; color: #94a3b8; font-size: 10px;">${t.category || 'Workflow'}</span>
+        </div>
+        <button class="primary" style="padding: 3px 8px; font-size: 11px;" onclick="applyWorkflowTemplate('${t.template_id || t.id}')">Apply Template</button>
+      </div>
+      <div style="font-size: 11px; color: var(--text-secondary); line-height: 1.4;">${t.description}</div>
+      <div style="display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: var(--text-muted);">
+        <span>Preset Profile: <strong style="color: var(--text-primary); font-family: var(--font-mono);">${t.tool_profile || t.suggested_profile}</strong></span>
+        <span>${t.max_steps ? t.max_steps + ' max steps' : 'Autonomous loop'}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+function applyWorkflowTemplate(templateId) {
+  const tpl = workflowTemplatesCache.find(t => (t.template_id || t.id) === templateId);
+  if (!tpl) return;
+  const taskInput = document.getElementById('agent-task-input');
+  if (taskInput) {
+    taskInput.value = tpl.template || tpl.prompt_template || tpl.description;
+  }
+  const profSelect = document.getElementById('agent-tool-profile');
+  const prof = tpl.tool_profile || tpl.suggested_profile;
+  if (profSelect && prof) {
+    profSelect.value = prof;
+    updateAgentToolProfile(prof);
+  }
+  closeTemplatesModal();
+}
+
+// Scheduled Jobs Manager
+async function openJobsModal() {
+  const modal = document.getElementById('scheduled-jobs-modal');
+  if (modal) modal.style.display = 'flex';
+  await fetchScheduledJobs();
+}
+
+function closeJobsModal() {
+  const modal = document.getElementById('scheduled-jobs-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+function handleJobsBackdropClick(e) {
+  if (e.target.id === 'scheduled-jobs-modal') closeJobsModal();
+}
+
+async function fetchScheduledJobs() {
+  try {
+    const res = await fetch('/api/agent/jobs');
+    const data = await res.json();
+    renderScheduledJobs(data.jobs || []);
+  } catch (err) {
+    console.error('Failed to fetch jobs', err);
+  }
+}
+
+function renderScheduledJobs(jobs) {
+  const container = document.getElementById('scheduled-jobs-list');
+  if (!container) return;
+  if (!jobs.length) {
+    container.innerHTML = '<div style="font-size: 11px; color: var(--text-muted); font-style: italic;">No scheduled jobs active. Create a job above.</div>';
+    return;
+  }
+  container.innerHTML = jobs.map(j => `
+    <div class="diff-card" style="padding: 8px 12px; display: flex; justify-content: space-between; align-items: center;">
+      <div style="display: flex; flex-direction: column; gap: 3px; max-width: 70%;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span style="font-weight: 600; font-size: 12px; color: var(--text-primary);">${j.name}</span>
+          <span class="badge" style="background: ${j.status === 'active' || j.status === 'scheduled' ? '#065f46' : '#374151'}; font-size: 9px;">${(j.status || '').toUpperCase()}</span>
+          <span style="font-size: 10px; color: var(--text-muted); font-family: var(--font-mono);">${j.interval_seconds || j.interval_sec || 60}s</span>
+        </div>
+        <div style="font-size: 11px; color: var(--text-secondary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${j.task_description || j.task}</div>
+        <div style="font-size: 10px; color: var(--text-muted);">Runs: ${j.run_count} | Last: ${j.last_run ? j.last_run.slice(11, 19) : 'never'}</div>
+      </div>
+      <div style="display: flex; gap: 6px;">
+        <button class="secondary" style="padding: 3px 6px; font-size: 11px;" onclick="runScheduledJobNow('${j.job_id}')" title="Trigger immediate execution">Run Now</button>
+        <button class="secondary" style="padding: 3px 6px; font-size: 11px; color: var(--error);" onclick="cancelScheduledJob('${j.job_id}')" title="Cancel scheduled job">Cancel</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function createScheduledJob() {
+  const name = document.getElementById('job-name-input')?.value || 'Scheduled Agent Task';
+  const task = document.getElementById('job-task-input')?.value;
+  const interval = parseFloat(document.getElementById('job-interval-input')?.value || '60');
+  const profile = document.getElementById('job-profile-select')?.value || 'full_automation';
+  if (!task) {
+    alert('Please enter a task description');
+    return;
+  }
+  try {
+    const res = await fetch('/api/agent/jobs/create', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name, task_description: task, interval_seconds: interval, tool_profile: profile })
+    });
+    const data = await res.json();
+    if (!data.isError) {
+      document.getElementById('job-task-input').value = '';
+      await fetchScheduledJobs();
+    }
+  } catch (err) {
+    console.error('Failed to create job', err);
+  }
+}
+
+async function runScheduledJobNow(jobId) {
+  try {
+    await fetch('/api/agent/jobs/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ job_id: jobId })
+    });
+    await fetchScheduledJobs();
+  } catch (err) {
+    console.error('Failed to run job now', err);
+  }
+}
+
+async function cancelScheduledJob(jobId) {
+  try {
+    await fetch('/api/agent/jobs/cancel', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ job_id: jobId })
+    });
+    await fetchScheduledJobs();
+  } catch (err) {
+    console.error('Failed to cancel job', err);
+  }
+}
+
 function openCommandPalette() {
   const modal = document.getElementById('command-palette-modal');
   if (!modal) return;
@@ -1770,6 +2005,38 @@ COMMAND_PALETTE_ACTIONS: Dict[str, Dict[str, Any]] = {
         "endpoint": "/api/gateway/complete",
         "method": "POST",
     },
+    "template:browse": {
+        "id": "template:browse",
+        "title": "Browse Workflow Templates",
+        "description": "Select from pre-configured multi-step autonomous workflows",
+        "category": "templates",
+        "endpoint": "/api/agent/templates",
+        "method": "GET",
+    },
+    "templates:list": {
+        "id": "templates:list",
+        "title": "Browse Workflow Templates",
+        "description": "Explore pre-defined parameterized agent workflow templates",
+        "category": "templates",
+        "endpoint": "/api/templates",
+        "method": "GET",
+    },
+    "jobs:list": {
+        "id": "jobs:list",
+        "title": "List Scheduled Agent Jobs",
+        "description": "Inspect active and recurring scheduled agent tasks",
+        "category": "jobs",
+        "endpoint": "/api/jobs",
+        "method": "GET",
+    },
+    "jobs:clear": {
+        "id": "jobs:clear",
+        "title": "Cancel All Scheduled Jobs",
+        "description": "Terminate all recurring jobs and clear scheduler timers",
+        "category": "jobs",
+        "endpoint": "/api/jobs/clear",
+        "method": "POST",
+    },
 }
 
 
@@ -1825,6 +2092,16 @@ def dispatch_command_palette_action(action_id: str, params: Optional[Dict[str, A
         prompt = p.get("prompt", "ping")
         gw_res = resolve_and_complete_with_fallback(m, prompt)
         return {"isError": False, "dispatched": action_id, "result": gw_res}
+    elif action_id in ("templates:list", "template:browse"):
+        from hydra_cli.agent_runner import list_workflow_templates
+        return {"isError": False, "dispatched": action_id, "templates": list_workflow_templates()}
+    elif action_id == "jobs:list":
+        from hydra_cli.agent_runner import get_job_scheduler
+        return {"isError": False, "dispatched": action_id, "jobs": get_job_scheduler().list_jobs()}
+    elif action_id == "jobs:clear":
+        from hydra_cli.agent_runner import get_job_scheduler
+        get_job_scheduler().reset()
+        return {"isError": False, "dispatched": action_id, "cleared": True}
 
     return {"isError": False, "dispatched": action_id, "meta": action_meta}
 
@@ -2221,6 +2498,158 @@ def create_desktop_app() -> Any:
         reset_token_accounting()
         return {"isError": False, "status": "reset", "summary": get_token_accounting().get_summary()}
 
+    @app.get("/api/templates")
+    @app.get("/api/agent/templates")
+    async def get_templates_endpoint():
+        from hydra_cli.agent_runner import list_workflow_templates
+        templates = list_workflow_templates()
+        return {
+            "isError": False,
+            "count": len(templates),
+            "templates": templates,
+        }
+
+    @app.get("/api/templates/{template_id}")
+    async def get_template_by_id(template_id: str):
+        from hydra_cli.agent_runner import get_workflow_template
+        tpl = get_workflow_template(template_id)
+        if not tpl:
+            return JSONResponse({"isError": True, "error": f"Template '{template_id}' not found"}, status_code=404)
+        return {"isError": False, "template": tpl.to_dict()}
+
+    @app.post("/api/templates/interpolate")
+    @app.post("/api/agent/templates/instantiate")
+    async def interpolate_template_endpoint(req: Request):
+        from hydra_cli.agent_runner import interpolate_workflow_template
+        body = await req.json()
+        template_id = body.get("template_id", "")
+        params = body.get("params") or {}
+        res = interpolate_workflow_template(template_id, params)
+        status_code = 400 if res.get("isError") else 200
+        return JSONResponse(res, status_code=status_code)
+
+    @app.get("/api/jobs")
+    @app.get("/api/agent/jobs")
+    async def list_jobs_endpoint():
+        from hydra_cli.agent_runner import get_job_scheduler
+        scheduler = get_job_scheduler()
+        jobs = scheduler.list_jobs()
+        return {"isError": False, "count": len(jobs), "jobs": jobs}
+
+    @app.post("/api/jobs/schedule")
+    @app.post("/api/agent/jobs/create")
+    async def schedule_job_endpoint(req: Request):
+        from hydra_cli.agent_runner import get_job_scheduler
+        body = await req.json()
+        name = body.get("name", "Scheduled Agent Task")
+        task = body.get("task")
+        template_id = body.get("template_id")
+        params = body.get("params")
+        interval_sec = body.get("interval_sec")
+        if interval_sec is not None:
+            interval_sec = float(interval_sec)
+        delay_sec = float(body.get("delay_sec", 0.0))
+        recurring = bool(body.get("recurring", False))
+        max_runs = body.get("max_runs")
+        if max_runs is not None:
+            max_runs = int(max_runs)
+        tool_profile = body.get("tool_profile", "full_automation")
+        model = body.get("model")
+        max_steps = int(body.get("max_steps", 15))
+        steps = body.get("steps")
+        auto_arm = bool(body.get("auto_arm", True))
+
+        try:
+            scheduler = get_job_scheduler()
+            job = scheduler.schedule_job(
+                name=name,
+                task=task,
+                template_id=template_id,
+                params=params,
+                interval_sec=interval_sec,
+                delay_sec=delay_sec,
+                recurring=recurring,
+                max_runs=max_runs,
+                tool_profile=tool_profile,
+                model=model,
+                max_steps=max_steps,
+                steps=steps,
+                auto_arm=auto_arm,
+            )
+            return {"isError": False, "job": job.to_dict()}
+        except Exception as exc:
+            return JSONResponse({"isError": True, "error": str(exc)}, status_code=400)
+
+    @app.get("/api/jobs/{job_id}")
+    async def get_job_endpoint(job_id: str):
+        from hydra_cli.agent_runner import get_job_scheduler
+        scheduler = get_job_scheduler()
+        job = scheduler.get_job(job_id)
+        if not job:
+            return JSONResponse({"isError": True, "error": f"Job '{job_id}' not found"}, status_code=404)
+        return {"isError": False, "job": job.to_dict()}
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    async def cancel_job_endpoint(job_id: str):
+        from hydra_cli.agent_runner import get_job_scheduler
+        scheduler = get_job_scheduler()
+        job = scheduler.get_job(job_id)
+        if not job:
+            return JSONResponse({"isError": True, "error": f"Job '{job_id}' not found"}, status_code=404)
+        job.cancel()
+        return {"isError": False, "job_id": job_id, "status": "cancelled"}
+
+    @app.post("/api/jobs/{job_id}/run")
+    async def run_job_endpoint(job_id: str):
+        from hydra_cli.agent_runner import get_job_scheduler
+        scheduler = get_job_scheduler()
+        job = scheduler.get_job(job_id)
+        if not job:
+            return JSONResponse({"isError": True, "error": f"Job '{job_id}' not found"}, status_code=404)
+        res = await asyncio.to_thread(job.run)
+        status_code = 400 if res.get("isError") and not res.get("concurrent_blocked") else 200
+        return JSONResponse({"isError": res.get("isError", False), "job_id": job_id, "result": res}, status_code=status_code)
+
+    @app.post("/api/agent/jobs/cancel")
+    async def cancel_agent_job_body(req: Request):
+        from hydra_cli.agent_runner import get_job_scheduler
+        body = await req.json()
+        job_id = body.get("job_id", "")
+        scheduler = get_job_scheduler()
+        job = scheduler.get_job(job_id)
+        if not job:
+            return JSONResponse({"isError": True, "error": f"Job '{job_id}' not found"}, status_code=404)
+        job.cancel()
+        return {"isError": False, "job_id": job_id, "status": "cancelled"}
+
+    @app.get("/api/agent/jobs/history")
+    @app.get("/api/jobs/history")
+    async def get_jobs_history_endpoint(job_id: Optional[str] = None):
+        from hydra_cli.agent_runner import get_job_scheduler
+        scheduler = get_job_scheduler()
+        history = scheduler.get_job_history(job_id)
+        return {"isError": False, "job_id": job_id, "history": history, "count": len(history)}
+
+    @app.post("/api/agent/jobs/run")
+    async def run_agent_job_body(req: Request):
+        from hydra_cli.agent_runner import get_job_scheduler
+        body = await req.json()
+        job_id = body.get("job_id", "")
+        scheduler = get_job_scheduler()
+        job = scheduler.get_job(job_id)
+        if not job:
+            return JSONResponse({"isError": True, "error": f"Job '{job_id}' not found"}, status_code=404)
+        res = await asyncio.to_thread(job.run)
+        status_code = 400 if res.get("isError") and not res.get("concurrent_blocked") else 200
+        return JSONResponse({"isError": res.get("isError", False), "job_id": job_id, "result": res}, status_code=status_code)
+
+    @app.post("/api/jobs/clear")
+    async def clear_jobs_endpoint():
+        from hydra_cli.agent_runner import get_job_scheduler
+        scheduler = get_job_scheduler()
+        scheduler.reset()
+        return {"isError": False, "cleared": True, "count": 0}
+
     @app.post("/api/coordinates/scale")
     async def scale_coordinates(req: Request):
         body = await req.json()
@@ -2450,6 +2879,27 @@ def create_desktop_app() -> Any:
                             "event": "profiles_catalog",
                             "active": runner.get_tool_profile(),
                             "profiles": list(TOOL_PROFILES.keys()),
+                        }))
+                    elif action == "list_templates":
+                        from hydra_cli.agent_runner import list_workflow_templates
+                        await ws.send_text(json.dumps({
+                            "event": "templates_catalog",
+                            "data": list_workflow_templates(),
+                        }))
+                    elif action == "list_jobs":
+                        from hydra_cli.agent_runner import get_job_scheduler
+                        await ws.send_text(json.dumps({
+                            "event": "jobs_list",
+                            "data": get_job_scheduler().list_jobs(),
+                        }))
+                    elif action == "cancel_job":
+                        from hydra_cli.agent_runner import get_job_scheduler
+                        jid = payload.get("job_id", "")
+                        ok = get_job_scheduler().cancel_job(jid)
+                        await ws.send_text(json.dumps({
+                            "event": "job_cancelled",
+                            "job_id": jid,
+                            "success": ok,
                         }))
                 except Exception as inner_exc:
                     await ws.send_text(json.dumps({"event": "error", "message": str(inner_exc)}))

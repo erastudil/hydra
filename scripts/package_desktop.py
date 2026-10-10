@@ -71,6 +71,12 @@ def run_checks() -> int:
         "command-palette-modal",
         "palette-input",
         "openCommandPalette",
+        "btn-agent-templates",
+        "btn-agent-jobs",
+        "workflow-templates-modal",
+        "scheduled-jobs-modal",
+        "openTemplatesModal",
+        "openJobsModal",
         "/api/agent/export",
         "/api/agent/run",
     ]
@@ -108,6 +114,13 @@ def run_checks() -> int:
         "/api/agent/profile",
         "/api/palette/actions",
         "/api/palette/dispatch",
+        "/api/agent/jobs",
+        "/api/agent/jobs/create",
+        "/api/agent/jobs/cancel",
+        "/api/agent/jobs/history",
+        "/api/agent/templates",
+        "/api/templates",
+        "/api/jobs",
         "/v1/models",
         "/v1/chat/completions",
     ]
@@ -356,6 +369,34 @@ def run_checks() -> int:
         return 1
 
     print("cli entrypoints verification : hydra desktop and python -m hydra_cli.desktop entrypoints functional.\n")
+
+        # Templates catalog check
+    tpl_res = client.get("/api/agent/templates")
+    if tpl_res.status_code != 200 or tpl_res.json().get("count", 0) < 4:
+        print("error : /api/agent/templates check failed.\n")
+        return 1
+
+    # Scheduled jobs check
+    jobs_res = client.get("/api/agent/jobs")
+    if jobs_res.status_code != 200:
+        print("error : /api/agent/jobs check failed.\n")
+        return 1
+
+    create_job_res = client.post("/api/agent/jobs/create", json={
+        "name": "Packaging Verification Probe",
+        "task": "Echo verification probe",
+        "interval_sec": 30.0,
+        "tool_profile": "full_automation",
+    })
+    if create_job_res.status_code != 200 or not create_job_res.json().get("job"):
+        print("error : /api/agent/jobs/create check failed.\n")
+        return 1
+    job_id = create_job_res.json()["job"]["job_id"]
+
+    cancel_job_res = client.post("/api/agent/jobs/cancel", json={"job_id": job_id})
+    if cancel_job_res.status_code != 200 or cancel_job_res.json().get("status") != "cancelled":
+        print("error : /api/agent/jobs/cancel check failed.\n")
+        return 1
 
     print("desktop packaging gate : exit code 0.\n")
     return 0

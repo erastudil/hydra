@@ -1154,3 +1154,678 @@ def reset_agent_runner() -> None:
         if _GLOBAL_AGENT_RUNNER is not None:
             _GLOBAL_AGENT_RUNNER.abort()
             _GLOBAL_AGENT_RUNNER = None
+
+
+# --- Wave 7: Workflow Templates & Scheduled Agent Jobs ---
+
+
+class WorkflowTemplate:
+    """
+    Parameterized workflow template specification for autonomous agent operations.
+    Enforces strict parameter sanitization, path traversal blocking, and type safety.
+    """
+
+    def __init__(
+        self,
+        template_id: str,
+        name: str,
+        description: str,
+        template: str,
+        parameters: Optional[Dict[str, Dict[str, Any]]] = None,
+        tool_profile: str = "full_automation",
+        model: Optional[str] = None,
+        max_steps: int = 15,
+    ) -> None:
+        self.template_id = template_id
+        self.name = name
+        self.description = description
+        self.template = template
+        self.parameters = parameters or {}
+        self.tool_profile = tool_profile
+        self.model = model
+        self.max_steps = max_steps
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "template_id": self.template_id,
+            "name": self.name,
+            "description": self.description,
+            "template": self.template,
+            "parameters": dict(self.parameters),
+            "tool_profile": self.tool_profile,
+            "model": self.model,
+            "max_steps": self.max_steps,
+        }
+
+    def render(self, params: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """
+        Validate, sanitize parameters, and render prompt template.
+        Returns (rendered_prompt, sanitized_params).
+        Raises ValueError if validation or sanitization fails.
+        """
+        sanitized = sanitize_template_parameters(self, params)
+        rendered = self.template
+        for k, v in sanitized.items():
+            str_val = str(v)
+            rendered = rendered.replace(f"{{{k}}}", str_val)
+            rendered = rendered.replace(f"{{{{{k}}}}}", str_val)
+
+        # Check for un-interpolated placeholders {var}
+        unresolved = re.findall(r"\{([a-zA-Z0-9_]+)\}", rendered)
+        if unresolved:
+            raise ValueError(f"Unresolved placeholder variables in template '{self.template_id}': {unresolved}")
+
+        return rendered, sanitized
+
+
+def sanitize_template_parameters(template: WorkflowTemplate, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Sanitize input parameters for workflow templates.
+    Blocks directory traversal, control characters, and illegal command injection patterns.
+    """
+    sanitized: Dict[str, Any] = {}
+    spec = template.parameters
+
+    # 1. Check required parameters
+    for param_name, param_meta in spec.items():
+        is_required = param_meta.get("required", False)
+        if is_required and (param_name not in params or params[param_name] is None or str(params[param_name]).strip() == ""):
+            raise ValueError(f"Missing required parameter '{param_name}' for template '{template.template_id}'")
+
+    # 2. Process provided parameters and defaults
+    for param_name, param_meta in spec.items():
+        raw_val = params.get(param_name)
+        if raw_val is None:
+            if "default" in param_meta:
+                raw_val = param_meta["default"]
+            else:
+                continue
+
+        # Type conversion & validation
+        expected_type = param_meta.get("type", "string")
+        if expected_type == "integer":
+            try:
+                clean_val = int(raw_val)
+            except (ValueError, TypeError):
+                raise ValueError(f"Parameter '{param_name}' must be an integer, received: {raw_val}")
+        elif expected_type == "boolean":
+            if isinstance(raw_val, bool):
+                clean_val = raw_val
+            elif str(raw_val).lower() in ("true", "1", "yes"):
+                clean_val = True
+            elif str(raw_val).lower() in ("false", "0", "no"):
+                clean_val = False
+            else:
+                raise ValueError(f"Parameter '{param_name}' must be a boolean, received: {raw_val}")
+        else:
+            clean_val = str(raw_val)
+
+        # String security sanitization
+        if isinstance(clean_val, str):
+            # Check null bytes or escape sequences
+            if chr(0) in clean_val or chr(27) in clean_val:
+                raise ValueError(f"Parameter '{param_name}' contains illegal control characters")
+
+            # Check path traversal
+            is_path_param = any(t in param_name.lower() for t in ("path", "file", "dir", "dest", "src"))
+            if is_path_param or "../" in clean_val or "..\\" in clean_val:
+                if "../" in clean_val or "..\\" in clean_val or "/.." in clean_val or "\\.." in clean_val:
+                    raise ValueError(f"Parameter '{param_name}' contains illegal path traversal sequence: {clean_val}")
+                # Block foreign absolute roots if it is a relative workspace path
+                if re.match(r"^[a-zA-Z]:[/\\]", clean_val) or clean_val.startswith(("/", "\\")):
+                    raise ValueError(f"Parameter '{param_name}' must be a relative workspace path, absolute paths forbidden: {clean_val}")
+
+            # Check command injection tokens if param is a command or script
+            is_cmd_param = any(t in param_name.lower() for t in ("cmd", "command", "exec", "script"))
+            if is_cmd_param:
+                for tok in (";", "&&", "||", "`", "$("):
+                    if tok in clean_val:
+                        raise ValueError(f"Parameter '{param_name}' contains illegal shell chaining token: '{tok}'")
+
+        sanitized[param_name] = clean_val
+
+    return sanitized
+
+
+WORKFLOW_TEMPLATES: Dict[str, WorkflowTemplate] = {
+    "web_extract": WorkflowTemplate(
+        template_id="web_extract",
+        name="Web Table Extractor",
+        description="Navigate to target web page and extract tabular information",
+        template="Navigate to {url} and extract table data matching selector {selector}.",
+        parameters={
+            "url": {"type": "string", "required": True, "description": "Target webpage URL"},
+            "selector": {"type": "string", "required": False, "default": "table", "description": "CSS selector for table"},
+        },
+        tool_profile="browser_only",
+        max_steps=10,
+    ),
+    "file_audit": WorkflowTemplate(
+        template_id="file_audit",
+        name="Workspace File Security Audit",
+        description="Inspect local workspace files for sensitive patterns and security policy",
+        template="Inspect file {path} and audit for security policy compliance with rule {rule}.",
+        parameters={
+            "path": {"type": "string", "required": True, "description": "Relative file path in workspace"},
+            "rule": {"type": "string", "required": False, "default": "P018", "description": "Invariant rule name"},
+        },
+        tool_profile="workspace_only",
+        max_steps=8,
+    ),
+    "system_status": WorkflowTemplate(
+        template_id="system_status",
+        name="System Environment Diagnostic",
+        description="Check active windows and capture display snapshot",
+        template="Inspect active system window matching pattern {pattern} and capture screen verification.",
+        parameters={
+            "pattern": {"type": "string", "required": False, "default": ".*", "description": "Window title regex pattern"},
+        },
+        tool_profile="readonly",
+        max_steps=5,
+    ),
+    "form_automation": WorkflowTemplate(
+        template_id="form_automation",
+        name="Web Form Auto-Filler",
+        description="Navigate to URL and fill input form fields",
+        template="Navigate to {url} and populate form input fields: {fields}.",
+        parameters={
+            "url": {"type": "string", "required": True, "description": "Target form URL"},
+            "fields": {"type": "string", "required": True, "description": "Form fields description"},
+        },
+        tool_profile="browser_only",
+        max_steps=10,
+    ),
+    "code_refactor": WorkflowTemplate(
+        template_id="code_refactor",
+        name="Code Refactor Runner",
+        description="Analyze workspace code file and apply automated refactoring",
+        template="Read workspace file {path} and implement refactoring instruction: {instruction}.",
+        parameters={
+            "path": {"type": "string", "required": True, "description": "Target workspace code file"},
+            "instruction": {"type": "string", "required": True, "description": "Refactoring instructions"},
+        },
+        tool_profile="workspace_only",
+        max_steps=12,
+    ),
+}
+
+
+def get_workflow_template(template_id: str) -> Optional[WorkflowTemplate]:
+    """Retrieve registered workflow template by ID."""
+    return WORKFLOW_TEMPLATES.get(template_id)
+
+
+def list_workflow_templates() -> List[Dict[str, Any]]:
+    """Return catalog of all registered workflow templates."""
+    return [t.to_dict() for t in WORKFLOW_TEMPLATES.values()]
+
+
+def register_workflow_template(template: WorkflowTemplate) -> None:
+    """Register custom workflow template in global catalog."""
+    WORKFLOW_TEMPLATES[template.template_id] = template
+
+
+def interpolate_workflow_template(template_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Retrieve workflow template and interpolate parameters safely.
+    Returns dictionary with rendered_prompt, sanitized_params, and template metadata.
+    """
+    template = get_workflow_template(template_id)
+    if template is None:
+        return {"isError": True, "error": f"Unknown workflow template: '{template_id}'"}
+    try:
+        rendered, sanitized = template.render(params)
+        return {
+            "isError": False,
+            "template_id": template_id,
+            "name": template.name,
+            "rendered_prompt": rendered,
+            "sanitized_params": sanitized,
+            "tool_profile": template.tool_profile,
+            "max_steps": template.max_steps,
+            "model": template.model,
+        }
+    except Exception as exc:
+        return {"isError": True, "error": str(exc), "template_id": template_id}
+
+
+def parse_cron_to_interval(cron_expr: str) -> float:
+    """Parse cron expression or interval directive to seconds."""
+    expr = cron_expr.strip()
+    if expr.startswith("@every"):
+        parts = expr.split()
+        if len(parts) >= 2:
+            val = parts[1].lower()
+            if val.endswith("s"):
+                return max(1.0, float(val[:-1]))
+            elif val.endswith("m"):
+                return max(1.0, float(val[:-1]) * 60.0)
+            elif val.endswith("h"):
+                return max(1.0, float(val[:-1]) * 3600.0)
+            elif val.endswith("d"):
+                return max(1.0, float(val[:-1]) * 86400.0)
+    elif expr == "@hourly":
+        return 3600.0
+    elif expr == "@daily":
+        return 86400.0
+    parts = expr.split()
+    if len(parts) >= 5:
+        first = parts[0]
+        if first.startswith("*/"):
+            try:
+                mins = int(first[2:])
+                return max(1.0, float(mins * 60))
+            except ValueError:
+                pass
+        elif first == "*":
+            return 60.0
+    return 60.0
+
+
+class JobStatus:
+    SCHEDULED = "scheduled"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+
+class ScheduledJob:
+    """
+    Scheduled autonomous agent task instance with isolation locks and timer lifecycle.
+    Guarantees recurring tasks cannot execute concurrently if previous run is still active.
+    """
+
+    def __init__(
+        self,
+        job_id: str,
+        name: str,
+        task: str = "",
+        task_description: str = "",
+        template_id: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+        interval_sec: Optional[float] = None,
+        interval_seconds: float = 60.0,
+        delay_sec: float = 0.0,
+        recurring: bool = False,
+        max_runs: Optional[int] = None,
+        tool_profile: str = "full_automation",
+        model: Optional[str] = None,
+        max_steps: int = 15,
+        steps: Optional[List[Dict[str, Any]]] = None,
+        cron_expression: Optional[str] = None,
+    ) -> None:
+        self.job_id = job_id
+        self.name = name
+        self.task = task or task_description
+        self.task_description = self.task
+        self.template_id = template_id
+        self.params = params or {}
+
+        effective_interval = interval_sec if interval_sec is not None else interval_seconds
+        if cron_expression:
+            effective_interval = parse_cron_to_interval(cron_expression)
+        self.interval_sec = max(0.01, float(effective_interval))
+        self.interval_seconds = self.interval_sec
+        self.delay_sec = max(0.0, float(delay_sec))
+        self.recurring = recurring or (cron_expression is not None)
+        self.max_runs = max_runs
+        self.tool_profile = tool_profile
+        self.model = model
+        self.max_steps = max_steps
+        self.steps = list(steps) if steps else []
+        self.cron_expression = cron_expression
+
+        self.status = JobStatus.SCHEDULED
+        self.run_count: int = 0
+        self.created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self.last_run_at: Optional[float] = None
+        self.last_run: Optional[str] = None
+        self.next_run_at: Optional[float] = None
+        self.next_run_ts: Optional[float] = None
+        self.last_result: Optional[Dict[str, Any]] = None
+        self.last_error: Optional[str] = None
+        self.is_running: bool = False
+        self.history: List[Dict[str, Any]] = []
+
+        self._isolation_lock = threading.Lock()
+        self._timer_lock = threading.Lock()
+        self._history_lock = threading.Lock()
+        self._timer: Optional[threading.Timer] = None
+        self._async_task: Optional[Any] = None
+        self._cancelled_event = threading.Event()
+
+    def to_dict(self) -> Dict[str, Any]:
+        with self._isolation_lock:
+            return {
+                "job_id": self.job_id,
+                "name": self.name,
+                "task": self.task,
+                "task_description": self.task,
+                "template_id": self.template_id,
+                "params": dict(self.params),
+                "interval_sec": self.interval_sec,
+                "interval_seconds": self.interval_sec,
+                "delay_sec": self.delay_sec,
+                "recurring": self.recurring,
+                "max_runs": self.max_runs,
+                "tool_profile": self.tool_profile,
+                "model": self.model,
+                "max_steps": self.max_steps,
+                "steps": list(self.steps),
+                "cron_expression": self.cron_expression,
+                "status": self.status,
+                "run_count": self.run_count,
+                "created_at": self.created_at,
+                "last_run_at": self.last_run_at,
+                "last_run": self.last_run,
+                "next_run_at": self.next_run_at,
+                "next_run_ts": self.next_run_ts,
+                "is_running": self.is_running,
+                "last_error": self.last_error,
+                "history_count": len(self.history),
+            }
+
+    def arm(self, delay: Optional[float] = None) -> None:
+        """Arm scheduled execution timer."""
+        if self._cancelled_event.is_set():
+            return
+        d = delay if delay is not None else self.delay_sec
+        with self._timer_lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+            self.next_run_at = time.time() + d
+            self.next_run_ts = self.next_run_at
+            self._timer = threading.Timer(d, self._timer_tick)
+            self._timer.daemon = True
+            self._timer.start()
+
+    def _timer_tick(self) -> None:
+        with self._timer_lock:
+            self._timer = None
+        if self._cancelled_event.is_set() or self.status == JobStatus.PAUSED:
+            return
+        self.run()
+
+    def cancel(self) -> None:
+        """Cancel scheduled job and abort any armed timers or active async tasks."""
+        self._cancelled_event.set()
+        self.status = JobStatus.CANCELLED
+        self.next_run_at = None
+        self.next_run_ts = None
+        with self._timer_lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+        if self._async_task is not None and hasattr(self._async_task, "cancel"):
+            try:
+                self._async_task.cancel()
+            except Exception:
+                pass
+            self._async_task = None
+
+    def pause(self) -> None:
+        self.status = JobStatus.PAUSED
+        with self._timer_lock:
+            if self._timer is not None:
+                self._timer.cancel()
+                self._timer = None
+
+    def resume(self) -> None:
+        if self.status == JobStatus.PAUSED and not self._cancelled_event.is_set():
+            self.status = JobStatus.SCHEDULED
+            self.arm(self.interval_sec or 1.0)
+
+    def run(self, runner: Optional[AutonomousAgentRunner] = None) -> Dict[str, Any]:
+        """
+        Execute scheduled task under strict concurrent isolation lock.
+        Blocks overlapping recurring execution if a previous execution is still running.
+        """
+        return self.execute_now(runner=runner)
+
+    def execute_now(self, runner: Optional[AutonomousAgentRunner] = None) -> Dict[str, Any]:
+        if self._cancelled_event.is_set():
+            return {
+                "isError": True,
+                "error": f"Job '{self.name}' ({self.job_id}) is cancelled",
+                "status": JobStatus.CANCELLED,
+                "job_id": self.job_id,
+            }
+
+        # Concurrency Isolation Lock (non-blocking acquire)
+        acquired = self._isolation_lock.acquire(blocking=False)
+        if not acquired:
+            err = f"Job '{self.name}' ({self.job_id}) is already actively executing. Concurrent run blocked by isolation lock."
+            logger.warning(err)
+            skip_record = {
+                "isError": True,
+                "error": err,
+                "concurrent_blocked": True,
+                "skipped": True,
+                "status": self.status,
+                "job_id": self.job_id,
+                "reason": "Overlapping execution prevented; job already running",
+            }
+            with self._history_lock:
+                self.history.append(skip_record)
+            # Re-arm timer if recurring so future cycles continue
+            if self.recurring and not self._cancelled_event.is_set():
+                if self.max_runs is None or self.run_count < self.max_runs:
+                    self.arm(self.interval_sec or 60.0)
+            return skip_record
+
+        try:
+            self.is_running = True
+            self.status = JobStatus.RUNNING
+            self.last_run_at = time.time()
+            self.last_run = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+            active_runner = runner or get_agent_runner()
+            if self.tool_profile:
+                active_runner.set_tool_profile(self.tool_profile)
+
+            res = active_runner.run_task(
+                task_description=self.task,
+                steps=self.steps if self.steps else None,
+                max_steps=self.max_steps,
+            )
+
+            self.run_count += 1
+            self.last_result = res
+            if res.get("isError"):
+                self.last_error = res.get("error")
+
+            exec_record = {
+                "isError": res.get("isError", False),
+                "status": res.get("status", JobStatus.COMPLETED),
+                "result": res,
+                "step_count": res.get("step_count", 0),
+                "error": res.get("error"),
+                "job_id": self.job_id,
+                "timestamp": self.last_run,
+            }
+            with self._history_lock:
+                self.history.append(exec_record)
+
+            # Handle completion or recurring re-arming
+            if self.recurring and not self._cancelled_event.is_set():
+                if self.max_runs is None or self.run_count < self.max_runs:
+                    self.status = JobStatus.SCHEDULED
+                    self.arm(self.interval_sec or 60.0)
+                else:
+                    self.status = JobStatus.COMPLETED
+                    self.next_run_at = None
+                    self.next_run_ts = None
+            else:
+                self.status = JobStatus.COMPLETED
+                self.next_run_at = None
+                self.next_run_ts = None
+
+            return res
+        except Exception as exc:
+            self.status = JobStatus.FAILED
+            self.last_error = str(exc)
+            return {"isError": True, "error": str(exc), "status": JobStatus.FAILED, "job_id": self.job_id}
+        finally:
+            self.is_running = False
+            self._isolation_lock.release()
+
+
+class AgentJobScheduler:
+    """Central scheduler managing scheduled and recurring agent jobs."""
+
+    def __init__(self) -> None:
+        self._jobs: Dict[str, ScheduledJob] = {}
+        self._lock = threading.RLock()
+        self.jobs = self._jobs
+
+    def schedule_job(
+        self,
+        name: str,
+        task: Optional[str] = None,
+        task_description: Optional[str] = None,
+        template_id: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+        interval_sec: Optional[float] = None,
+        interval_seconds: float = 60.0,
+        delay_sec: float = 0.0,
+        recurring: bool = False,
+        max_runs: Optional[int] = None,
+        tool_profile: str = "full_automation",
+        model: Optional[str] = None,
+        max_steps: int = 15,
+        steps: Optional[List[Dict[str, Any]]] = None,
+        cron_expression: Optional[str] = None,
+        job_id: Optional[str] = None,
+        auto_arm: bool = True,
+    ) -> ScheduledJob:
+        resolved_task = task or task_description or ""
+        resolved_profile = tool_profile
+
+        if template_id:
+            interp = interpolate_workflow_template(template_id, params or {})
+            if interp.get("isError"):
+                raise ValueError(interp.get("error"))
+            resolved_task = interp["rendered_prompt"]
+            if interp.get("tool_profile"):
+                resolved_profile = interp["tool_profile"]
+            if interp.get("max_steps"):
+                max_steps = interp["max_steps"]
+
+        if not resolved_task and not steps:
+            raise ValueError("Scheduled job requires either a task description, template_id, or explicit steps")
+
+        jid = job_id or f"job-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        job = ScheduledJob(
+            job_id=jid,
+            name=name,
+            task=resolved_task,
+            template_id=template_id,
+            params=params,
+            interval_sec=interval_sec,
+            interval_seconds=interval_seconds,
+            delay_sec=delay_sec,
+            recurring=recurring,
+            max_runs=max_runs,
+            tool_profile=resolved_profile,
+            model=model,
+            max_steps=max_steps,
+            steps=steps,
+            cron_expression=cron_expression,
+        )
+
+        with self._lock:
+            self._jobs[jid] = job
+
+        if auto_arm:
+            job.arm()
+
+        return job
+
+    def get_job(self, job_id: str) -> Optional[ScheduledJob]:
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def list_jobs(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [j.to_dict() for j in self._jobs.values()]
+
+    def get_jobs(self) -> List[Dict[str, Any]]:
+        return self.list_jobs()
+
+    def cancel_job(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.cancel()
+                return True
+            return False
+
+    def pause_job(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.pause()
+                return True
+            return False
+
+    def resume_job(self, job_id: str) -> bool:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job:
+                job.resume()
+                return True
+            return False
+
+    def run_job_now(self, job_id: str, runner: Optional[AutonomousAgentRunner] = None) -> Dict[str, Any]:
+        job = self.get_job(job_id)
+        if not job:
+            return {"isError": True, "error": f"Job '{job_id}' not found"}
+        return job.run(runner=runner)
+
+    def execute_job_now(self, job_id: str) -> Dict[str, Any]:
+        return self.run_job_now(job_id)
+
+    def stop_all(self) -> None:
+        with self._lock:
+            for job in list(self._jobs.values()):
+                job.cancel()
+
+    def reset(self) -> None:
+        self.stop_all()
+        with self._lock:
+            self._jobs.clear()
+
+
+_GLOBAL_JOB_SCHEDULER: Optional[AgentJobScheduler] = None
+_SCHEDULER_LOCK = threading.RLock()
+
+
+def get_job_scheduler() -> AgentJobScheduler:
+    """Retrieve global agent job scheduler singleton."""
+    global _GLOBAL_JOB_SCHEDULER
+    with _SCHEDULER_LOCK:
+        if _GLOBAL_JOB_SCHEDULER is None:
+            _GLOBAL_JOB_SCHEDULER = AgentJobScheduler()
+        return _GLOBAL_JOB_SCHEDULER
+
+
+def reset_job_scheduler() -> None:
+    """Cleanly cancel all jobs and reset global scheduler singleton."""
+    global _GLOBAL_JOB_SCHEDULER
+    with _SCHEDULER_LOCK:
+        if _GLOBAL_JOB_SCHEDULER is not None:
+            _GLOBAL_JOB_SCHEDULER.reset()
+            _GLOBAL_JOB_SCHEDULER = None
+
+
+ScheduledJobRunner = AgentJobScheduler
+get_scheduled_job_runner = get_job_scheduler
+reset_scheduled_job_runner = reset_job_scheduler
+instantiate_workflow_template = interpolate_workflow_template
+
+
+# Re-export Workflow Templates and Scheduled Jobs
+from hydra_cli.workflow_jobs import *
