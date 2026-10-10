@@ -6186,6 +6186,165 @@ def dom_idle_latch_contracts():
 
 
 @check
+def screenshot_gate_contracts():
+    import tempfile
+    import zlib
+    import struct
+    from hydra_cli.browser import (
+        ScreenshotGate,
+        create_screenshot_gate,
+        get_default_screenshot_gate,
+        reset_screenshot_gate,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import ScreenshotGate as SandboxScreenshotGate
+    from hydra_cli import ScreenshotGate as RootScreenshotGate
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxScreenshotGate is ScreenshotGate
+    assert RootScreenshotGate is ScreenshotGate
+
+    reset_screenshot_gate()
+
+    # 2. Construction and default parameters
+    gate = create_screenshot_gate(default_min_bytes=150, default_max_bytes=100000)
+    assert gate.default_min_bytes == 150
+    assert gate.default_max_bytes == 100000
+
+    # 3. Helper synthesizing test PNG payloads
+    def make_test_png(w: int, h: int, color=(0, 128, 255), checker: bool = False) -> bytes:
+        sig = b"\x89PNG\r\n\x1a\n"
+        ihdr_data = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+        ihdr_crc = zlib.crc32(b"IHDR" + ihdr_data)
+        ihdr = struct.pack(">I", 13) + b"IHDR" + ihdr_data + struct.pack(">I", ihdr_crc)
+
+        rows = []
+        for y in range(h):
+            row_bytes = bytearray([0])
+            for x in range(w):
+                if checker and ((x // 10) + (y // 10)) % 2 == 0:
+                    row_bytes.extend((255, 255, 255))
+                else:
+                    row_bytes.extend(color)
+            rows.append(bytes(row_bytes))
+        raw_data = b"".join(rows)
+        idat_data = zlib.compress(raw_data)
+        idat_crc = zlib.crc32(b"IDAT" + idat_data)
+        idat = struct.pack(">I", len(idat_data)) + b"IDAT" + idat_data + struct.pack(">I", idat_crc)
+        iend_crc = zlib.crc32(b"IEND")
+        iend = struct.pack(">I", 0) + b"IEND" + struct.pack(">I", iend_crc)
+        return sig + ihdr + idat + iend
+
+    # 4. Dimension parsing across formats
+    png_data = make_test_png(320, 240, checker=True)
+    assert gate.detect_format(png_data) == "png"
+    assert gate.parse_dimensions(png_data) == (320, 240)
+    assert gate.parse_png_dimensions(png_data) == (320, 240)
+
+    sof0_content = struct.pack(">BHHB", 8, 480, 640, 3)
+    sof0 = b"\xff\xc0" + struct.pack(">H", 2 + len(sof0_content)) + sof0_content
+    jpeg_data = b"\xff\xd8" + sof0 + b"\xff\xd9"
+    assert gate.detect_format(jpeg_data) == "jpeg"
+    assert gate.parse_dimensions(jpeg_data) == (640, 480)
+
+    gif_data = b"GIF89a" + struct.pack("<HH", 1024, 768)
+    assert gate.detect_format(gif_data) == "gif"
+    assert gate.parse_dimensions(gif_data) == (1024, 768)
+
+    # 5. Validation on valid image bytes
+    valid_res = gate.validate_image_bytes(png_data, min_width=300, min_height=200)
+    assert valid_res["valid"] is True
+    assert valid_res["format"] == "png"
+    assert valid_res["dimensions"] == (320, 240)
+    assert valid_res["width"] == 320
+    assert valid_res["height"] == 240
+    assert valid_res["size_bytes"] == len(png_data)
+    assert valid_res["is_solid"] is False
+    assert len(valid_res["fingerprint"]) == 64
+
+    # 6. Rejection of solid color image
+    solid_png = make_test_png(100, 100, color=(0, 0, 0), checker=False)
+    solid_res = gate.validate_image_bytes(solid_png)
+    assert solid_res["valid"] is False
+    assert solid_res["is_solid"] is True
+    assert any("solid" in err.lower() for err in solid_res["errors"])
+
+    permissive_gate = create_screenshot_gate(default_min_bytes=50, allow_solid_color=True)
+    perm_res = permissive_gate.validate_image_bytes(solid_png)
+    assert perm_res["valid"] is True
+
+    # 7. Dimensional bounds enforcement
+    too_small_dim = gate.validate_image_bytes(png_data, min_width=500)
+    assert too_small_dim["valid"] is False
+    assert any("width" in err.lower() for err in too_small_dim["errors"])
+
+    too_large_dim = gate.validate_image_bytes(png_data, max_width=200)
+    assert too_large_dim["valid"] is False
+    assert any("width" in err.lower() for err in too_large_dim["errors"])
+
+    # 8. Byte size bounds enforcement
+    too_small_bytes = gate.validate_image_bytes(png_data, min_bytes=1000000)
+    assert too_small_bytes["valid"] is False
+    assert any("byte size" in err.lower() for err in too_small_bytes["errors"])
+
+    empty_res = gate.validate_image_bytes(b"")
+    assert empty_res["valid"] is False
+    assert any("empty" in err.lower() for err in empty_res["errors"])
+
+    # 9. Baseline comparison
+    b_match = gate.compare_baselines(png_data, png_data)
+    assert b_match["match"] is True
+    assert b_match["diff_ratio"] == 0.0
+
+    b_diff = gate.compare_baselines(png_data, solid_png, max_diff_ratio=0.01)
+    assert b_diff["match"] is False
+    assert b_diff["diff_ratio"] > 0.0
+
+    # 10. File validation
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp.write(png_data)
+        tmp_path = tmp.name
+
+    try:
+        f_res = gate.validate_image_file(tmp_path, min_width=300)
+        assert f_res["valid"] is True
+        assert f_res["path"] == tmp_path
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    missing_res = gate.validate_image_file("nonexistent_screenshot_12345.png")
+    assert missing_res["valid"] is False
+    assert any("not found" in err.lower() for err in missing_res["errors"])
+
+    # 11. Browser action integration
+    if not PLAYWRIGHT_AVAILABLE:
+        act_res = dispatch_browser_action("screenshot_verified")
+        assert act_res["isError"] is True
+        assert "Playwright uninstalled" in act_res["error"]
+
+    # 12. Telemetry and reset
+    met = gate.get_metrics()
+    assert met["total_validations"] >= 5
+    assert met["passed_validations"] >= 1
+    assert met["failed_validations"] >= 1
+
+    gate.reset_metrics()
+    clean_met = gate.get_metrics()
+    assert clean_met["total_validations"] == 0
+    assert clean_met["passed_validations"] == 0
+    assert clean_met["failed_validations"] == 0
+
+    # 13. Default singleton
+    reset_screenshot_gate()
+    default_gate = get_default_screenshot_gate()
+    assert default_gate is not None
+    assert default_gate.default_min_bytes == 100
+    reset_screenshot_gate()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
