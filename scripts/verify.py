@@ -8634,6 +8634,100 @@ def menu_pager_contracts():
 
 
 @check
+def exit_confirm_contracts():
+    from hydra_cli.repl import (
+        ReplExitConfirm,
+        create_exit_confirm,
+        get_default_exit_confirm,
+        reset_exit_confirm,
+        ReplSession,
+    )
+    from hydra_cli import (
+        ReplExitConfirm as RootReplExitConfirm,
+        create_exit_confirm as root_create_exit_confirm,
+        get_default_exit_confirm as root_get_default_exit_confirm,
+        reset_exit_confirm as root_reset_exit_confirm,
+    )
+
+    # 1. Re-exports parity
+    assert RootReplExitConfirm is ReplExitConfirm
+    assert root_create_exit_confirm is create_exit_confirm
+    assert root_get_default_exit_confirm is get_default_exit_confirm
+    assert root_reset_exit_confirm is reset_exit_confirm
+
+    # 2. Policy evaluation
+    confirm_mgr = create_exit_confirm(policy="double_ctrl_c", window_seconds=2.0)
+    assert confirm_mgr.get_policy() == "double_ctrl_c"
+    assert confirm_mgr.should_confirm_exit(source="slash") is False
+    assert confirm_mgr.should_confirm_exit(source="interrupt") is True
+
+    confirm_mgr.set_policy("always")
+    assert confirm_mgr.get_policy() == "always"
+    assert confirm_mgr.should_confirm_exit(source="slash") is True
+    assert confirm_mgr.should_confirm_exit(source="interrupt") is True
+
+    confirm_mgr.set_policy("never")
+    assert confirm_mgr.get_policy() == "never"
+    assert confirm_mgr.should_confirm_exit(source="slash") is False
+    assert confirm_mgr.should_confirm_exit(source="interrupt") is False
+
+    # 3. Interrupt throttling and double signal detection
+    confirm_mgr.set_policy("double_ctrl_c")
+    confirm_mgr.reset_interrupt()
+    t0 = 1000.0
+    first_interrupt = confirm_mgr.register_interrupt(now=t0)
+    assert first_interrupt is False
+
+    second_interrupt = confirm_mgr.register_interrupt(now=t0 + 1.2)
+    assert second_interrupt is True
+
+    # Expired window resets pending interrupt
+    confirm_mgr.reset_interrupt()
+    first = confirm_mgr.register_interrupt(now=t0)
+    assert first is False
+    late = confirm_mgr.register_interrupt(now=t0 + 3.5)
+    assert late is False
+
+    # 4. Window configuration
+    confirm_mgr.set_window_seconds(4.0)
+    assert confirm_mgr.get_window_seconds() == 4.0
+    first = confirm_mgr.register_interrupt(now=2000.0)
+    second = confirm_mgr.register_interrupt(now=2003.5)
+    assert second is True
+
+    # 5. Confirmation response evaluation
+    assert confirm_mgr.confirm("y") is True
+    assert confirm_mgr.confirm("YES") is True
+    assert confirm_mgr.confirm("true") is True
+    assert confirm_mgr.confirm("n") is False
+    assert confirm_mgr.confirm("no") is False
+    assert confirm_mgr.confirm("other") is False
+
+    # 6. Session integration
+    session = ReplSession()
+    assert hasattr(session, "exit_confirm")
+    assert isinstance(session.exit_confirm, ReplExitConfirm)
+
+    # 7. Telemetry metrics and reset
+    metrics = confirm_mgr.get_metrics()
+    assert metrics["total_exit_requests"] >= 4
+    assert metrics["interrupt_count"] >= 4
+    assert metrics["confirmed_exits"] >= 4
+    assert metrics["canceled_exits"] >= 3
+
+    confirm_mgr.reset_metrics()
+    clean_metrics = confirm_mgr.get_metrics()
+    assert clean_metrics["total_exit_requests"] == 0
+    assert clean_metrics["interrupt_count"] == 0
+
+    # 8. Singleton lifecycle
+    reset_exit_confirm()
+    default_ec = get_default_exit_confirm()
+    assert default_ec is not None
+    reset_exit_confirm()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

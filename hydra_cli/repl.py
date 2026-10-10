@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 import difflib
 import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -134,6 +135,12 @@ COMMAND_HINTS: Dict[str, Dict[str, Any]] = {
         "hint_text": "next | prev | number",
         "description": "Navigate paged REPL menu completions",
         "choices": ["next", "prev", "1", "2"],
+    },
+    "/exit-confirm": {
+        "parameter": "[double_ctrl_c | always | never]",
+        "hint_text": "double_ctrl_c | always | never",
+        "description": "Configure REPL exit confirmation policy",
+        "choices": ["double_ctrl_c", "always", "never"],
     },
 }
 
@@ -1134,10 +1141,135 @@ def create_menu_pager(page_size: int = 10) -> ReplMenuPager:
     return ReplMenuPager(page_size=page_size)
 
 
+class ReplExitConfirm:
+    """
+    Interactive session exit confirmation and interrupt throttling manager for Hydra REPL.
+    Prevents accidental session termination via double interrupt windows or prompt confirmation.
+    """
+
+    def __init__(
+        self,
+        policy: str = "double_ctrl_c",
+        window_seconds: float = 2.0,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._policy = policy if policy in ("double_ctrl_c", "always", "never") else "double_ctrl_c"
+        self._window_seconds = max(0.5, float(window_seconds))
+        self._last_interrupt_time: float = 0.0
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_exit_requests: int = 0
+            self._confirmed_exits: int = 0
+            self._canceled_exits: int = 0
+            self._interrupt_count: int = 0
+            self._last_interrupt_time = 0.0
+
+    def get_policy(self) -> str:
+        """Return active exit confirmation policy."""
+        with self._lock:
+            return self._policy
+
+    def set_policy(self, policy: str) -> None:
+        """Configure exit confirmation policy."""
+        with self._lock:
+            if policy in ("double_ctrl_c", "always", "never"):
+                self._policy = policy
+
+    def get_window_seconds(self) -> float:
+        """Return active double interrupt window duration."""
+        with self._lock:
+            return self._window_seconds
+
+    def set_window_seconds(self, seconds: float) -> None:
+        """Configure double interrupt window duration."""
+        with self._lock:
+            self._window_seconds = max(0.5, float(seconds))
+
+    def should_confirm_exit(self, source: str = "slash") -> bool:
+        """Evaluate whether active policy mandates user confirmation for given exit source."""
+        with self._lock:
+            self._total_exit_requests += 1
+            if self._policy == "always":
+                return True
+            if self._policy == "never":
+                self._confirmed_exits += 1
+                return False
+            if source == "interrupt":
+                return True
+            self._confirmed_exits += 1
+            return False
+
+    def register_interrupt(self, now: Optional[float] = None) -> bool:
+        """Register interrupt event timestamp. Return True if second interrupt received within window."""
+        with self._lock:
+            current_time = now if now is not None else time.time()
+            self._interrupt_count += 1
+            diff = current_time - self._last_interrupt_time
+            if 0.0 < diff <= self._window_seconds:
+                self._last_interrupt_time = 0.0
+                self._confirmed_exits += 1
+                return True
+            self._last_interrupt_time = current_time
+            return False
+
+    def reset_interrupt(self) -> None:
+        """Clear active interrupt timestamp."""
+        with self._lock:
+            self._last_interrupt_time = 0.0
+
+    def confirm(self, response: str) -> bool:
+        """Evaluate confirmation response string. Return True if affirmed."""
+        with self._lock:
+            cleaned = response.strip().lower()
+            if cleaned in ("y", "yes", "true", "1", "ok"):
+                self._confirmed_exits += 1
+                return True
+            self._canceled_exits += 1
+            return False
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            return {
+                "policy": self._policy,
+                "window_seconds": self._window_seconds,
+                "total_exit_requests": self._total_exit_requests,
+                "confirmed_exits": self._confirmed_exits,
+                "canceled_exits": self._canceled_exits,
+                "interrupt_count": self._interrupt_count,
+            }
+
+
+_DEFAULT_EXIT_CONFIRM = ReplExitConfirm()
+
+
+def get_default_exit_confirm() -> ReplExitConfirm:
+    """Return default singleton exit confirm manager."""
+    return _DEFAULT_EXIT_CONFIRM
+
+
+def reset_exit_confirm() -> None:
+    """Reset global exit confirmation telemetry and pending state."""
+    _DEFAULT_EXIT_CONFIRM.reset_interrupt()
+    _DEFAULT_EXIT_CONFIRM.reset_metrics()
+
+
+def create_exit_confirm(
+    policy: str = "double_ctrl_c",
+    window_seconds: float = 2.0,
+) -> ReplExitConfirm:
+    """Instantiate a new dedicated exit confirmation manager."""
+    return ReplExitConfirm(policy=policy, window_seconds=window_seconds)
+
+
 class ReplSession:
     def __init__(self) -> None:
         self.history: ReplHistoryDedup = get_default_history_dedup()
         self.menu_pager: ReplMenuPager = get_default_menu_pager()
+        self.exit_confirm: ReplExitConfirm = get_default_exit_confirm()
         self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "sonnet 5.5").strip() or "sonnet 5.5"
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.effort: Optional[str] = None
@@ -1321,7 +1453,28 @@ def _handle_slash(session: ReplSession, line: str) -> Tuple[Optional[int], bool]
         for it in items:
             print(f"  {it['trigger']:<6} -> {it['expansion']:<16} : {it['description']}")
         return None, True
+    if cmd in ("/exit-confirm", "/confirm-exit"):
+        if not args:
+            m = session.exit_confirm.get_metrics()
+            print(f"Exit confirm policy: {m['policy']} (window={m['window_seconds']}s)")
+            return None, True
+        sub = args[0].lower()
+        if sub in ("double_ctrl_c", "always", "never"):
+            session.exit_confirm.set_policy(sub)
+            print(f"Exit confirm policy set to: {sub}")
+        else:
+            print("Usage: /exit-confirm [double_ctrl_c | always | never]")
+        return None, True
+
     if cmd in ("/quit", "/exit", "/q"):
+        if session.exit_confirm.should_confirm_exit(source="slash"):
+            try:
+                ans = input("Exit Hydra REPL? [y/N] ")
+                if not session.exit_confirm.confirm(ans):
+                    print("Exit canceled.")
+                    return None, True
+            except (KeyboardInterrupt, EOFError):
+                return 0, True
         return 0, True
 
     print(f"Unknown slash command: {cmd}. Try /help")
@@ -1366,7 +1519,10 @@ def run_repl(initial_argv: Optional[List[str]] = None) -> int:
             print()
             return 0
         except KeyboardInterrupt:
-            print()
+            if session.exit_confirm.register_interrupt():
+                print("\n[Exit confirmed via double interrupt]")
+                return 0
+            print(_c("\nPress Ctrl-C again within 2 seconds or type /quit to exit.", GREEN_DIM))
             continue
 
         text = line.strip()
