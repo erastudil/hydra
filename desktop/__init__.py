@@ -1,8 +1,8 @@
-﻿"""
+"""
 Hydra Sovereign Desktop Application package.
 Exposes FastAPI application, WebSocket streaming, sovereign Web Desk SPA,
 background DesktopServer runner, session playback engine, multi-workspace manager,
-and browser storage persistence.
+browser storage persistence, model performance evaluator, and command registry.
 """
 
 from hydra_cli.desktop import (
@@ -24,6 +24,16 @@ from desktop.browser_storage import (
     BrowserStorageManager,
     BrowserCookie,
 )
+from desktop.model_evaluator import (
+    ModelPerformanceEvaluator,
+    ModelBenchmarkSample,
+    ModelMetricSample,
+)
+from desktop.command_registry import (
+    CommandRegistry,
+    CommandItem,
+    normalize_shortcut,
+)
 
 __all__ = [
     "create_desktop_app",
@@ -37,4 +47,10 @@ __all__ = [
     "Workspace",
     "BrowserStorageManager",
     "BrowserCookie",
+    "ModelPerformanceEvaluator",
+    "ModelBenchmarkSample",
+    "ModelMetricSample",
+    "CommandRegistry",
+    "CommandItem",
+    "normalize_shortcut",
 ]

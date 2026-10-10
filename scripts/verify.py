@@ -10007,12 +10007,35 @@ def desktop_multi_workspace_and_browser_storage_contracts():
         assert len(state["origins"]) == 1
 
 
+
+@check
+def desktop_model_evaluator_and_command_registry_contracts():
+    from desktop.model_evaluator import ModelPerformanceEvaluator, ModelBenchmarkSample
+    from desktop.command_registry import CommandRegistry, CommandItem, normalize_shortcut
+
+    # Evaluator contracts
+    evaluator = ModelPerformanceEvaluator()
+    evaluator.record_sample("test_model", "test_prov", 100, 200, 2.0, ttft_ms=500.0)
+    assert evaluator.total_samples == 1
+    tput = evaluator.get_throughput_metrics("test_model")
+    assert tput["mean"] > 0
+    p50 = evaluator.calculate_percentile([10.0, 20.0, 30.0], 50.0)
+    assert p50 == 20.0
+
+    # Command registry contracts
+    registry = CommandRegistry()
+    assert normalize_shortcut("shift+ctrl+k") == "Ctrl+Shift+K"
+    cmd = registry.register(CommandItem("test:action", "Test Action", shortcut="ctrl+k", priority=150))
+    assert cmd.shortcut == "Ctrl+K"
+    assert registry.resolve_shortcut("Ctrl+K").command_id == "test:action"
+
+
 @check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed
