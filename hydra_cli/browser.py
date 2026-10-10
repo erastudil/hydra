@@ -1610,6 +1610,253 @@ def create_network_idle_latch(
     )
 
 
+class DownloadVerifier:
+    """Playwright file download tracking, checksum calculation, and integrity validation engine."""
+
+    def __init__(self, default_download_dir: Optional[str] = None):
+        """Initialize download verifier with destination directory configuration."""
+        self.default_download_dir = default_download_dir or os.path.join(
+            os.path.expanduser("~"), ".hydra", "downloads"
+        )
+        self._lock = threading.RLock()
+        self._downloads: List[Dict[str, Any]] = []
+        self._attached_pages: Set[int] = set()
+        self.reset()
+
+    def reset_metrics(self) -> None:
+        """Reset telemetry counters preserving configuration."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_verifications: int = 0
+            self._passed_verifications: int = 0
+            self._failed_verifications: int = 0
+            self._total_downloads_tracked: int = 0
+
+    def reset(self) -> None:
+        """Reset download verifier state and telemetry."""
+        with self._lock:
+            self._downloads.clear()
+            self._attached_pages.clear()
+            self.reset_metrics()
+
+    def compute_checksum(self, data: bytes, algorithm: str = "sha256") -> str:
+        """Calculate cryptographic hash for binary payload."""
+        alg = algorithm.lower().strip()
+        if alg == "md5":
+            return hashlib.md5(data).hexdigest()
+        if alg == "sha1":
+            return hashlib.sha1(data).hexdigest()
+        return hashlib.sha256(data).hexdigest()
+
+    def detect_magic_type(self, data: bytes) -> str:
+        """Detect binary payload content type from magic header signatures."""
+        if not data:
+            return "empty"
+        if len(data) >= 4 and data[:4] == b"%PDF":
+            return "pdf"
+        if len(data) >= 4 and data[:4] == b"PK\x03\x04":
+            return "zip"
+        if len(data) >= 2 and data[:2] == b"\x1f\x8b":
+            return "gzip"
+        if len(data) >= 8 and data[:8] == b"\x89PNG\r\n\x1a\n":
+            return "png"
+        if len(data) >= 3 and data[:3] == b"\xff\xd8\xff":
+            return "jpeg"
+        if len(data) >= 4 and data[:4] == b"RIFF":
+            return "riff"
+        try:
+            parsed = json.loads(data.decode("utf-8"))
+            if isinstance(parsed, (dict, list)):
+                return "json"
+        except Exception:
+            pass
+        try:
+            data.decode("utf-8")
+            return "text"
+        except Exception:
+            return "binary"
+
+    def verify_bytes(
+        self,
+        data: bytes,
+        expected_hash: Optional[str] = None,
+        min_bytes: int = 1,
+        max_bytes: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Validate binary payload against size boundaries and checksum invariants."""
+        with self._lock:
+            self._total_verifications += 1
+
+        errors: List[str] = []
+        size = len(data)
+
+        if size < min_bytes:
+            errors.append(f"Payload size {size} below minimum bound {min_bytes}")
+        if max_bytes is not None and size > max_bytes:
+            errors.append(f"Payload size {size} exceeds maximum bound {max_bytes}")
+
+        actual_sha256 = self.compute_checksum(data, "sha256")
+        if expected_hash:
+            exp_clean = expected_hash.strip().lower()
+            if actual_sha256.lower() != exp_clean:
+                errors.append(f"Checksum mismatch: expected {exp_clean} but computed {actual_sha256}")
+
+        magic_type = self.detect_magic_type(data)
+        valid = (len(errors) == 0)
+
+        with self._lock:
+            if valid:
+                self._passed_verifications += 1
+            else:
+                self._failed_verifications += 1
+
+        return {
+            "valid": valid,
+            "size_bytes": size,
+            "sha256": actual_sha256,
+            "magic_type": magic_type,
+            "errors": errors,
+        }
+
+    def verify_download(
+        self,
+        file_path: str,
+        expected_hash: Optional[str] = None,
+        min_bytes: int = 1,
+        max_bytes: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Validate downloaded file at specified path against integrity constraints."""
+        if not file_path or not os.path.isfile(file_path):
+            with self._lock:
+                self._total_verifications += 1
+                self._failed_verifications += 1
+            return {
+                "valid": False,
+                "file_path": file_path,
+                "size_bytes": 0,
+                "sha256": "",
+                "magic_type": "none",
+                "errors": [f"File not found on disk: {file_path}"],
+            }
+
+        expected_ext = kwargs.get("expected_extension")
+        if expected_ext:
+            clean_exp = expected_ext.lower().lstrip(".")
+            _, ext = os.path.splitext(file_path)
+            clean_act = ext.lower().lstrip(".")
+            if clean_act != clean_exp:
+                with self._lock:
+                    self._total_verifications += 1
+                    self._failed_verifications += 1
+                return {
+                    "valid": False,
+                    "file_path": file_path,
+                    "size_bytes": os.path.getsize(file_path),
+                    "sha256": "",
+                    "magic_type": "none",
+                    "errors": [f"Extension mismatch: expected .{clean_exp} but found .{clean_act}"],
+                }
+
+        try:
+            with open(file_path, "rb") as f:
+                data = f.read()
+            res = self.verify_bytes(
+                data=data,
+                expected_hash=expected_hash,
+                min_bytes=min_bytes,
+                max_bytes=max_bytes,
+            )
+            res["file_path"] = file_path
+            return res
+        except Exception as exc:
+            with self._lock:
+                self._total_verifications += 1
+                self._failed_verifications += 1
+            return {
+                "valid": False,
+                "file_path": file_path,
+                "size_bytes": 0,
+                "sha256": "",
+                "magic_type": "none",
+                "errors": [f"Read failure: {exc}"],
+            }
+
+    def attach_to_page(
+        self,
+        page: Any,
+        download_dir: Optional[str] = None,
+    ) -> bool:
+        """Attach download event listeners to Playwright page target."""
+        if page is None or not hasattr(page, "on"):
+            return False
+        page_id = id(page)
+        with self._lock:
+            if page_id in self._attached_pages:
+                return True
+            self._attached_pages.add(page_id)
+
+        target_dir = download_dir or self.default_download_dir
+
+        try:
+            def on_download(download: Any) -> None:
+                try:
+                    os.makedirs(target_dir, exist_ok=True)
+                    suggested_name = getattr(download, "suggested_filename", "download.bin")
+                    save_path = os.path.join(target_dir, suggested_name)
+                    if hasattr(download, "save_as"):
+                        download.save_as(save_path)
+                    rec = {
+                        "filename": suggested_name,
+                        "path": save_path,
+                        "url": getattr(download, "url", ""),
+                    }
+                    with self._lock:
+                        self._downloads.append(rec)
+                        self._total_downloads_tracked += 1
+                except Exception:
+                    pass
+
+            page.on("download", on_download)
+            return True
+        except Exception:
+            return False
+
+    def get_downloads(self) -> List[Dict[str, Any]]:
+        """Return list of captured download records."""
+        with self._lock:
+            return list(self._downloads)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return download verifier telemetry counters."""
+        with self._lock:
+            return {
+                "default_download_dir": self.default_download_dir,
+                "total_verifications": self._total_verifications,
+                "passed_verifications": self._passed_verifications,
+                "failed_verifications": self._failed_verifications,
+                "total_downloads_tracked": self._total_downloads_tracked,
+                "active_records_count": len(self._downloads),
+            }
+
+
+_DEFAULT_DOWNLOAD_VERIFIER = DownloadVerifier()
+
+
+def get_default_download_verifier() -> DownloadVerifier:
+    """Return default singleton download verifier engine."""
+    return _DEFAULT_DOWNLOAD_VERIFIER
+
+
+def reset_download_verifier() -> None:
+    """Reset global download verifier state."""
+    _DEFAULT_DOWNLOAD_VERIFIER.reset()
+
+
+def create_download_verifier(default_download_dir: Optional[str] = None) -> DownloadVerifier:
+    """Instantiate a new dedicated download verifier engine."""
+    return DownloadVerifier(default_download_dir=default_download_dir)
+
+
 class PlaywrightBrowserManager:
     """Managed Playwright browser lifecycle instance with automatic cleanup."""
 
@@ -1621,6 +1868,7 @@ class PlaywrightBrowserManager:
         self._page: Optional[Page] = None
         self._console_capture = get_default_console_capture()
         self._network_latch = get_default_network_idle_latch()
+        self._download_verifier = get_default_download_verifier()
 
     def _ensure_page(self) -> Page:
         if not PLAYWRIGHT_AVAILABLE:
@@ -1640,6 +1888,7 @@ class PlaywrightBrowserManager:
             self._page = self._context.new_page()
             self._console_capture.attach_to_page(self._page)
             self._network_latch.attach_to_page(self._page)
+            self._download_verifier.attach_to_page(self._page)
         return self._page
 
     def wait_for_dom_idle(
@@ -1960,6 +2209,23 @@ def dispatch_browser_action(
                 max_inflight=max_inf,
             )
             return {"isError": res.get("isError", False) or not res.get("is_idle", True), "result": res}
+        elif act in ("verify_download", "download_verify"):
+            if not path:
+                return {"isError": True, "error": "Path parameter required for verify_download"}
+            exp_h = kwargs.get("expected_hash")
+            min_b = kwargs.get("min_bytes", 1)
+            max_b = kwargs.get("max_bytes")
+            res = session.verify_download(
+                file_path=path,
+                expected_hash=exp_h,
+                min_bytes=min_b,
+                max_bytes=max_b,
+                **kwargs,
+            )
+            return {"isError": not res.get("valid", False), "result": res}
+        elif act in ("get_downloads", "downloads"):
+            records = session.get_downloads()
+            return {"isError": False, "result": records, "count": len(records)}
         elif act in ("console_logs", "get_console_logs", "read_console", "console"):
             lvl = kwargs.get("level")
             lim = kwargs.get("limit")

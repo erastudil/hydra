@@ -6876,6 +6876,138 @@ def network_idle_contracts():
 
 
 @check
+def download_verify_contracts():
+    import tempfile
+    import hashlib
+    import os
+    from hydra_cli.browser import (
+        DownloadVerifier,
+        create_download_verifier,
+        get_default_download_verifier,
+        reset_download_verifier,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import DownloadVerifier as SandboxDownloadVerifier
+    from hydra_cli import DownloadVerifier as RootDownloadVerifier
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxDownloadVerifier is DownloadVerifier
+    assert RootDownloadVerifier is DownloadVerifier
+
+    reset_download_verifier()
+
+    # 2. Construction and default parameters
+    tmp_d = tempfile.mkdtemp(prefix="hydra_test_dl_")
+    verifier = create_download_verifier(default_download_dir=tmp_d)
+    assert verifier.default_download_dir == tmp_d
+
+    # 3. Magic type detection
+    assert verifier.detect_magic_type(b"%PDF-1.7 payload") == "pdf"
+    assert verifier.detect_magic_type(b"PK\x03\x04zipdata") == "zip"
+    assert verifier.detect_magic_type(b"\x1f\x8bgzcontent") == "gzip"
+    assert verifier.detect_magic_type(b'{"alpha": 1, "beta": 2}') == "json"
+    assert verifier.detect_magic_type(b"Plain text report") == "text"
+    assert verifier.detect_magic_type(b"") == "empty"
+
+    # 4. Checksum computation
+    payload = b"Hydra test artifact download payload verification"
+    sha = hashlib.sha256(payload).hexdigest()
+    assert verifier.compute_checksum(payload, "sha256") == sha
+    md5 = hashlib.md5(payload).hexdigest()
+    assert verifier.compute_checksum(payload, "md5") == md5
+
+    # 5. Byte verification
+    pass_bytes = verifier.verify_bytes(payload, expected_hash=sha, min_bytes=10, max_bytes=1000)
+    assert pass_bytes["valid"] is True
+    assert pass_bytes["size_bytes"] == len(payload)
+    assert pass_bytes["sha256"] == sha
+
+    fail_bytes = verifier.verify_bytes(payload, expected_hash="0000000000000000000000000000000000000000000000000000000000000000")
+    assert fail_bytes["valid"] is False
+    assert any("mismatch" in e.lower() for e in fail_bytes["errors"])
+
+    # 6. File verification
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tmp_f:
+        tmp_f.write(b'{"status": "ready"}')
+        tmp_path = tmp_f.name
+
+    try:
+        f_res = verifier.verify_download(tmp_path, expected_extension="json", min_bytes=5)
+        assert f_res["valid"] is True
+        assert f_res["magic_type"] == "json"
+
+        ext_res = verifier.verify_download(tmp_path, expected_extension="pdf")
+        assert ext_res["valid"] is False
+        assert any("extension mismatch" in e.lower() for e in ext_res["errors"])
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    missing_res = verifier.verify_download("nonexistent_download_file_9876.zip")
+    assert missing_res["valid"] is False
+    assert any("not found" in e.lower() for e in missing_res["errors"])
+
+    # 7. Mock Playwright page interaction
+    class MockPage:
+        def __init__(self):
+            self.handlers = {}
+
+        def on(self, event, handler):
+            self.handlers[event] = handler
+
+    class MockDownload:
+        def __init__(self, filename):
+            self.suggested_filename = filename
+            self.url = "https://cdn.hydra.local/files/" + filename
+            self.saved_path = None
+
+        def save_as(self, path):
+            self.saved_path = path
+
+    mock_page = MockPage()
+    assert verifier.attach_to_page(mock_page) is True
+    assert verifier.attach_to_page(mock_page) is True
+
+    dl_obj = MockDownload("dataset.zip")
+    mock_page.handlers["download"](dl_obj)
+    assert verifier.get_metrics()["total_downloads_tracked"] == 1
+    dl_records = verifier.get_downloads()
+    assert len(dl_records) == 1
+    assert dl_records[0]["filename"] == "dataset.zip"
+
+    assert verifier.attach_to_page(None) is False
+
+    # 8. Browser action integration
+    if not PLAYWRIGHT_AVAILABLE:
+        act_res = dispatch_browser_action("verify_download", path="dummy.zip")
+        assert act_res["isError"] is True
+        assert "Playwright uninstalled" in act_res["error"]
+
+    # 9. Telemetry metrics and reset
+    met = verifier.get_metrics()
+    assert met["total_verifications"] >= 3
+    assert met["passed_verifications"] >= 2
+    assert met["failed_verifications"] >= 1
+
+    verifier.reset_metrics()
+    clean_met = verifier.get_metrics()
+    assert clean_met["total_verifications"] == 0
+    assert clean_met["passed_verifications"] == 0
+    assert clean_met["failed_verifications"] == 0
+
+    verifier.reset()
+    assert len(verifier.get_downloads()) == 0
+
+    # 10. Default singleton
+    reset_download_verifier()
+    default_verifier = get_default_download_verifier()
+    assert default_verifier is not None
+    assert "downloads" in default_verifier.default_download_dir
+    reset_download_verifier()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
