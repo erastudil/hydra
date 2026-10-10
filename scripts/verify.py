@@ -7198,6 +7198,148 @@ def iframe_traversal_contracts():
     reset_iframe_traversal()
 
 @check
+def media_abort_contracts():
+    from hydra_cli.browser import (
+        MediaAbortController,
+        create_media_abort,
+        get_default_media_abort,
+        reset_media_abort,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import MediaAbortController as SandboxMediaAbortController
+    from hydra_cli import MediaAbortController as RootMediaAbortController
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxMediaAbortController is MediaAbortController
+    assert RootMediaAbortController is MediaAbortController
+
+    reset_media_abort()
+
+    # 2. Construction and default metrics
+    ctrl = create_media_abort()
+    m0 = ctrl.get_metrics()
+    assert m0["enabled"] is True
+    assert m0["total_intercepted"] == 0
+    assert m0["aborted_requests"] == 0
+    assert m0["allowed_requests"] == 0
+
+    # 3. Decision logic for media extensions and resource types
+    assert ctrl.should_abort("https://cdn.local/banner.png") is True
+    assert ctrl.should_abort("https://cdn.local/photo.jpg") is True
+    assert ctrl.should_abort("https://cdn.local/video.mp4") is True
+    assert ctrl.should_abort("https://cdn.local/font.woff2") is True
+    assert ctrl.should_abort("https://cdn.local/sound.mp3") is True
+    assert ctrl.should_abort("https://api.local/data.json", resource_type="fetch") is False
+    assert ctrl.should_abort("https://api.local/pixel", resource_type="image") is True
+    assert ctrl.should_abort("https://api.local/tracker", resource_type="ping") is True
+
+    # Empty and invalid URL checks
+    assert ctrl.should_abort("") is False
+    assert ctrl.should_abort(None) is False
+
+    # 4. Custom allowlist and blocklist patterns
+    custom = create_media_abort(
+        allow_urls=[r"allowed-logo\.png"],
+        block_urls=[r"blocked-analytics\.js"],
+    )
+    assert custom.should_abort("https://cdn.local/allowed-logo.png") is False
+    assert custom.should_abort("https://cdn.local/other-logo.png") is True
+    assert custom.should_abort("https://cdn.local/blocked-analytics.js") is True
+
+    # 5. Enable and disable controls
+    ctrl.disable()
+    assert ctrl.should_abort("https://cdn.local/banner.png") is False
+    assert ctrl.get_metrics()["enabled"] is False
+    ctrl.enable()
+    assert ctrl.should_abort("https://cdn.local/banner.png") is True
+    assert ctrl.get_metrics()["enabled"] is True
+
+    # 6. Page route interception simulation
+    class TestRequest:
+        """Structured request representation for verification."""
+        def __init__(self, url, resource_type):
+            self.url = url
+            self._res_type = resource_type
+
+        def resource_type(self):
+            return self._res_type
+
+    class TestRoute:
+        """Structured route representation for verification."""
+        def __init__(self, url, resource_type):
+            self.request = TestRequest(url, resource_type)
+            self.aborted = False
+            self.continued = False
+            self.abort_reason = None
+
+        def abort(self, reason=None):
+            self.aborted = True
+            self.abort_reason = reason
+            return None
+
+        def continue_(self):
+            self.continued = True
+            return None
+
+    class TestPage:
+        """Structured page representation for route registration."""
+        def __init__(self):
+            self.routes = {}
+
+        def route(self, pattern, handler):
+            self.routes[pattern] = handler
+            return None
+
+    page = TestPage()
+    assert ctrl.attach_to_page(page) is True
+    assert ctrl.attach_to_page(page) is True
+    assert ctrl.attach_to_page(None) is False
+
+    # Intercept image route
+    r_img = TestRoute("https://cdn.local/graphic.png", "image")
+    page.routes["**/*"](r_img)
+    assert r_img.aborted is True
+    assert r_img.abort_reason == "blockedbyclient"
+    assert r_img.continued is False
+
+    # Intercept document route
+    r_doc = TestRoute("https://app.local/index.html", "document")
+    page.routes["**/*"](r_doc)
+    assert r_doc.aborted is False
+    assert r_doc.continued is True
+
+    # 7. Telemetry metrics and URL buffer
+    m1 = ctrl.get_metrics()
+    assert m1["total_intercepted"] == 2
+    assert m1["aborted_requests"] == 1
+    assert m1["allowed_requests"] == 1
+
+    aborted_urls = ctrl.get_aborted_urls()
+    assert len(aborted_urls) == 1
+    assert aborted_urls[0] == "https://cdn.local/graphic.png"
+
+    # Reset metrics
+    ctrl.reset_metrics()
+    m_clean = ctrl.get_metrics()
+    assert m_clean["total_intercepted"] == 0
+    assert m_clean["aborted_requests"] == 0
+    assert len(ctrl.get_aborted_urls()) == 0
+
+    # 8. Browser action dispatch
+    if not PLAYWRIGHT_AVAILABLE:
+        action_res = dispatch_browser_action("enable_media_abort")
+        assert action_res["isError"] is True
+        assert "Playwright uninstalled" in action_res["error"]
+
+    # 9. Singleton lifecycle
+    reset_media_abort()
+    default_ctrl = get_default_media_abort()
+    assert default_ctrl is not None
+    assert default_ctrl.enabled is True
+    reset_media_abort()
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

@@ -2206,6 +2206,176 @@ def create_iframe_traversal(max_depth: int = 10) -> IframeTraversal:
     """Instantiate a new dedicated iframe traversal engine."""
     return IframeTraversal(max_depth=max_depth)
 
+DEFAULT_BLOCKED_TYPES: Set[str] = {"image", "media", "font", "imageset", "ping"}
+DEFAULT_BLOCKED_EXTENSIONS: Set[str] = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico",
+    ".mp4", ".webm", ".ogv", ".mp3", ".wav", ".ogg",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot"
+}
+
+
+class MediaAbortController:
+    """
+    Playwright network route interception controller.
+    Aborts heavy media and binary asset requests to optimize speed and bandwidth.
+    """
+
+    def __init__(
+        self,
+        blocked_types: Optional[Set[str]] = None,
+        blocked_extensions: Optional[Set[str]] = None,
+        allow_urls: Optional[Sequence[str]] = None,
+        block_urls: Optional[Sequence[str]] = None,
+        enabled: bool = True,
+    ) -> None:
+        self.blocked_types = set(blocked_types) if blocked_types is not None else set(DEFAULT_BLOCKED_TYPES)
+        self.blocked_extensions = set(blocked_extensions) if blocked_extensions is not None else set(DEFAULT_BLOCKED_EXTENSIONS)
+        self.allow_patterns = [re.compile(p) for p in (allow_urls or [])]
+        self.block_patterns = [re.compile(p) for p in (block_urls or [])]
+        self.enabled = bool(enabled)
+        self._lock = threading.RLock()
+        self._attached_pages: Set[int] = set()
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal telemetry metrics and URL buffers."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_intercepted: int = 0
+            self._aborted_requests: int = 0
+            self._allowed_requests: int = 0
+            self._aborted_urls: List[str] = []
+            self._attached_pages.clear()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        self.reset()
+
+    def enable(self) -> None:
+        """Enable media abort interception filter."""
+        self.enabled = True
+
+    def disable(self) -> None:
+        """Disable media abort interception filter."""
+        self.enabled = False
+
+    def should_abort(self, url: str, resource_type: Optional[str] = None) -> bool:
+        """Evaluate whether target request qualifies for client abort."""
+        if not self.enabled or not url:
+            return False
+
+        clean_url = url.split("?")[0].split("#")[0].lower()
+
+        for pat in self.allow_patterns:
+            if pat.search(url):
+                return False
+
+        for pat in self.block_patterns:
+            if pat.search(url):
+                return True
+
+        if resource_type:
+            clean_res = resource_type.strip().lower()
+            if clean_res in self.blocked_types:
+                return True
+
+        for ext in self.blocked_extensions:
+            if clean_url.endswith(ext.lower()):
+                return True
+
+        return False
+
+    def attach_to_page(self, page: Any) -> bool:
+        """Register route interception listener on target page."""
+        if page is None or not hasattr(page, "route"):
+            return False
+
+        page_id = id(page)
+        with self._lock:
+            if page_id in self._attached_pages:
+                return True
+            self._attached_pages.add(page_id)
+
+        try:
+            def on_route(route: Any) -> None:
+                with self._lock:
+                    self._total_intercepted += 1
+
+                req = getattr(route, "request", None)
+                url = ""
+                if req and hasattr(req, "url"):
+                    url = req.url
+                elif hasattr(route, "url"):
+                    url = route.url
+
+                res_type = ""
+                if req and hasattr(req, "resource_type"):
+                    res_val = req.resource_type
+                    res_type = res_val() if callable(res_val) else str(res_val or "")
+
+                if self.should_abort(url, res_type):
+                    with self._lock:
+                        self._aborted_requests += 1
+                        self._aborted_urls.append(url)
+                    if hasattr(route, "abort"):
+                        route.abort("blockedbyclient")
+                else:
+                    with self._lock:
+                        self._allowed_requests += 1
+                    if hasattr(route, "continue_"):
+                        route.continue_()
+
+            page.route("**/*", on_route)
+            return True
+        except Exception:
+            return False
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return operational telemetry metrics."""
+        with self._lock:
+            return {
+                "enabled": self.enabled,
+                "total_intercepted": self._total_intercepted,
+                "aborted_requests": self._aborted_requests,
+                "allowed_requests": self._allowed_requests,
+                "blocked_types_count": len(self.blocked_types),
+                "blocked_extensions_count": len(self.blocked_extensions),
+            }
+
+    def get_aborted_urls(self) -> List[str]:
+        """Return copy of aborted request URLs."""
+        with self._lock:
+            return list(self._aborted_urls)
+
+
+_DEFAULT_MEDIA_ABORT = MediaAbortController()
+
+
+def get_default_media_abort() -> MediaAbortController:
+    """Return default singleton media abort controller."""
+    return _DEFAULT_MEDIA_ABORT
+
+
+def reset_media_abort() -> None:
+    """Reset global media abort controller state."""
+    _DEFAULT_MEDIA_ABORT.reset()
+
+
+def create_media_abort(
+    blocked_types: Optional[Set[str]] = None,
+    blocked_extensions: Optional[Set[str]] = None,
+    allow_urls: Optional[Sequence[str]] = None,
+    block_urls: Optional[Sequence[str]] = None,
+    enabled: bool = True,
+) -> MediaAbortController:
+    """Instantiate a new dedicated media abort controller."""
+    return MediaAbortController(
+        blocked_types=blocked_types,
+        blocked_extensions=blocked_extensions,
+        allow_urls=allow_urls,
+        block_urls=block_urls,
+        enabled=enabled,
+    )
+
 
 class PlaywrightBrowserManager:
     """Managed Playwright browser lifecycle instance with automatic cleanup."""
@@ -2220,6 +2390,7 @@ class PlaywrightBrowserManager:
         self._network_latch = get_default_network_idle_latch()
         self._download_verifier = get_default_download_verifier()
         self._iframe_traversal = get_default_iframe_traversal()
+        self._media_abort = get_default_media_abort()
 
     def _ensure_page(self) -> Page:
         if not PLAYWRIGHT_AVAILABLE:
@@ -2240,6 +2411,7 @@ class PlaywrightBrowserManager:
             self._console_capture.attach_to_page(self._page)
             self._network_latch.attach_to_page(self._page)
             self._download_verifier.attach_to_page(self._page)
+            self._media_abort.attach_to_page(self._page)
         return self._page
 
     def wait_for_dom_idle(
@@ -2506,6 +2678,22 @@ class PlaywrightBrowserManager:
         content = page.content() if hasattr(page, "content") else ""
         return traversal.inspect_html(content)
 
+    def enable_media_abort(self) -> None:
+        """Enable media abort filter on active session."""
+        self._media_abort.enable()
+
+    def disable_media_abort(self) -> None:
+        """Disable media abort filter on active session."""
+        self._media_abort.disable()
+
+    def get_media_abort_metrics(self) -> Dict[str, Any]:
+        """Return media abort telemetry metrics."""
+        return self._media_abort.get_metrics()
+
+    def get_aborted_media_urls(self) -> List[str]:
+        """Return list of aborted media URLs."""
+        return self._media_abort.get_aborted_urls()
+
     def close(self) -> None:
         """Close browser context and stop Playwright runner cleanly."""
         try:
@@ -2695,6 +2883,18 @@ def dispatch_browser_action(
             sub_act = kwargs.get("frame_action") or kwargs.get("sub_action") or "extract_content"
             res = session.execute_in_frame(target, sub_act, **kwargs)
             return {"isError": not res.get("valid", False), "result": res}
+        elif act in ("enable_media_abort", "enable_media_block"):
+            session.enable_media_abort()
+            return {"isError": False, "result": "Media abort filter enabled."}
+        elif act in ("disable_media_abort", "disable_media_block"):
+            session.disable_media_abort()
+            return {"isError": False, "result": "Media abort filter disabled."}
+        elif act in ("media_abort_metrics", "media_metrics"):
+            m = session.get_media_abort_metrics()
+            return {"isError": False, "result": m}
+        elif act in ("aborted_media", "aborted_urls"):
+            urls = session.get_aborted_media_urls()
+            return {"isError": False, "result": urls, "count": len(urls)}
         elif act in ("close", "exit", "quit"):
             close_browser_session()
             return {"isError": False, "result": "Browser session closed."}
