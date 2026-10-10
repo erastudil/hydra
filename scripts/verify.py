@@ -6345,6 +6345,140 @@ def screenshot_gate_contracts():
 
 
 @check
+def console_capture_contracts():
+    from hydra_cli.browser import (
+        BrowserConsoleCapture,
+        BrowserConsoleEntry,
+        create_console_capture,
+        get_default_console_capture,
+        reset_console_capture,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import BrowserConsoleCapture as SandboxConsoleCapture
+    from hydra_cli import BrowserConsoleCapture as RootConsoleCapture
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxConsoleCapture is BrowserConsoleCapture
+    assert RootConsoleCapture is BrowserConsoleCapture
+
+    reset_console_capture()
+
+    # 2. Construction and default parameters
+    cap = create_console_capture(max_entries=50, scrub_secrets=True)
+    assert cap.max_entries == 50
+    assert cap.scrub_secrets is True
+
+    # 3. Entry creation and serialization
+    entry = cap.record_entry("log", "Application startup completed", location="app.js:10")
+    assert entry.level == "log"
+    assert entry.text == "Application startup completed"
+    assert entry.location == "app.js:10"
+    d = entry.to_dict()
+    assert d["level"] == "log"
+    assert d["text"] == "Application startup completed"
+    assert d["location"] == "app.js:10"
+
+    # 4. Severity categorization and error tracking
+    assert cap.has_errors() is False
+    cap.record_entry("warn", "Deprecated feature invoked")
+    cap.record_entry("error", "Failed to connect to upstream service")
+    cap.record_page_error("Uncaught ReferenceError: variable is not defined", location="bundle.js:100")
+
+    assert cap.has_errors() is True
+    errors = cap.get_errors()
+    assert len(errors) == 2
+    assert errors[0]["level"] == "error"
+    assert errors[1]["level"] == "pageerror"
+
+    # 5. Secret scrubbing in recorded text
+    cap.record_entry("error", "Auth error: api_key=sk-1234567890abcdef12345678")
+    latest_err = cap.get_errors()[-1]
+    assert "sk-1234567890" not in latest_err["text"]
+    assert "REDACTED_SECRET" in latest_err["text"]
+
+    # 6. Filtering by level and search
+    warn_entries = cap.get_entries(level="warn")
+    assert len(warn_entries) == 1
+    assert "Deprecated" in warn_entries[0]["text"]
+
+    searched = cap.get_entries(search="startup")
+    assert len(searched) == 1
+
+    # 7. Minimum severity filtering
+    high_sev = cap.get_entries(min_level="warn")
+    assert all(e["level"] in ("warn", "warning", "error", "pageerror") for e in high_sev)
+
+    # 8. Limit bounding
+    limited = cap.get_entries(limit=2)
+    assert len(limited) == 2
+
+    # 9. Bounded ring buffer eviction
+    bounded_cap = create_console_capture(max_entries=3)
+    bounded_cap.record_entry("log", "Item 1")
+    bounded_cap.record_entry("log", "Item 2")
+    bounded_cap.record_entry("log", "Item 3")
+    bounded_cap.record_entry("log", "Item 4")
+    bounded_entries = bounded_cap.get_entries()
+    assert len(bounded_entries) == 3
+    assert [e["text"] for e in bounded_entries] == ["Item 2", "Item 3", "Item 4"]
+
+    # 10. Mock Playwright page attach
+    class MockPage:
+        def __init__(self):
+            self.handlers = {}
+        def on(self, event, handler):
+            self.handlers[event] = handler
+
+    class MockConsoleMessage:
+        def __init__(self, msg_type, text):
+            self.type = msg_type
+            self.text = text
+            self.location = {"url": "main.js", "lineNumber": 77}
+
+    mock_page = MockPage()
+    assert cap.attach_to_page(mock_page) is True
+    assert cap.attach_to_page(mock_page) is True
+
+    mock_page.handlers["console"](MockConsoleMessage("info", "Page ready event received"))
+    info_entries = cap.get_entries(level="info")
+    assert any("Page ready event" in e["text"] for e in info_entries)
+
+    mock_page.handlers["pageerror"](Exception("Simulated script exception"))
+    page_errors = cap.get_entries(level="pageerror")
+    assert any("Simulated script exception" in e["text"] for e in page_errors)
+
+    assert cap.attach_to_page(None) is False
+
+    # 11. Clear and reset
+    cap.clear()
+    assert len(cap.get_entries()) == 0
+    assert cap.has_errors() is False
+
+    cap.record_entry("log", "Post-clear item")
+    assert len(cap.get_entries()) == 1
+    cap.reset()
+    assert len(cap.get_entries()) == 0
+    assert cap.get_metrics()["total_captured"] == 0
+
+    # 12. Browser action integration
+    if not PLAYWRIGHT_AVAILABLE:
+        act_res = dispatch_browser_action("console_logs")
+        assert act_res["isError"] is True
+        assert "Playwright uninstalled" in act_res["error"]
+        clear_res = dispatch_browser_action("clear_console")
+        assert clear_res["isError"] is True
+        assert "Playwright uninstalled" in clear_res["error"]
+
+    # 13. Default singleton
+    reset_console_capture()
+    default_cap = get_default_console_capture()
+    assert default_cap is not None
+    assert default_cap.max_entries == 1000
+    reset_console_capture()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

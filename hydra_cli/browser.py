@@ -7,6 +7,7 @@ Safe lazy import ensures clean execution whether Playwright is installed or unin
 from __future__ import annotations
 
 import atexit
+import re
 import os
 import time
 import uuid
@@ -17,7 +18,7 @@ import math
 import struct
 import zlib
 import threading
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 try:
     from playwright.sync_api import sync_playwright, Playwright, Browser, BrowserContext, Page, Error as PlaywrightError
@@ -667,6 +668,248 @@ def create_screenshot_gate(
     )
 
 
+class BrowserConsoleEntry:
+    """Structured representation of single browser console or page error message."""
+
+    def __init__(
+        self,
+        level: str,
+        text: str,
+        timestamp: Optional[float] = None,
+        location: Optional[str] = None,
+        args: Optional[List[str]] = None,
+    ):
+        """Initialize console entry record."""
+        self.level = level.lower().strip()
+        self.text = text
+        self.timestamp = timestamp if timestamp is not None else time.time()
+        self.location = location
+        self.args = list(args) if args else []
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return serializable dictionary representation."""
+        return {
+            "level": self.level,
+            "text": self.text,
+            "timestamp": self.timestamp,
+            "location": self.location,
+            "args": self.args,
+        }
+
+
+_CONSOLE_SEVERITY: Dict[str, int] = {
+    "debug": 10,
+    "log": 20,
+    "info": 20,
+    "warn": 30,
+    "warning": 30,
+    "error": 40,
+    "pageerror": 50,
+}
+
+
+class BrowserConsoleCapture:
+    """Playwright browser console message capture and monitoring engine."""
+
+    SECRET_PATTERNS = [
+        re.compile(r"Bearer\s+([a-zA-Z0-9_\-\.\=]{16,})", re.IGNORECASE),
+        re.compile(r"\b(sk-[a-zA-Z0-9_\-]{16,}|ghp_[a-zA-Z0-9]{16,}|xox[baprs]-[a-zA-Z0-9\-]{16,})\b"),
+        re.compile(r"""(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*['"]?([a-zA-Z0-9_\-\.\=]{12,})['"]?"""),
+    ]
+
+    def __init__(
+        self,
+        max_entries: int = 1000,
+        scrub_secrets: bool = True,
+    ):
+        """Initialize console capture engine with buffer bounds."""
+        self.max_entries = max(1, int(max_entries))
+        self.scrub_secrets = bool(scrub_secrets)
+        self._lock = threading.RLock()
+        self._entries: collections.deque[BrowserConsoleEntry] = collections.deque(maxlen=self.max_entries)
+        self._attached_pages: Set[int] = set()
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset telemetry counters preserving buffer contents."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_captured: int = 0
+            self._error_count: int = 0
+            self._warning_count: int = 0
+            self._info_count: int = 0
+            self._page_error_count: int = 0
+
+    def reset(self) -> None:
+        """Clear buffer and reset telemetry metrics."""
+        with self._lock:
+            self._entries.clear()
+            self._attached_pages.clear()
+            self.reset_metrics()
+
+    def clear(self) -> None:
+        """Empty captured console log entries buffer."""
+        with self._lock:
+            self._entries.clear()
+
+    def _scrub(self, text: str) -> str:
+        """Scrub credentials and sensitive tokens from console text."""
+        if not self.scrub_secrets or not text:
+            return text
+        res = text
+        for pat in self.SECRET_PATTERNS:
+            res = pat.sub("[REDACTED_SECRET]", res)
+        return res
+
+    def record_entry(
+        self,
+        level: str,
+        text: str,
+        location: Optional[str] = None,
+        args: Optional[List[str]] = None,
+    ) -> BrowserConsoleEntry:
+        """Record single console entry into bounded buffer."""
+        lvl = (level or "log").lower().strip()
+        scrubbed = self._scrub(str(text or ""))
+        entry = BrowserConsoleEntry(
+            level=lvl,
+            text=scrubbed,
+            timestamp=time.time(),
+            location=location,
+            args=[self._scrub(str(a)) for a in args] if args else None,
+        )
+        with self._lock:
+            self._entries.append(entry)
+            self._total_captured += 1
+            if lvl in ("error",):
+                self._error_count += 1
+            elif lvl in ("warn", "warning"):
+                self._warning_count += 1
+            elif lvl in ("pageerror",):
+                self._page_error_count += 1
+                self._error_count += 1
+            else:
+                self._info_count += 1
+        return entry
+
+    def record_page_error(
+        self,
+        error_text: str,
+        location: Optional[str] = None,
+    ) -> BrowserConsoleEntry:
+        """Record unhandled page exception into bounded buffer."""
+        return self.record_entry(level="pageerror", text=error_text, location=location)
+
+    def attach_to_page(self, page: Any) -> bool:
+        """Attach event listeners to Playwright page target."""
+        if page is None or not hasattr(page, "on"):
+            return False
+        page_id = id(page)
+        with self._lock:
+            if page_id in self._attached_pages:
+                return True
+            self._attached_pages.add(page_id)
+
+        try:
+            def on_console(msg: Any) -> None:
+                try:
+                    msg_type = getattr(msg, "type", "log")
+                    msg_text = getattr(msg, "text", str(msg))
+                    msg_loc = getattr(msg, "location", None)
+                    loc_str = f"{msg_loc.get('url', '')}:{msg_loc.get('lineNumber', '')}" if isinstance(msg_loc, dict) else str(msg_loc) if msg_loc else None
+                    self.record_entry(level=msg_type, text=msg_text, location=loc_str)
+                except Exception:
+                    pass
+
+            def on_page_error(exc: Any) -> None:
+                try:
+                    self.record_page_error(str(exc))
+                except Exception:
+                    pass
+
+            page.on("console", on_console)
+            page.on("pageerror", on_page_error)
+            return True
+        except Exception:
+            return False
+
+    def get_entries(
+        self,
+        level: Optional[str] = None,
+        min_level: Optional[str] = None,
+        limit: Optional[int] = None,
+        search: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Query captured console entries with optional severity and search filtering."""
+        with self._lock:
+            entries = list(self._entries)
+
+        res: List[Dict[str, Any]] = []
+        filter_lvl = level.lower().strip() if level else None
+        min_sev = _CONSOLE_SEVERITY.get(min_level.lower().strip(), 0) if min_level else 0
+        query = search.lower().strip() if search else None
+
+        for e in entries:
+            if filter_lvl and e.level != filter_lvl:
+                continue
+            if min_sev > 0 and _CONSOLE_SEVERITY.get(e.level, 20) < min_sev:
+                continue
+            if query and query not in e.text.lower():
+                continue
+            res.append(e.to_dict())
+
+        if limit is not None and limit > 0:
+            return res[-limit:]
+        return res
+
+    def get_errors(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Return captured error and pageerror entries."""
+        with self._lock:
+            entries = [e.to_dict() for e in self._entries if e.level in ("error", "pageerror")]
+        if limit is not None and limit > 0:
+            return entries[-limit:]
+        return entries
+
+    def has_errors(self) -> bool:
+        """Evaluate whether any error or pageerror entries recorded."""
+        with self._lock:
+            return any(e.level in ("error", "pageerror") for e in self._entries)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return console capture telemetry counters."""
+        with self._lock:
+            return {
+                "max_entries": self.max_entries,
+                "current_entries": len(self._entries),
+                "total_captured": self._total_captured,
+                "error_count": self._error_count,
+                "warning_count": self._warning_count,
+                "info_count": self._info_count,
+                "page_error_count": self._page_error_count,
+                "attached_pages": len(self._attached_pages),
+            }
+
+
+_DEFAULT_CONSOLE_CAPTURE = BrowserConsoleCapture()
+
+
+def get_default_console_capture() -> BrowserConsoleCapture:
+    """Return default singleton console capture engine."""
+    return _DEFAULT_CONSOLE_CAPTURE
+
+
+def reset_console_capture() -> None:
+    """Reset global console capture engine state."""
+    _DEFAULT_CONSOLE_CAPTURE.reset()
+
+
+def create_console_capture(
+    max_entries: int = 1000,
+    scrub_secrets: bool = True,
+) -> BrowserConsoleCapture:
+    """Instantiate a new dedicated console capture engine."""
+    return BrowserConsoleCapture(max_entries=max_entries, scrub_secrets=scrub_secrets)
+
+
 class PlaywrightBrowserManager:
     """Managed Playwright browser lifecycle instance with automatic cleanup."""
 
@@ -676,6 +919,7 @@ class PlaywrightBrowserManager:
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
+        self._console_capture = get_default_console_capture()
 
     def _ensure_page(self) -> Page:
         if not PLAYWRIGHT_AVAILABLE:
@@ -693,6 +937,7 @@ class PlaywrightBrowserManager:
                     user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) HydraBrowser/1.2",
                 )
             self._page = self._context.new_page()
+            self._console_capture.attach_to_page(self._page)
         return self._page
 
     def wait_for_dom_idle(
@@ -832,6 +1077,18 @@ class PlaywrightBrowserManager:
             "truncated": truncated,
         }
 
+    def get_console_logs(
+        self,
+        level: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return captured browser console entries."""
+        return self._console_capture.get_entries(level=level, limit=limit)
+
+    def clear_console_logs(self) -> None:
+        """Clear captured browser console entries."""
+        self._console_capture.clear()
+
     def close(self) -> None:
         """Close browser context and stop Playwright runner cleanly."""
         try:
@@ -891,6 +1148,7 @@ def dispatch_browser_action(
     path: Optional[str] = None,
     full_page: bool = False,
     timeout_ms: int = 15000,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Execute browser action returning structured observation."""
     if not PLAYWRIGHT_AVAILABLE:
@@ -936,6 +1194,14 @@ def dispatch_browser_action(
         elif act in ("wait_idle", "dom_idle", "settle"):
             res = session.wait_for_dom_idle(timeout_ms=timeout_ms)
             return {"isError": False, "result": res}
+        elif act in ("console_logs", "get_console_logs", "read_console", "console"):
+            lvl = kwargs.get("level")
+            lim = kwargs.get("limit")
+            logs = session.get_console_logs(level=lvl, limit=lim)
+            return {"isError": False, "result": logs, "count": len(logs)}
+        elif act in ("clear_console", "flush_console"):
+            session.clear_console_logs()
+            return {"isError": False, "result": "Console log buffer cleared."}
         elif act in ("close", "exit", "quit"):
             close_browser_session()
             return {"isError": False, "result": "Browser session closed."}

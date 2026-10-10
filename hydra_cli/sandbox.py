@@ -17,12 +17,17 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hydra_cli.config import sensitive_env_key
 from hydra_cli.browser import (
+    BrowserConsoleCapture,
+    BrowserConsoleEntry,
     DomIdleLatch,
     ScreenshotGate,
+    create_console_capture,
     create_dom_idle_latch,
     create_screenshot_gate,
+    get_default_console_capture,
     get_default_dom_idle_latch,
     get_default_screenshot_gate,
+    reset_console_capture,
     reset_dom_idle_latch,
     reset_screenshot_gate,
 )
