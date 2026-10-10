@@ -7340,6 +7340,171 @@ def media_abort_contracts():
     reset_media_abort()
 
 @check
+def visibility_check_contracts():
+    from hydra_cli.browser import (
+        VisibilityChecker,
+        create_visibility_checker,
+        get_default_visibility_checker,
+        reset_visibility_checker,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import VisibilityChecker as SandboxVisibilityChecker
+    from hydra_cli import VisibilityChecker as RootVisibilityChecker
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxVisibilityChecker is VisibilityChecker
+    assert RootVisibilityChecker is VisibilityChecker
+
+    reset_visibility_checker()
+
+    # 2. Construction and default metrics
+    checker = create_visibility_checker(default_timeout_ms=3000.0)
+    assert checker.default_timeout_ms == 3000.0
+    m0 = checker.get_metrics()
+    assert m0["total_checks"] == 0
+    assert m0["visible_count"] == 0
+    assert m0["hidden_count"] == 0
+    assert m0["missing_count"] == 0
+
+    # 3. Static HTML visibility inspection
+    html_markup = (
+        "<div id=\"app-shell\">"
+        "<button id=\"submit-btn\" style=\"display: inline-block; opacity: 1;\">Submit</button>"
+        "<button id=\"cancel-btn\" style=\"display: none;\">Cancel</button>"
+        "<div id=\"overlay\" style=\"visibility: hidden;\">Overlay</div>"
+        "<span id=\"ghost-text\" style=\"opacity: 0.0;\">Ghost</span>"
+        "<input id=\"secret-token\" hidden />"
+        "</div>"
+    )
+
+    r_vis = checker.inspect_html(html_markup, "#submit-btn")
+    assert r_vis["exists"] is True
+    assert r_vis["is_visible"] is True
+    assert r_vis["display"] == "inline-block"
+
+    r_none = checker.inspect_html(html_markup, "#cancel-btn")
+    assert r_none["exists"] is True
+    assert r_none["is_visible"] is False
+    assert r_none["display"] == "none"
+
+    r_hidden = checker.inspect_html(html_markup, "#overlay")
+    assert r_hidden["exists"] is True
+    assert r_hidden["is_visible"] is False
+    assert r_hidden["visibility"] == "hidden"
+
+    r_ghost = checker.inspect_html(html_markup, "#ghost-text")
+    assert r_ghost["exists"] is True
+    assert r_ghost["is_visible"] is False
+    assert r_ghost["opacity"] == 0.0
+
+    r_attr = checker.inspect_html(html_markup, "#secret-token")
+    assert r_attr["exists"] is True
+    assert r_attr["is_visible"] is False
+    assert r_attr["has_hidden_attr"] is True
+
+    r_absent = checker.inspect_html(html_markup, "#nonexistent-element")
+    assert r_absent["exists"] is False
+    assert r_absent["is_visible"] is False
+
+    # Empty and invalid inputs
+    assert checker.inspect_html("", "#btn")["exists"] is False
+    assert checker.inspect_html(html_markup, "")["exists"] is False
+
+    # 4. Mock Page and Locator inspection
+    class TestLocator:
+        """Structured locator representation for verification."""
+        def __init__(self, visible=True, box=None):
+            self._visible = visible
+            self._box = box or {"x": 50, "y": 50, "width": 120, "height": 40}
+
+        @property
+        def first(self):
+            return self
+
+        def count(self):
+            return 1
+
+        def is_visible(self):
+            return self._visible
+
+        def is_enabled(self):
+            return True
+
+        def is_editable(self):
+            return False
+
+        def bounding_box(self):
+            return self._box
+
+        def wait_for(self, state="visible", timeout=5000):
+            return None
+
+    class TestPage:
+        """Structured page representation for verification."""
+        def __init__(self, locator_inst):
+            self._loc = locator_inst
+            self.viewport_size = {"width": 1280, "height": 800}
+
+        def locator(self, selector):
+            return self._loc
+
+    loc_visible = TestLocator(visible=True)
+    page_vis = TestPage(loc_visible)
+    vis_res = checker.check_visibility(page_vis, "#submit-btn")
+    assert vis_res["exists"] is True
+    assert vis_res["is_visible"] is True
+    assert vis_res["in_viewport"] is True
+    assert vis_res["bounding_box"]["width"] == 120
+
+    # Out of viewport bounds check
+    loc_out = TestLocator(visible=True, box={"x": 2000, "y": 3000, "width": 100, "height": 50})
+    page_out = TestPage(loc_out)
+    out_res = checker.check_visibility(page_out, "#footer-link")
+    assert out_res["exists"] is True
+    assert out_res["in_viewport"] is False
+
+    # Zero size bounds check
+    loc_zero = TestLocator(visible=True, box={"x": 10, "y": 10, "width": 0, "height": 0})
+    page_zero = TestPage(loc_zero)
+    zero_res = checker.check_visibility(page_zero, "#zero-span")
+    assert zero_res["in_viewport"] is False
+
+    # 5. Wait for visibility state
+    wait_ok = checker.wait_for_visibility(page_vis, "#submit-btn", visible=True)
+    assert wait_ok["success"] is True
+    assert wait_ok["target_state"] == "visible"
+
+    wait_none = checker.wait_for_visibility(None, "#submit-btn")
+    assert wait_none["success"] is False
+
+    # 6. Telemetry and reset
+    metrics = checker.get_metrics()
+    assert metrics["total_checks"] >= 9
+    assert metrics["visible_count"] >= 2
+    assert metrics["hidden_count"] >= 4
+    assert metrics["missing_count"] >= 1
+
+    checker.reset_metrics()
+    clean_metrics = checker.get_metrics()
+    assert clean_metrics["total_checks"] == 0
+    assert clean_metrics["visible_count"] == 0
+    assert clean_metrics["hidden_count"] == 0
+
+    # 7. Browser action dispatch
+    if not PLAYWRIGHT_AVAILABLE:
+        action_res = dispatch_browser_action("check_visibility", selector="#btn")
+        assert action_res["isError"] is True
+        assert "Playwright uninstalled" in action_res["error"]
+
+    # 8. Singleton lifecycle
+    reset_visibility_checker()
+    default_checker = get_default_visibility_checker()
+    assert default_checker is not None
+    assert default_checker.default_timeout_ms == 5000.0
+    reset_visibility_checker()
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

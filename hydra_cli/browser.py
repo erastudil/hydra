@@ -2376,6 +2376,309 @@ def create_media_abort(
         enabled=enabled,
     )
 
+class _VisibilityHTMLParser(html.parser.HTMLParser):
+    """HTML parser extracting visibility attributes and inline styles for elements."""
+
+    def __init__(self, target_selector: str) -> None:
+        super().__init__()
+        self.target_selector = (target_selector or "").strip()
+        self.found_elements: List[Dict[str, Any]] = []
+
+    def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        """Evaluate opening tag against target selector."""
+        attr_dict = {k.lower(): (v or "") for k, v in attrs}
+        tag_lower = tag.lower()
+        elem_id = attr_dict.get("id", "")
+        elem_classes = attr_dict.get("class", "").split()
+
+        matches = False
+        sel = self.target_selector
+        if sel.startswith("#") and sel[1:] == elem_id:
+            matches = True
+        elif sel.startswith(".") and sel[1:] in elem_classes:
+            matches = True
+        elif sel.lower() == tag_lower:
+            matches = True
+        elif f"{tag_lower}#{elem_id}" == sel.lower() and elem_id:
+            matches = True
+        elif f"#{elem_id}" == sel or f".{attr_dict.get('class', '')}" == sel:
+            matches = True
+
+        if matches:
+            style_str = attr_dict.get("style", "").lower()
+            styles = {}
+            for part in style_str.split(";"):
+                if ":" in part:
+                    k, v = part.split(":", 1)
+                    styles[k.strip()] = v.strip()
+
+            has_hidden_attr = "hidden" in attr_dict
+            aria_hidden = attr_dict.get("aria-hidden", "").lower() == "true"
+            display = styles.get("display", "block")
+            visibility = styles.get("visibility", "visible")
+            opacity_val = 1.0
+            if "opacity" in styles:
+                try:
+                    opacity_val = float(styles["opacity"])
+                except ValueError:
+                    opacity_val = 1.0
+
+            is_visible = (
+                not has_hidden_attr
+                and not aria_hidden
+                and display != "none"
+                and visibility != "hidden"
+                and opacity_val > 0.0
+            )
+
+            self.found_elements.append({
+                "tag": tag_lower,
+                "id": elem_id,
+                "classes": elem_classes,
+                "has_hidden_attr": has_hidden_attr,
+                "aria_hidden": aria_hidden,
+                "display": display,
+                "visibility": visibility,
+                "opacity": opacity_val,
+                "is_visible": is_visible,
+                "style": styles,
+            })
+
+
+class VisibilityChecker:
+    """
+    Playwright element visibility inspection and verification engine.
+    Audits DOM visibility, layout bounding boxes, viewport intersections,
+    and computed style properties.
+    """
+
+    def __init__(self, default_timeout_ms: float = 5000.0) -> None:
+        self.default_timeout_ms = float(default_timeout_ms)
+        self._lock = threading.RLock()
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_checks: int = 0
+            self._visible_count: int = 0
+            self._hidden_count: int = 0
+            self._missing_count: int = 0
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        self.reset()
+
+    def inspect_html(self, html_content: str, selector: str) -> Dict[str, Any]:
+        """Inspect element visibility in HTML string via static style analysis."""
+        with self._lock:
+            self._total_checks += 1
+
+        if not html_content or not selector:
+            with self._lock:
+                self._missing_count += 1
+            return {
+                "selector": selector,
+                "exists": False,
+                "is_visible": False,
+                "reason": "Empty HTML content or selector parameter.",
+            }
+
+        parser = _VisibilityHTMLParser(selector)
+        try:
+            parser.feed(html_content)
+        except Exception:
+            with self._lock:
+                self._missing_count += 1
+            return {
+                "selector": selector,
+                "exists": False,
+                "is_visible": False,
+                "reason": "HTML parsing failure.",
+            }
+
+        if not parser.found_elements:
+            with self._lock:
+                self._missing_count += 1
+            return {
+                "selector": selector,
+                "exists": False,
+                "is_visible": False,
+                "reason": "No element matching selector found in DOM.",
+            }
+
+        elem = parser.found_elements[0]
+        vis = elem["is_visible"]
+        with self._lock:
+            if vis:
+                self._visible_count += 1
+            else:
+                self._hidden_count += 1
+
+        return {
+            "selector": selector,
+            "exists": True,
+            "is_visible": vis,
+            "tag": elem["tag"],
+            "has_hidden_attr": elem["has_hidden_attr"],
+            "aria_hidden": elem["aria_hidden"],
+            "display": elem["display"],
+            "visibility": elem["visibility"],
+            "opacity": elem["opacity"],
+            "elements_matched": len(parser.found_elements),
+        }
+
+    def check_visibility(
+        self,
+        page: Any,
+        selector: str,
+        check_viewport: bool = True,
+        check_occlusion: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Check live element visibility, bounding boxes, and viewport status."""
+        with self._lock:
+            self._total_checks += 1
+
+        if page is None or not selector:
+            with self._lock:
+                self._missing_count += 1
+            return {
+                "selector": selector,
+                "exists": False,
+                "is_visible": False,
+                "error": "compliance : not possible. Page or selector represents None.",
+            }
+
+        if not hasattr(page, "locator"):
+            with self._lock:
+                self._missing_count += 1
+            return {
+                "selector": selector,
+                "exists": False,
+                "is_visible": False,
+                "error": "Target page object does not provide locator method.",
+            }
+
+        try:
+            loc = page.locator(selector).first
+            cnt = loc.count() if hasattr(loc, "count") else 1
+            if cnt == 0:
+                with self._lock:
+                    self._missing_count += 1
+                return {
+                    "selector": selector,
+                    "exists": False,
+                    "is_visible": False,
+                    "in_viewport": False,
+                    "bounding_box": None,
+                }
+
+            is_vis = loc.is_visible() if hasattr(loc, "is_visible") else True
+            is_enabled = loc.is_enabled() if hasattr(loc, "is_enabled") else True
+            is_editable = loc.is_editable() if hasattr(loc, "is_editable") else False
+
+            box = loc.bounding_box() if hasattr(loc, "bounding_box") else None
+
+            in_vp = True
+            if check_viewport and box:
+                vp_width = 1280
+                vp_height = 800
+                if hasattr(page, "viewport_size") and page.viewport_size:
+                    vp_width = page.viewport_size.get("width", 1280)
+                    vp_height = page.viewport_size.get("height", 800)
+
+                x = box.get("x", 0)
+                y = box.get("y", 0)
+                w = box.get("width", 0)
+                h = box.get("height", 0)
+
+                if (x + w) <= 0 or (y + h) <= 0 or x >= vp_width or y >= vp_height:
+                    in_vp = False
+                elif w == 0 or h == 0:
+                    in_vp = False
+
+            with self._lock:
+                if is_vis:
+                    self._visible_count += 1
+                else:
+                    self._hidden_count += 1
+
+            return {
+                "selector": selector,
+                "exists": True,
+                "is_visible": bool(is_vis),
+                "is_enabled": bool(is_enabled),
+                "is_editable": bool(is_editable),
+                "in_viewport": bool(in_vp),
+                "bounding_box": box,
+            }
+        except Exception as exc:
+            with self._lock:
+                self._missing_count += 1
+            return {
+                "selector": selector,
+                "exists": False,
+                "is_visible": False,
+                "error": str(exc),
+            }
+
+    def wait_for_visibility(
+        self,
+        page: Any,
+        selector: str,
+        visible: bool = True,
+        timeout_ms: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Wait until element matches requested visibility state."""
+        t_ms = float(timeout_ms) if timeout_ms is not None else self.default_timeout_ms
+
+        if page is None or not selector:
+            return {
+                "selector": selector,
+                "success": False,
+                "error": "compliance : not possible. Page or selector represents None.",
+            }
+
+        try:
+            if hasattr(page, "locator"):
+                loc = page.locator(selector).first
+                if hasattr(loc, "wait_for"):
+                    loc.wait_for(state="visible" if visible else "hidden", timeout=t_ms)
+                    return {"selector": selector, "success": True, "target_state": "visible" if visible else "hidden"}
+            return {"selector": selector, "success": True, "target_state": "visible" if visible else "hidden"}
+        except Exception as exc:
+            return {"selector": selector, "success": False, "error": str(exc)}
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return operational telemetry metrics."""
+        with self._lock:
+            return {
+                "total_checks": self._total_checks,
+                "visible_count": self._visible_count,
+                "hidden_count": self._hidden_count,
+                "missing_count": self._missing_count,
+                "default_timeout_ms": self.default_timeout_ms,
+            }
+
+
+_DEFAULT_VISIBILITY_CHECKER = VisibilityChecker()
+
+
+def get_default_visibility_checker() -> VisibilityChecker:
+    """Return default singleton visibility checker engine."""
+    return _DEFAULT_VISIBILITY_CHECKER
+
+
+def reset_visibility_checker() -> None:
+    """Reset global visibility checker state."""
+    _DEFAULT_VISIBILITY_CHECKER.reset()
+
+
+def create_visibility_checker(default_timeout_ms: float = 5000.0) -> VisibilityChecker:
+    """Instantiate a new dedicated visibility checker engine."""
+    return VisibilityChecker(default_timeout_ms=default_timeout_ms)
+
 
 class PlaywrightBrowserManager:
     """Managed Playwright browser lifecycle instance with automatic cleanup."""
@@ -2391,6 +2694,7 @@ class PlaywrightBrowserManager:
         self._download_verifier = get_default_download_verifier()
         self._iframe_traversal = get_default_iframe_traversal()
         self._media_abort = get_default_media_abort()
+        self._visibility_checker = get_default_visibility_checker()
 
     def _ensure_page(self) -> Page:
         if not PLAYWRIGHT_AVAILABLE:
@@ -2694,6 +2998,53 @@ class PlaywrightBrowserManager:
         """Return list of aborted media URLs."""
         return self._media_abort.get_aborted_urls()
 
+    def check_visibility(
+        self,
+        selector: str,
+        check_viewport: bool = True,
+        check_occlusion: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Check live element visibility and layout properties."""
+        page = self._ensure_page()
+        checker = get_default_visibility_checker()
+        return checker.check_visibility(
+            page=page,
+            selector=selector,
+            check_viewport=check_viewport,
+            check_occlusion=check_occlusion,
+            **kwargs,
+        )
+
+    def wait_for_visibility(
+        self,
+        selector: str,
+        visible: bool = True,
+        timeout_ms: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Wait until element matches requested visibility state."""
+        page = self._ensure_page()
+        checker = get_default_visibility_checker()
+        return checker.wait_for_visibility(
+            page=page,
+            selector=selector,
+            visible=visible,
+            timeout_ms=timeout_ms,
+        )
+
+    def inspect_element_visibility(
+        self,
+        selector: str,
+        html_content: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Inspect element visibility in page or HTML string."""
+        checker = get_default_visibility_checker()
+        if html_content is not None:
+            return checker.inspect_html(html_content, selector)
+        page = self._ensure_page()
+        content = page.content() if hasattr(page, "content") else ""
+        return checker.inspect_html(content, selector)
+
     def close(self) -> None:
         """Close browser context and stop Playwright runner cleanly."""
         try:
@@ -2895,6 +3246,22 @@ def dispatch_browser_action(
         elif act in ("aborted_media", "aborted_urls"):
             urls = session.get_aborted_media_urls()
             return {"isError": False, "result": urls, "count": len(urls)}
+        elif act in ("check_visibility", "is_visible", "visibility"):
+            if not selector:
+                return {"isError": True, "error": "Selector required for visibility check"}
+            res = session.check_visibility(selector=selector, **kwargs)
+            return {"isError": res.get("isError", False) or not res.get("exists", False), "result": res}
+        elif act in ("wait_visibility", "wait_for_visible", "wait_for_hidden"):
+            if not selector:
+                return {"isError": True, "error": "Selector required for wait visibility action"}
+            vis_target = not ("hidden" in act)
+            res = session.wait_for_visibility(selector=selector, visible=vis_target, **kwargs)
+            return {"isError": not res.get("success", False), "result": res}
+        elif act in ("inspect_visibility", "inspect_element_visibility"):
+            if not selector:
+                return {"isError": True, "error": "Selector required for inspect visibility action"}
+            res = session.inspect_element_visibility(selector=selector, html_content=text)
+            return {"isError": not res.get("exists", False), "result": res}
         elif act in ("close", "exit", "quit"):
             close_browser_session()
             return {"isError": False, "result": "Browser session closed."}
