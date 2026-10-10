@@ -204,6 +204,10 @@ from hydra_cli.providers import (
     create_jitter_smoother,
     get_default_jitter_smoother,
     reset_jitter_smoother,
+    Utf8StreamChunker,
+    create_utf8_chunker,
+    get_default_utf8_chunker,
+    reset_utf8_chunker,
 )
 from hydra_cli.sandbox import (
     CommandInspector,
@@ -369,5 +373,9 @@ __all__ = [
     "create_jitter_smoother",
     "get_default_jitter_smoother",
     "reset_jitter_smoother",
+    "Utf8StreamChunker",
+    "create_utf8_chunker",
+    "get_default_utf8_chunker",
+    "reset_utf8_chunker",
     "__version__",
 ]

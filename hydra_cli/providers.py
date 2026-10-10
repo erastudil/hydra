@@ -3,6 +3,7 @@ Provider integrations and streaming transport for Hydra CLI.
 Supports OpenRouter, Vercel AI Gateway, Cloudflare Workers AI, and local inference.
 """
 
+import codecs
 import hashlib
 import json
 import os
@@ -4364,3 +4365,131 @@ def create_jitter_smoother(
         max_buffer=max_buffer,
         smoothing_factor=smoothing_factor,
     )
+
+
+class Utf8StreamChunker:
+    """
+    Incremental UTF-8 byte stream chunker and boundary-aligned text decoder.
+    Preserves incomplete multi-byte sequence fragments across streaming chunk boundaries.
+    """
+
+    def __init__(self, errors: str = "replace") -> None:
+        self._lock = threading.RLock()
+        self._errors = errors if errors in ("replace", "ignore", "strict", "surrogateescape") else "replace"
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors=self._errors)
+        self._buffer: bytearray = bytearray()
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_bytes_processed: int = 0
+            self._total_chars_emitted: int = 0
+            self._chunks_processed: int = 0
+            self._split_sequences_buffered: int = 0
+            self._buffer.clear()
+            self._decoder.reset()
+
+    def get_errors(self) -> str:
+        """Return configured unicode error handling strategy."""
+        with self._lock:
+            return self._errors
+
+    def feed_bytes(self, chunk: bytes, final: bool = False) -> str:
+        """Decode incoming byte chunk incrementally and return fully formed text characters."""
+        if not chunk and not final:
+            return ""
+
+        with self._lock:
+            self._chunks_processed += 1
+            self._total_bytes_processed += len(chunk)
+            self._buffer.extend(chunk)
+
+            if not final and chunk:
+                trailing_incomplete = self._detect_incomplete_suffix(self._buffer)
+                if trailing_incomplete > 0:
+                    self._split_sequences_buffered += 1
+
+            text = self._decoder.decode(chunk, final=final)
+            self._total_chars_emitted += len(text)
+            if final:
+                self._buffer.clear()
+            return text
+
+    def _detect_incomplete_suffix(self, buf: bytearray) -> int:
+        """Detect number of trailing bytes forming an incomplete multi-byte UTF-8 sequence."""
+        if not buf:
+            return 0
+        for i in range(1, min(5, len(buf) + 1)):
+            b = buf[-i]
+            if (b & 0x80) == 0:
+                return 0
+            if (b & 0xE0) == 0xC0:
+                expected = 2
+                return i if i < expected else 0
+            if (b & 0xF0) == 0xE0:
+                expected = 3
+                return i if i < expected else 0
+            if (b & 0xF8) == 0xF0:
+                expected = 4
+                return i if i < expected else 0
+        return 0
+
+    def feed_stream(
+        self,
+        byte_stream: Iterable[bytes],
+    ) -> Generator[str, None, None]:
+        """Consume byte chunk stream and yield decoded string fragments without boundary splits."""
+        for chunk in byte_stream:
+            text = self.feed_bytes(chunk, final=False)
+            if text:
+                yield text
+        final_text = self.feed_bytes(b"", final=True)
+        if final_text:
+            yield final_text
+
+    def flush(self) -> str:
+        """Flush remaining buffered bytes and return decoded characters."""
+        with self._lock:
+            return self.feed_bytes(b"", final=True)
+
+    def has_pending(self) -> bool:
+        """Return True if partial multi-byte sequence remains buffered."""
+        with self._lock:
+            return self._detect_incomplete_suffix(self._buffer) > 0
+
+    def pending_bytes_count(self) -> int:
+        """Return count of currently buffered incomplete trailing bytes."""
+        with self._lock:
+            return self._detect_incomplete_suffix(self._buffer)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            return {
+                "total_bytes_processed": self._total_bytes_processed,
+                "total_chars_emitted": self._total_chars_emitted,
+                "chunks_processed": self._chunks_processed,
+                "split_sequences_buffered": self._split_sequences_buffered,
+                "has_pending": self.has_pending(),
+                "pending_bytes_count": self.pending_bytes_count(),
+                "errors_strategy": self._errors,
+            }
+
+
+_DEFAULT_UTF8_CHUNKER = Utf8StreamChunker()
+
+
+def get_default_utf8_chunker() -> Utf8StreamChunker:
+    """Return default singleton UTF-8 stream chunker."""
+    return _DEFAULT_UTF8_CHUNKER
+
+
+def reset_utf8_chunker() -> None:
+    """Reset global UTF-8 stream chunker telemetry and buffer."""
+    _DEFAULT_UTF8_CHUNKER.reset_metrics()
+
+
+def create_utf8_chunker(errors: str = "replace") -> Utf8StreamChunker:
+    """Instantiate a new dedicated UTF-8 stream chunker."""
+    return Utf8StreamChunker(errors=errors)

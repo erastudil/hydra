@@ -8800,6 +8800,83 @@ def jitter_smoothing_contracts():
 
 
 @check
+def utf8_chunking_contracts():
+    from hydra_cli.providers import (
+        Utf8StreamChunker,
+        create_utf8_chunker,
+        get_default_utf8_chunker,
+        reset_utf8_chunker,
+    )
+    from hydra_cli import (
+        Utf8StreamChunker as RootUtf8StreamChunker,
+        create_utf8_chunker as root_create_utf8_chunker,
+        get_default_utf8_chunker as root_get_default_utf8_chunker,
+        reset_utf8_chunker as root_reset_utf8_chunker,
+    )
+
+    # 1. Re-exports parity
+    assert RootUtf8StreamChunker is Utf8StreamChunker
+    assert root_create_utf8_chunker is create_utf8_chunker
+    assert root_get_default_utf8_chunker is get_default_utf8_chunker
+    assert root_reset_utf8_chunker is reset_utf8_chunker
+
+    # 2. Split 4-byte UTF-8 sequence decoding
+    emoji_bytes = "🚀".encode("utf-8")
+    assert len(emoji_bytes) == 4
+    chunker = create_utf8_chunker()
+    part1 = chunker.feed_bytes(emoji_bytes[:2])
+    assert part1 == ""
+    assert chunker.has_pending() is True
+    assert chunker.pending_bytes_count() == 2
+
+    part2 = chunker.feed_bytes(emoji_bytes[2:])
+    assert part2 == "🚀"
+    assert chunker.has_pending() is False
+    assert chunker.pending_bytes_count() == 0
+
+    # 3. Split 3-byte UTF-8 sequence decoding
+    c_bytes = "中".encode("utf-8")
+    assert len(c_bytes) == 3
+    p1 = chunker.feed_bytes(c_bytes[:1])
+    assert p1 == ""
+    assert chunker.has_pending() is True
+    p2 = chunker.feed_bytes(c_bytes[1:])
+    assert p2 == "中"
+    assert chunker.has_pending() is False
+
+    # 4. Stream generator over fragmented bytes
+    source_text = "Hydra 🚀 sovereign multi-head engine 中文."
+    raw = source_text.encode("utf-8")
+    byte_chunks = [raw[i:i + 3] for i in range(0, len(raw), 3)]
+    decoded_pieces = list(chunker.feed_stream(byte_chunks))
+    reconstructed = "".join(decoded_pieces)
+    assert reconstructed == source_text
+
+    # 5. Flush incomplete sequence on stream termination
+    chunker.feed_bytes(b"\xc3")
+    flushed = chunker.flush()
+    assert len(flushed) == 1
+
+    # 6. Telemetry metrics and reset
+    metrics = chunker.get_metrics()
+    assert metrics["total_bytes_processed"] > 0
+    assert metrics["total_chars_emitted"] > 0
+    assert metrics["split_sequences_buffered"] >= 2
+
+    chunker.reset_metrics()
+    clean_metrics = chunker.get_metrics()
+    assert clean_metrics["total_bytes_processed"] == 0
+    assert clean_metrics["total_chars_emitted"] == 0
+    assert clean_metrics["split_sequences_buffered"] == 0
+
+    # 7. Singleton lifecycle
+    reset_utf8_chunker()
+    default_uc = get_default_utf8_chunker()
+    assert default_uc is not None
+    reset_utf8_chunker()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
