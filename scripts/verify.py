@@ -8877,6 +8877,104 @@ def utf8_chunking_contracts():
 
 
 @check
+def ttft_metrics_contracts():
+    from hydra_cli.providers import (
+        StreamTtftTracker,
+        create_ttft_tracker,
+        get_default_ttft_tracker,
+        reset_ttft_tracker,
+    )
+    from hydra_cli import (
+        StreamTtftTracker as RootStreamTtftTracker,
+        create_ttft_tracker as root_create_ttft_tracker,
+        get_default_ttft_tracker as root_get_default_ttft_tracker,
+        reset_ttft_tracker as root_reset_ttft_tracker,
+    )
+
+    # 1. Re-exports parity
+    assert RootStreamTtftTracker is StreamTtftTracker
+    assert root_create_ttft_tracker is create_ttft_tracker
+    assert root_get_default_ttft_tracker is get_default_ttft_tracker
+    assert root_reset_ttft_tracker is reset_ttft_tracker
+
+    # 2. Direct measurement recording
+    tracker = create_ttft_tracker(max_history=50)
+    sample1 = tracker.record_measurement(
+        provider="openrouter",
+        model="sonnet 5.5",
+        ttft_ms=150.0,
+        total_duration_ms=800.0,
+        token_count=45,
+    )
+    assert sample1["provider"] == "openrouter"
+    assert sample1["ttft_ms"] == 150.0
+
+    tracker.record_measurement(
+        provider="openrouter",
+        model="sonnet 5.5",
+        ttft_ms=250.0,
+        total_duration_ms=900.0,
+        token_count=50,
+    )
+    tracker.record_measurement(
+        provider="cloudflare",
+        model="qwen 3.8",
+        ttft_ms=80.0,
+        total_duration_ms=400.0,
+        token_count=30,
+    )
+
+    # 3. Statistical summary aggregates
+    stats = tracker.get_summary_statistics()
+    assert stats["count"] == 3
+    assert stats["min_ttft_ms"] == 80.0
+    assert stats["max_ttft_ms"] == 250.0
+    assert stats["mean_ttft_ms"] == 160.0
+
+    p_stats = tracker.get_summary_statistics(provider="openrouter")
+    assert p_stats["count"] == 2
+    assert p_stats["mean_ttft_ms"] == 200.0
+
+    m_stats = tracker.get_summary_statistics(model="qwen 3.8")
+    assert m_stats["count"] == 1
+    assert m_stats["mean_ttft_ms"] == 80.0
+
+    empty_stats = tracker.get_summary_statistics(provider="nonexistent")
+    assert empty_stats["count"] == 0
+
+    # 4. Stream wrapper telemetry tracking with deterministic clock
+    clock_times = [100.0, 100.25, 100.35, 100.80]
+    tokens = ["First", "Second", "Third"]
+    wrapped = list(tracker.wrap_stream(
+        tokens,
+        provider="mock_p",
+        model="mock_m",
+        clock_fn=lambda: clock_times.pop(0) if clock_times else 101.0,
+    ))
+    assert wrapped == ["First", "Second", "Third"]
+
+    mock_stats = tracker.get_summary_statistics(provider="mock_p")
+    assert mock_stats["count"] == 1
+    assert mock_stats["mean_ttft_ms"] == 250.0
+
+    # 5. Telemetry metrics and reset
+    metrics = tracker.get_metrics()
+    assert metrics["total_sessions_tracked"] == 4
+    assert metrics["sample_history_size"] == 4
+
+    tracker.reset_metrics()
+    clean_metrics = tracker.get_metrics()
+    assert clean_metrics["total_sessions_tracked"] == 0
+    assert clean_metrics["sample_history_size"] == 0
+
+    # 6. Singleton lifecycle
+    reset_ttft_tracker()
+    default_ttft = get_default_ttft_tracker()
+    assert default_ttft is not None
+    reset_ttft_tracker()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

@@ -4493,3 +4493,146 @@ def reset_utf8_chunker() -> None:
 def create_utf8_chunker(errors: str = "replace") -> Utf8StreamChunker:
     """Instantiate a new dedicated UTF-8 stream chunker."""
     return Utf8StreamChunker(errors=errors)
+
+
+class StreamTtftTracker:
+    """
+    Time to first token latency and generation throughput telemetry recorder for Hydra inference.
+    Monitors latency from request dispatch to initial token arrival across providers and models.
+    """
+
+    def __init__(self, max_history: int = 1000) -> None:
+        self._lock = threading.RLock()
+        self._max_history = max(10, int(max_history))
+        self._samples: List[Dict[str, Any]] = []
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_sessions_tracked: int = 0
+            self._samples.clear()
+
+    def record_measurement(
+        self,
+        provider: str,
+        model: str,
+        ttft_ms: float,
+        total_duration_ms: Optional[float] = None,
+        token_count: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Record completed TTFT sample with optional generation duration and token count."""
+        with self._lock:
+            self._total_sessions_tracked += 1
+            sample = {
+                "provider": provider.strip().lower(),
+                "model": model.strip().lower(),
+                "ttft_ms": max(0.0, float(ttft_ms)),
+                "total_duration_ms": max(0.0, float(total_duration_ms)) if total_duration_ms is not None else None,
+                "token_count": max(0, int(token_count)) if token_count is not None else None,
+            }
+            self._samples.append(sample)
+            if len(self._samples) > self._max_history:
+                self._samples.pop(0)
+            return sample
+
+    def wrap_stream(
+        self,
+        token_stream: Iterable[str],
+        provider: str = "default",
+        model: str = "default",
+        start_time: Optional[float] = None,
+        clock_fn: Optional[Callable[[], float]] = None,
+    ) -> Generator[str, None, None]:
+        """Wrap streaming token generator to measure TTFT and generation duration transparently."""
+        timer = clock_fn if clock_fn is not None else time.time
+        t_start = start_time if start_time is not None else timer()
+        t_first: Optional[float] = None
+        token_count = 0
+
+        for chunk in token_stream:
+            if t_first is None:
+                t_first = timer()
+                ttft_ms = (t_first - t_start) * 1000.0
+            token_count += 1
+            yield chunk
+
+        t_end = timer()
+        if t_first is not None:
+            ttft_ms = (t_first - t_start) * 1000.0
+            total_duration_ms = (t_end - t_start) * 1000.0
+            self.record_measurement(
+                provider=provider,
+                model=model,
+                ttft_ms=ttft_ms,
+                total_duration_ms=total_duration_ms,
+                token_count=token_count,
+            )
+
+    def get_summary_statistics(
+        self,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Calculate statistical aggregates for recorded TTFT samples."""
+        with self._lock:
+            filtered = self._samples
+            if provider:
+                p_key = provider.strip().lower()
+                filtered = [s for s in filtered if s["provider"] == p_key]
+            if model:
+                m_key = model.strip().lower()
+                filtered = [s for s in filtered if s["model"] == m_key]
+
+            if not filtered:
+                return {
+                    "count": 0,
+                    "mean_ttft_ms": 0.0,
+                    "min_ttft_ms": 0.0,
+                    "max_ttft_ms": 0.0,
+                    "p50_ttft_ms": 0.0,
+                    "p95_ttft_ms": 0.0,
+                }
+
+            ttft_values = sorted(s["ttft_ms"] for s in filtered)
+            n = len(ttft_values)
+            mean_val = sum(ttft_values) / n
+            p50_idx = int(0.50 * (n - 1))
+            p95_idx = int(0.95 * (n - 1))
+
+            return {
+                "count": n,
+                "mean_ttft_ms": round(mean_val, 2),
+                "min_ttft_ms": round(ttft_values[0], 2),
+                "max_ttft_ms": round(ttft_values[-1], 2),
+                "p50_ttft_ms": round(ttft_values[p50_idx], 2),
+                "p95_ttft_ms": round(ttft_values[p95_idx], 2),
+            }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            stats = self.get_summary_statistics()
+            return {
+                "total_sessions_tracked": self._total_sessions_tracked,
+                "sample_history_size": len(self._samples),
+                "stats": stats,
+            }
+
+
+_DEFAULT_TTFT_TRACKER = StreamTtftTracker()
+
+
+def get_default_ttft_tracker() -> StreamTtftTracker:
+    """Return default singleton TTFT telemetry tracker."""
+    return _DEFAULT_TTFT_TRACKER
+
+
+def reset_ttft_tracker() -> None:
+    """Reset global TTFT tracker telemetry."""
+    _DEFAULT_TTFT_TRACKER.reset_metrics()
+
+
+def create_ttft_tracker(max_history: int = 1000) -> StreamTtftTracker:
+    """Instantiate a new dedicated stream TTFT tracker."""
+    return StreamTtftTracker(max_history=max_history)
