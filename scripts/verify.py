@@ -8237,6 +8237,75 @@ def shortcut_registry_contracts():
 
 
 @check
+def repl_fuzzy_search_contracts():
+    from hydra_cli.repl import (
+        ReplFuzzySearch,
+        create_repl_fuzzy_search,
+        get_default_repl_fuzzy_search,
+        reset_repl_fuzzy_search,
+        ReplSession,
+    )
+    from hydra_cli import (
+        ReplFuzzySearch as RootReplFuzzySearch,
+        create_repl_fuzzy_search as root_create_repl_fuzzy_search,
+    )
+
+    # 1. Re-exports parity
+    assert RootReplFuzzySearch is ReplFuzzySearch
+    assert root_create_repl_fuzzy_search is create_repl_fuzzy_search
+
+    # 2. Similarity scoring tiers
+    fs = create_repl_fuzzy_search()
+    assert fs.fuzzy_score("sonnet", "sonnet 5.5") > 80.0
+    assert fs.fuzzy_score("sonnet 5.5", "sonnet 5.5") == 100.0
+    assert fs.fuzzy_score("snt", "sonnet") >= 40.0
+    assert fs.fuzzy_score("xyz", "sonnet") == 0.0
+    assert fs.fuzzy_score("", "anything") == 100.0
+    assert fs.fuzzy_score("pattern", "") == 0.0
+
+    # 3. Search and ranking
+    candidates = ["sonnet 5.5", "opus 5.5", "gpt 6.1 sol", "haiku 4.5", "flash 2.5"]
+    res = fs.search("son", candidates)
+    assert len(res) >= 1
+    assert res[0][0] == "sonnet 5.5"
+
+    best = fs.find_best("opuss 5.5", candidates, min_score=50.0)
+    assert best == "opus 5.5"
+
+    best_none = fs.find_best("unrelated string", candidates, min_score=95.0)
+    assert best_none is None
+
+    # 4. Domain searches
+    model_res = fs.search_models("sonnet")
+    assert len(model_res) >= 1
+    assert any("sonnet" in r[0] for r in model_res)
+
+    cmd_res = fs.search_commands("/mod")
+    assert len(cmd_res) >= 1
+    assert any("/model" in r[0] for r in cmd_res)
+
+    # 5. Session integration
+    session = ReplSession()
+    assert hasattr(session, "fuzzy_search")
+    assert isinstance(session.fuzzy_search, ReplFuzzySearch)
+
+    # 6. Metrics and reset
+    metrics = fs.get_metrics()
+    assert metrics["total_searches"] >= 4
+    assert metrics["matched_searches"] >= 3
+
+    fs.reset_metrics()
+    clean_metrics = fs.get_metrics()
+    assert clean_metrics["total_searches"] == 0
+    assert clean_metrics["matched_searches"] == 0
+
+    reset_repl_fuzzy_search()
+    default_fs = get_default_repl_fuzzy_search()
+    assert default_fs is not None
+    reset_repl_fuzzy_search()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

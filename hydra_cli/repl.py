@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+import difflib
 import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -416,6 +417,169 @@ def create_shortcut_registry(
     return ShortcutRegistry(initial_shortcuts=initial_shortcuts)
 
 
+
+class ReplFuzzySearch:
+    """
+    Fuzzy string search and similarity scoring engine for Hydra REPL.
+    Evaluates prefix, substring, subsequence, and distance metrics for model aliases and commands.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_searches: int = 0
+            self._matched_searches: int = 0
+            self._last_pattern: str = ""
+            self._last_best_match: str = ""
+
+    def fuzzy_score(self, pattern: str, target: str) -> float:
+        """Calculate fuzzy similarity score between 0.0 and 100.0."""
+        p = pattern.strip().lower()
+        t = target.strip().lower()
+
+        if not p:
+            return 100.0
+        if not t:
+            return 0.0
+        if p == t:
+            return 100.0
+
+        if t.startswith(p):
+            ratio = len(p) / len(t)
+            return round(80.0 + (ratio * 20.0), 2)
+
+        words = t.split()
+        if any(w.startswith(p) for w in words):
+            return 75.0
+
+        if p in t:
+            ratio = len(p) / len(t)
+            return round(60.0 + (ratio * 20.0), 2)
+
+        p_idx = 0
+        p_len = len(p)
+        matched_chars = 0
+        for char in t:
+            if p_idx < p_len and char == p[p_idx]:
+                p_idx += 1
+                matched_chars += 1
+
+        if p_idx == p_len:
+            subseq_ratio = matched_chars / len(t)
+            return round(40.0 + (subseq_ratio * 20.0), 2)
+
+        matcher = difflib.SequenceMatcher(None, p, t)
+        sim = matcher.ratio()
+        if sim >= 0.5:
+            return round(sim * 100.0, 2)
+
+        common = set(p) & set(t)
+        if common:
+            overlap = len(common) / max(len(set(p)), len(set(t)))
+            return round(overlap * 30.0, 2)
+
+        return 0.0
+
+    def search(
+        self,
+        pattern: str,
+        candidates: Sequence[str],
+        limit: Optional[int] = None,
+        min_score: float = 30.0,
+    ) -> List[Tuple[str, float]]:
+        """Rank candidates against pattern by descending fuzzy similarity score."""
+        with self._lock:
+            self._total_searches += 1
+            self._last_pattern = pattern
+
+        scored: List[Tuple[str, float]] = []
+        for cand in candidates:
+            sc = self.fuzzy_score(pattern, cand)
+            if sc >= min_score:
+                scored.append((cand, sc))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        if limit is not None and limit > 0:
+            scored = scored[:limit]
+
+        if scored:
+            with self._lock:
+                self._matched_searches += 1
+                self._last_best_match = scored[0][0]
+
+        return scored
+
+    def find_best(
+        self,
+        pattern: str,
+        candidates: Sequence[str],
+        min_score: float = 30.0,
+    ) -> Optional[str]:
+        """Return single highest scoring candidate exceeding minimum score."""
+        results = self.search(pattern, candidates, limit=1, min_score=min_score)
+        if results:
+            return results[0][0]
+        return None
+
+    def search_models(self, pattern: str, limit: Optional[int] = 5) -> List[Tuple[str, float]]:
+        """Search registered model aliases matching pattern."""
+        candidates = list(MODEL_MAP.keys())
+        return self.search(pattern, candidates, limit=limit, min_score=25.0)
+
+    def search_commands(
+        self,
+        pattern: str,
+        commands: Optional[Sequence[str]] = None,
+        limit: Optional[int] = 5,
+    ) -> List[Tuple[str, float]]:
+        """Search available slash commands matching pattern."""
+        cmds = commands or [
+            "/model",
+            "/effort",
+            "/system",
+            "/status",
+            "/models",
+            "/banner",
+            "/clear",
+            "/quit",
+            "/help",
+            "/shortcuts",
+        ]
+        return self.search(pattern, cmds, limit=limit, min_score=25.0)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return search telemetry counters."""
+        with self._lock:
+            return {
+                "total_searches": self._total_searches,
+                "matched_searches": self._matched_searches,
+                "last_pattern": self._last_pattern,
+                "last_best_match": self._last_best_match,
+            }
+
+
+_DEFAULT_REPL_FUZZY_SEARCH = ReplFuzzySearch()
+
+
+def get_default_repl_fuzzy_search() -> ReplFuzzySearch:
+    """Return default singleton fuzzy search engine."""
+    return _DEFAULT_REPL_FUZZY_SEARCH
+
+
+def reset_repl_fuzzy_search() -> None:
+    """Reset global fuzzy search engine telemetry."""
+    _DEFAULT_REPL_FUZZY_SEARCH.reset_metrics()
+
+
+def create_repl_fuzzy_search() -> ReplFuzzySearch:
+    """Instantiate a new dedicated fuzzy search engine."""
+    return ReplFuzzySearch()
+
+
 class ReplSession:
     def __init__(self) -> None:
         self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "sonnet 5.5").strip() or "sonnet 5.5"
@@ -424,6 +588,7 @@ class ReplSession:
         self.reasoning_mode: Optional[str] = None
         self.hints: ReplParameterHints = get_default_repl_parameter_hints()
         self.shortcuts: ShortcutRegistry = get_default_shortcut_registry()
+        self.fuzzy_search: ReplFuzzySearch = get_default_repl_fuzzy_search()
         route = resolve_route(self.alias)
         if route.get("effort"):
             self.effort = route["effort"]
