@@ -8032,6 +8032,117 @@ def status_assert_contracts():
 
 
 @check
+def repl_parameter_hints_contracts():
+    from hydra_cli.repl import (
+        COMMAND_HINTS,
+        ReplParameterHints,
+        ReplSession,
+        create_repl_parameter_hints,
+        get_default_repl_parameter_hints,
+        reset_repl_parameter_hints,
+    )
+    from hydra_cli import (
+        ReplParameterHints as RootReplParameterHints,
+        create_repl_parameter_hints as root_create_repl_parameter_hints,
+    )
+
+    # 1. Re-exports parity
+    assert RootReplParameterHints is ReplParameterHints
+    assert root_create_repl_parameter_hints is create_repl_parameter_hints
+
+    # 2. Command hints dictionary structure
+    assert "/model" in COMMAND_HINTS
+    assert "/effort" in COMMAND_HINTS
+    assert "/system" in COMMAND_HINTS
+    assert "/models" in COMMAND_HINTS
+    assert "/banner" in COMMAND_HINTS
+    assert "/status" in COMMAND_HINTS
+    assert "/clear" in COMMAND_HINTS
+    assert "/quit" in COMMAND_HINTS
+
+    assert COMMAND_HINTS["/model"]["parameter"] == "<alias>"
+    assert COMMAND_HINTS["/effort"]["parameter"] == "<level>"
+
+    # 3. Hint resolution on commands and arguments
+    hints = create_repl_parameter_hints()
+    h_effort = hints.get_hint("/effort")
+    assert h_effort is not None
+    assert h_effort["command"] == "/effort"
+    assert h_effort["parameter"] == "<level>"
+    assert "medium" in h_effort["choices"]
+    assert h_effort["has_arg"] is False
+
+    h_effort_arg = hints.get_hint("/effort med")
+    assert h_effort_arg is not None
+    assert h_effort_arg["choices"] == ["medium"]
+    assert h_effort_arg["has_arg"] is True
+
+    h_model = hints.get_hint("/model son")
+    assert h_model is not None
+    assert any("sonnet" in c for c in h_model["choices"])
+
+    h_non_slash = hints.get_hint("hello world")
+    assert h_non_slash is None
+
+    h_unknown = hints.get_hint("/unknowncmd")
+    assert h_unknown is None
+
+    # 4. Suggestions matching
+    sug_effort = hints.get_arg_suggestions("/effort", "h")
+    assert "high" in sug_effort
+    assert "low" not in sug_effort
+
+    sug_empty = hints.get_arg_suggestions("/effort")
+    assert len(sug_empty) >= 5
+
+    sug_unknown = hints.get_arg_suggestions("/nonexistent")
+    assert sug_unknown == []
+
+    # 5. Inline ghost text formatting
+    inline_effort = hints.format_inline_hint("/effort")
+    assert inline_effort == " <level>"
+
+    inline_effort_partial = hints.format_inline_hint("/effort med")
+    assert inline_effort_partial == "ium"
+
+    inline_none = hints.format_inline_hint("plain text")
+    assert inline_none == ""
+
+    # 6. Custom hint registration
+    hints.register_hint(
+        command="/custom",
+        parameter="<foo>",
+        hint_text="custom parameter",
+        choices=["alpha", "beta", "gamma"],
+        description="Custom registered command",
+    )
+    h_custom = hints.get_hint("/custom alp")
+    assert h_custom is not None
+    assert h_custom["choices"] == ["alpha"]
+
+    # 7. Session integration
+    session = ReplSession()
+    assert hasattr(session, "hints")
+    assert isinstance(session.hints, ReplParameterHints)
+
+    # 8. Metrics and lifecycle
+    metrics = hints.get_metrics()
+    assert metrics["total_queries"] >= 6
+    assert metrics["matched_queries"] >= 4
+    assert metrics["registered_commands"] >= 9
+
+    hints.reset_metrics()
+    clean_metrics = hints.get_metrics()
+    assert clean_metrics["total_queries"] == 0
+    assert clean_metrics["matched_queries"] == 0
+
+    reset_repl_parameter_hints()
+    default_hints = get_default_repl_parameter_hints()
+    assert default_hints is not None
+    reset_repl_parameter_hints()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

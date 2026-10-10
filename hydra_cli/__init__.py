@@ -67,6 +67,15 @@ Hydra — Sovereign Multi-Headed AI Summoning CLI
 from hydra_cli._version import __version__
 __author__ = "erastudil"
 
+from hydra_cli.repl import (
+    COMMAND_HINTS,
+    ReplParameterHints,
+    ReplSession,
+    create_repl_parameter_hints,
+    get_default_repl_parameter_hints,
+    reset_repl_parameter_hints,
+    run_repl,
+)
 from hydra_cli.agent import (
     DEFAULT_AGENT_SYSTEM_PROMPT,
     HierarchicalScratchpad,

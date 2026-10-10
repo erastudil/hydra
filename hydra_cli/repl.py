@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import List, Optional, Tuple
+import threading
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from hydra_cli import __version__
 from hydra_cli.config import DEFAULT_SYSTEM_PROMPT, MODEL_MAP, resolve_route
@@ -32,12 +33,254 @@ Anything else is sent to the active model as a prompt.
 """.strip()
 
 
+
+COMMAND_HINTS: Dict[str, Dict[str, Any]] = {
+    "/model": {
+        "parameter": "<alias>",
+        "hint_text": "alias from registered models",
+        "description": "Switch active model alias",
+        "choices": [
+            "sonnet 5.5",
+            "opus 5.5",
+            "gpt 6.1 sol",
+            "flash 2.5",
+            "haiku 4.5",
+            "gemini 2.5 flash",
+            "claude 3.7 sonnet",
+        ],
+    },
+    "/effort": {
+        "parameter": "<level>",
+        "hint_text": "low | medium | high | xhigh | max | none",
+        "description": "Set reasoning effort level",
+        "choices": ["low", "medium", "high", "xhigh", "max", "none", "off", "clear"],
+    },
+    "/system": {
+        "parameter": "<text>",
+        "hint_text": "system prompt string",
+        "description": "Set system prompt for this session",
+        "choices": [],
+    },
+    "/models": {
+        "parameter": "[--verbose]",
+        "hint_text": "--verbose | --show-ids",
+        "description": "List registered models and aliases",
+        "choices": ["--verbose", "--show-ids", "-V"],
+    },
+    "/banner": {
+        "parameter": "",
+        "hint_text": "",
+        "description": "Reprint TUI splash banner",
+        "choices": [],
+    },
+    "/status": {
+        "parameter": "",
+        "hint_text": "",
+        "description": "Show session model, effort, and system prompt",
+        "choices": [],
+    },
+    "/clear": {
+        "parameter": "",
+        "hint_text": "",
+        "description": "Clear screen buffer",
+        "choices": [],
+    },
+    "/quit": {
+        "parameter": "",
+        "hint_text": "",
+        "description": "Leave REPL session",
+        "choices": [],
+    },
+    "/exit": {
+        "parameter": "",
+        "hint_text": "",
+        "description": "Leave REPL session",
+        "choices": [],
+    },
+    "/q": {
+        "parameter": "",
+        "hint_text": "",
+        "description": "Leave REPL session",
+        "choices": [],
+    },
+    "/help": {
+        "parameter": "",
+        "hint_text": "",
+        "description": "Display help message",
+        "choices": [],
+    },
+}
+
+
+class ReplParameterHints:
+    """
+    Parameter hints and command signature provider for interactive Hydra REPL.
+    Resolves slash commands, suggests parameter values, and renders inline hints.
+    """
+
+    def __init__(self, custom_hints: Optional[Dict[str, Dict[str, Any]]] = None) -> None:
+        self._lock = threading.RLock()
+        self._hints: Dict[str, Dict[str, Any]] = {k: dict(v) for k, v in COMMAND_HINTS.items()}
+        if custom_hints:
+            for cmd, data in custom_hints.items():
+                self._hints[cmd.lower()] = dict(data)
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_queries: int = 0
+            self._matched_queries: int = 0
+            self._unmatched_queries: int = 0
+            self._last_command: str = ""
+
+    def register_hint(
+        self,
+        command: str,
+        parameter: str,
+        hint_text: str,
+        choices: Optional[List[str]] = None,
+        description: str = "",
+    ) -> None:
+        """Register or override slash command parameter hint specification."""
+        cmd = command.strip().lower()
+        if not cmd.startswith("/"):
+            cmd = "/" + cmd
+        with self._lock:
+            self._hints[cmd] = {
+                "parameter": parameter.strip(),
+                "hint_text": hint_text.strip(),
+                "description": description.strip(),
+                "choices": list(choices or []),
+            }
+
+    def get_hint(self, line: str) -> Optional[Dict[str, Any]]:
+        """Resolve parameter hint for given REPL input buffer."""
+        clean = line.strip()
+        with self._lock:
+            self._total_queries += 1
+
+        if not clean.startswith("/"):
+            with self._lock:
+                self._unmatched_queries += 1
+            return None
+
+        parts = clean.split(maxsplit=1)
+        cmd = parts[0].lower()
+        arg_part = parts[1] if len(parts) > 1 else ""
+
+        with self._lock:
+            spec = self._hints.get(cmd)
+
+        if spec is None:
+            with self._lock:
+                matching_cmds = [c for c in self._hints if c.startswith(cmd)]
+            if len(matching_cmds) == 1:
+                cmd = matching_cmds[0]
+                with self._lock:
+                    spec = self._hints.get(cmd)
+
+        if spec is None:
+            with self._lock:
+                self._unmatched_queries += 1
+            return None
+
+        all_choices = spec.get("choices", [])
+        if arg_part and all_choices:
+            arg_lower = arg_part.lower()
+            filtered_choices = [c for c in all_choices if c.lower().startswith(arg_lower)]
+        else:
+            filtered_choices = list(all_choices)
+
+        with self._lock:
+            self._matched_queries += 1
+            self._last_command = cmd
+
+        return {
+            "command": cmd,
+            "parameter": spec.get("parameter", ""),
+            "hint_text": spec.get("hint_text", ""),
+            "description": spec.get("description", ""),
+            "choices": filtered_choices,
+            "has_arg": bool(arg_part),
+        }
+
+    def get_arg_suggestions(self, command: str, prefix: str = "") -> List[str]:
+        """Return valid completion suggestions matching argument prefix."""
+        cmd = command.strip().lower()
+        if not cmd.startswith("/"):
+            cmd = "/" + cmd
+        with self._lock:
+            spec = self._hints.get(cmd)
+        if not spec:
+            return []
+        choices = spec.get("choices", [])
+        if not prefix:
+            return list(choices)
+        pref_l = prefix.lower()
+        return [c for c in choices if c.lower().startswith(pref_l)]
+
+    def format_inline_hint(self, line: str) -> str:
+        """Render inline ghost text hint for input line."""
+        clean = line.strip()
+        if not clean.startswith("/"):
+            return ""
+        hint = self.get_hint(clean)
+        if not hint:
+            return ""
+        param = hint.get("parameter", "")
+        if not param:
+            return ""
+        if hint.get("has_arg") and hint.get("choices"):
+            first_match = hint["choices"][0]
+            parts = clean.split(maxsplit=1)
+            cur_arg = parts[1] if len(parts) > 1 else ""
+            if len(first_match) > len(cur_arg):
+                return first_match[len(cur_arg):]
+            return ""
+        if not hint.get("has_arg"):
+            return f" {param}"
+        return ""
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            return {
+                "total_queries": self._total_queries,
+                "matched_queries": self._matched_queries,
+                "unmatched_queries": self._unmatched_queries,
+                "last_command": self._last_command,
+                "registered_commands": len(self._hints),
+            }
+
+
+_DEFAULT_REPL_PARAMETER_HINTS = ReplParameterHints()
+
+
+def get_default_repl_parameter_hints() -> ReplParameterHints:
+    """Return default singleton parameter hint provider."""
+    return _DEFAULT_REPL_PARAMETER_HINTS
+
+
+def reset_repl_parameter_hints() -> None:
+    """Reset global parameter hint provider telemetry."""
+    _DEFAULT_REPL_PARAMETER_HINTS.reset_metrics()
+
+
+def create_repl_parameter_hints(
+    custom_hints: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> ReplParameterHints:
+    """Instantiate a new dedicated parameter hint provider."""
+    return ReplParameterHints(custom_hints=custom_hints)
+
+
 class ReplSession:
     def __init__(self) -> None:
         self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "sonnet 5.5").strip() or "sonnet 5.5"
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.effort: Optional[str] = None
         self.reasoning_mode: Optional[str] = None
+        self.hints: ReplParameterHints = get_default_repl_parameter_hints()
         route = resolve_route(self.alias)
         if route.get("effort"):
             self.effort = route["effort"]
