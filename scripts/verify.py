@@ -9776,11 +9776,85 @@ def desktop_resilience_and_token_accounting_contracts():
 
 
 @check
+def desktop_tool_presets_and_markdown_report_contracts():
+    from hydra_cli.agent_runner import (
+        AutonomousAgentRunner,
+        TOOL_PROFILES,
+        is_tool_allowed_under_profile,
+        generate_markdown_report,
+    )
+    from hydra_cli.desktop import (
+        COMMAND_PALETTE_ACTIONS,
+        dispatch_command_palette_action,
+    )
+
+    # 1. Preset tool profile filtering
+    runner = AutonomousAgentRunner(tool_profile="browser_only")
+    assert runner.tool_profile == "browser_only"
+
+    # Browser allowed
+    res_b = runner.execute_step("browser_inspect", selector="body")
+    assert not res_b.get("profile_violation")
+
+    # OS blocked
+    res_os = runner.execute_step("mouse_click", x=10, y=10)
+    assert res_os.get("profile_violation") is True
+
+    # Workspace blocked under browser_only
+    res_ws = runner.execute_step("read_file", path="README.md")
+    assert res_ws.get("profile_violation") is True
+
+    # Workspace-only allows workspace and blocks browser/OS
+    runner.set_tool_profile("workspace_only")
+    res_ws_ok = runner.execute_step("read_file", path="README.md")
+    assert not res_ws_ok.get("profile_violation")
+    assert runner.execute_step("browser_click", selector="btn").get("profile_violation") is True
+
+    # Readonly blocks mutations
+    runner.set_tool_profile("readonly")
+    assert not runner.execute_step("read_file", path="README.md").get("profile_violation")
+    assert runner.execute_step("write_file", path="out.txt", content="payload").get("profile_violation") is True
+
+    # 2. Markdown report generation contracts
+    dummy_trace = {
+        "schema_version": "1.0.0",
+        "session_id": "trace-verify-001",
+        "timestamp": "2026-10-10T18:00:00Z",
+        "task": "Verification of markdown report",
+        "state": "completed",
+        "tool_profile": "browser_only",
+        "step_count": 2,
+        "duration_ms": 125.0,
+        "history": [
+            {"step": 1, "action": "browser_inspect", "parameters": {"selector": "body"}, "status": "success", "duration_sec": 0.05, "thought": "Check DOM"},
+            {"step": 2, "action": "mouse_click", "parameters": {"x": 10, "y": 10}, "status": "error", "error": "Profile violation", "profile_violation": True, "duration_sec": 0.01},
+        ],
+    }
+    report = generate_markdown_report(dummy_trace)
+    assert "# Hydra Agent Execution Report" in report
+    assert "## Session Overview" in report
+    assert "## Execution Trace Breakdown" in report
+    assert "## Step Details" in report
+    assert "trace-verify-001" in report
+    assert "Verification of markdown report" in report
+    assert "browser_only" in report
+    assert "**Total Actions Executed**: 2" in report
+
+    # 3. Command palette dispatch catalog
+    assert len(COMMAND_PALETTE_ACTIONS) >= 10
+    assert "agent:start" in COMMAND_PALETTE_ACTIONS
+    assert "agent:export_markdown" in COMMAND_PALETTE_ACTIONS
+
+    disp_prof = dispatch_command_palette_action("agent:set_profile", {"profile": "full"})
+    assert disp_prof.get("profile") == "full"
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

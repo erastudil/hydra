@@ -436,6 +436,28 @@ textarea:focus { border-color: var(--accent); }
   font-size: 11px;
   color: var(--text-muted);
 }
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.75);
+  backdrop-filter: blur(4px);
+  z-index: 99999;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 15vh;
+}
+.palette-container {
+  background: #0f172a;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  width: 620px;
+  max-width: 90vw;
+  box-shadow: 0 12px 35px rgba(0,0,0,0.85);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
 </style>
 </head>
 <body>
@@ -470,6 +492,7 @@ textarea:focus { border-color: var(--accent); }
       <option value="local">Offline Local (Ollama)</option>
     </select>
     <button class="secondary" onclick="clearMessages()">Clear</button>
+    <button class="secondary" id="btn-command-palette" onclick="openCommandPalette()" title="Command Palette (Ctrl+K)">⌘K Palette</button>
   </div>
 </header>
 <div class="session-bar" id="session-bar">
@@ -553,13 +576,20 @@ textarea:focus { border-color: var(--accent); }
           <span id="agent-status-badge" class="badge" style="background: #374151;">IDLE</span>
         </div>
         <textarea id="agent-task-input" style="width: 100%; min-height: 60px; background: #0b0f17; border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); padding: 8px; font-family: inherit; font-size: 12px; resize: vertical;" placeholder="Enter autonomous task (e.g. 'Navigate to data:... and extract table')..."></textarea>
-        <div style="display: flex; gap: 6px; align-items: center;">
+        <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
           <input type="number" id="agent-max-steps" value="30" min="1" max="100" style="width: 50px; background: #0b0f17; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 4px 6px; font-size: 11px;" title="Max Steps" />
-          <button class="primary" style="flex: 1; padding: 6px 10px; font-size: 12px;" onclick="startAgentTask()">Start Agent</button>
+          <select id="agent-tool-profile" style="background: #0b0f17; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 4px 6px; font-size: 11px;" title="Tool Preset Profile" onchange="updateAgentToolProfile(this.value)">
+            <option value="full_automation" selected>Full Automation</option>
+            <option value="browser_only">Browser Only</option>
+            <option value="workspace_only">Workspace Only</option>
+            <option value="minimal">Minimal (Read-Only)</option>
+          </select>
+          <button class="primary" style="flex: 1; min-width: 80px; padding: 6px 10px; font-size: 12px;" onclick="startAgentTask()">Start Agent</button>
           <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="pauseAgentTask()" id="btn-agent-pause">Pause</button>
           <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="resumeAgentTask()" id="btn-agent-resume">Resume</button>
           <button class="secondary" style="padding: 6px 8px; font-size: 12px; color: var(--error);" onclick="abortAgentTask()" id="btn-agent-abort">Abort</button>
           <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="exportAgentTrace()" id="btn-agent-export">Export Trace</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="exportAgentMarkdown()" id="btn-agent-export-markdown">Export Markdown</button>
         </div>
         <div style="background: #1f2937; border-radius: 4px; height: 6px; width: 100%; overflow: hidden; margin-top: 4px;">
           <div id="agent-progress-bar" style="background: var(--accent); width: 0%; height: 100%; transition: width 0.3s;"></div>
@@ -573,6 +603,22 @@ textarea:focus { border-color: var(--accent); }
           <div style="font-size: 11px; color: var(--text-muted); font-style: italic;">No active agent execution trace. Enter task and start runner.</div>
         </div>
       </div>
+    </div>
+  </div>
+</div>
+<!-- Command Palette Modal -->
+<div id="command-palette-modal" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 99999; justify-content: center; align-items: flex-start; padding-top: 15vh;" onclick="handlePaletteBackdropClick(event)">
+  <div class="palette-container" style="background: #0f172a; border: 1px solid var(--accent); border-radius: 8px; width: 620px; max-width: 90vw; box-shadow: 0 12px 35px rgba(0,0,0,0.85); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
+    <div style="display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); gap: 10px; background: #111827;">
+      <span style="color: var(--accent); font-weight: 700; font-size: 14px;">⌘</span>
+      <input type="text" id="palette-input" placeholder="Type a command or search quick actions... (Esc to close)" style="flex: 1; background: transparent; border: none; outline: none; color: var(--text-primary); font-size: 13px; font-family: inherit;" oninput="filterPaletteActions()" onkeydown="handlePaletteKeydown(event)" />
+      <span style="font-size: 11px; color: var(--text-muted); background: #1e293b; padding: 2px 6px; border-radius: 4px; font-family: var(--font-mono);">Esc</span>
+    </div>
+    <div id="palette-results" style="max-height: 380px; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px;">
+    </div>
+    <div style="padding: 8px 16px; background: #0b0f17; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-muted); display: flex; justify-content: space-between;">
+      <span>Use <kbd style='background:#1e293b;padding:1px 4px;border-radius:3px;'>↑</kbd> <kbd style='background:#1e293b;padding:1px 4px;border-radius:3px;'>↓</kbd> to navigate, <kbd style='background:#1e293b;padding:1px 4px;border-radius:3px;'>Enter</kbd> to select</span>
+      <span>Hydra Sovereign Command Palette</span>
     </div>
   </div>
 </div>
@@ -964,6 +1010,8 @@ async function startAgentTask() {
   if (!task) return;
   const maxSteps = parseInt(document.getElementById('agent-max-steps').value || '30', 10);
   const model = document.getElementById('model-select').value || 'sonnet 5.5';
+  const profileSel = document.getElementById('agent-tool-profile');
+  const toolProfile = profileSel ? profileSel.value : 'full_automation';
 
   const badge = document.getElementById('agent-status-badge');
   if (badge) { badge.innerText = 'STARTING'; badge.style.background = '#2563eb'; }
@@ -972,7 +1020,7 @@ async function startAgentTask() {
     const res = await fetch('/api/agent/run', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task, model, max_steps: maxSteps })
+      body: JSON.stringify({ task, model, max_steps: maxSteps, profile: toolProfile })
     });
     const data = await res.json();
     if (data.isError) {
@@ -1001,6 +1049,10 @@ async function resumeAgentTask() {
 
 function exportAgentTrace() {
   window.open('/api/agent/export?download=true', '_blank');
+}
+
+function exportAgentMarkdown() {
+  window.open('/api/agent/export/markdown?download=true', '_blank');
 }
 
 async function abortAgentTask() {
@@ -1148,6 +1200,168 @@ function initWebSocket() {
     wsReconnectTimer = setTimeout(initWebSocket, 3000);
   }
 }
+
+
+// --- Command Palette Modal & Controller ---
+let activePaletteIndex = 0;
+let filteredPaletteActions = [];
+
+const PALETTE_ACTIONS = [
+  { id: 'nav-chat', title: 'Switch to Chat View', category: 'Navigation', shortcut: 'Alt+1', run: () => switchNav('chat') },
+  { id: 'nav-terminal', title: 'Switch to Terminal Sandbox', category: 'Navigation', shortcut: 'Alt+2', run: () => switchNav('terminal') },
+  { id: 'nav-diffs', title: 'Switch to File Diff Viewer', category: 'Navigation', shortcut: 'Alt+3', run: () => { switchDrawerTab('diff'); fetchDiffs(); } },
+  { id: 'drawer-screen', title: 'Open Live Screen Drawer', category: 'Drawer', shortcut: '', run: () => switchDrawerTab('screen') },
+  { id: 'drawer-agent', title: 'Open Autonomous Agent Runner', category: 'Drawer', shortcut: '', run: () => switchDrawerTab('agent') },
+  { id: 'agent-focus', title: 'Trigger Autonomous Agent Task', category: 'Agent', shortcut: '', run: () => { switchDrawerTab('agent'); setTimeout(() => document.getElementById('agent-task-input')?.focus(), 50); } },
+  { id: 'profile-full', title: 'Switch Tool Profile: Full Automation', category: 'Tool Profile', shortcut: '', run: () => updateAgentToolProfile('full_automation') },
+  { id: 'profile-browser', title: 'Switch Tool Profile: Browser Only', category: 'Tool Profile', shortcut: '', run: () => updateAgentToolProfile('browser_only') },
+  { id: 'profile-workspace', title: 'Switch Tool Profile: Workspace Only', category: 'Tool Profile', shortcut: '', run: () => updateAgentToolProfile('workspace_only') },
+  { id: 'profile-minimal', title: 'Switch Tool Profile: Minimal (Read-Only)', category: 'Tool Profile', shortcut: '', run: () => updateAgentToolProfile('minimal') },
+  { id: 'model-sonnet', title: 'Set Model Alias: Claude Sonnet 5.5', category: 'Model', shortcut: '', run: () => setModelAlias('sonnet 5.5') },
+  { id: 'model-opus', title: 'Set Model Alias: Claude Opus 5.5', category: 'Model', shortcut: '', run: () => setModelAlias('opus 5.5') },
+  { id: 'model-sol', title: 'Set Model Alias: GPT-6.1 Sol', category: 'Model', shortcut: '', run: () => setModelAlias('sol 6.1 pro') },
+  { id: 'model-gemini', title: 'Set Model Alias: Gemini 3.8', category: 'Model', shortcut: '', run: () => setModelAlias('gemini 3.8') },
+  { id: 'export-trace', title: 'Download Session JSON Trace', category: 'Export', shortcut: '', run: () => exportAgentTrace() },
+  { id: 'export-md', title: 'Download Agent Markdown Report', category: 'Export', shortcut: '', run: () => exportAgentMarkdown() },
+  { id: 'new-session', title: 'Create New Session Tab', category: 'Session', shortcut: 'Ctrl+T', run: () => addNewSession() },
+];
+
+function setModelAlias(m) {
+  const sel = document.getElementById('model-select');
+  if (sel) sel.value = m;
+}
+
+function openCommandPalette() {
+  const modal = document.getElementById('command-palette-modal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  const inp = document.getElementById('palette-input');
+  if (inp) {
+    inp.value = '';
+    inp.focus();
+  }
+  filterPaletteActions();
+}
+
+function closeCommandPalette() {
+  const modal = document.getElementById('command-palette-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+function toggleCommandPalette() {
+  const modal = document.getElementById('command-palette-modal');
+  if (!modal) return;
+  if (modal.style.display === 'flex') {
+    closeCommandPalette();
+  } else {
+    openCommandPalette();
+  }
+}
+
+function handlePaletteBackdropClick(e) {
+  if (e.target && e.target.id === 'command-palette-modal') {
+    closeCommandPalette();
+  }
+}
+
+function filterPaletteActions() {
+  const inp = document.getElementById('palette-input');
+  const q = (inp ? inp.value : '').toLowerCase().trim();
+  if (!q) {
+    filteredPaletteActions = [...PALETTE_ACTIONS];
+  } else {
+    filteredPaletteActions = PALETTE_ACTIONS.filter(a =>
+      a.title.toLowerCase().includes(q) ||
+      a.category.toLowerCase().includes(q) ||
+      (a.shortcut && a.shortcut.toLowerCase().includes(q))
+    );
+  }
+  activePaletteIndex = 0;
+  renderPaletteActions();
+}
+
+function renderPaletteActions() {
+  const container = document.getElementById('palette-results');
+  if (!container) return;
+  if (filteredPaletteActions.length === 0) {
+    container.innerHTML = '<div style="padding: 12px; font-size: 12px; color: var(--text-muted); text-align: center;">No matching actions found</div>';
+    return;
+  }
+  container.innerHTML = filteredPaletteActions.map((a, idx) => {
+    const isSel = idx === activePaletteIndex;
+    const bg = isSel ? 'var(--accent-dim)' : 'transparent';
+    const border = isSel ? 'var(--accent)' : 'transparent';
+    return `
+      <div class="palette-item" style="display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-radius: 6px; background: ${bg}; border: 1px solid ${border}; cursor: pointer; transition: background 0.1s;" onclick="executePaletteAction(${idx})" onmouseover="highlightPaletteItem(${idx})">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 10px; font-weight: 600; text-transform: uppercase; background: #1e293b; color: var(--text-secondary); padding: 2px 6px; border-radius: 3px;">${a.category}</span>
+          <span style="font-size: 13px; color: ${isSel ? 'var(--accent)' : 'var(--text-primary)'}; font-weight: ${isSel ? '600' : '400'};">${a.title}</span>
+        </div>
+        ${a.shortcut ? `<span style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);">${a.shortcut}</span>` : ''}
+      </div>
+    `;
+  }).join('');
+}
+
+function highlightPaletteItem(idx) {
+  activePaletteIndex = idx;
+  renderPaletteActions();
+}
+
+function executePaletteAction(idx) {
+  const item = filteredPaletteActions[idx];
+  if (item && item.run) {
+    closeCommandPalette();
+    item.run();
+  }
+}
+
+function handlePaletteKeydown(e) {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (filteredPaletteActions.length > 0) {
+      activePaletteIndex = (activePaletteIndex + 1) % filteredPaletteActions.length;
+      renderPaletteActions();
+    }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (filteredPaletteActions.length > 0) {
+      activePaletteIndex = (activePaletteIndex - 1 + filteredPaletteActions.length) % filteredPaletteActions.length;
+      renderPaletteActions();
+    }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    executePaletteAction(activePaletteIndex);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeCommandPalette();
+  }
+}
+
+async function updateAgentToolProfile(profile) {
+  const sel = document.getElementById('agent-tool-profile');
+  if (sel && sel.value !== profile) {
+    sel.value = profile;
+  }
+  try {
+    const res = await fetch('/api/agent/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: profile })
+    });
+    const data = await res.json();
+    console.log('Tool profile set to:', profile, data);
+  } catch (err) {
+    console.warn('Failed to update tool profile on backend:', err);
+  }
+}
+
+window.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    toggleCommandPalette();
+  }
+});
 
 document.addEventListener('DOMContentLoaded', () => {
   initWebSocket();
@@ -1459,6 +1673,162 @@ def get_token_tracker() -> TokenTracker:
     return _TOKEN_TRACKER
 
 
+COMMAND_PALETTE_ACTIONS: Dict[str, Dict[str, Any]] = {
+    "agent:start": {
+        "id": "agent:start",
+        "title": "Start Agent ReAct Task",
+        "description": "Initialize and launch autonomous agent execution loop",
+        "category": "agent",
+        "endpoint": "/api/agent/run",
+        "method": "POST",
+    },
+    "agent:pause": {
+        "id": "agent:pause",
+        "title": "Pause Agent Task",
+        "description": "Temporarily halt active agent step dispatch",
+        "category": "agent",
+        "endpoint": "/api/agent/pause",
+        "method": "POST",
+    },
+    "agent:resume": {
+        "id": "agent:resume",
+        "title": "Resume Agent Task",
+        "description": "Resume execution of paused agent task",
+        "category": "agent",
+        "endpoint": "/api/agent/resume",
+        "method": "POST",
+    },
+    "agent:abort": {
+        "id": "agent:abort",
+        "title": "Emergency Abort Agent",
+        "description": "Immediately abort active task and stop child processes within 100ms",
+        "category": "agent",
+        "endpoint": "/api/agent/abort",
+        "method": "POST",
+    },
+    "agent:export_trace": {
+        "id": "agent:export_trace",
+        "title": "Export Session Trace (JSON)",
+        "description": "Download serialized session execution history in JSON format",
+        "category": "session",
+        "endpoint": "/api/agent/export",
+        "method": "GET",
+    },
+    "agent:export_markdown": {
+        "id": "agent:export_markdown",
+        "title": "Export Session Report (Markdown)",
+        "description": "Generate and download comprehensive markdown execution audit report",
+        "category": "session",
+        "endpoint": "/api/agent/report/markdown",
+        "method": "GET",
+    },
+    "agent:set_profile": {
+        "id": "agent:set_profile",
+        "title": "Set Tool Preset Profile",
+        "description": "Configure agent tool constraints (full, browser_only, workspace_only, readonly)",
+        "category": "agent",
+        "endpoint": "/api/agent/profile",
+        "method": "POST",
+    },
+    "screen:capture": {
+        "id": "screen:capture",
+        "title": "Capture Screen Preview",
+        "description": "Grab full screenshot from primary display",
+        "category": "screen",
+        "endpoint": "/api/computer/screen",
+        "method": "GET",
+    },
+    "terminal:execute": {
+        "id": "terminal:execute",
+        "title": "Execute Terminal Command",
+        "description": "Run sandboxed bash/powershell command",
+        "category": "terminal",
+        "endpoint": "/api/terminal/run",
+        "method": "POST",
+    },
+    "token:summary": {
+        "id": "token:summary",
+        "title": "View Token Ledger Summary",
+        "description": "Inspect cumulative token accounting and cost breakdowns across model tiers",
+        "category": "tokens",
+        "endpoint": "/api/token/accounting",
+        "method": "GET",
+    },
+    "token:reset": {
+        "id": "token:reset",
+        "title": "Reset Token Ledger",
+        "description": "Zero out recorded token counts and cost totals",
+        "category": "tokens",
+        "endpoint": "/api/token/accounting/reset",
+        "method": "POST",
+    },
+    "gateway:complete": {
+        "id": "gateway:complete",
+        "title": "Gateway Model Completion",
+        "description": "Summon model with 429 provider failover",
+        "category": "gateway",
+        "endpoint": "/api/gateway/complete",
+        "method": "POST",
+    },
+}
+
+
+def dispatch_command_palette_action(action_id: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Dispatch action by ID through the command palette dispatcher."""
+    if action_id not in COMMAND_PALETTE_ACTIONS:
+        return {"isError": True, "error": f"Unknown command palette action: {action_id}"}
+
+    action_meta = COMMAND_PALETTE_ACTIONS[action_id]
+    p = params or {}
+
+    from hydra_cli.agent_runner import get_agent_runner
+    runner = get_agent_runner()
+
+    if action_id == "agent:start":
+        task = p.get("task", "default command palette task")
+        steps = p.get("steps")
+        max_steps = int(p.get("max_steps", 15))
+        res = runner.run_task(task, steps=steps, max_steps=max_steps)
+        return {"isError": False, "dispatched": action_id, "result": res}
+    elif action_id == "agent:pause":
+        return {"isError": False, "dispatched": action_id, "result": runner.pause()}
+    elif action_id == "agent:resume":
+        return {"isError": False, "dispatched": action_id, "result": runner.resume()}
+    elif action_id == "agent:abort":
+        return {"isError": False, "dispatched": action_id, "result": runner.abort()}
+    elif action_id == "agent:export_trace":
+        return {"isError": False, "dispatched": action_id, "result": runner.export_session_trace()}
+    elif action_id == "agent:export_markdown":
+        from hydra_cli.agent_runner import generate_markdown_report
+        trace = runner.export_session_trace()
+        return {"isError": False, "dispatched": action_id, "markdown": generate_markdown_report(trace)}
+    elif action_id == "agent:set_profile":
+        prof = p.get("profile", "full")
+        runner.set_tool_profile(prof)
+        return {"isError": False, "dispatched": action_id, "profile": prof}
+    elif action_id == "token:summary":
+        return {"isError": False, "dispatched": action_id, "summary": get_token_accounting().get_summary()}
+    elif action_id == "token:reset":
+        reset_token_accounting()
+        return {"isError": False, "dispatched": action_id, "summary": get_token_accounting().get_summary()}
+    elif action_id == "screen:capture":
+        engine = get_computer_use_engine()
+        cap = engine.screen.capture(as_base64=True)
+        return {"isError": False, "dispatched": action_id, "captured": True, "data_length": len(cap)}
+    elif action_id == "terminal:execute":
+        cmd = p.get("command", "echo palette")
+        runner_sb = SandboxRunner()
+        sb_res = runner_sb.run_command(cmd)
+        return {"isError": False, "dispatched": action_id, "result": sb_res.to_dict()}
+    elif action_id == "gateway:complete":
+        m = p.get("model", "sonnet 5.5")
+        prompt = p.get("prompt", "ping")
+        gw_res = resolve_and_complete_with_fallback(m, prompt)
+        return {"isError": False, "dispatched": action_id, "result": gw_res}
+
+    return {"isError": False, "dispatched": action_id, "meta": action_meta}
+
+
 FALLBACK_CHAINS: Dict[str, List[str]] = {
     "sonnet 5.5": ["gemini 3.8", "gpt-6.1", "qwen"],
     "opus 5.5": ["sonnet 5.5", "gpt-6.1", "gemini 3.8"],
@@ -1678,6 +2048,8 @@ def create_desktop_app() -> Any:
         async_run = bool(body.get("async", False))
 
         runner = get_agent_runner()
+        if "profile" in body:
+            runner.set_tool_profile(body["profile"])
         if async_run:
             runner.run_task_async(task_description=task, steps=steps, max_steps=max_steps, timeout_sec=timeout_sec)
             return {"isError": False, "status": "running", "task": task, "async": True}
@@ -1769,6 +2141,65 @@ def create_desktop_app() -> Any:
         return res
 
 
+
+    @app.get("/api/agent/export/markdown")
+    @app.get("/api/agent/session/export/markdown")
+    @app.get("/api/agent/report/markdown")
+    @app.get("/api/session/report.md")
+    async def session_report_markdown(download: bool = False):
+        from hydra_cli.agent_runner import get_agent_runner, generate_markdown_report
+        runner = get_agent_runner()
+        trace = runner.export_session_trace()
+        md_content = generate_markdown_report(trace)
+        if download:
+            filename = f"agent-session-report-{int(time.time())}.md"
+            return Response(
+                md_content,
+                media_type="text/markdown",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        return Response(md_content, media_type="text/markdown")
+
+    @app.get("/api/agent/profiles")
+    async def get_agent_profiles():
+        from hydra_cli.agent_runner import TOOL_PROFILES, get_agent_runner
+        runner = get_agent_runner()
+        return {
+            "isError": False,
+            "current_profile": getattr(runner, "tool_profile", "full"),
+            "profiles": TOOL_PROFILES,
+        }
+
+    @app.post("/api/agent/profile")
+    async def set_agent_profile(req: Request):
+        from hydra_cli.agent_runner import get_agent_runner
+        body = await req.json()
+        profile = body.get("profile", "full")
+        runner = get_agent_runner()
+        runner.set_tool_profile(profile)
+        return {
+            "isError": False,
+            "profile": runner.tool_profile,
+            "status": "profile_updated",
+        }
+
+    @app.get("/api/palette/actions")
+    async def get_palette_actions():
+        return {
+            "isError": False,
+            "count": len(COMMAND_PALETTE_ACTIONS),
+            "actions": list(COMMAND_PALETTE_ACTIONS.values()),
+            "catalog": COMMAND_PALETTE_ACTIONS,
+        }
+
+    @app.post("/api/palette/dispatch")
+    async def dispatch_palette_action(req: Request):
+        body = await req.json()
+        action_id = body.get("action", "")
+        params = body.get("params") or {}
+        res = dispatch_command_palette_action(action_id, params)
+        status_code = 400 if res.get("isError") else 200
+        return JSONResponse(res, status_code=status_code)
 
     @app.get("/api/token/accounting")
     async def get_token_accounting_summary():
@@ -2009,6 +2440,17 @@ def create_desktop_app() -> Any:
                     elif action == "token_accounting":
                         ledger = get_token_accounting()
                         await ws.send_text(json.dumps({"event": "token_accounting", "data": ledger.get_summary()}))
+                    elif action == "set_profile":
+                        p = payload.get("profile") or payload.get("tool_profile", "full_automation")
+                        res = runner.set_tool_profile(p)
+                        await ws.send_text(json.dumps({"event": "profile_updated", "data": res}))
+                    elif action == "get_profiles":
+                        from hydra_cli.agent_runner import TOOL_PROFILES
+                        await ws.send_text(json.dumps({
+                            "event": "profiles_catalog",
+                            "active": runner.get_tool_profile(),
+                            "profiles": list(TOOL_PROFILES.keys()),
+                        }))
                 except Exception as inner_exc:
                     await ws.send_text(json.dumps({"event": "error", "message": str(inner_exc)}))
         except WebSocketDisconnect:

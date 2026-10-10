@@ -66,6 +66,11 @@ def run_checks() -> int:
         "initWebSocket",
         "calculateViewportScale",
         "token-tally",
+        "agent-tool-profile",
+        "btn-agent-export-markdown",
+        "command-palette-modal",
+        "palette-input",
+        "openCommandPalette",
         "/api/agent/export",
         "/api/agent/run",
     ]
@@ -98,6 +103,11 @@ def run_checks() -> int:
         "/api/coordinates/scale",
         "/api/usage",
         "/api/token/accounting",
+        "/api/agent/export/markdown",
+        "/api/agent/profiles",
+        "/api/agent/profile",
+        "/api/palette/actions",
+        "/api/palette/dispatch",
         "/v1/models",
         "/v1/chat/completions",
     ]
@@ -212,7 +222,43 @@ def run_checks() -> int:
             print("error : websocket heartbeat failed.\n")
             return 1
 
-    print("endpoint execution verification : status, diffs, screen, agent, export, token accounting, and websocket heartbeat functioning deterministically.\n")
+    # Tool profiles endpoint check
+    prof_res = client.get("/api/agent/profiles")
+    if prof_res.status_code != 200 or "full_automation" not in prof_res.json().get("profiles", {}):
+        print("error : /api/agent/profiles check failed.\n")
+        return 1
+
+    set_prof_res = client.post("/api/agent/profile", json={"profile": "workspace_only"})
+    if set_prof_res.status_code != 200 or set_prof_res.json().get("profile") != "workspace_only":
+        print("error : /api/agent/profile check failed.\n")
+        return 1
+
+    # Reset profile to full_automation
+    client.post("/api/agent/profile", json={"profile": "full_automation"})
+
+    # Markdown export check
+    md_res = client.get("/api/agent/export/markdown")
+    if md_res.status_code != 200 or "# Hydra" not in md_res.text:
+        print("error : /api/agent/export/markdown check failed.\n")
+        return 1
+
+    md_dl_res = client.get("/api/agent/export/markdown?download=true")
+    if md_dl_res.status_code != 200 or "attachment" not in md_dl_res.headers.get("content-disposition", ""):
+        print("error : /api/agent/export/markdown?download=true check failed.\n")
+        return 1
+
+    # Command palette endpoints check
+    palette_res = client.get("/api/palette/actions")
+    if palette_res.status_code != 200 or palette_res.json().get("count", 0) < 5:
+        print("error : /api/palette/actions check failed.\n")
+        return 1
+
+    dispatch_res = client.post("/api/palette/dispatch", json={"action": "token:summary"})
+    if dispatch_res.status_code != 200 or not dispatch_res.json().get("summary"):
+        print("error : /api/palette/dispatch check failed.\n")
+        return 1
+
+    print("endpoint execution verification : status, diffs, screen, agent, export, token accounting, tool profiles, command palette, and websocket heartbeat functioning deterministically.\n")
 
     # 5. Composite Computer Use Primitives Verification
     from hydra_cli.computer_use import get_computer_use_engine
