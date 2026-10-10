@@ -150,6 +150,21 @@ class CoordinateBounds:
                 self._clipped_actions += 1
             return clamped_x, clamped_y, was_clipped
 
+    def normalize(self, x: int, y: int) -> Tuple[float, float]:
+        """Normalize pixel coordinates to [0.0, 1000.0] grid."""
+        with self._lock:
+            norm_x = round((float(x) / max(1.0, float(self.width))) * 1000.0, 2)
+            norm_y = round((float(y) / max(1.0, float(self.height))) * 1000.0, 2)
+            return max(0.0, min(1000.0, norm_x)), max(0.0, min(1000.0, norm_y))
+
+    def denormalize(self, norm_x: float, norm_y: float) -> Tuple[int, int]:
+        """Convert [0.0, 1000.0] grid coordinates to physical screen pixels."""
+        with self._lock:
+            px = int((float(norm_x) / 1000.0) * self.width)
+            py = int((float(norm_y) / 1000.0) * self.height)
+            cx, cy, _ = self.clip(px, py)
+            return cx, cy
+
     def check_safety(self, x: int, y: int) -> Tuple[bool, Optional[str]]:
         """Verify coordinates against safety fences and failsafe triggers."""
         with self._lock:
@@ -532,6 +547,14 @@ class OSController:
 
     def focus_window(self, title_or_hwnd: Union[str, int]) -> Dict[str, Any]:
         """Focus window by title substring or handle."""
+        target_str = str(title_or_hwnd).lower()
+        RESTRICTED_WINDOW_PATTERNS = (
+            "1password", "bitwarden", "keepass", "lastpass", "dashlane",
+            "credential", "uac", "user account control", "windows security",
+            "taskmgr", "task manager", "regedit", "registry editor",
+        )
+        if any(pat in target_str for pat in RESTRICTED_WINDOW_PATTERNS):
+            return {"isError": True, "error": f"Security violation: focus blocked on protected window target '{title_or_hwnd}'"}
         target_hwnd = None
         if isinstance(title_or_hwnd, int):
             target_hwnd = title_or_hwnd
@@ -687,6 +710,10 @@ class PlaywrightAutomationBridge:
 
     def navigate(self, url: str, timeout_ms: int = 30000) -> Dict[str, Any]:
         """Navigate to URL and return title and status."""
+        BLOCKED_HOST_PATTERNS = ("169.254.169.254", "metadata.google.internal", "169.254.", "instance-data", "wpad")
+        url_lower = (url or "").lower()
+        if any(b in url_lower for b in BLOCKED_HOST_PATTERNS):
+            return {"isError": True, "error": f"Security violation: navigation to restricted target '{url}' is blocked"}
         try:
             page = self._ensure_browser()
             resp = page.goto(url, timeout=timeout_ms)
@@ -890,8 +917,28 @@ class ComputerUseEngine:
                     return {"isError": True, "error": "Parameter chord required"}
                 return self.os.key_chord(chord)
 
+            elif act in ("normalize_coordinates", "normalize"):
+                x = int(kwargs.get("x", 0))
+                y = int(kwargs.get("y", 0))
+                nx, ny = self.bounds.normalize(x, y)
+                return {"isError": False, "x": x, "y": y, "norm_x": nx, "norm_y": ny}
+
+            elif act in ("denormalize_coordinates", "denormalize"):
+                nx = float(kwargs.get("norm_x", kwargs.get("x", 0.0)))
+                ny = float(kwargs.get("norm_y", kwargs.get("y", 0.0)))
+                px, py = self.bounds.denormalize(nx, ny)
+                return {"isError": False, "norm_x": nx, "norm_y": ny, "pixel_x": px, "pixel_y": py}
+
             elif act in ("type_text", "type", "input"):
                 text = kwargs.get("text", "")
+                DANGEROUS_TYPE_PATTERNS = (
+                    r"(?i)\brm\s+-(rf|fr)\s+[/~*]",
+                    r"(?i)\bdel\s+/[fF]\s+/[sS]\s+/[qQ]\s+\*",
+                    r"(?i)\bRemove-Item\b.*-Recurse.*-Force\s+([/\\*]|[a-z]:\\)",
+                )
+                for pat in DANGEROUS_TYPE_PATTERNS:
+                    if re.search(pat, text):
+                        return {"isError": True, "error": "Security violation: blocked typing potentially destructive command stream"}
                 delay_ms = float(kwargs.get("delay_ms", 10.0))
                 return self.os.type_text(text, delay_ms=delay_ms)
 

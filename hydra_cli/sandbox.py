@@ -253,6 +253,11 @@ class SandboxExecutionResult:
         self.violation = violation
         self.diff = diff
 
+    @property
+    def duration_sec(self) -> float:
+        """Execution duration in seconds."""
+        return round(self.execution_time_ms / 1000.0, 4)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "status": self.status,

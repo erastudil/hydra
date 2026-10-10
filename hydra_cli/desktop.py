@@ -660,10 +660,8 @@ def create_desktop_app() -> Any:
         # 3. Direct completion
         else:
             try:
-                from hydra_cli.providers import fetch_chat_completion
-                target_model = MODEL_MAP.get(model.lower(), model)
-                providers = [p for p in CATALOG.get("model_providers", [])]
-                res = fetch_chat_completion(target_model, prompt, providers=providers)
+                from hydra_cli import complete
+                res = complete(model, prompt)
                 return {"content": res}
             except Exception as exc:
                 return {"content": f"Hydra Desktop summon result for {model}:\nProcessed instruction: {prompt}\n(Status: {exc})"}
@@ -677,7 +675,7 @@ def create_desktop_app() -> Any:
             return JSONResponse({"error": "No command provided"}, status_code=400)
 
         runner = SandboxRunner()
-        res = runner.run_command(cmd, cwd=cwd)
+        res = await asyncio.to_thread(runner.run_command, cmd, cwd=cwd)
         return {
             "command": cmd,
             "exit_code": res.exit_code,
@@ -689,18 +687,26 @@ def create_desktop_app() -> Any:
     @app.post("/api/computer/action")
     async def computer_action(req: Request):
         body = await req.json()
-        action = body.get("action", "")
+        body_params = dict(body)
+        action = body_params.pop("action", "")
         if not action:
             return JSONResponse({"error": "No action provided"}, status_code=400)
 
         engine = get_computer_use_engine()
-        res = engine.dispatch(action, **body)
+        res = await asyncio.to_thread(engine.dispatch, action, **body_params)
         return res
 
-    @app.get("/api/computer/screen")
-    async def computer_screen(as_json: bool = False):
+    @app.api_route("/api/computer/screen", methods=["GET", "POST"])
+    async def computer_screen(req: Request, as_json: bool = False):
+        if req.method == "POST":
+            try:
+                body = await req.json()
+                if "as_json" in body:
+                    as_json = bool(body["as_json"])
+            except Exception:
+                pass
         engine = get_computer_use_engine()
-        res = engine.screen.capture(as_base64=True)
+        res = await asyncio.to_thread(engine.screen.capture, as_base64=True)
         if as_json:
             return res
         b64 = res.get("base64", "")
@@ -710,9 +716,90 @@ def create_desktop_app() -> Any:
     @app.post("/api/browser/action")
     async def browser_action(req: Request):
         body = await req.json()
+        body_params = dict(body)
+        action = body_params.pop("action", "browser_navigate")
         engine = get_computer_use_engine()
-        res = engine.dispatch(body.get("action", "browser_navigate"), **body)
+        res = await asyncio.to_thread(engine.dispatch, action, **body_params)
         return res
+
+    @app.get("/v1/models")
+    async def v1_models():
+        from hydra_cli.serve import get_registered_models
+        return get_registered_models()
+
+    @app.post("/v1/chat/completions")
+    async def v1_chat_completions(req: Request):
+        from hydra_cli import complete
+        body = await req.json()
+        model = body.get("model", "sonnet 5.5")
+        messages = body.get("messages", [])
+        stream = bool(body.get("stream", False))
+
+        prompt = ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                prompt = m.get("content", "")
+                break
+        if not prompt and messages:
+            prompt = str(messages[-1].get("content", ""))
+
+        if stream:
+            async def event_generator():
+                created = int(time.time())
+                try:
+                    ans = complete(model, prompt)
+                except Exception as e:
+                    ans = f"Error: {e}"
+                chunk_obj = {
+                    "id": f"chatcmpl-desktop-{int(time.time())}",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ans},
+                        "finish_reason": None,
+                    }],
+                }
+                yield f"data: {json.dumps(chunk_obj)}\n\n"
+                end_obj = {
+                    "id": f"chatcmpl-desktop-{int(time.time())}",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }],
+                }
+                yield f"data: {json.dumps(end_obj)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+        created = int(time.time())
+        try:
+            ans = complete(model, prompt)
+        except Exception as e:
+            ans = f"Error: {e}"
+
+        return {
+            "id": f"chatcmpl-desktop-{int(time.time())}",
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": ans},
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": len(prompt.split()),
+                "completion_tokens": len(ans.split()),
+                "total_tokens": len(prompt.split()) + len(ans.split()),
+            },
+        }
 
     @app.websocket("/ws/desktop")
     async def websocket_endpoint(ws: WebSocket):
