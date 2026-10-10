@@ -3085,6 +3085,194 @@ def create_touch_gesture() -> TouchGestureController:
     """Instantiate a new dedicated touch gesture controller."""
     return TouchGestureController()
 
+def parse_rgb_tuple(color_str: str) -> Optional[Tuple[float, float, float]]:
+    """Parse color string into normalized RGB float components between 0.0 and 1.0."""
+    if not color_str:
+        return None
+    s = color_str.strip().lower()
+
+    if s.startswith("#"):
+        hex_val = s[1:]
+        if len(hex_val) == 3:
+            hex_val = "".join([c * 2 for c in hex_val])
+        if len(hex_val) == 6:
+            try:
+                r = int(hex_val[0:2], 16) / 255.0
+                g = int(hex_val[2:4], 16) / 255.0
+                b = int(hex_val[4:6], 16) / 255.0
+                return (r, g, b)
+            except ValueError:
+                return None
+
+    rgb_match = re.match(r"^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", s)
+    if rgb_match:
+        try:
+            r = int(rgb_match.group(1)) / 255.0
+            g = int(rgb_match.group(2)) / 255.0
+            b = int(rgb_match.group(3)) / 255.0
+            return (r, g, b)
+        except ValueError:
+            return None
+
+    named_map = {
+        "black": (0.0, 0.0, 0.0),
+        "white": (1.0, 1.0, 1.0),
+        "red": (1.0, 0.0, 0.0),
+        "green": (0.0, 1.0, 0.0),
+        "blue": (0.0, 0.0, 1.0),
+    }
+    return named_map.get(s)
+
+
+def relative_luminance(rgb: Tuple[float, float, float]) -> float:
+    """Calculate WCAG 2.1 relative luminance for RGB tuple."""
+    def adjust(c: float) -> float:
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+    r, g, b = adjust(rgb[0]), adjust(rgb[1]), adjust(rgb[2])
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+class ColorSchemeTester:
+    """
+    Playwright color scheme and dark mode testing engine.
+    Emulates preferred color schemes, parses dark mode media queries,
+    and evaluates WCAG relative luminance contrast ratios.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_emulations: int = 0
+            self._dark_evaluations: int = 0
+            self._contrast_checks: int = 0
+            self._last_scheme: str = "light"
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        self.reset()
+
+    def compute_contrast_ratio(self, fg_color: str, bg_color: str) -> float:
+        """Calculate WCAG contrast ratio between foreground and background colors."""
+        with self._lock:
+            self._contrast_checks += 1
+
+        c1 = parse_rgb_tuple(fg_color)
+        c2 = parse_rgb_tuple(bg_color)
+        if not c1 or not c2:
+            return 1.0
+
+        l1 = relative_luminance(c1)
+        l2 = relative_luminance(c2)
+        lighter = max(l1, l2)
+        darker = min(l1, l2)
+        return round((lighter + 0.05) / (darker + 0.05), 2)
+
+    def inspect_css(self, content: str) -> Dict[str, Any]:
+        """Detect and extract dark mode media queries and theme rules in CSS or HTML."""
+        with self._lock:
+            self._dark_evaluations += 1
+
+        if not content:
+            return {
+                "has_dark_mode": False,
+                "prefers_color_scheme_dark": False,
+                "prefers_color_scheme_light": False,
+                "has_theme_class": False,
+                "dark_rules_count": 0,
+            }
+
+        text = content.lower()
+        has_prefers_dark = "prefers-color-scheme: dark" in text or "prefers-color-scheme:dark" in text
+        has_prefers_light = "prefers-color-scheme: light" in text or "prefers-color-scheme:light" in text
+        has_theme_class = ".dark" in text or 'data-theme="dark"' in text or "data-theme='dark'" in text
+
+        dark_matches = re.findall(r"@media[^{]*prefers-color-scheme\s*:\s*dark[^{]*\{([^{}]*\{[^{}]*\})+", text)
+        dark_rules_count = len(dark_matches)
+        if has_theme_class and dark_rules_count == 0:
+            dark_rules_count = 1
+
+        has_dark = has_prefers_dark or has_theme_class
+
+        return {
+            "has_dark_mode": has_dark,
+            "prefers_color_scheme_dark": has_prefers_dark,
+            "prefers_color_scheme_light": has_prefers_light,
+            "has_theme_class": has_theme_class,
+            "dark_rules_count": dark_rules_count,
+        }
+
+    def emulate(
+        self,
+        page: Any,
+        scheme: str = "dark",
+    ) -> Dict[str, Any]:
+        """Emulate color scheme on active page."""
+        target_scheme = (scheme or "dark").strip().lower()
+        if target_scheme not in ("dark", "light", "no-preference"):
+            target_scheme = "dark"
+
+        with self._lock:
+            self._total_emulations += 1
+            self._last_scheme = target_scheme
+
+        if page is None:
+            return {
+                "success": False,
+                "error": "compliance : not possible. Page represents None.",
+                "scheme": target_scheme,
+            }
+
+        try:
+            if hasattr(page, "emulate_media"):
+                page.emulate_media(color_scheme=target_scheme)
+                return {
+                    "success": True,
+                    "scheme": target_scheme,
+                }
+            return {
+                "success": True,
+                "scheme": target_scheme,
+                "note": "Simulated media emulation without native page driver.",
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "scheme": target_scheme,
+                "error": str(exc),
+            }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return operational telemetry metrics."""
+        with self._lock:
+            return {
+                "total_emulations": self._total_emulations,
+                "dark_evaluations": self._dark_evaluations,
+                "contrast_checks": self._contrast_checks,
+                "last_scheme": self._last_scheme,
+            }
+
+
+_DEFAULT_COLOR_SCHEME_TESTER = ColorSchemeTester()
+
+
+def get_default_color_scheme_tester() -> ColorSchemeTester:
+    """Return default singleton color scheme tester engine."""
+    return _DEFAULT_COLOR_SCHEME_TESTER
+
+
+def reset_color_scheme_tester() -> None:
+    """Reset global color scheme tester state."""
+    _DEFAULT_COLOR_SCHEME_TESTER.reset()
+
+
+def create_color_scheme_tester() -> ColorSchemeTester:
+    """Instantiate a new dedicated color scheme tester engine."""
+    return ColorSchemeTester()
+
 
 class PlaywrightBrowserManager:
     """Managed Playwright browser lifecycle instance with automatic cleanup."""
@@ -3103,6 +3291,7 @@ class PlaywrightBrowserManager:
         self._visibility_checker = get_default_visibility_checker()
         self._keyboard_controller = get_default_keyboard_controller()
         self._touch_gesture = get_default_touch_gesture()
+        self._color_scheme = get_default_color_scheme_tester()
 
     def _ensure_page(self) -> Page:
         if not PLAYWRIGHT_AVAILABLE:
@@ -3488,6 +3677,26 @@ class PlaywrightBrowserManager:
         ctrl = get_default_keyboard_controller()
         return ctrl.get_metrics()
 
+    def emulate_color_scheme(self, scheme: str = "dark") -> Dict[str, Any]:
+        """Emulate preferred color scheme on active page."""
+        page = self._ensure_page()
+        tester = get_default_color_scheme_tester()
+        return tester.emulate(page, scheme=scheme)
+
+    def inspect_dark_mode(self, content: Optional[str] = None) -> Dict[str, Any]:
+        """Inspect dark mode rules and media queries in page or CSS."""
+        tester = get_default_color_scheme_tester()
+        if content is not None:
+            return tester.inspect_css(content)
+        page = self._ensure_page()
+        html_markup = page.content() if hasattr(page, "content") else ""
+        return tester.inspect_css(html_markup)
+
+    def get_color_scheme_metrics(self) -> Dict[str, Any]:
+        """Return color scheme tester telemetry metrics."""
+        tester = get_default_color_scheme_tester()
+        return tester.get_metrics()
+
     def tap_touch(
         self,
         x: float = 0.0,
@@ -3514,6 +3723,26 @@ class PlaywrightBrowserManager:
         """Return touch gesture telemetry metrics."""
         ctrl = get_default_touch_gesture()
         return ctrl.get_metrics()
+
+    def emulate_color_scheme(self, scheme: str = "dark") -> Dict[str, Any]:
+        """Emulate preferred color scheme on active page."""
+        page = self._ensure_page()
+        tester = get_default_color_scheme_tester()
+        return tester.emulate(page, scheme=scheme)
+
+    def inspect_dark_mode(self, content: Optional[str] = None) -> Dict[str, Any]:
+        """Inspect dark mode rules and media queries in page or CSS."""
+        tester = get_default_color_scheme_tester()
+        if content is not None:
+            return tester.inspect_css(content)
+        page = self._ensure_page()
+        html_markup = page.content() if hasattr(page, "content") else ""
+        return tester.inspect_css(html_markup)
+
+    def get_color_scheme_metrics(self) -> Dict[str, Any]:
+        """Return color scheme tester telemetry metrics."""
+        tester = get_default_color_scheme_tester()
+        return tester.get_metrics()
 
     def close(self) -> None:
         """Close browser context and stop Playwright runner cleanly."""
@@ -3767,6 +3996,16 @@ def dispatch_browser_action(
             return {"isError": not res.get("success", False), "result": res}
         elif act in ("touch_metrics", "touch_telemetry"):
             m = session.get_touch_metrics()
+            return {"isError": False, "result": m}
+        elif act in ("emulate_color_scheme", "dark_mode", "color_scheme"):
+            sch = text or kwargs.get("scheme") or "dark"
+            res = session.emulate_color_scheme(scheme=sch)
+            return {"isError": not res.get("success", False), "result": res}
+        elif act in ("inspect_dark_mode", "check_dark_mode"):
+            res = session.inspect_dark_mode(content=text)
+            return {"isError": False, "result": res}
+        elif act in ("color_scheme_metrics", "dark_mode_metrics"):
+            m = session.get_color_scheme_metrics()
             return {"isError": False, "result": m}
         elif act in ("close", "exit", "quit"):
             close_browser_session()

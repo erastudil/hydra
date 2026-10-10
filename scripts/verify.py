@@ -7765,6 +7765,101 @@ def touch_gesture_contracts():
     reset_touch_gesture()
 
 @check
+def color_scheme_tester_contracts():
+    from hydra_cli.browser import (
+        ColorSchemeTester,
+        create_color_scheme_tester,
+        get_default_color_scheme_tester,
+        reset_color_scheme_tester,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import ColorSchemeTester as SandboxColorSchemeTester
+    from hydra_cli import ColorSchemeTester as RootColorSchemeTester
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxColorSchemeTester is ColorSchemeTester
+    assert RootColorSchemeTester is ColorSchemeTester
+
+    reset_color_scheme_tester()
+
+    # 2. Construction and default metrics
+    tester = create_color_scheme_tester()
+    m0 = tester.get_metrics()
+    assert m0["total_emulations"] == 0
+    assert m0["dark_evaluations"] == 0
+    assert m0["contrast_checks"] == 0
+
+    # 3. Contrast ratio computation
+    assert tester.compute_contrast_ratio("#000000", "#ffffff") == 21.0
+    assert tester.compute_contrast_ratio("white", "white") == 1.0
+    assert tester.compute_contrast_ratio("black", "black") == 1.0
+    assert tester.compute_contrast_ratio("rgb(0, 0, 0)", "rgb(255, 255, 255)") == 21.0
+    assert tester.compute_contrast_ratio("invalid_color", "other") == 1.0
+
+    # 4. CSS and HTML dark mode inspection
+    css_media_sample = "body { background: #fff; } @media (prefers-color-scheme: dark) { body { background: #121212; } }"
+    r_media = tester.inspect_css(css_media_sample)
+    assert r_media["has_dark_mode"] is True
+    assert r_media["prefers_color_scheme_dark"] is True
+    assert r_media["dark_rules_count"] >= 1
+
+    html_theme_sample = "<html class=\"dark\"><body data-theme=\"dark\"><h1>Title</h1></body></html>"
+    r_theme = tester.inspect_css(html_theme_sample)
+    assert r_theme["has_dark_mode"] is True
+    assert r_theme["has_theme_class"] is True
+
+    r_empty = tester.inspect_css("")
+    assert r_empty["has_dark_mode"] is False
+
+    # 5. Media emulation with Page
+    class TestPage:
+        """Structured page representation for media emulation."""
+        def __init__(self):
+            self.emulated_scheme = None
+
+        def emulate_media(self, color_scheme):
+            self.emulated_scheme = color_scheme
+            return None
+
+    page = TestPage()
+    res_dark = tester.emulate(page, "dark")
+    assert res_dark["success"] is True
+    assert res_dark["scheme"] == "dark"
+    assert page.emulated_scheme == "dark"
+
+    res_light = tester.emulate(page, "light")
+    assert res_light["success"] is True
+    assert res_light["scheme"] == "light"
+    assert page.emulated_scheme == "light"
+
+    res_none = tester.emulate(None, "dark")
+    assert res_none["success"] is False
+
+    # 6. Telemetry metrics and reset
+    metrics = tester.get_metrics()
+    assert metrics["total_emulations"] >= 2
+    assert metrics["dark_evaluations"] >= 2
+    assert metrics["contrast_checks"] >= 4
+
+    tester.reset_metrics()
+    clean_metrics = tester.get_metrics()
+    assert clean_metrics["total_emulations"] == 0
+    assert clean_metrics["contrast_checks"] == 0
+
+    # 7. Browser action dispatch
+    if not PLAYWRIGHT_AVAILABLE:
+        action_res = dispatch_browser_action("emulate_color_scheme", text="dark")
+        assert action_res["isError"] is True
+        assert "Playwright uninstalled" in action_res["error"]
+
+    # 8. Singleton lifecycle
+    reset_color_scheme_tester()
+    default_tester = get_default_color_scheme_tester()
+    assert default_tester is not None
+    reset_color_scheme_tester()
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
