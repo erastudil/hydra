@@ -8306,6 +8306,80 @@ def repl_fuzzy_search_contracts():
 
 
 @check
+def continuation_glyph_contracts():
+    from hydra_cli.repl import (
+        DEFAULT_CONTINUATION_GLYPH,
+        ASCII_CONTINUATION_GLYPH,
+        ContinuationGlyphManager,
+        create_continuation_manager,
+        get_default_continuation_manager,
+        reset_continuation_manager,
+        ReplSession,
+    )
+    from hydra_cli import (
+        ContinuationGlyphManager as RootContinuationGlyphManager,
+        create_continuation_manager as root_create_continuation_manager,
+    )
+
+    # 1. Re-exports parity
+    assert RootContinuationGlyphManager is ContinuationGlyphManager
+    assert root_create_continuation_manager is create_continuation_manager
+
+    # 2. Default glyphs
+    assert DEFAULT_CONTINUATION_GLYPH == "··· "
+    assert ASCII_CONTINUATION_GLYPH == "... "
+
+    # 3. Completeness checking
+    mgr = create_continuation_manager()
+    assert mgr.is_incomplete("def foo():\n    return (1 +") is True
+    assert mgr.is_incomplete("foo = 'unclosed") is True
+    assert mgr.is_incomplete('text = """triple unclosed') is True
+    assert mgr.is_incomplete("line ending with \\") is True
+    assert mgr.is_incomplete("def foo(): return 1") is False
+    assert mgr.is_incomplete("foo = 'closed'") is False
+    assert mgr.is_incomplete("") is False
+
+    # Detailed balance analysis
+    res_open = mgr.check_balance("data = {'key': [1, 2")
+    assert res_open["incomplete"] is True
+    assert res_open["open_brackets"] == ["{", "["]
+
+    # 4. Prompt formatting and alignment
+    prompt_str = mgr.format_continuation_prompt(prefix_len=12)
+    assert DEFAULT_CONTINUATION_GLYPH in prompt_str
+    assert len(prompt_str) == 12
+
+    ascii_prompt = mgr.format_continuation_prompt(prefix_len=10, ascii_only=True)
+    assert ASCII_CONTINUATION_GLYPH in ascii_prompt
+
+    # 5. Glyph customization
+    mgr.set_glyph("... ")
+    assert mgr.get_glyph() == "... "
+    mgr.set_glyph(DEFAULT_CONTINUATION_GLYPH)
+
+    # 6. Session integration
+    session = ReplSession()
+    assert hasattr(session, "continuation")
+    assert isinstance(session.continuation, ContinuationGlyphManager)
+
+    # 7. Metrics and reset
+    metrics = mgr.get_metrics()
+    assert metrics["total_evaluations"] >= 8
+    assert metrics["incomplete_evaluations"] >= 5
+    assert metrics["complete_evaluations"] >= 3
+
+    mgr.reset_metrics()
+    clean_metrics = mgr.get_metrics()
+    assert clean_metrics["total_evaluations"] == 0
+    assert clean_metrics["incomplete_evaluations"] == 0
+
+    reset_continuation_manager()
+    default_mgr = get_default_continuation_manager()
+    assert default_mgr is not None
+    reset_continuation_manager()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

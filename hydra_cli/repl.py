@@ -580,6 +580,149 @@ def create_repl_fuzzy_search() -> ReplFuzzySearch:
     return ReplFuzzySearch()
 
 
+
+DEFAULT_CONTINUATION_GLYPH: str = "··· "
+ASCII_CONTINUATION_GLYPH: str = "... "
+
+
+class ContinuationGlyphManager:
+    """
+    Multitrack multiline continuation glyph and buffer completeness evaluator for Hydra REPL.
+    Analyzes bracket balance, quote closures, and trailing escapes to render aligned continuation glyphs.
+    """
+
+    def __init__(self, glyph: Optional[str] = None) -> None:
+        self._lock = threading.RLock()
+        self._glyph = glyph if glyph is not None else DEFAULT_CONTINUATION_GLYPH
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_evaluations: int = 0
+            self._incomplete_evaluations: int = 0
+            self._complete_evaluations: int = 0
+
+    def get_glyph(self, ascii_only: bool = False) -> str:
+        """Return active continuation glyph string."""
+        with self._lock:
+            if ascii_only:
+                return ASCII_CONTINUATION_GLYPH
+            return self._glyph
+
+    def set_glyph(self, glyph: str) -> None:
+        """Configure custom continuation glyph string."""
+        with self._lock:
+            self._glyph = glyph
+
+    def check_balance(self, text: str) -> Dict[str, Any]:
+        """Analyze text buffer for unclosed brackets, unclosed quotes, or trailing escapes."""
+        with self._lock:
+            self._total_evaluations += 1
+
+        bracket_pairs = {")": "(", "]": "[", "}": "{"}
+        opening_brackets = set(bracket_pairs.values())
+        stack: List[str] = []
+        in_quote: Optional[str] = None
+        escaped = False
+
+        i = 0
+        n = len(text)
+        while i < n:
+            c = text[i]
+
+            if escaped:
+                escaped = False
+                i += 1
+                continue
+
+            if c == "\\":
+                escaped = True
+                i += 1
+                continue
+
+            if not in_quote and i + 2 < n and text[i:i+3] in ('"""', "'''"):
+                in_quote = text[i:i+3]
+                i += 3
+                continue
+            elif in_quote in ('"""', "'''") and i + 2 < n and text[i:i+3] == in_quote:
+                in_quote = None
+                i += 3
+                continue
+
+            if in_quote is None and c in ('"', "'"):
+                in_quote = c
+            elif in_quote == c:
+                in_quote = None
+            elif in_quote is None:
+                if c in opening_brackets:
+                    stack.append(c)
+                elif c in bracket_pairs:
+                    if stack and stack[-1] == bracket_pairs[c]:
+                        stack.pop()
+
+            i += 1
+
+        trailing_backslash = escaped
+        incomplete = bool(stack or in_quote or trailing_backslash)
+
+        with self._lock:
+            if incomplete:
+                self._incomplete_evaluations += 1
+            else:
+                self._complete_evaluations += 1
+
+        return {
+            "incomplete": incomplete,
+            "open_brackets": stack,
+            "in_quote": in_quote,
+            "trailing_backslash": trailing_backslash,
+        }
+
+    def is_incomplete(self, text: str) -> bool:
+        """Return true when buffer represents incomplete multiline input."""
+        res = self.check_balance(text)
+        return bool(res["incomplete"])
+
+    def format_continuation_prompt(self, prefix_len: int = 16, ascii_only: bool = False) -> str:
+        """Render aligned continuation prompt string matching prefix width."""
+        glyph = self.get_glyph(ascii_only=ascii_only)
+        if prefix_len <= len(glyph):
+            return glyph
+        padding = " " * (prefix_len - len(glyph))
+        return f"{padding}{glyph}"
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            return {
+                "total_evaluations": self._total_evaluations,
+                "incomplete_evaluations": self._incomplete_evaluations,
+                "complete_evaluations": self._complete_evaluations,
+                "active_glyph": self._glyph,
+            }
+
+
+_DEFAULT_CONTINUATION_MANAGER = ContinuationGlyphManager()
+
+
+def get_default_continuation_manager() -> ContinuationGlyphManager:
+    """Return default singleton continuation manager."""
+    return _DEFAULT_CONTINUATION_MANAGER
+
+
+def reset_continuation_manager() -> None:
+    """Reset global continuation manager telemetry."""
+    _DEFAULT_CONTINUATION_MANAGER.reset_metrics()
+
+
+def create_continuation_manager(
+    glyph: Optional[str] = None,
+) -> ContinuationGlyphManager:
+    """Instantiate a new dedicated continuation manager."""
+    return ContinuationGlyphManager(glyph=glyph)
+
+
 class ReplSession:
     def __init__(self) -> None:
         self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "sonnet 5.5").strip() or "sonnet 5.5"
@@ -589,6 +732,7 @@ class ReplSession:
         self.hints: ReplParameterHints = get_default_repl_parameter_hints()
         self.shortcuts: ShortcutRegistry = get_default_shortcut_registry()
         self.fuzzy_search: ReplFuzzySearch = get_default_repl_fuzzy_search()
+        self.continuation: ContinuationGlyphManager = get_default_continuation_manager()
         route = resolve_route(self.alias)
         if route.get("effort"):
             self.effort = route["effort"]
