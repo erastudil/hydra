@@ -63,6 +63,9 @@ def run_checks() -> int:
         "startAgentTask",
         "pauseAgentTask",
         "exportAgentTrace",
+        "initWebSocket",
+        "calculateViewportScale",
+        "token-tally",
         "/api/agent/export",
         "/api/agent/run",
     ]
@@ -92,6 +95,9 @@ def run_checks() -> int:
         "/api/agent/abort",
         "/api/agent/status",
         "/ws/desktop",
+        "/api/coordinates/scale",
+        "/api/usage",
+        "/api/token/accounting",
         "/v1/models",
         "/v1/chat/completions",
     ]
@@ -176,7 +182,37 @@ def run_checks() -> int:
         print("error : agent runner workspace tool dispatch failed.\n")
         return 1
 
-    print("endpoint execution verification : status, diffs, screen, agent, and export endpoints functioning deterministically.\n")
+        # Token accounting and usage endpoint check
+    tok_res = client.get("/api/token/accounting")
+    if tok_res.status_code != 200 or "total_tokens" not in tok_res.json():
+        print("error : /api/token/accounting failed.\n")
+        return 1
+
+    tok_rec = client.post("/api/token/accounting/record", json={"model": "sonnet 5.5", "prompt_tokens": 1000, "completion_tokens": 200})
+    if tok_rec.status_code != 200 or tok_rec.json().get("recorded", {}).get("total_tokens") != 1200:
+        print("error : /api/token/accounting/record failed.\n")
+        return 1
+
+    # Coordinate scaling check
+    scale_res = client.post("/api/coordinates/scale", json={"action": "canvas_to_screen", "x": 480, "y": 270, "screen_width": 1920, "screen_height": 1080, "canvas_width": 960, "canvas_height": 540})
+    if scale_res.status_code != 200 or scale_res.json().get("x") != 960:
+        print("error : /api/coordinates/scale failed.\n")
+        return 1
+
+    # WebSocket heartbeat check
+    with client.websocket_connect("/ws/desktop") as ws:
+        ws.send_text("ping")
+        pong1 = ws.receive_text()
+        if "pong" not in pong1:
+            print("error : websocket ping failed.\n")
+            return 1
+        ws.send_text('{"action": "heartbeat"}')
+        hb = ws.receive_text()
+        if "heartbeat_ack" not in hb:
+            print("error : websocket heartbeat failed.\n")
+            return 1
+
+    print("endpoint execution verification : status, diffs, screen, agent, export, token accounting, and websocket heartbeat functioning deterministically.\n")
 
     # 5. Composite Computer Use Primitives Verification
     from hydra_cli.computer_use import get_computer_use_engine

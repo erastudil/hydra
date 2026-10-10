@@ -16,7 +16,7 @@ import threading
 import time
 import urllib.request
 import webbrowser
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from hydra_cli import __version__
 from hydra_cli.config import (
@@ -446,6 +446,11 @@ textarea:focus { border-color: var(--accent); }
     <span class="badge">v""" + __version__ + """</span>
   </div>
   <div class="header-controls">
+    <div class="token-tally-widget" id="token-tally" title="Live token usage and cost accounting" style="display: flex; align-items: center; gap: 8px; font-size: 11px; background: rgba(31, 41, 55, 0.7); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);">
+      <span style="color: var(--text-secondary);">Tokens: <strong id="tally-tokens" style="color: var(--text-primary); font-family: var(--font-mono);">0</strong></span>
+      <span style="color: var(--border);">&bull;</span>
+      <span style="color: var(--text-secondary);">Cost: <strong id="tally-cost" style="color: var(--accent); font-family: var(--font-mono);">$0.0000</strong></span>
+    </div>
     <div class="status-pill">
       <div class="status-dot"></div>
       Gateway : 7777
@@ -696,44 +701,99 @@ function handleKey(e) {
   }
 }
 
+let currentHighlights = [];
+let desktopWs = null;
+let wsHeartbeatTimer = null;
+let wsReconnectTimer = null;
+
+function calculateViewportScale() {
+  const img = document.getElementById('screen-img');
+  const canvas = document.getElementById('screen-overlay-canvas');
+  if (!canvas) return { scaleX: 1.0, scaleY: 1.0, box: { width: 800, height: 450 } };
+  const box = (img && img.clientWidth) ? img.getBoundingClientRect() : canvas.getBoundingClientRect();
+  const w = box.width || canvas.clientWidth || 800;
+  const h = box.height || canvas.clientHeight || 450;
+  if (canvas.width !== Math.round(w) || canvas.height !== Math.round(h)) {
+    canvas.width = Math.round(w);
+    canvas.height = Math.round(h);
+  }
+  const scaleX = w / (screenWidth || 1920);
+  const scaleY = h / (screenHeight || 1080);
+  return { scaleX, scaleY, box: { width: w, height: h } };
+}
+
+function renderOverlayHighlights(highlights) {
+  if (highlights) currentHighlights = highlights;
+  const canvas = document.getElementById('screen-overlay-canvas');
+  if (!canvas) return;
+  const { scaleX, scaleY } = calculateViewportScale();
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (!currentHighlights || !currentHighlights.length) return;
+
+  currentHighlights.forEach(h => {
+    const sx = Math.round(h.x * scaleX);
+    const sy = Math.round(h.y * scaleY);
+    const sw = Math.round(h.width * scaleX);
+    const sh = Math.round(h.height * scaleY);
+
+    ctx.strokeStyle = '#ef4444';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(sx, sy, sw, sh);
+    ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
+    ctx.fillRect(sx, sy, sw, sh);
+    ctx.fillStyle = '#fca5a5';
+    ctx.font = '10px monospace';
+    ctx.fillText(h.label || 'Target', sx + 2, Math.max(10, sy - 4));
+  });
+}
+
 function updateCoord(event) { handleScreenHover(event); }
 
 function handleScreenHover(e) {
-  const box = e.currentTarget.getBoundingClientRect();
+  const { scaleX, scaleY, box } = calculateViewportScale();
   const relX = (e.clientX - box.left) / box.width;
   const relY = (e.clientY - box.top) / box.height;
   const targetX = Math.round(relX * screenWidth);
   const targetY = Math.round(relY * screenHeight);
-  document.getElementById('coord-readout').innerText = `X: ${targetX} | Y: ${targetY}`;
+  const readout = document.getElementById('coord-readout');
+  if (readout) readout.innerText = `X: ${targetX} | Y: ${targetY}`;
 
-  // Draw overlay canvas crosshairs
   const canvas = document.getElementById('screen-overlay-canvas');
-  if (canvas) {
-    canvas.width = box.width;
-    canvas.height = box.height;
+  if (canvas && overlayBoundsEnabled) {
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (overlayBoundsEnabled) {
-      // Draw crosshair lines
-      ctx.strokeStyle = 'rgba(16, 185, 129, 0.4)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(e.clientX - box.left, 0);
-      ctx.lineTo(e.clientX - box.left, canvas.height);
-      ctx.moveTo(0, e.clientY - box.top);
-      ctx.lineTo(canvas.width, e.clientY - box.top);
-      ctx.stroke();
-
-      // Sample bounding box overlay for active window
-      ctx.strokeStyle = '#10b981';
-      ctx.lineWidth = 2;
-      ctx.strokeRect(10, 10, canvas.width - 20, canvas.height - 20);
-      ctx.fillStyle = 'rgba(16, 185, 129, 0.08)';
-      ctx.fillRect(10, 10, canvas.width - 20, canvas.height - 20);
+    if (currentHighlights && currentHighlights.length) {
+      renderOverlayHighlights(currentHighlights);
     }
+
+    const curX = e.clientX - box.left;
+    const curY = e.clientY - box.top;
+    ctx.strokeStyle = 'rgba(16, 185, 129, 0.5)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(curX, 0);
+    ctx.lineTo(curX, canvas.height);
+    ctx.moveTo(0, curY);
+    ctx.lineTo(canvas.width, curY);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#10b981';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(4, 4, canvas.width - 8, canvas.height - 8);
+    ctx.fillStyle = 'rgba(16, 185, 129, 0.05)';
+    ctx.fillRect(4, 4, canvas.width - 8, canvas.height - 8);
   }
 }
+
+window.addEventListener('resize', () => {
+  calculateViewportScale();
+  if (currentHighlights && currentHighlights.length) {
+    renderOverlayHighlights(currentHighlights);
+  }
+});
 
 function toggleOverlayBounds() {
   overlayBoundsEnabled = !overlayBoundsEnabled;
@@ -995,22 +1055,8 @@ function renderAgentStatus(st) {
   const timer = document.getElementById('agent-elapsed-timer');
   if (timer) timer.innerText = `Elapsed: ${st.elapsed_sec}s`;
 
-  if (st.highlights && st.highlights.length) {
-    const canvas = document.getElementById('screen-overlay-canvas');
-    if (canvas) {
-      const ctx = canvas.getContext('2d');
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      st.highlights.forEach(h => {
-        ctx.strokeStyle = '#ef4444';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(h.x, h.y, h.width, h.height);
-        ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
-        ctx.fillRect(h.x, h.y, h.width, h.height);
-        ctx.fillStyle = '#fca5a5';
-        ctx.font = '10px monospace';
-        ctx.fillText(h.label || 'Target', h.x + 2, h.y - 4);
-      });
-    }
+  if (st.highlights) {
+    renderOverlayHighlights(st.highlights);
   }
 
   const traceLog = document.getElementById('agent-trace-log');
@@ -1034,10 +1080,383 @@ function renderAgentStatus(st) {
   }
 }
 
+
+function updateTokenTally(data) {
+  if (!data) return;
+  const tokensEl = document.getElementById('tally-tokens');
+  const costEl = document.getElementById('tally-cost');
+  if (tokensEl) tokensEl.innerText = (data.total_tokens || 0).toLocaleString();
+  if (costEl) costEl.innerText = data.formatted_cost || `$${(data.total_cost_usd || 0).toFixed(4)}`;
+}
+
+async function fetchTokenUsage() {
+  try {
+    const res = await fetch('/api/usage');
+    const data = await res.json();
+    updateTokenTally(data);
+  } catch (e) {}
+}
+
+function initWebSocket() {
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  const wsUrl = proto + location.host + '/ws/desktop';
+  try {
+    desktopWs = new WebSocket(wsUrl);
+
+    desktopWs.onopen = () => {
+      // Bi-directional 15s heartbeat
+      if (wsHeartbeatTimer) clearInterval(wsHeartbeatTimer);
+      wsHeartbeatTimer = setInterval(() => {
+        if (desktopWs && desktopWs.readyState === WebSocket.OPEN) {
+          desktopWs.send(JSON.stringify({ action: 'ping' }));
+        }
+      }, 15000);
+
+      // Re-attach state upon connection
+      desktopWs.send(JSON.stringify({ action: 'agent_status' }));
+      desktopWs.send(JSON.stringify({ action: 'token_usage' }));
+    };
+
+    desktopWs.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.event === 'pong' || msg.event === 'heartbeat') {
+          // Heartbeat acknowledged
+        } else if (msg.event === 'agent_status') {
+          if (msg.data) renderAgentStatus(msg.data);
+        } else if (msg.event === 'step_complete' || msg.event === 'step_start' || msg.event === 'task_complete' || msg.event === 'task_start') {
+          pollAgentStatus();
+        } else if (msg.event === 'token_usage') {
+          if (msg.data) updateTokenTally(msg.data);
+        }
+      } catch (e) {}
+    };
+
+    desktopWs.onclose = () => {
+      if (wsHeartbeatTimer) clearInterval(wsHeartbeatTimer);
+      wsReconnectTimer = setTimeout(initWebSocket, 3000);
+    };
+
+    desktopWs.onerror = () => {
+      if (desktopWs) desktopWs.close();
+    };
+  } catch (e) {
+    wsReconnectTimer = setTimeout(initWebSocket, 3000);
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  initWebSocket();
+  fetchTokenUsage();
+  calculateViewportScale();
+});
+setTimeout(() => {
+  initWebSocket();
+  fetchTokenUsage();
+  calculateViewportScale();
+}, 200);
+
 </script>
 </body>
 </html>
 """
+
+
+MODEL_PRICING: Dict[str, Dict[str, Any]] = {
+    # Frontier tier ($ / 1M tokens)
+    "opus 5.5": {"tier": "frontier", "prompt_rate": 15.00, "completion_rate": 75.00},
+    "claude-3-opus": {"tier": "frontier", "prompt_rate": 15.00, "completion_rate": 75.00},
+    "sonnet 5.5": {"tier": "frontier", "prompt_rate": 3.00, "completion_rate": 15.00},
+    "claude-3.5-sonnet": {"tier": "frontier", "prompt_rate": 3.00, "completion_rate": 15.00},
+    "claude-3-7-sonnet": {"tier": "frontier", "prompt_rate": 3.00, "completion_rate": 15.00},
+    "gpt-6.1": {"tier": "frontier", "prompt_rate": 2.50, "completion_rate": 10.00},
+    "sol 6.1 pro": {"tier": "frontier", "prompt_rate": 2.50, "completion_rate": 10.00},
+    "gpt-4o": {"tier": "frontier", "prompt_rate": 2.50, "completion_rate": 10.00},
+
+    # Standard tier ($ / 1M tokens)
+    "gemini 3.8": {"tier": "standard", "prompt_rate": 0.50, "completion_rate": 1.50},
+    "gemini-2.5-flash": {"tier": "standard", "prompt_rate": 0.15, "completion_rate": 0.60},
+    "glm 5.3 flash": {"tier": "standard", "prompt_rate": 0.10, "completion_rate": 0.10},
+    "deepseek 4.1 flash": {"tier": "standard", "prompt_rate": 0.14, "completion_rate": 0.28},
+    "deepseek-chat": {"tier": "standard", "prompt_rate": 0.14, "completion_rate": 0.28},
+
+    # Free tier ($ / 1M tokens)
+    "free": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
+    "qwen": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
+    "qwen-3.8-27b:free": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
+    "deepseek-chat:free": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
+    "llama-3.3-70b-instruct:free": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
+
+    # Default rate
+    "default": {"tier": "standard", "prompt_rate": 1.00, "completion_rate": 3.00},
+}
+
+
+class TokenAccountingManager:
+    """Manages token accounting, cost calculations, and usage summaries across model tiers."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.reset()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._total_prompt_tokens: int = 0
+            self._total_completion_tokens: int = 0
+            self._total_cost_usd: float = 0.0
+            self._records: List[Dict[str, Any]] = []
+            self._tier_breakdown: Dict[str, Dict[str, Any]] = {
+                "frontier": {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
+                "standard": {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
+                "free": {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
+            }
+
+    @staticmethod
+    def resolve_pricing(model: str) -> Dict[str, Any]:
+        clean = (model or "").lower().strip()
+        for k, v in MODEL_PRICING.items():
+            if k == clean or k in clean:
+                return v
+        return MODEL_PRICING["default"]
+
+    def record_usage(
+        self,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> Dict[str, Any]:
+        pt = max(0, int(prompt_tokens))
+        ct = max(0, int(completion_tokens))
+        tot = pt + ct
+        pricing = self.resolve_pricing(model)
+        tier = pricing["tier"]
+        prompt_rate = pricing["prompt_rate"]
+        completion_rate = pricing["completion_rate"]
+
+        cost_prompt = (pt / 1_000_000.0) * prompt_rate
+        cost_completion = (ct / 1_000_000.0) * completion_rate
+        total_cost = cost_prompt + cost_completion
+
+        entry = {
+            "model": model,
+            "tier": tier,
+            "prompt_tokens": pt,
+            "completion_tokens": ct,
+            "total_tokens": tot,
+            "prompt_cost_usd": round(cost_prompt, 8),
+            "completion_cost_usd": round(cost_completion, 8),
+            "total_cost_usd": round(total_cost, 8),
+            "timestamp": time.time(),
+        }
+
+        with self._lock:
+            self._total_prompt_tokens += pt
+            self._total_completion_tokens += ct
+            self._total_cost_usd += total_cost
+            self._records.append(entry)
+            if tier in self._tier_breakdown:
+                self._tier_breakdown[tier]["prompt_tokens"] += pt
+                self._tier_breakdown[tier]["completion_tokens"] += ct
+                self._tier_breakdown[tier]["cost_usd"] = round(
+                    self._tier_breakdown[tier]["cost_usd"] + total_cost, 8
+                )
+
+        return entry
+
+    def get_summary(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "total_prompt_tokens": self._total_prompt_tokens,
+                "total_completion_tokens": self._total_completion_tokens,
+                "total_tokens": self._total_prompt_tokens + self._total_completion_tokens,
+                "total_cost_usd": round(self._total_cost_usd, 8),
+                "record_count": len(self._records),
+                "tier_breakdown": {
+                    k: dict(v) for k, v in self._tier_breakdown.items()
+                },
+            }
+
+
+_GLOBAL_TOKEN_ACCOUNTING: Optional[TokenAccountingManager] = None
+
+
+def get_token_accounting() -> TokenAccountingManager:
+    global _GLOBAL_TOKEN_ACCOUNTING
+    if _GLOBAL_TOKEN_ACCOUNTING is None:
+        _GLOBAL_TOKEN_ACCOUNTING = TokenAccountingManager()
+    return _GLOBAL_TOKEN_ACCOUNTING
+
+
+def reset_token_accounting() -> None:
+    global _GLOBAL_TOKEN_ACCOUNTING
+    if _GLOBAL_TOKEN_ACCOUNTING is not None:
+        _GLOBAL_TOKEN_ACCOUNTING.reset()
+    else:
+        _GLOBAL_TOKEN_ACCOUNTING = TokenAccountingManager()
+
+
+class ResponsiveCoordinateScaler:
+    """
+    Computes responsive canvas scaling and coordinate transformations between
+    physical screen pixels, dynamic viewport/canvas dimensions, and normalized [0, 1000] grid.
+    """
+
+    def __init__(
+        self,
+        screen_width: int = 1920,
+        screen_height: int = 1080,
+        canvas_width: int = 960,
+        canvas_height: int = 540,
+    ) -> None:
+        self.screen_width = max(1, int(screen_width))
+        self.screen_height = max(1, int(screen_height))
+        self.canvas_width = max(1, int(canvas_width))
+        self.canvas_height = max(1, int(canvas_height))
+
+    @property
+    def scale_x(self) -> float:
+        return self.canvas_width / self.screen_width
+
+    @property
+    def scale_y(self) -> float:
+        return self.canvas_height / self.screen_height
+
+    def update_canvas_dimensions(self, width: int, height: int) -> None:
+        self.canvas_width = max(1, int(width))
+        self.canvas_height = max(1, int(height))
+
+    def update_screen_dimensions(self, width: int, height: int) -> None:
+        self.screen_width = max(1, int(width))
+        self.screen_height = max(1, int(height))
+
+    def canvas_to_normalized(self, cx: float, cy: float) -> Tuple[float, float]:
+        """Convert dynamic canvas pixel coordinate to normalized [0.0, 1000.0] grid."""
+        nx = max(0.0, min(1000.0, round((cx / self.canvas_width) * 1000.0, 2)))
+        ny = max(0.0, min(1000.0, round((cy / self.canvas_height) * 1000.0, 2)))
+        return nx, ny
+
+    def normalized_to_canvas(self, nx: float, ny: float) -> Tuple[int, int]:
+        """Convert normalized [0.0, 1000.0] grid coordinate to canvas pixel coordinate."""
+        cx = int(round((max(0.0, min(1000.0, nx)) / 1000.0) * self.canvas_width))
+        cy = int(round((max(0.0, min(1000.0, ny)) / 1000.0) * self.canvas_height))
+        return cx, cy
+
+    def normalized_to_screen(self, nx: float, ny: float) -> Tuple[int, int]:
+        """Convert normalized [0.0, 1000.0] coordinate to physical screen pixels."""
+        sx = int(round((max(0.0, min(1000.0, nx)) / 1000.0) * self.screen_width))
+        sy = int(round((max(0.0, min(1000.0, ny)) / 1000.0) * self.screen_height))
+        return sx, sy
+
+    def screen_to_normalized(self, sx: float, sy: float) -> Tuple[float, float]:
+        """Convert physical screen pixels to normalized [0.0, 1000.0] coordinate."""
+        nx = max(0.0, min(1000.0, round((sx / self.screen_width) * 1000.0, 2)))
+        ny = max(0.0, min(1000.0, round((sy / self.screen_height) * 1000.0, 2)))
+        return nx, ny
+
+    def canvas_to_screen(self, cx: float, cy: float) -> Tuple[int, int]:
+        """Convert canvas pixel coordinate directly to physical screen pixels."""
+        nx, ny = self.canvas_to_normalized(cx, cy)
+        return self.normalized_to_screen(nx, ny)
+
+    def screen_to_canvas(self, sx: float, sy: float) -> Tuple[int, int]:
+        """Convert physical screen pixels directly to canvas pixel coordinate."""
+        nx, ny = self.screen_to_normalized(sx, sy)
+        return self.normalized_to_canvas(nx, ny)
+
+
+
+class TokenTracker:
+    """Thread-safe token usage and cost accounting ledger for Hydra Desktop."""
+
+    RATES: Dict[str, Dict[str, float]] = {
+        "claude-3-7-sonnet": {"prompt": 3.00, "completion": 15.00},
+        "sonnet 5.5": {"prompt": 3.00, "completion": 15.00},
+        "opus 5.5": {"prompt": 15.00, "completion": 75.00},
+        "sol 6.1 pro": {"prompt": 2.50, "completion": 10.00},
+        "gpt-6.1": {"prompt": 2.50, "completion": 10.00},
+        "gemini-2.5-flash": {"prompt": 0.15, "completion": 0.60},
+        "gemini 3.8": {"prompt": 0.15, "completion": 0.60},
+        "glm 5.3 flash": {"prompt": 0.10, "completion": 0.40},
+        "deepseek 4.1 flash": {"prompt": 0.10, "completion": 0.40},
+        "qwen-3.8-27b:free": {"prompt": 0.0, "completion": 0.0},
+        "deepseek-chat:free": {"prompt": 0.0, "completion": 0.0},
+        "llama-3.3-70b-instruct:free": {"prompt": 0.0, "completion": 0.0},
+        "free": {"prompt": 0.0, "completion": 0.0},
+        "local": {"prompt": 0.0, "completion": 0.0},
+    }
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.prompt_tokens: int = 0
+        self.completion_tokens: int = 0
+        self.total_tokens: int = 0
+        self.total_cost_usd: float = 0.0
+        self.by_model: Dict[str, Dict[str, Any]] = {}
+
+    def _get_rates_for_model(self, model: str) -> Dict[str, float]:
+        m = model.lower()
+        if ":free" in m or m == "free" or m == "local" or "@cf/" in m:
+            return {"prompt": 0.0, "completion": 0.0}
+        for key, r in self.RATES.items():
+            if key in m:
+                return r
+        return {"prompt": 1.00, "completion": 3.00}
+
+    def record_usage(self, model: str, prompt_tokens: int, completion_tokens: int) -> Dict[str, Any]:
+        with self._lock:
+            pt = max(0, int(prompt_tokens))
+            ct = max(0, int(completion_tokens))
+            tot = pt + ct
+            rates = self._get_rates_for_model(model)
+            cost = (pt * rates["prompt"] + ct * rates["completion"]) / 1_000_000.0
+
+            self.prompt_tokens += pt
+            self.completion_tokens += ct
+            self.total_tokens += tot
+            self.total_cost_usd += cost
+
+            m_key = model.lower()
+            if m_key not in self.by_model:
+                self.by_model[m_key] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost_usd": 0.0}
+            self.by_model[m_key]["prompt_tokens"] += pt
+            self.by_model[m_key]["completion_tokens"] += ct
+            self.by_model[m_key]["total_tokens"] += tot
+            self.by_model[m_key]["cost_usd"] += cost
+
+            return self.get_usage()
+
+    def get_usage(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "total_tokens": self.total_tokens,
+                "total_cost_usd": round(self.total_cost_usd, 6),
+                "formatted_cost": f"${self.total_cost_usd:.4f}",
+                "by_model": dict(self.by_model),
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self.prompt_tokens = 0
+            self.completion_tokens = 0
+            self.total_tokens = 0
+            self.total_cost_usd = 0.0
+            self.by_model.clear()
+
+
+_TOKEN_TRACKER: Optional[TokenTracker] = None
+
+
+def get_token_tracker() -> TokenTracker:
+    global _TOKEN_TRACKER
+    if _TOKEN_TRACKER is None:
+        _TOKEN_TRACKER = TokenTracker()
+    return _TOKEN_TRACKER
 
 
 FALLBACK_CHAINS: Dict[str, List[str]] = {
@@ -1074,6 +1493,9 @@ def resolve_and_complete_with_fallback(
         resolved_id = MODEL_MAP.get(m.lower(), m)
         try:
             ans = completer_fn(resolved_id, prompt)
+            pt = len(prompt.split())
+            ct = len(ans.split())
+            token_rec = get_token_accounting().record_usage(m, pt, ct)
             return {
                 "isError": False,
                 "content": ans,
@@ -1082,6 +1504,12 @@ def resolve_and_complete_with_fallback(
                 "resolved_model_id": resolved_id,
                 "fallback_triggered": (m != model),
                 "attempts": attempts,
+                "usage": {
+                    "prompt_tokens": pt,
+                    "completion_tokens": ct,
+                    "total_tokens": pt + ct,
+                },
+                "token_accounting": token_rec,
             }
         except Exception as exc:
             err_str = str(exc)
@@ -1280,6 +1708,25 @@ def create_desktop_app() -> Any:
         runner = get_agent_runner()
         return runner.abort()
 
+    
+    @app.get("/api/usage")
+    async def get_usage_endpoint():
+        return get_token_tracker().get_usage()
+
+    @app.post("/api/usage/record")
+    async def record_usage_endpoint(req: Request):
+        body = await req.json()
+        model = body.get("model", "sonnet 5.5")
+        pt = int(body.get("prompt_tokens", 0))
+        ct = int(body.get("completion_tokens", 0))
+        return get_token_tracker().record_usage(model, pt, ct)
+
+    @app.post("/api/usage/reset")
+    async def reset_usage_endpoint():
+        tracker = get_token_tracker()
+        tracker.reset()
+        return tracker.get_usage()
+
     @app.get("/api/agent/export")
     @app.get("/api/agent/session/export")
     @app.get("/api/session/export")
@@ -1315,9 +1762,81 @@ def create_desktop_app() -> Any:
         prompt = body.get("prompt", "")
         fallbacks = body.get("fallbacks")
         res = await asyncio.to_thread(resolve_and_complete_with_fallback, model, prompt, fallbacks)
+        if not res.get("isError"):
+            pt = max(1, len(prompt) // 4)
+            ct = max(1, len(res.get("content", "")) // 4)
+            get_token_tracker().record_usage(res.get("model_used", model), pt, ct)
         return res
 
 
+
+    @app.get("/api/token/accounting")
+    async def get_token_accounting_summary():
+        ledger = get_token_accounting()
+        return ledger.get_summary()
+
+    @app.post("/api/token/accounting/record")
+    async def record_token_accounting(req: Request):
+        body = await req.json()
+        ledger = get_token_accounting()
+        model = body.get("model", "default")
+        pt = int(body.get("prompt_tokens", 0))
+        ct = int(body.get("completion_tokens", 0))
+        res = ledger.record_usage(model, pt, ct)
+        return {"isError": False, "recorded": res, "summary": ledger.get_summary()}
+
+    @app.post("/api/token/accounting/reset")
+    async def reset_token_accounting_endpoint():
+        reset_token_accounting()
+        return {"isError": False, "status": "reset", "summary": get_token_accounting().get_summary()}
+
+    @app.post("/api/coordinates/scale")
+    async def scale_coordinates(req: Request):
+        body = await req.json()
+        action = body.get("action", "canvas_to_screen")
+        x = float(body.get("x", 0))
+        y = float(body.get("y", 0))
+        sw = int(body.get("screen_width", 1920))
+        sh = int(body.get("screen_height", 1080))
+        cw = int(body.get("canvas_width", 960))
+        ch = int(body.get("canvas_height", 540))
+
+        scaler = ResponsiveCoordinateScaler(
+            screen_width=sw,
+            screen_height=sh,
+            canvas_width=cw,
+            canvas_height=ch,
+        )
+
+        if action == "canvas_to_screen":
+            out_x, out_y = scaler.canvas_to_screen(x, y)
+            nx, ny = scaler.canvas_to_normalized(x, y)
+        elif action == "screen_to_canvas":
+            out_x, out_y = scaler.screen_to_canvas(x, y)
+            nx, ny = scaler.screen_to_normalized(x, y)
+        elif action == "canvas_to_normalized":
+            out_x, out_y = scaler.canvas_to_normalized(x, y)
+            nx, ny = out_x, out_y
+        elif action == "normalized_to_screen":
+            out_x, out_y = scaler.normalized_to_screen(x, y)
+            nx, ny = x, y
+        elif action == "normalized_to_canvas":
+            out_x, out_y = scaler.normalized_to_canvas(x, y)
+            nx, ny = x, y
+        else:
+            return JSONResponse({"isError": True, "error": f"Unknown action: {action}"}, status_code=400)
+
+        return {
+            "isError": False,
+            "action": action,
+            "x": out_x,
+            "y": out_y,
+            "normalized": [nx, ny],
+            "scale_x": scaler.scale_x,
+            "scale_y": scaler.scale_y,
+            "screen_dimensions": [sw, sh],
+            "canvas_dimensions": [cw, ch],
+        }
 
     @app.get("/v1/models")
     async def v1_models():
@@ -1448,10 +1967,32 @@ def create_desktop_app() -> Any:
             while True:
                 msg_raw = await ws.receive_text()
                 try:
-                    payload = json.loads(msg_raw)
-                    action = payload.get("action", "ping")
-                    if action == "ping":
+                    if msg_raw.strip().lower() == "ping":
                         await ws.send_text(json.dumps({"event": "pong", "time": time.time()}))
+                        continue
+
+                    payload = json.loads(msg_raw)
+                    action = payload.get("action") or payload.get("type") or "ping"
+                    if action == "ping":
+                        resp = {"event": "pong", "time": time.time()}
+                        if "id" in payload:
+                            resp["id"] = payload["id"]
+                        if "seq" in payload:
+                            resp["seq"] = payload["seq"]
+                        await ws.send_text(json.dumps(resp))
+                    elif action == "heartbeat":
+                        await ws.send_text(json.dumps({
+                            "event": "heartbeat_ack",
+                            "time": time.time(),
+                            "status": "healthy",
+                        }))
+                    elif action in ("reconnect", "attach"):
+                        await ws.send_text(json.dumps({
+                            "event": "attached",
+                            "data": runner.get_status(),
+                            "running_task": runner.current_task,
+                            "reconnected": True,
+                        }))
                     elif action == "chat":
                         prompt = payload.get("prompt", "")
                         await ws.send_text(json.dumps({"event": "token", "chunk": f"Summoned response: {prompt}"}))
@@ -1465,6 +2006,9 @@ def create_desktop_app() -> Any:
                         await ws.send_text(json.dumps({"event": "agent_aborted", "data": res}))
                     elif action == "agent_status":
                         await ws.send_text(json.dumps({"event": "agent_status", "data": runner.get_status()}))
+                    elif action == "token_accounting":
+                        ledger = get_token_accounting()
+                        await ws.send_text(json.dumps({"event": "token_accounting", "data": ledger.get_summary()}))
                 except Exception as inner_exc:
                     await ws.send_text(json.dumps({"event": "error", "message": str(inner_exc)}))
         except WebSocketDisconnect:

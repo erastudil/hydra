@@ -9692,11 +9692,95 @@ def workspace_context_and_session_export_contracts():
 
 
 @check
+def desktop_resilience_and_token_accounting_contracts():
+    from hydra_cli.desktop import (
+        MODEL_PRICING,
+        ResponsiveCoordinateScaler,
+        TokenAccountingManager,
+        get_token_accounting,
+        reset_token_accounting,
+        resolve_and_complete_with_fallback,
+    )
+
+    # 1. Token accounting manager and pricing formulas
+    mgr = TokenAccountingManager()
+    assert mgr.resolve_pricing("opus 5.5")["tier"] == "frontier"
+    assert mgr.resolve_pricing("sonnet 5.5")["tier"] == "frontier"
+    assert mgr.resolve_pricing("gemini 3.8")["tier"] == "standard"
+    assert mgr.resolve_pricing("free")["tier"] == "free"
+
+    # Multi-model summation check
+    mgr.record_usage("sonnet 5.5", 10_000, 2_000)
+    mgr.record_usage("opus 5.5", 5_000, 1_000)
+    mgr.record_usage("free", 50_000, 10_000)
+    mgr.record_usage("gemini 3.8", 40_000, 10_000)
+
+    summary = mgr.get_summary()
+    assert summary["total_prompt_tokens"] == 105_000
+    assert summary["total_completion_tokens"] == 23_000
+    assert summary["total_tokens"] == 128_000
+    expected_cost = round(0.06 + 0.15 + 0.0 + 0.035, 6)
+    assert abs(summary["total_cost_usd"] - expected_cost) < 1e-6
+    assert summary["tier_breakdown"]["free"]["cost_usd"] == 0.0
+
+    # 2. Responsive coordinate scaler and mapping fidelity
+    scaler = ResponsiveCoordinateScaler(
+        screen_width=1920,
+        screen_height=1080,
+        canvas_width=960,
+        canvas_height=540,
+    )
+    assert scaler.scale_x == 0.5
+    assert scaler.scale_y == 0.5
+
+    # Center point mapping
+    cx, cy = 480, 270
+    nx, ny = scaler.canvas_to_normalized(cx, cy)
+    assert nx == 500.0 and ny == 500.0
+    sx, sy = scaler.normalized_to_screen(nx, ny)
+    assert sx == 960 and sy == 540
+    assert scaler.canvas_to_screen(cx, cy) == (960, 540)
+    assert scaler.screen_to_canvas(960, 540) == (480, 270)
+
+    # Dynamic canvas resize
+    scaler.update_canvas_dimensions(1280, 720)
+    assert abs(scaler.scale_x - (1280 / 1920)) < 1e-6
+    assert abs(scaler.scale_y - (720 / 1080)) < 1e-6
+    assert scaler.canvas_to_normalized(640, 360) == (500.0, 500.0)
+
+    # Dynamic screen resize (4K)
+    scaler.update_screen_dimensions(3840, 2160)
+    assert scaler.normalized_to_screen(500.0, 500.0) == (1920, 1080)
+
+    # Round-trip fidelity check
+    for p in [0.0, 250.0, 500.0, 750.0, 1000.0]:
+        s_val, _ = scaler.normalized_to_screen(p, 500.0)
+        n_back, _ = scaler.screen_to_normalized(s_val, 1080)
+        assert abs(p - n_back) <= 1.0
+
+    # 3. Gateway fallback integrates token accounting
+    reset_token_accounting()
+    def mock_completer(resolved_model: str, prompt: str) -> str:
+        return "Operational synthesis answer"
+
+    res = resolve_and_complete_with_fallback(
+        model="sonnet 5.5",
+        prompt="verify tokens and fallback",
+        completer=mock_completer,
+    )
+    assert not res.get("isError")
+    assert "token_accounting" in res
+    assert res["token_accounting"]["total_tokens"] > 0
+    glob_sum = get_token_accounting().get_summary()
+    assert glob_sum["total_tokens"] > 0
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

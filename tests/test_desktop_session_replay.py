@@ -220,7 +220,8 @@ def test_gateway_provider_fallback_under_simulated_429():
     assert len(call_log) == 2
 
 
-def test_desktop_fastapi_gateway_and_session_endpoints(desktop_client: TestClient):
+def test_desktop_fastapi_gateway_and_session_endpoints(desktop_client: TestClient, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("hydra_cli.complete", lambda alias, prompt, **kw: f"Operational completion for {alias}: {prompt}")
     """
     Test desktop API endpoints: /api/gateway/complete, /api/agent/session/export, /api/agent/session/replay.
     """
