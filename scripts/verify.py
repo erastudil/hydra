@@ -7008,6 +7008,196 @@ def download_verify_contracts():
 
 
 @check
+def iframe_traversal_contracts():
+    from hydra_cli.browser import (
+        IframeTraversal,
+        create_iframe_traversal,
+        get_default_iframe_traversal,
+        reset_iframe_traversal,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import IframeTraversal as SandboxIframeTraversal
+    from hydra_cli import IframeTraversal as RootIframeTraversal
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxIframeTraversal is IframeTraversal
+    assert RootIframeTraversal is IframeTraversal
+
+    reset_iframe_traversal()
+
+    # 2. Construction and metrics
+    engine = create_iframe_traversal(max_depth=5)
+    assert engine.max_depth == 5
+    m0 = engine.get_metrics()
+    assert m0["total_traversals"] == 0
+    assert m0["frames_discovered"] == 0
+    assert m0["actions_executed"] == 0
+    assert m0["errors_encountered"] == 0
+
+    # 3. HTML parsing and attribute extraction
+    sample_html = (
+        "<html><body>"
+        "<iframe id=\"main_frame\" name=\"login_frame\" src=\"https://auth.local/login\" "
+        "title=\"Login Portal\" sandbox=\"allow-scripts allow-forms\">"
+        "<p>Fallback text</p>"
+        "</iframe>"
+        "<div class=\"widget\">"
+        "<iframe id=\"chat_frame\" name=\"support_widget\" src=\"https://chat.local/embed\" class=\"embed-ui\"></iframe>"
+        "</div>"
+        "</body></html>"
+    )
+    frames = engine.inspect_html(sample_html)
+    assert len(frames) == 2
+    assert frames[0]["id"] == "main_frame"
+    assert frames[0]["name"] == "login_frame"
+    assert frames[0]["src"] == "https://auth.local/login"
+    assert frames[0]["title"] == "Login Portal"
+    assert "allow-scripts" in frames[0]["sandbox"]
+    assert frames[1]["id"] == "chat_frame"
+    assert frames[1]["name"] == "support_widget"
+    assert frames[1]["class"] == "embed-ui"
+
+    # Empty string handling
+    assert engine.inspect_html("") == []
+    assert engine.inspect_html(None) == []
+
+    # 4. Live page tree and hierarchy modeling
+    class TestFrame:
+        """Structured frame representation for verification."""
+        def __init__(self, name, url, child_frames=None, detached=False):
+            self.name = name
+            self.url = url
+            self.child_frames = child_frames or []
+            self.detached = detached
+            self.clicked_selectors = []
+            self.filled_inputs = {}
+
+        def is_detached(self):
+            return self.detached
+
+        def evaluate(self, expr):
+            return "eval:" + str(expr)
+
+        def inner_text(self, selector="body"):
+            return "content:" + self.name + ":" + selector
+
+        def click(self, selector):
+            self.clicked_selectors.append(selector)
+            return None
+
+        def fill(self, selector, text):
+            self.filled_inputs[selector] = text
+            return None
+
+    class TestPage:
+        """Structured page representation for verification."""
+        def __init__(self, main_frame):
+            self.main_frame = main_frame
+            self.frames = [main_frame] + main_frame.child_frames
+
+        def frame(self, name=None, url=None):
+            for f in self.frames:
+                if name and f.name == name:
+                    return f
+                if url and hasattr(url, "search") and url.search(f.url):
+                    return f
+            return None
+
+        def frame_locator(self, selector):
+            return TestFrame("locator_frame", "https://local/frame", detached=False)
+
+    child1 = TestFrame("nested_auth", "https://auth.local/nested")
+    child2 = TestFrame("payment_gate", "https://pay.local/gateway")
+    root = TestFrame("main_portal", "https://app.local", [child1, child2])
+    test_page = TestPage(root)
+
+    # 5. Tree construction
+    tree = engine.get_frame_tree(test_page)
+    assert tree["name"] == "main_portal"
+    assert tree["child_count"] == 2
+    assert len(tree["children"]) == 2
+    assert tree["children"][0]["name"] == "nested_auth"
+    assert tree["children"][1]["name"] == "payment_gate"
+
+    # 6. Flat frame listing
+    flat_list = engine.list_frames(test_page)
+    assert len(flat_list) == 3
+    assert flat_list[0]["name"] == "main_portal"
+    assert flat_list[0]["is_main"] is True
+    assert flat_list[1]["is_main"] is False
+
+    # 7. Frame lookup by identifier
+    found_by_name = engine.find_frame(test_page, name="nested_auth")
+    assert found_by_name is child1
+
+    found_by_url = engine.find_frame(test_page, url_pattern=r"pay\.local")
+    assert found_by_url is child2
+
+    found_by_selector = engine.find_frame(test_page, selector="iframe#pay")
+    assert found_by_selector is not None
+
+    missing = engine.find_frame(test_page, name="nonexistent_frame")
+    assert missing is None
+
+    # 8. Frame interaction execution
+    eval_res = engine.execute_in_frame(child1, "evaluate", expression="2 + 2")
+    assert eval_res["valid"] is True
+    assert eval_res["result"] == "eval:2 + 2"
+
+    content_res = engine.execute_in_frame(child1, "extract_content", selector="#header")
+    assert content_res["valid"] is True
+    assert content_res["result"] == "content:nested_auth:#header"
+
+    click_res = engine.execute_in_frame(child2, "click", selector="#submit-payment")
+    assert click_res["valid"] is True
+    assert "#submit-payment" in child2.clicked_selectors
+
+    type_res = engine.execute_in_frame(child2, "type", selector="#card-number", text="4111222233334444")
+    assert type_res["valid"] is True
+    assert child2.filled_inputs["#card-number"] == "4111222233334444"
+
+    # Detached and error cases
+    dead_frame = TestFrame("detached_frame", "https://dead.local", detached=True)
+    dead_res = engine.execute_in_frame(dead_frame, "click", selector="#button")
+    assert dead_res["valid"] is False
+    assert "detached" in dead_res["error"].lower()
+
+    none_res = engine.execute_in_frame(None, "click", selector="#button")
+    assert none_res["valid"] is False
+    assert "not possible" in none_res["error"]
+
+    unsupported_res = engine.execute_in_frame(child1, "unsupported_action")
+    assert unsupported_res["valid"] is False
+    assert "unsupported" in unsupported_res["error"].lower()
+
+    # 9. Browser action dispatch
+    if not PLAYWRIGHT_AVAILABLE:
+        action_res = dispatch_browser_action("list_frames")
+        assert action_res["isError"] is True
+        assert "Playwright uninstalled" in action_res["error"]
+
+    # 10. Telemetry and reset
+    metrics = engine.get_metrics()
+    assert metrics["total_traversals"] >= 2
+    assert metrics["frames_discovered"] >= 2
+    assert metrics["actions_executed"] >= 6
+    assert metrics["errors_encountered"] >= 3
+
+    engine.reset_metrics()
+    clean_metrics = engine.get_metrics()
+    assert clean_metrics["total_traversals"] == 0
+    assert clean_metrics["actions_executed"] == 0
+    assert clean_metrics["errors_encountered"] == 0
+
+    # 11. Singleton lifecycle
+    reset_iframe_traversal()
+    default_traversal = get_default_iframe_traversal()
+    assert default_traversal is not None
+    assert default_traversal.max_depth == 10
+    reset_iframe_traversal()
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

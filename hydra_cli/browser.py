@@ -1856,6 +1856,356 @@ def create_download_verifier(default_download_dir: Optional[str] = None) -> Down
     """Instantiate a new dedicated download verifier engine."""
     return DownloadVerifier(default_download_dir=default_download_dir)
 
+class _IframeParser(html.parser.HTMLParser):
+    """HTML parser discovering and extracting metadata from iframe tags."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.frames: List[Dict[str, Any]] = []
+        self._stack: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        """Process opening tag to locate iframe elements."""
+        tag_lower = tag.lower()
+        self._stack.append(tag_lower)
+        if tag_lower in ("iframe", "frame"):
+            attr_dict = {k.lower(): (v or "") for k, v in attrs}
+            current_depth = len([t for t in self._stack if t in ("iframe", "frame")])
+            self.frames.append({
+                "tag": tag_lower,
+                "id": attr_dict.get("id", ""),
+                "name": attr_dict.get("name", ""),
+                "src": attr_dict.get("src", ""),
+                "title": attr_dict.get("title", ""),
+                "sandbox": attr_dict.get("sandbox", ""),
+                "class": attr_dict.get("class", ""),
+                "srcdoc": attr_dict.get("srcdoc", ""),
+                "depth": current_depth,
+            })
+
+    def handle_endtag(self, tag: str) -> None:
+        """Process closing tag and decrement nesting stack."""
+        tag_lower = tag.lower()
+        if self._stack and self._stack[-1] == tag_lower:
+            self._stack.pop()
+        elif tag_lower in self._stack:
+            idx = len(self._stack) - 1 - self._stack[::-1].index(tag_lower)
+            self._stack = self._stack[:idx]
+
+
+class IframeTraversal:
+    """
+    Playwright iframe traversal and inspection engine.
+    Navigates nested iframe trees, locates frames by identifier or URL,
+    and executes actions across frame boundaries.
+    """
+
+    def __init__(self, max_depth: int = 10) -> None:
+        self.max_depth = int(max_depth)
+        self._lock = threading.RLock()
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal metrics and frame registries."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_traversals: int = 0
+            self._frames_discovered: int = 0
+            self._actions_executed: int = 0
+            self._errors_encountered: int = 0
+
+    def reset_metrics(self) -> None:
+        """Reset telemetry counters to zero."""
+        self.reset()
+
+    def inspect_html(self, html_content: str) -> List[Dict[str, Any]]:
+        """Parse HTML string and extract metadata for all iframe elements."""
+        if not html_content or not isinstance(html_content, str):
+            return []
+        parser = _IframeParser()
+        try:
+            parser.feed(html_content)
+        except Exception:
+            with self._lock:
+                self._errors_encountered += 1
+            return []
+        with self._lock:
+            self._frames_discovered += len(parser.frames)
+        return parser.frames
+
+    def get_frame_tree(self, page_or_frame: Any) -> Dict[str, Any]:
+        """Construct hierarchical tree representation of frames."""
+        with self._lock:
+            self._total_traversals += 1
+
+        if page_or_frame is None:
+            return {
+                "name": "",
+                "url": "",
+                "is_detached": True,
+                "depth": 0,
+                "child_count": 0,
+                "children": [],
+            }
+
+        root = getattr(page_or_frame, "main_frame", page_or_frame)
+        return self._build_frame_node(root, depth=0)
+
+    def _build_frame_node(self, frame: Any, depth: int = 0) -> Dict[str, Any]:
+        """Recursively build frame node metadata."""
+        if frame is None or depth > self.max_depth:
+            return {
+                "name": "",
+                "url": "",
+                "is_detached": True,
+                "depth": depth,
+                "child_count": 0,
+                "children": [],
+            }
+
+        name = getattr(frame, "name", "")
+        url = getattr(frame, "url", "")
+        is_detached_fn = getattr(frame, "is_detached", None)
+        detached = is_detached_fn() if callable(is_detached_fn) else False
+
+        child_frames = getattr(frame, "child_frames", [])
+        if not isinstance(child_frames, (list, tuple)):
+            child_frames = []
+
+        with self._lock:
+            self._frames_discovered += 1
+
+        children = [
+            self._build_frame_node(child, depth=depth + 1)
+            for child in child_frames
+        ]
+
+        return {
+            "name": str(name or ""),
+            "url": str(url or ""),
+            "is_detached": bool(detached),
+            "depth": depth,
+            "child_count": len(children),
+            "children": children,
+        }
+
+    def list_frames(self, page: Any) -> List[Dict[str, Any]]:
+        """Return flat collection of all frames attached to page."""
+        with self._lock:
+            self._total_traversals += 1
+
+        if page is None:
+            return []
+
+        frames_seq = getattr(page, "frames", None)
+        if isinstance(frames_seq, (list, tuple)):
+            res: List[Dict[str, Any]] = []
+            main_f = getattr(page, "main_frame", None)
+            for f in frames_seq:
+                name = getattr(f, "name", "")
+                url = getattr(f, "url", "")
+                is_det_fn = getattr(f, "is_detached", None)
+                detached = is_det_fn() if callable(is_det_fn) else False
+                is_main = (f == main_f) if main_f is not None else False
+                res.append({
+                    "name": str(name or ""),
+                    "url": str(url or ""),
+                    "is_detached": bool(detached),
+                    "is_main": bool(is_main),
+                })
+            with self._lock:
+                self._frames_discovered += len(res)
+            return res
+
+        tree = self.get_frame_tree(page)
+        flat: List[Dict[str, Any]] = []
+
+        def _flatten(node: Dict[str, Any], is_main: bool = False) -> None:
+            flat.append({
+                "name": node.get("name", ""),
+                "url": node.get("url", ""),
+                "is_detached": node.get("is_detached", False),
+                "is_main": is_main,
+            })
+            for c in node.get("children", []):
+                _flatten(c, is_main=False)
+
+        _flatten(tree, is_main=True)
+        return flat
+
+    def find_frame(
+        self,
+        page: Any,
+        name: Optional[str] = None,
+        url_pattern: Optional[str] = None,
+        selector: Optional[str] = None,
+    ) -> Optional[Any]:
+        """Locate frame matching name, URL regex, or CSS selector."""
+        if page is None:
+            return None
+
+        if name and hasattr(page, "frame"):
+            try:
+                found = page.frame(name=name)
+                if found is not None:
+                    return found
+            except Exception:
+                pass_err = True
+
+        if url_pattern and hasattr(page, "frame"):
+            try:
+                found = page.frame(url=re.compile(url_pattern))
+                if found is not None:
+                    return found
+            except Exception:
+                pass_err = True
+
+        frames = getattr(page, "frames", None)
+        if isinstance(frames, (list, tuple)):
+            for f in frames:
+                f_name = getattr(f, "name", "")
+                f_url = getattr(f, "url", "")
+                if name and f_name == name:
+                    return f
+                if url_pattern and (url_pattern in f_url or re.search(url_pattern, f_url)):
+                    return f
+
+        if selector and hasattr(page, "frame_locator"):
+            try:
+                return page.frame_locator(selector)
+            except Exception:
+                pass_err = True
+
+        return None
+
+    def execute_in_frame(
+        self,
+        frame: Any,
+        action: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Execute interaction or evaluation within target frame."""
+        with self._lock:
+            self._actions_executed += 1
+
+        if frame is None:
+            with self._lock:
+                self._errors_encountered += 1
+            return {
+                "valid": False,
+                "action": action,
+                "error": "compliance : not possible. Target frame represents None.",
+            }
+
+        act = (action or "").strip().lower()
+
+        is_det_fn = getattr(frame, "is_detached", None)
+        if callable(is_det_fn) and is_det_fn():
+            with self._lock:
+                self._errors_encountered += 1
+            return {
+                "valid": False,
+                "action": act,
+                "error": "Target frame detached from document.",
+            }
+
+        try:
+            if act in ("evaluate", "eval", "script"):
+                expr = kwargs.get("expression") or kwargs.get("script") or kwargs.get("text", "")
+                if not hasattr(frame, "evaluate"):
+                    raise AttributeError("Frame does not provide evaluate method")
+                val = frame.evaluate(expr)
+                return {"valid": True, "action": act, "result": val}
+
+            elif act in ("extract_content", "extract", "content", "text"):
+                sel = kwargs.get("selector")
+                max_chars = kwargs.get("max_chars", 8000)
+                if sel and hasattr(frame, "locator"):
+                    loc = frame.locator(sel).first
+                    cnt = loc.count() if hasattr(loc, "count") else 1
+                    txt = loc.inner_text() if cnt > 0 else ""
+                elif hasattr(frame, "inner_text"):
+                    txt = frame.inner_text(sel or "body")
+                elif hasattr(frame, "content"):
+                    txt = frame.content()
+                else:
+                    txt = ""
+
+                truncated = len(txt) > max_chars
+                return {
+                    "valid": True,
+                    "action": act,
+                    "result": txt[:max_chars],
+                    "truncated": truncated,
+                }
+
+            elif act in ("click", "tap"):
+                sel = kwargs.get("selector")
+                if not sel:
+                    raise ValueError("Selector required for click action")
+                if hasattr(frame, "click"):
+                    frame.click(sel)
+                elif hasattr(frame, "locator"):
+                    frame.locator(sel).click()
+                else:
+                    raise AttributeError("Frame does not support click dispatch")
+                return {"valid": True, "action": act, "result": f"Clicked {sel}"}
+
+            elif act in ("type", "fill", "input"):
+                sel = kwargs.get("selector")
+                txt = kwargs.get("text", "")
+                if not sel:
+                    raise ValueError("Selector required for type action")
+                if hasattr(frame, "fill"):
+                    frame.fill(sel, txt)
+                elif hasattr(frame, "type"):
+                    frame.type(sel, txt)
+                elif hasattr(frame, "locator"):
+                    frame.locator(sel).fill(txt)
+                else:
+                    raise AttributeError("Frame does not support type dispatch")
+                return {"valid": True, "action": act, "result": f"Filled {sel}"}
+
+            else:
+                raise ValueError(f"Unsupported frame action '{action}'")
+
+        except Exception as exc:
+            with self._lock:
+                self._errors_encountered += 1
+            return {
+                "valid": False,
+                "action": act,
+                "error": str(exc),
+            }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return operational telemetry metrics."""
+        with self._lock:
+            return {
+                "total_traversals": self._total_traversals,
+                "frames_discovered": self._frames_discovered,
+                "actions_executed": self._actions_executed,
+                "errors_encountered": self._errors_encountered,
+                "max_depth": self.max_depth,
+            }
+
+
+_DEFAULT_IFRAME_TRAVERSAL = IframeTraversal()
+
+
+def get_default_iframe_traversal() -> IframeTraversal:
+    """Return default singleton iframe traversal engine."""
+    return _DEFAULT_IFRAME_TRAVERSAL
+
+
+def reset_iframe_traversal() -> None:
+    """Reset global iframe traversal state."""
+    _DEFAULT_IFRAME_TRAVERSAL.reset()
+
+
+def create_iframe_traversal(max_depth: int = 10) -> IframeTraversal:
+    """Instantiate a new dedicated iframe traversal engine."""
+    return IframeTraversal(max_depth=max_depth)
+
 
 class PlaywrightBrowserManager:
     """Managed Playwright browser lifecycle instance with automatic cleanup."""
@@ -1869,6 +2219,7 @@ class PlaywrightBrowserManager:
         self._console_capture = get_default_console_capture()
         self._network_latch = get_default_network_idle_latch()
         self._download_verifier = get_default_download_verifier()
+        self._iframe_traversal = get_default_iframe_traversal()
 
     def _ensure_page(self) -> Page:
         if not PLAYWRIGHT_AVAILABLE:
@@ -2087,6 +2438,74 @@ class PlaywrightBrowserManager:
         """Return network idle latch telemetry counters."""
         return self._network_latch.get_metrics()
 
+    def verify_download(
+        self,
+        file_path: str,
+        expected_hash: Optional[str] = None,
+        min_bytes: int = 1,
+        max_bytes: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Validate downloaded file against integrity constraints."""
+        verifier = get_default_download_verifier()
+        return verifier.verify_download(
+            file_path=file_path,
+            expected_hash=expected_hash,
+            min_bytes=min_bytes,
+            max_bytes=max_bytes,
+            **kwargs,
+        )
+
+    def get_downloads(self) -> List[Dict[str, Any]]:
+        """Return captured download records."""
+        verifier = get_default_download_verifier()
+        return verifier.get_downloads()
+
+    def get_frame_tree(self) -> Dict[str, Any]:
+        """Return hierarchical iframe tree of active page."""
+        page = self._ensure_page()
+        traversal = get_default_iframe_traversal()
+        return traversal.get_frame_tree(page)
+
+    def list_frames(self) -> List[Dict[str, Any]]:
+        """Return flat list of all active frames."""
+        page = self._ensure_page()
+        traversal = get_default_iframe_traversal()
+        return traversal.list_frames(page)
+
+    def find_frame(
+        self,
+        name: Optional[str] = None,
+        url_pattern: Optional[str] = None,
+        selector: Optional[str] = None,
+    ) -> Optional[Any]:
+        """Locate target frame matching criteria."""
+        page = self._ensure_page()
+        traversal = get_default_iframe_traversal()
+        return traversal.find_frame(page, name=name, url_pattern=url_pattern, selector=selector)
+
+    def execute_in_frame(
+        self,
+        frame_target: Any,
+        action: str,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Execute interaction within target frame."""
+        traversal = get_default_iframe_traversal()
+        return traversal.execute_in_frame(frame_target, action, **kwargs)
+
+    def inspect_iframes(
+        self,
+        html_content: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Inspect and discover iframe elements in page or HTML."""
+        traversal = get_default_iframe_traversal()
+        if html_content is not None:
+            return traversal.inspect_html(html_content)
+        page = self._ensure_page()
+        content = page.content() if hasattr(page, "content") else ""
+        return traversal.inspect_html(content)
+
     def close(self) -> None:
         """Close browser context and stop Playwright runner cleanly."""
         try:
@@ -2254,6 +2673,28 @@ def dispatch_browser_action(
         elif act in ("inspect_form", "get_form_fields", "form_fields"):
             res = session.inspect_form(form_selector=selector)
             return {"isError": res.get("isError", False), "result": res}
+        elif act in ("list_frames", "frames", "get_frames"):
+            frame_list = session.list_frames()
+            return {"isError": False, "result": frame_list, "count": len(frame_list)}
+        elif act in ("frame_tree", "get_frame_tree"):
+            tree = session.get_frame_tree()
+            return {"isError": False, "result": tree}
+        elif act in ("inspect_iframes", "inspect_frames"):
+            res = session.inspect_iframes(html_content=text)
+            return {"isError": False, "result": res, "count": len(res)}
+        elif act in ("execute_in_frame", "frame_action", "in_frame"):
+            f_name = kwargs.get("frame_name") or kwargs.get("name")
+            f_url = kwargs.get("frame_url") or kwargs.get("url")
+            f_sel = kwargs.get("frame_selector") or selector
+            target = session.find_frame(name=f_name, url_pattern=f_url, selector=f_sel)
+            if target is None:
+                return {
+                    "isError": True,
+                    "error": f"Target iframe not located by name={f_name}, url={f_url}, selector={f_sel}",
+                }
+            sub_act = kwargs.get("frame_action") or kwargs.get("sub_action") or "extract_content"
+            res = session.execute_in_frame(target, sub_act, **kwargs)
+            return {"isError": not res.get("valid", False), "result": res}
         elif act in ("close", "exit", "quit"):
             close_browser_session()
             return {"isError": False, "result": "Browser session closed."}
