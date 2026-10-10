@@ -2333,6 +2333,18 @@ class NativeToolRegistry:
             "fstring_modernizer": self.modernize_fstrings,
             "lint_fstrings": self.modernize_fstrings,
             "check_fstrings": self.modernize_fstrings,
+            "computer_screen_capture": self.computer_screen_capture,
+            "computer_mouse_click": self.computer_mouse_click,
+            "computer_mouse_move": self.computer_mouse_move,
+            "computer_mouse_drag": self.computer_mouse_drag,
+            "computer_mouse_scroll": self.computer_mouse_scroll,
+            "computer_key_press": self.computer_key_press,
+            "computer_key_chord": self.computer_key_chord,
+            "computer_type_text": self.computer_type_text,
+            "computer_window_action": self.computer_window_action,
+            "computer_dispatch_action": self.computer_dispatch_action,
+            "browser_pdf_print": self.browser_pdf_print,
+            "browser_network_inspect": self.browser_network_inspect,
         }
 
     @property
@@ -2685,6 +2697,103 @@ class NativeToolRegistry:
     def extract_content(self, selector: Optional[str] = None) -> Any:
         """Extract text content from browser page or element using Playwright browser."""
         return self.browser_action(action="extract_content", selector=selector)
+    def computer_screen_capture(
+        self,
+        path: Optional[str] = None,
+        bbox: Optional[Tuple[int, int, int, int]] = None,
+        as_base64: bool = True,
+    ) -> Dict[str, Any]:
+        """Capture screen image using computer use engine."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.screen.capture(bbox=bbox, save_path=path, as_base64=as_base64)
+
+    def computer_mouse_click(
+        self,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
+        button: str = "left",
+        double: bool = False,
+    ) -> Dict[str, Any]:
+        """Click mouse button at specified or current coordinates with safety bounds."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.os.mouse_click(x=x, y=y, button=button, double=double)
+
+    def computer_mouse_move(
+        self,
+        x: int,
+        y: int,
+        smooth: bool = True,
+        steps: int = 5,
+    ) -> Dict[str, Any]:
+        """Move mouse cursor to coordinates with boundary clipping."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.os.mouse_move(x=x, y=y, smooth=smooth, steps=steps)
+
+    def computer_mouse_drag(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        steps: int = 10,
+        button: str = "left",
+    ) -> Dict[str, Any]:
+        """Drag mouse pointer between coordinates with button depressed."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.os.mouse_drag(start_x, start_y, end_x, end_y, steps=steps, button=button)
+
+    def computer_mouse_scroll(self, dx: int = 0, dy: int = 0) -> Dict[str, Any]:
+        """Scroll mouse wheel vertically or horizontally."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.os.mouse_scroll(dx=dx, dy=dy)
+
+    def computer_key_press(self, key: str) -> Dict[str, Any]:
+        """Send tap keystroke event."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.os.key_press(key)
+
+    def computer_key_chord(self, chord: str) -> Dict[str, Any]:
+        """Execute combined hotkey chord like ctrl+c or alt+tab."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.os.key_chord(chord)
+
+    def computer_type_text(self, text: str, delay_ms: float = 10.0) -> Dict[str, Any]:
+        """Type text string character by character."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.os.type_text(text, delay_ms=delay_ms)
+
+    def computer_window_action(self, sub_action: str = "active", target: Optional[Any] = None) -> Dict[str, Any]:
+        """Inspect, enumerate, or focus system windows."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.dispatch("window_action", sub_action=sub_action, target=target)
+
+    def computer_dispatch_action(self, action: str, **kwargs: Any) -> Dict[str, Any]:
+        """Dispatch arbitrary unified computer use action."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.dispatch(action, **kwargs)
+
+    def browser_pdf_print(self, path: Optional[str] = None) -> Dict[str, Any]:
+        """Print active Playwright page to PDF."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.browser.print_pdf(path=path)
+
+    def browser_network_inspect(self, limit: int = 50) -> Dict[str, Any]:
+        """Inspect recorded network traffic from Playwright browser."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.browser.get_network_logs(limit=limit)
+
 
     def sort_imports(
         self,
@@ -4726,6 +4835,140 @@ class NativeToolRegistry:
                         },
                     },
                 },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "computer_screen_capture",
+                    "description": "Capture full desktop screen or bounding box returning metadata and image base64.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Optional file path to save screenshot."},
+                            "as_base64": {"type": "boolean", "description": "Whether to include base64 encoded PNG (default true)."}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "computer_mouse_click",
+                    "description": "Click mouse button at specified (x, y) coordinates with safety clipping.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "x": {"type": "integer", "description": "Target X screen coordinate."},
+                            "y": {"type": "integer", "description": "Target Y screen coordinate."},
+                            "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "Mouse button (default 'left')."},
+                            "double": {"type": "boolean", "description": "Whether to double click (default false)."}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "computer_mouse_move",
+                    "description": "Move mouse cursor to coordinates with boundary clipping and smoothing.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "x": {"type": "integer", "description": "Target X coordinate."},
+                            "y": {"type": "integer", "description": "Target Y coordinate."},
+                            "smooth": {"type": "boolean", "description": "Whether to interpolate movement (default true)."}
+                        },
+                        "required": ["x", "y"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "computer_mouse_drag",
+                    "description": "Drag mouse pointer between coordinates with button depressed.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "start_x": {"type": "integer", "description": "Start X coordinate."},
+                            "start_y": {"type": "integer", "description": "Start Y coordinate."},
+                            "end_x": {"type": "integer", "description": "End X coordinate."},
+                            "end_y": {"type": "integer", "description": "End Y coordinate."},
+                            "button": {"type": "string", "description": "Mouse button (default 'left')."}
+                        },
+                        "required": ["start_x", "start_y", "end_x", "end_y"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "computer_type_text",
+                    "description": "Type text string character by character into active window.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string", "description": "Text to type."},
+                            "delay_ms": {"type": "number", "description": "Delay between keystrokes in ms (default 10.0)."}
+                        },
+                        "required": ["text"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "computer_key_press",
+                    "description": "Send tap keystroke event for named key.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "key": {"type": "string", "description": "Key name, e.g. enter, escape, tab, f5."}
+                        },
+                        "required": ["key"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "computer_window_action",
+                    "description": "Inspect, list, or focus system windows.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "sub_action": {"type": "string", "enum": ["active", "list", "focus"], "description": "Window action."},
+                            "target": {"type": "string", "description": "Window title substring or handle for focus."}
+                        },
+                        "required": ["sub_action"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "browser_pdf_print",
+                    "description": "Print active Playwright browser page to PDF document.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Optional file path to save PDF."}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "browser_network_inspect",
+                    "description": "Inspect recorded network requests and responses from Playwright browser.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "description": "Maximum log entries to return (default 50)."}
+                        }
+                    }
+                }
             },
         ]
 

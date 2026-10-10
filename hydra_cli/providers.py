@@ -5104,3 +5104,161 @@ def create_frozen_detector(
         max_silence_sec=max_silence_sec,
         raise_on_freeze=raise_on_freeze,
     )
+
+
+_FANOUT_EOF = object()
+
+
+class StreamFanoutCoordinator:
+    """
+    Streaming throughput fanout coordinator for multi-subscriber stream broadcasting.
+    Broadcasts incoming tokens across multiple concurrent consumer queues with bounded buffers.
+    """
+
+    def __init__(
+        self,
+        default_buffer_size: int = 1000,
+        overflow_policy: str = "drop_oldest",
+    ) -> None:
+        import queue
+        self._queue_module = queue
+        self._lock = threading.RLock()
+        self._default_buffer_size = max(1, int(default_buffer_size))
+        self._overflow_policy = str(overflow_policy)
+        self._subscribers: Dict[str, Any] = {}
+        self._sub_counter: int = 0
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_chunks_published: int = 0
+            self._total_chunks_delivered: int = 0
+            self._dropped_chunks_count: int = 0
+            self._subscribers.clear()
+
+    def subscribe(
+        self,
+        subscriber_id: Optional[str] = None,
+        buffer_size: Optional[int] = None,
+    ) -> str:
+        """Subscribe consumer queue to broadcast stream and return unique subscriber identifier."""
+        max_size = buffer_size if buffer_size is not None else self._default_buffer_size
+        q = self._queue_module.Queue(maxsize=max(1, max_size))
+        with self._lock:
+            self._sub_counter += 1
+            sid = subscriber_id or f"sub_{self._sub_counter}"
+            self._subscribers[sid] = q
+            return sid
+
+    def unsubscribe(self, subscriber_id: str) -> bool:
+        """Unsubscribe consumer and clean subscriber queue resources."""
+        with self._lock:
+            if subscriber_id in self._subscribers:
+                del self._subscribers[subscriber_id]
+                return True
+            return False
+
+    def subscriber_count(self) -> int:
+        """Return count of registered active subscribers."""
+        with self._lock:
+            return len(self._subscribers)
+
+    def publish(self, chunk: str) -> int:
+        """Publish token chunk to all registered active subscribers."""
+        with self._lock:
+            self._total_chunks_published += 1
+            delivered = 0
+            for sid, q in list(self._subscribers.items()):
+                try:
+                    q.put_nowait(chunk)
+                    delivered += 1
+                    self._total_chunks_delivered += 1
+                except self._queue_module.Full:
+                    if self._overflow_policy == "drop_oldest":
+                        try:
+                            q.get_nowait()
+                        except self._queue_module.Empty:
+                            pass
+                        try:
+                            q.put_nowait(chunk)
+                            delivered += 1
+                            self._total_chunks_delivered += 1
+                        except self._queue_module.Full:
+                            self._dropped_chunks_count += 1
+                    else:
+                        self._dropped_chunks_count += 1
+            return delivered
+
+    def close(self) -> None:
+        """Signal end of stream across all subscriber queues."""
+        with self._lock:
+            for sid, q in list(self._subscribers.items()):
+                try:
+                    q.put_nowait(_FANOUT_EOF)
+                except self._queue_module.Full:
+                    try:
+                        q.get_nowait()
+                        q.put_nowait(_FANOUT_EOF)
+                    except (self._queue_module.Empty, self._queue_module.Full):
+                        pass
+
+    def get_subscriber_stream(self, subscriber_id: str) -> Generator[str, None, None]:
+        """Generate token stream for specified subscriber queue."""
+        with self._lock:
+            q = self._subscribers.get(subscriber_id)
+        if q is None:
+            return
+
+        while True:
+            item = q.get()
+            if item is _FANOUT_EOF:
+                break
+            yield item
+
+    def fanout(
+        self,
+        source_stream: Iterable[str],
+        subscriber_ids: Optional[List[str]] = None,
+    ) -> Generator[str, None, None]:
+        """Stream tokens from source while broadcasting chunks to registered subscribers."""
+        for chunk in source_stream:
+            self.publish(chunk)
+            yield chunk
+        self.close()
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            return {
+                "default_buffer_size": self._default_buffer_size,
+                "overflow_policy": self._overflow_policy,
+                "active_subscribers": len(self._subscribers),
+                "total_chunks_published": self._total_chunks_published,
+                "total_chunks_delivered": self._total_chunks_delivered,
+                "dropped_chunks_count": self._dropped_chunks_count,
+            }
+
+
+_DEFAULT_STREAM_FANOUT = StreamFanoutCoordinator()
+
+
+def get_default_stream_fanout() -> StreamFanoutCoordinator:
+    """Return default singleton stream fanout coordinator."""
+    return _DEFAULT_STREAM_FANOUT
+
+
+def reset_stream_fanout() -> None:
+    """Reset global stream fanout coordinator telemetry."""
+    _DEFAULT_STREAM_FANOUT.reset_metrics()
+
+
+def create_stream_fanout(
+    default_buffer_size: int = 1000,
+    overflow_policy: str = "drop_oldest",
+) -> StreamFanoutCoordinator:
+    """Instantiate a new dedicated stream fanout coordinator."""
+    return StreamFanoutCoordinator(
+        default_buffer_size=default_buffer_size,
+        overflow_policy=overflow_policy,
+    )

@@ -70,6 +70,7 @@ USAGE:
     hydra agent --local "<prompt>"       # Offline local agent loop (Ollama/llama.cpp)
     hydra <alias> --mcp "<prompt>"       # Tool-augmented execution loop
     hydra serve [--port 7777]            # Sovereign OpenAI Gateway for Hermes and Pi
+    hydra desktop [--port 7778]          # Sovereign Desktop App & local Web Desk UI
     hydra mcp list                       # List configured community MCP servers & tools
     hydra sandbox run "<cmd>"            # Isolated zero-trust command execution
     hydra banner                         # Display 3-head TUI Hydra + title wordmark
@@ -345,6 +346,9 @@ def route_command(argv: List[str]) -> int:
         return execute_hands_command(argv[1:])
     if argv and argv[0] in ("sandbox", "--sandbox"):
         return execute_sandbox_command(argv[1:])
+    if argv and argv[0] in ("desktop", "--desktop"):
+        from hydra_cli.desktop import main as desktop_main
+        return desktop_main(argv[1:])
     if argv and argv[0] in ("serve", "--serve"):
         host = "127.0.0.1"
         port = 7777

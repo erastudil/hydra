@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and len(names) == 28
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and len(names) == 37
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -9277,6 +9277,179 @@ def frozen_detector_contracts():
     assert default_det is not None
     reset_frozen_detector()
 
+
+
+@check
+def computer_use_coordinate_bounds_and_safety():
+    from hydra_cli.computer_use import CoordinateBounds
+    b = CoordinateBounds(width=1920, height=1080, margin=10, enable_failsafe=True)
+    
+    # Normal coordinate inside bounds
+    cx, cy, clipped = b.clip(500, 400)
+    assert cx == 500 and cy == 400 and not clipped
+    safe, err = b.check_safety(cx, cy)
+    assert safe is True and err is None
+
+    # Clamped coordinates
+    cx, cy, clipped = b.clip(-100, 2000)
+    assert cx == 10 and cy == 1069 and clipped
+
+    # Fenced region
+    b.add_fence("restricted_zone", 100, 100, 300, 300)
+    assert "restricted_zone" in b.list_fences()
+    safe, err = b.check_safety(150, 150)
+    assert safe is False
+    assert "restricted_zone" in err
+
+    # Emergency failsafe corner (0, 0)
+    safe, err = b.check_safety(0, 0)
+    assert safe is False
+    assert "failsafe" in err.lower()
+
+    # Remove fence
+    assert b.remove_fence("restricted_zone") is True
+    safe, err = b.check_safety(150, 150)
+    assert safe is True
+
+
+@check
+def computer_use_os_controller_and_screen_capture():
+    import base64
+    from hydra_cli.computer_use import (
+        CoordinateBounds,
+        OSController,
+        ScreenCaptureEngine,
+    )
+    bounds = CoordinateBounds(width=1920, height=1080)
+    os_ctl = OSController(bounds)
+    
+    w, h = os_ctl.get_screen_size()
+    assert w > 0 and h > 0
+    cur_x, cur_y = os_ctl.get_cursor_position()
+    assert cur_x >= 0 and cur_y >= 0
+
+    mv = os_ctl.mouse_move(400, 300, smooth=False)
+    assert mv["isError"] is False
+    assert mv["x"] == 400 and mv["y"] == 300
+
+    clk = os_ctl.mouse_click(400, 300, button="left")
+    assert clk["isError"] is False
+
+    drag = os_ctl.mouse_drag(200, 200, 300, 300, steps=2)
+    assert drag["isError"] is False
+
+    scroll = os_ctl.mouse_scroll(dy=1)
+    assert scroll["isError"] is False
+
+    kp = os_ctl.key_press("enter")
+    assert kp["isError"] is False
+
+    chord = os_ctl.key_chord("ctrl+c")
+    assert chord["isError"] is False
+
+    typ = os_ctl.type_text("echo test", delay_ms=0.0)
+    assert typ["isError"] is False
+    assert typ["typed_characters"] == 9
+
+    win = os_ctl.get_active_window()
+    assert "title" in win
+    wins = os_ctl.list_windows()
+    assert isinstance(wins, list)
+
+    screen = ScreenCaptureEngine(bounds)
+    cap = screen.capture(as_base64=True)
+    assert cap["isError"] is False
+    assert cap["format"] == "PNG"
+    assert cap["width"] > 0 and cap["height"] > 0
+    raw = base64.b64decode(cap["base64"])
+    assert raw.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+@check
+def computer_use_playwright_and_network():
+    from hydra_cli.computer_use import PlaywrightAutomationBridge
+    bridge = PlaywrightAutomationBridge(headless=True)
+    try:
+        html_page = 'data:text/html,<html><body><h1>Hydra Automation</h1><input id="inp" type="text"/><button id="btn">Action</button></body></html>'
+        nav = bridge.navigate(html_page)
+        assert nav["isError"] is False
+
+        dom = bridge.inspect_dom()
+        assert dom["isError"] is False
+        assert dom["count"] >= 2
+
+        typ = bridge.type_element("#inp", "automated text")
+        assert typ["isError"] is False
+
+        clk = bridge.click_element("#btn")
+        assert clk["isError"] is False
+
+        pdf_res = bridge.print_pdf()
+        assert pdf_res["isError"] is False
+        assert pdf_res["size_bytes"] > 0
+
+        logs = bridge.get_network_logs()
+        assert logs["isError"] is False
+    finally:
+        bridge.close()
+
+
+@check
+def computer_use_native_tool_registry():
+    from hydra_cli.native_tools import NativeToolRegistry
+    reg = NativeToolRegistry()
+    assert reg.has_tool("computer_screen_capture")
+    assert reg.has_tool("computer_mouse_click")
+    assert reg.has_tool("computer_mouse_move")
+    assert reg.has_tool("computer_type_text")
+    assert reg.has_tool("computer_window_action")
+    assert reg.has_tool("browser_pdf_print")
+
+    tools = reg.get_openai_tools()
+    names = {t["function"]["name"] for t in tools}
+    assert "computer_screen_capture" in names
+    assert "computer_mouse_click" in names
+    assert "browser_pdf_print" in names
+
+    res = reg.dispatch("computer_mouse_move", {"x": 250, "y": 250, "smooth": False})
+    assert res["isError"] is False
+
+
+@check
+def desktop_app_server_and_gateway_contracts():
+    import json
+    import time
+    import urllib.request
+    import hydra_cli.desktop as d
+    server = d.DesktopServer(host="127.0.0.1", port=7798)
+    server.start(open_browser=False, background=True)
+    time.sleep(1.0)
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:7798/api/status", timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            assert data["status"] == "ok"
+            assert data["gateway_url"] == "http://127.0.0.1:7777"
+        with urllib.request.urlopen("http://127.0.0.1:7798/api/models", timeout=5) as resp:
+            m = json.loads(resp.read().decode("utf-8"))
+            assert len(m["models"]) > 0
+        with urllib.request.urlopen("http://127.0.0.1:7798/api/computer/screen", timeout=5) as resp:
+            img_bytes = resp.read()
+            assert img_bytes.startswith(b"\x89PNG\r\n\x1a\n")
+    finally:
+        server.stop()
+
+
+@check
+def hydra_desktop_cli_launcher():
+    import subprocess
+    import sys
+    res1 = subprocess.run([sys.executable, "-m", "hydra_cli.desktop", "--help"], capture_output=True, text=True)
+    assert res1.returncode == 0
+    assert "Hydra Sovereign Desktop Application" in res1.stdout
+
+    res2 = subprocess.run([sys.executable, "-m", "hydra_cli.cli", "desktop", "--help"], capture_output=True, text=True)
+    assert res2.returncode == 0
+    assert "Hydra Sovereign Desktop Application" in res2.stdout
 
 @check
 def no_pytest_tree():
