@@ -160,6 +160,288 @@ def reset_timeout_guard() -> None:
     _DEFAULT_TIMEOUT_GUARD.reset()
 
 
+class McpRateLimitExceededError(RuntimeError):
+    """
+    Raised when an MCP tool invocation exceeds configured rate limits.
+    Asserts compliance : not possible in error details.
+    """
+    pass
+
+
+@dataclass
+class _TokenBucket:
+    """
+    Internal token bucket tracking available invocation tokens.
+    """
+    fill_rate: float
+    burst: float
+    tokens: float
+    last_updated: float
+
+
+class _RateLimitContext:
+    """Context manager acquiring rate limit tokens on entry."""
+
+    def __init__(
+        self,
+        limiter: "McpRateLimiter",
+        key: str = "default",
+        cost: float = 1.0,
+        blocking: bool = True,
+        timeout: Optional[float] = None,
+        raise_on_limit: Optional[bool] = None,
+    ) -> None:
+        self.limiter = limiter
+        self.key = key
+        self.cost = cost
+        self.blocking = blocking
+        self.timeout = timeout
+        self.raise_on_limit = raise_on_limit
+
+    def __enter__(self) -> "McpRateLimiter":
+        self.limiter.acquire(
+            key=self.key,
+            cost=self.cost,
+            blocking=self.blocking,
+            timeout=self.timeout,
+            raise_on_limit=self.raise_on_limit,
+        )
+        return self.limiter
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> bool:
+        """Exit rate limit context manager without suppressing exceptions."""
+        return False
+
+
+class McpRateLimiter:
+    """
+    Token-bucket rate limiter managing invocation frequency for MCP tools.
+    Supports global, per-namespace, and per-tool limits with pattern matching.
+    """
+
+    def __init__(
+        self,
+        default_rate: float = 60.0,
+        per_seconds: float = 60.0,
+        default_burst: Optional[int] = None,
+        raise_on_limit: bool = False,
+    ) -> None:
+        self.default_rate = float(default_rate)
+        self.per_seconds = float(per_seconds) if per_seconds > 0 else 1.0
+        self.default_burst = int(default_burst) if default_burst is not None else max(1, int(self.default_rate))
+        self.raise_on_limit = bool(raise_on_limit)
+        self._lock = threading.RLock()
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset rate limiter rules, active buckets, and telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._rules: List[Tuple[str, float, float, int, bool]] = []
+            self._buckets: Dict[str, _TokenBucket] = {}
+            self._total_requests: int = 0
+            self._allowed_requests: int = 0
+            self._throttled_requests: int = 0
+            self._rejected_requests: int = 0
+            self._wait_time_total_seconds: float = 0.0
+
+    def register_rule(
+        self,
+        pattern: str,
+        rate: float,
+        per_seconds: float = 1.0,
+        burst: Optional[int] = None,
+        shared: bool = False,
+    ) -> None:
+        """Register pattern-based rate limit rule."""
+        if rate <= 0:
+            raise ValueError("Rate must be strictly positive.")
+        clean_pat = pattern.strip().lower()
+        clean_per = float(per_seconds) if per_seconds > 0 else 1.0
+        clean_burst = int(burst) if burst is not None else max(1, int(rate))
+        with self._lock:
+            self._rules.append((clean_pat, float(rate), clean_per, clean_burst, bool(shared)))
+
+    def _resolve_config(self, key: str) -> Tuple[float, int, str]:
+        """Resolve fill rate, burst capacity, and bucket key for target string."""
+        target = key.strip().lower()
+        for pat, r_val, per_val, b_val, is_shared in reversed(self._rules):
+            if fnmatch.fnmatch(target, pat):
+                fill_rate = r_val / per_val
+                bucket_key = f"rule:{pat}" if is_shared else f"key:{target}"
+                return fill_rate, b_val, bucket_key
+
+        fill_rate = self.default_rate / self.per_seconds
+        return fill_rate, self.default_burst, f"key:{target}"
+
+    def _get_bucket(self, bucket_key: str, fill_rate: float, burst: int) -> _TokenBucket:
+        """Retrieve existing token bucket or instantiate new bucket."""
+        now = time.time()
+        bucket = self._buckets.get(bucket_key)
+        if bucket is None:
+            bucket = _TokenBucket(
+                fill_rate=fill_rate,
+                burst=float(burst),
+                tokens=float(burst),
+                last_updated=now,
+            )
+            self._buckets[bucket_key] = bucket
+        else:
+            elapsed = max(0.0, now - bucket.last_updated)
+            bucket.tokens = min(bucket.burst, bucket.tokens + elapsed * bucket.fill_rate)
+            bucket.last_updated = now
+            bucket.fill_rate = fill_rate
+            bucket.burst = float(burst)
+        return bucket
+
+    def get_wait_time(self, key: str = "default", cost: float = 1.0) -> float:
+        """Calculate wait time in seconds required before cost tokens become available."""
+        with self._lock:
+            fill_rate, burst, bucket_key = self._resolve_config(key)
+            bucket = self._get_bucket(bucket_key, fill_rate, burst)
+            if bucket.tokens >= cost:
+                return 0.0
+            deficit = cost - bucket.tokens
+            return max(0.0, deficit / bucket.fill_rate)
+
+    def can_acquire(self, key: str = "default", cost: float = 1.0) -> bool:
+        """Return true when cost tokens immediately available without blocking."""
+        with self._lock:
+            return self.get_wait_time(key=key, cost=cost) <= 0.0
+
+    def get_available_tokens(self, key: str = "default") -> float:
+        """Return count of currently available tokens for designated key."""
+        with self._lock:
+            fill_rate, burst, bucket_key = self._resolve_config(key)
+            bucket = self._get_bucket(bucket_key, fill_rate, burst)
+            return max(0.0, bucket.tokens)
+
+    def acquire(
+        self,
+        key: str = "default",
+        cost: float = 1.0,
+        blocking: bool = True,
+        timeout: Optional[float] = None,
+        raise_on_limit: Optional[bool] = None,
+    ) -> bool:
+        """
+        Acquire token bucket capacity for invocation.
+        Waits when blocking requested and capacity depleted.
+        """
+        should_raise = self.raise_on_limit if raise_on_limit is None else bool(raise_on_limit)
+
+        with self._lock:
+            self._total_requests += 1
+            fill_rate, burst, bucket_key = self._resolve_config(key)
+            bucket = self._get_bucket(bucket_key, fill_rate, burst)
+
+            if bucket.tokens >= cost:
+                bucket.tokens -= cost
+                self._allowed_requests += 1
+                return True
+
+            deficit = cost - bucket.tokens
+            wait_time = max(0.0, deficit / bucket.fill_rate)
+
+            if not blocking:
+                self._rejected_requests += 1
+                if should_raise:
+                    raise McpRateLimitExceededError(
+                        f"compliance : not possible. Rate limit exceeded for '{key}'. retry_after: {wait_time:.3f}s"
+                    )
+                return False
+
+            if timeout is not None and wait_time > timeout:
+                self._rejected_requests += 1
+                if should_raise:
+                    raise McpRateLimitExceededError(
+                        f"compliance : not possible. Rate limit wait {wait_time:.3f}s exceeds timeout {timeout:.3f}s for '{key}'."
+                    )
+                return False
+
+        time.sleep(wait_time)
+
+        with self._lock:
+            bucket = self._get_bucket(bucket_key, fill_rate, burst)
+            bucket.tokens = max(0.0, bucket.tokens - cost)
+            self._allowed_requests += 1
+            self._throttled_requests += 1
+            self._wait_time_total_seconds += wait_time
+            return True
+
+    def limit(
+        self,
+        key: str = "default",
+        cost: float = 1.0,
+        blocking: bool = True,
+        timeout: Optional[float] = None,
+        raise_on_limit: Optional[bool] = None,
+    ) -> _RateLimitContext:
+        """Return context manager acquiring token capacity on entrance."""
+        return _RateLimitContext(
+            limiter=self,
+            key=key,
+            cost=cost,
+            blocking=blocking,
+            timeout=timeout,
+            raise_on_limit=raise_on_limit,
+        )
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return rate limiter telemetry counters and active bucket counts."""
+        with self._lock:
+            return {
+                "default_rate": self.default_rate,
+                "per_seconds": self.per_seconds,
+                "default_burst": self.default_burst,
+                "rules_count": len(self._rules),
+                "total_requests": self._total_requests,
+                "allowed_requests": self._allowed_requests,
+                "throttled_requests": self._throttled_requests,
+                "rejected_requests": self._rejected_requests,
+                "active_buckets_count": len(self._buckets),
+                "wait_time_total_seconds": self._wait_time_total_seconds,
+            }
+
+    def reset_metrics(self) -> None:
+        """Reset telemetry counters preserving configured rules and active buckets."""
+        with self._lock:
+            self._total_requests = 0
+            self._allowed_requests = 0
+            self._throttled_requests = 0
+            self._rejected_requests = 0
+            self._wait_time_total_seconds = 0.0
+
+
+_DEFAULT_RATE_LIMITER = McpRateLimiter()
+
+
+def get_default_rate_limiter() -> McpRateLimiter:
+    """Return default singleton MCP rate limiter."""
+    return _DEFAULT_RATE_LIMITER
+
+
+def reset_rate_limiter() -> None:
+    """Reset global MCP rate limiter state."""
+    _DEFAULT_RATE_LIMITER.reset()
+
+
+def create_rate_limiter(
+    default_rate: float = 60.0,
+    per_seconds: float = 60.0,
+    default_burst: Optional[int] = None,
+    raise_on_limit: bool = False,
+) -> McpRateLimiter:
+    """Instantiate a new dedicated MCP rate limiter."""
+    return McpRateLimiter(
+        default_rate=default_rate,
+        per_seconds=per_seconds,
+        default_burst=default_burst,
+        raise_on_limit=raise_on_limit,
+    )
+
+
+
+
 DEFAULT_NAMESPACE_SEPARATOR = "__"
 
 
@@ -202,11 +484,17 @@ class McpNamespaceRouter:
         separator: str = DEFAULT_NAMESPACE_SEPARATOR,
         manifest_cache: Optional[Any] = None,
         result_sanitizer: Optional[Any] = None,
+        rate_limiter: Optional[Any] = None,
     ) -> None:
         self.separator = separator
         self.manifest_cache = manifest_cache
         self.result_sanitizer = result_sanitizer
+        self.rate_limiter = rate_limiter
         self.reset()
+
+    def set_rate_limiter(self, rate_limiter: Optional[Any]) -> None:
+        """Configure rate limiter on namespace router."""
+        self.rate_limiter = rate_limiter
 
     def reset(self) -> None:
         """Reset all registered namespaces, aliases, and counters."""
@@ -298,9 +586,12 @@ class McpNamespaceRouter:
         arguments: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = None,
         sanitize: bool = False,
+        rate_limit: bool = True,
     ) -> Any:
         """Route tool execution through namespace router."""
         self._dispatch_count += 1
+        if rate_limit and self.rate_limiter:
+            self.rate_limiter.acquire(qualified_tool_name)
         ns, tool_name = parse_qualified_tool_name(qualified_tool_name, self.separator)
         canonical = self.resolve_namespace(ns)
         client = self._namespaces.get(canonical)
@@ -328,6 +619,7 @@ class McpNamespaceRouter:
         timeout: Optional[float] = None,
         fail_fast: bool = False,
         sanitize: bool = False,
+        rate_limit: bool = True,
     ) -> List["McpDispatchResult"]:
         """Dispatch batch of tool calls concurrently across registered namespaces."""
         dispatcher = McpConcurrentDispatcher(
@@ -1818,6 +2110,7 @@ class McpSubprocessClient:
         self.server_capabilities: Dict[str, Any] = {}
         self._heartbeat_monitor: Optional[McpHeartbeatMonitor] = None
         self._timeout_guard: McpTimeoutGuard = McpTimeoutGuard(default_timeout=self.timeout)
+        self.rate_limiter: Optional[Any] = None
         self.lifecycle: McpLifecycleFSM = create_lifecycle_fsm(name=self.namespace or self.command or "subprocess")
         self.lifecycle.bind_client(self)
 
@@ -2169,6 +2462,10 @@ class McpSubprocessClient:
             return self._heartbeat_monitor.get_status()
         return None
 
+    def set_rate_limiter(self, rate_limiter: Optional[Any]) -> None:
+        """Configure rate limiter on client."""
+        self.rate_limiter = rate_limiter
+
     def call_tool(
         self,
         tool_name: str,
@@ -2176,6 +2473,8 @@ class McpSubprocessClient:
         timeout: Optional[float] = None,
     ) -> Any:
         """Call a specific tool on the MCP server with the provided arguments and timeout guard."""
+        if self.rate_limiter:
+            self.rate_limiter.acquire(tool_name)
         if self.lazy and not self.is_running:
             self.ensure_started()
         effective_timeout = self.get_tool_timeout(tool_name, explicit_timeout=timeout)
@@ -2286,6 +2585,7 @@ class McpLazyClient:
         self.spawn_count: int = 0
         self.last_spawn_time: Optional[float] = None
         self.total_calls: int = 0
+        self.rate_limiter: Optional[Any] = None
         self.lifecycle: McpLifecycleFSM = create_lifecycle_fsm(name=self.namespace or "mcp_lazy_client")
         self.lifecycle.bind_client(self)
 

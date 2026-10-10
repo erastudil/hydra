@@ -5805,6 +5805,138 @@ def mcp_lifecycle_fsm_contracts():
 
 
 @check
+def mcp_rate_limiter_contracts():
+    import time
+    from hydra_cli.mcp import (
+        McpRateLimitExceededError,
+        McpRateLimiter,
+        McpNamespaceRouter,
+        McpSubprocessClient,
+        create_rate_limiter,
+        get_default_rate_limiter,
+        reset_rate_limiter,
+        reset_namespace_router,
+    )
+
+    reset_rate_limiter()
+    reset_namespace_router()
+
+    # 1. Baseline token bucket and burst capacity
+    lim = create_rate_limiter(default_rate=100.0, per_seconds=1.0, default_burst=3)
+    assert lim.get_available_tokens("alpha") == 3.0
+    assert lim.can_acquire("alpha") is True
+    assert lim.get_wait_time("alpha") == 0.0
+
+    assert lim.acquire("alpha", blocking=False) is True
+    assert lim.acquire("alpha", blocking=False) is True
+    assert lim.acquire("alpha", blocking=False) is True
+    assert lim.can_acquire("alpha") is False
+    assert lim.get_wait_time("alpha") > 0.0
+
+    # Non-blocking acquire on exhausted bucket
+    assert lim.acquire("alpha", blocking=False) is False
+
+    # 2. Error enforcement
+    try:
+        lim.acquire("alpha", blocking=False, raise_on_limit=True)
+        assert False, "Should raise McpRateLimitExceededError on depleted bucket"
+    except McpRateLimitExceededError as exc:
+        assert "compliance : not possible" in str(exc)
+        assert "Rate limit exceeded" in str(exc)
+        assert "alpha" in str(exc)
+
+    # 3. Pattern-based rules and isolation
+    lim2 = create_rate_limiter(default_rate=1000.0, per_seconds=1.0, default_burst=10)
+    lim2.register_rule("heavy__*", rate=5.0, per_seconds=1.0, burst=1)
+    lim2.register_rule("shared__*", rate=10.0, per_seconds=1.0, burst=2, shared=True)
+
+    # Independent rule buckets
+    assert lim2.acquire("heavy__a", blocking=False) is True
+    assert lim2.acquire("heavy__a", blocking=False) is False
+    # heavy__b is distinct key under non-shared rule
+    assert lim2.acquire("heavy__b", blocking=False) is True
+
+    # Shared rule bucket
+    assert lim2.acquire("shared__x", blocking=False) is True
+    assert lim2.acquire("shared__y", blocking=False) is True
+    # Shared capacity 2 depleted
+    assert lim2.acquire("shared__z", blocking=False) is False
+
+    # 4. Wait and token replenish
+    fast_lim = create_rate_limiter(default_rate=50.0, per_seconds=1.0, default_burst=1)
+    assert fast_lim.acquire("fast", blocking=False) is True
+    assert fast_lim.can_acquire("fast") is False
+    start_t = time.perf_counter()
+    assert fast_lim.acquire("fast", blocking=True, timeout=1.0) is True
+    elapsed = time.perf_counter() - start_t
+    assert elapsed >= 0.015
+
+    # 5. Context manager support
+    ctx_lim = create_rate_limiter(default_rate=100.0, per_seconds=1.0, default_burst=2)
+    with ctx_lim.limit("ctx_tool"):
+        pass
+    assert ctx_lim.get_metrics()["allowed_requests"] == 1
+
+    # 6. Telemetry metrics and reset
+    met = lim.get_metrics()
+    assert met["total_requests"] >= 4
+    assert met["allowed_requests"] >= 3
+    assert met["rejected_requests"] >= 2
+    assert met["active_buckets_count"] >= 1
+
+    lim.reset_metrics()
+    clean_met = lim.get_metrics()
+    assert clean_met["total_requests"] == 0
+    assert clean_met["allowed_requests"] == 0
+    assert clean_met["rejected_requests"] == 0
+
+    lim.reset()
+    assert lim.get_metrics()["rules_count"] == 0
+
+    # 7. Router integration
+    class MockRouterClient:
+        def __init__(self):
+            self.calls = []
+
+        def call_tool(self, tool_name, arguments, timeout=None):
+            self.calls.append((tool_name, arguments))
+            return {"echo": tool_name}
+
+    router = McpNamespaceRouter()
+    r_client = MockRouterClient()
+    router.register_client("mock", r_client)
+
+    r_limiter = create_rate_limiter(default_rate=100.0, per_seconds=1.0, default_burst=5)
+    router.set_rate_limiter(r_limiter)
+
+    res1 = router.dispatch("mock__test", {"val": 1})
+    assert res1["echo"] == "test"
+    assert r_limiter.get_metrics()["allowed_requests"] == 1
+
+    # Bypass rate limiter flag
+    res2 = router.dispatch("mock__test", {"val": 2}, rate_limit=False)
+    assert res2["echo"] == "test"
+    assert r_limiter.get_metrics()["allowed_requests"] == 1
+
+    # 8. Client set_rate_limiter integration
+    sub_c = McpSubprocessClient("python", ["-c", "pass"], timeout=5.0)
+    sub_c.set_rate_limiter(r_limiter)
+    assert sub_c.rate_limiter is r_limiter
+
+    # 9. Default singleton and top-level helpers
+    reset_rate_limiter()
+    def_lim = get_default_rate_limiter()
+    assert def_lim is not None
+    assert def_lim.can_acquire("def_key") is True
+    assert def_lim.acquire("def_key", blocking=False) is True
+    reset_rate_limiter()
+    assert def_lim.get_metrics()["total_requests"] == 0
+
+    reset_rate_limiter()
+    reset_namespace_router()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
