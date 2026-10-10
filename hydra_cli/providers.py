@@ -4966,3 +4966,141 @@ def create_reconnect_backoff(
         max_retries=max_retries,
         jitter=jitter,
     )
+
+
+class StreamFrozenTimeoutError(Exception):
+    """Exception raised upon stream freeze timeout detection."""
+
+
+class StreamFrozenDetector:
+    """
+    Streaming throughput frozen detector for stalled inference transport streams.
+    Tracks inter-token arrival latency and detects stream stalls exceeding timeout threshold.
+    """
+
+    def __init__(
+        self,
+        stall_timeout_sec: float = 10.0,
+        max_silence_sec: float = 30.0,
+        raise_on_freeze: bool = False,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._stall_timeout_sec = max(0.001, float(stall_timeout_sec))
+        self._max_silence_sec = max(self._stall_timeout_sec, float(max_silence_sec))
+        self._raise_on_freeze = bool(raise_on_freeze)
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_chunks_monitored: int = 0
+            self._frozen_events_count: int = 0
+            self._max_silence_observed_sec: float = 0.0
+            self._total_stall_duration_sec: float = 0.0
+            self._last_heartbeat: float = 0.0
+
+    def heartbeat(self, chunk_len: int = 1, timestamp: Optional[float] = None) -> None:
+        """Record token arrival heartbeat and update activity timestamp."""
+        now = timestamp if timestamp is not None else time.time()
+        with self._lock:
+            if self._last_heartbeat > 0.0:
+                silence = max(0.0, now - self._last_heartbeat)
+                if silence > self._max_silence_observed_sec:
+                    self._max_silence_observed_sec = silence
+                if silence >= self._stall_timeout_sec:
+                    self._frozen_events_count += 1
+                    self._total_stall_duration_sec += silence
+            self._last_heartbeat = now
+            self._total_chunks_monitored += max(1, int(chunk_len))
+
+    def check_frozen(self, current_time: Optional[float] = None) -> Tuple[bool, float]:
+        """Evaluate stream stall state and compute elapsed silence seconds."""
+        now = current_time if current_time is not None else time.time()
+        with self._lock:
+            if self._last_heartbeat <= 0.0:
+                return False, 0.0
+            silence = max(0.0, now - self._last_heartbeat)
+            is_stalled = silence >= self._stall_timeout_sec
+            if is_stalled and silence > self._max_silence_observed_sec:
+                self._max_silence_observed_sec = silence
+            return is_stalled, round(silence, 4)
+
+    def wrap_stream(
+        self,
+        token_stream: Iterable[str],
+        timeout_sec: Optional[float] = None,
+        on_frozen_fn: Optional[Callable[[float], None]] = None,
+        clock_fn: Optional[Callable[[], float]] = None,
+    ) -> Generator[str, None, None]:
+        """Wrap token generator with stall detection and timeout enforcement."""
+        now_fn = clock_fn if clock_fn is not None else time.time
+        threshold = timeout_sec if timeout_sec is not None else self._stall_timeout_sec
+        iterator = iter(token_stream)
+        last_chunk_time = now_fn()
+        with self._lock:
+            self._last_heartbeat = last_chunk_time
+
+        while True:
+            try:
+                chunk = next(iterator)
+            except StopIteration:
+                return
+
+            now = now_fn()
+            silence = max(0.0, now - last_chunk_time)
+            with self._lock:
+                self._total_chunks_monitored += 1
+                if silence > self._max_silence_observed_sec:
+                    self._max_silence_observed_sec = silence
+                if silence >= threshold:
+                    self._frozen_events_count += 1
+                    self._total_stall_duration_sec += silence
+                    if on_frozen_fn is not None:
+                        on_frozen_fn(silence)
+                    if self._raise_on_freeze:
+                        raise StreamFrozenTimeoutError(
+                            f"stream stall detected: silence {silence:.2f}s exceeded {threshold:.2f}s"
+                        )
+                self._last_heartbeat = now
+            last_chunk_time = now
+            yield chunk
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            return {
+                "stall_timeout_sec": self._stall_timeout_sec,
+                "max_silence_sec": self._max_silence_sec,
+                "raise_on_freeze": self._raise_on_freeze,
+                "total_chunks_monitored": self._total_chunks_monitored,
+                "frozen_events_count": self._frozen_events_count,
+                "max_silence_observed_sec": round(self._max_silence_observed_sec, 4),
+                "total_stall_duration_sec": round(self._total_stall_duration_sec, 4),
+                "last_heartbeat": self._last_heartbeat,
+            }
+
+
+_DEFAULT_FROZEN_DETECTOR = StreamFrozenDetector()
+
+
+def get_default_frozen_detector() -> StreamFrozenDetector:
+    """Return default singleton stream frozen detector."""
+    return _DEFAULT_FROZEN_DETECTOR
+
+
+def reset_frozen_detector() -> None:
+    """Reset global stream frozen detector telemetry."""
+    _DEFAULT_FROZEN_DETECTOR.reset_metrics()
+
+
+def create_frozen_detector(
+    stall_timeout_sec: float = 10.0,
+    max_silence_sec: float = 30.0,
+    raise_on_freeze: bool = False,
+) -> StreamFrozenDetector:
+    """Instantiate a new dedicated stream frozen detector."""
+    return StreamFrozenDetector(
+        stall_timeout_sec=stall_timeout_sec,
+        max_silence_sec=max_silence_sec,
+        raise_on_freeze=raise_on_freeze,
+    )

@@ -9185,6 +9185,100 @@ def reconnect_backoff_contracts():
 
 
 @check
+def frozen_detector_contracts():
+    from hydra_cli.providers import (
+        StreamFrozenDetector,
+        StreamFrozenTimeoutError,
+        create_frozen_detector,
+        get_default_frozen_detector,
+        reset_frozen_detector,
+    )
+    from hydra_cli import (
+        StreamFrozenDetector as RootStreamFrozenDetector,
+        StreamFrozenTimeoutError as RootStreamFrozenTimeoutError,
+        create_frozen_detector as root_create_frozen_detector,
+        get_default_frozen_detector as root_get_default_frozen_detector,
+        reset_frozen_detector as root_reset_frozen_detector,
+    )
+
+    # 1. Re-exports parity
+    assert RootStreamFrozenDetector is StreamFrozenDetector
+    assert RootStreamFrozenTimeoutError is StreamFrozenTimeoutError
+    assert root_create_frozen_detector is create_frozen_detector
+    assert root_get_default_frozen_detector is get_default_frozen_detector
+    assert root_reset_frozen_detector is reset_frozen_detector
+
+    # 2. Configuration and initial idle state
+    detector = create_frozen_detector(stall_timeout_sec=2.0, max_silence_sec=5.0, raise_on_freeze=False)
+    is_stalled, silence = detector.check_frozen()
+    assert is_stalled is False
+    assert silence == 0.0
+
+    # 3. Heartbeat and silence tracking with explicit timestamps
+    detector.heartbeat(chunk_len=5, timestamp=100.0)
+    is_stalled, silence = detector.check_frozen(current_time=101.5)
+    assert is_stalled is False
+    assert silence == 1.5
+
+    is_stalled, silence = detector.check_frozen(current_time=102.5)
+    assert is_stalled is True
+    assert silence == 2.5
+
+    detector.heartbeat(chunk_len=3, timestamp=102.5)
+    metrics = detector.get_metrics()
+    assert metrics["frozen_events_count"] == 1
+    assert metrics["total_chunks_monitored"] == 8
+    assert metrics["max_silence_observed_sec"] == 2.5
+
+    # 4. Stream generator wrapping with stall observation
+    clock_seq = [10.0, 10.5, 13.0, 13.2]
+    tokens = ["token1", "token2", "token3"]
+    frozen_records = []
+
+    wrap_detector = create_frozen_detector(stall_timeout_sec=1.0, raise_on_freeze=False)
+    output = list(wrap_detector.wrap_stream(
+        tokens,
+        timeout_sec=1.0,
+        on_frozen_fn=lambda s: frozen_records.append(s),
+        clock_fn=lambda: clock_seq.pop(0) if clock_seq else 14.0,
+    ))
+    assert output == ["token1", "token2", "token3"]
+    assert len(frozen_records) == 1
+    assert frozen_records[0] == 2.5
+
+    # 5. Strict timeout enforcement with exception raising
+    strict_clock = [20.0, 20.2, 22.0]
+    strict_detector = create_frozen_detector(stall_timeout_sec=1.0, raise_on_freeze=True)
+    raised = False
+    try:
+        list(strict_detector.wrap_stream(
+            ["chunkA", "chunkB"],
+            timeout_sec=1.0,
+            clock_fn=lambda: strict_clock.pop(0) if strict_clock else 25.0,
+        ))
+    except StreamFrozenTimeoutError:
+        raised = True
+    assert raised is True
+
+    # 6. Telemetry metrics and reset
+    metrics = wrap_detector.get_metrics()
+    assert metrics["total_chunks_monitored"] == 3
+    assert metrics["frozen_events_count"] == 1
+
+    wrap_detector.reset_metrics()
+    clean_metrics = wrap_detector.get_metrics()
+    assert clean_metrics["total_chunks_monitored"] == 0
+    assert clean_metrics["frozen_events_count"] == 0
+    assert clean_metrics["max_silence_observed_sec"] == 0.0
+
+    # 7. Singleton lifecycle
+    reset_frozen_detector()
+    default_det = get_default_frozen_detector()
+    assert default_det is not None
+    reset_frozen_detector()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

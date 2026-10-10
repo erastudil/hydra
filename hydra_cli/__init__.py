@@ -220,6 +220,11 @@ from hydra_cli.providers import (
     create_reconnect_backoff,
     get_default_reconnect_backoff,
     reset_reconnect_backoff,
+    StreamFrozenDetector,
+    create_frozen_detector,
+    get_default_frozen_detector,
+    reset_frozen_detector,
+    StreamFrozenTimeoutError,
 )
 from hydra_cli.sandbox import (
     CommandInspector,
@@ -401,5 +406,10 @@ __all__ = [
     "create_reconnect_backoff",
     "get_default_reconnect_backoff",
     "reset_reconnect_backoff",
+    "StreamFrozenDetector",
+    "create_frozen_detector",
+    "get_default_frozen_detector",
+    "reset_frozen_detector",
+    "StreamFrozenTimeoutError",
     "__version__",
 ]
