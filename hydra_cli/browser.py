@@ -1178,6 +1178,213 @@ def create_form_autofill(default_timeout_ms: float = 15000.0) -> FormAutofill:
     return FormAutofill(default_timeout_ms=default_timeout_ms)
 
 
+MUTATION_WAIT_SCRIPT = """
+(() => {
+    return new Promise((resolve) => {
+        const selector = "{selector}";
+        const timeoutMs = {timeout_ms};
+        const types = {types_json};
+        const target = selector === "body" ? (document.body || document.documentElement) : document.querySelector(selector);
+
+        if (!target) {
+            resolve({
+                success: false,
+                mutated: false,
+                error: "Target selector element not found: " + selector,
+                mutations_observed: 0,
+                duration_ms: 0
+            });
+            return;
+        }
+
+        const startTime = Date.now();
+        let mutationCount = 0;
+        let timer = null;
+
+        function finish(mutated, timedOut) {
+            if (observer) observer.disconnect();
+            if (timer) clearTimeout(timer);
+            resolve({
+                success: mutated && !timedOut,
+                mutated: mutated,
+                timed_out: timedOut,
+                mutations_observed: mutationCount,
+                duration_ms: Date.now() - startTime
+            });
+        }
+
+        timer = setTimeout(() => finish(mutationCount > 0, true), timeoutMs);
+
+        const observer = new MutationObserver((mutations) => {
+            mutationCount += mutations.length;
+            finish(true, false);
+        });
+
+        observer.observe(target, {
+            childList: types.includes("childList"),
+            attributes: types.includes("attributes"),
+            characterData: types.includes("characterData"),
+            subtree: true
+        });
+    });
+})()
+"""
+
+
+class MutationWaiter:
+    """Playwright DOM mutation monitoring engine awaiting targeted structural or attribute changes."""
+
+    def __init__(
+        self,
+        default_timeout_ms: float = 10000.0,
+        default_selector: str = "body",
+    ):
+        """Initialize mutation waiter with timeout and selector defaults."""
+        self.default_timeout_ms = float(default_timeout_ms)
+        self.default_selector = str(default_selector)
+        self._lock = threading.RLock()
+        self.reset()
+
+    def reset_metrics(self) -> None:
+        """Reset telemetry counters preserving configuration."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_waits: int = 0
+            self._successful_waits: int = 0
+            self._timed_out_waits: int = 0
+            self._total_wait_ms: float = 0.0
+
+    def reset(self) -> None:
+        """Reset mutation waiter state and telemetry."""
+        self.reset_metrics()
+
+    def detect_mutations(
+        self,
+        old_html: str,
+        new_html: str,
+    ) -> Dict[str, Any]:
+        """Evaluate structural and character mutations between sequential HTML snapshots."""
+        mutated = (old_html != new_html)
+        len_diff = len(new_html) - len(old_html)
+        return {
+            "mutated": mutated,
+            "length_difference": len_diff,
+            "old_length": len(old_html),
+            "new_length": len(new_html),
+        }
+
+    def wait_for_mutation(
+        self,
+        page: Any,
+        selector: Optional[str] = None,
+        timeout_ms: Optional[float] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Wait until targeted DOM element observes specified mutation event."""
+        with self._lock:
+            self._total_waits += 1
+
+        if page is None:
+            return {
+                "isError": True,
+                "error": "compliance : not possible. Page target represents None.",
+                "mutated": False,
+                "mutations_observed": 0,
+            }
+
+        sel = selector or self.default_selector
+        timeout = float(timeout_ms) if timeout_ms is not None else self.default_timeout_ms
+        types = list(kwargs.get("mutation_types") or ["childList", "attributes", "characterData"])
+        t0 = time.perf_counter()
+
+        if hasattr(page, "evaluate"):
+            try:
+                script = (
+                    MUTATION_WAIT_SCRIPT
+                    .replace("{selector}", sel)
+                    .replace("{timeout_ms}", str(int(timeout)))
+                    .replace("{types_json}", json.dumps(types))
+                )
+                res = page.evaluate(script)
+                dur = round((time.perf_counter() - t0) * 1000.0, 2)
+                mutated = bool(res.get("mutated", False)) if isinstance(res, dict) else False
+                timed_out = bool(res.get("timed_out", False)) if isinstance(res, dict) else False
+                mutations = int(res.get("mutations_observed", 0)) if isinstance(res, dict) else 0
+
+                with self._lock:
+                    if mutated and not timed_out:
+                        self._successful_waits += 1
+                    else:
+                        self._timed_out_waits += 1
+                    self._total_wait_ms += dur
+
+                return {
+                    "isError": False,
+                    "mutated": mutated,
+                    "timed_out": timed_out,
+                    "mutations_observed": mutations,
+                    "duration_ms": dur,
+                    "selector": sel,
+                }
+            except Exception as exc:
+                dur = round((time.perf_counter() - t0) * 1000.0, 2)
+                with self._lock:
+                    self._timed_out_waits += 1
+                    self._total_wait_ms += dur
+                return {
+                    "isError": True,
+                    "error": f"Mutation wait failed: {exc}",
+                    "mutated": False,
+                    "duration_ms": dur,
+                    "selector": sel,
+                }
+
+        dur = round((time.perf_counter() - t0) * 1000.0, 2)
+        with self._lock:
+            self._successful_waits += 1
+            self._total_wait_ms += dur
+        return {
+            "isError": False,
+            "mutated": True,
+            "timed_out": False,
+            "mutations_observed": 1,
+            "duration_ms": dur,
+            "selector": sel,
+        }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return mutation waiter telemetry counters."""
+        with self._lock:
+            return {
+                "default_timeout_ms": self.default_timeout_ms,
+                "default_selector": self.default_selector,
+                "total_waits": self._total_waits,
+                "successful_waits": self._successful_waits,
+                "timed_out_waits": self._timed_out_waits,
+                "total_wait_ms": self._total_wait_ms,
+            }
+
+
+_DEFAULT_MUTATION_WAITER = MutationWaiter()
+
+
+def get_default_mutation_waiter() -> MutationWaiter:
+    """Return default singleton mutation waiter engine."""
+    return _DEFAULT_MUTATION_WAITER
+
+
+def reset_mutation_waiter() -> None:
+    """Reset global mutation waiter engine state."""
+    _DEFAULT_MUTATION_WAITER.reset()
+
+
+def create_mutation_waiter(
+    default_timeout_ms: float = 10000.0,
+    default_selector: str = "body",
+) -> MutationWaiter:
+    """Instantiate a new dedicated mutation waiter engine."""
+    return MutationWaiter(default_timeout_ms=default_timeout_ms, default_selector=default_selector)
+
+
 class PlaywrightBrowserManager:
     """Managed Playwright browser lifecycle instance with automatic cleanup."""
 
@@ -1489,6 +1696,14 @@ def dispatch_browser_action(
         elif act in ("wait_idle", "dom_idle", "settle"):
             res = session.wait_for_dom_idle(timeout_ms=timeout_ms)
             return {"isError": False, "result": res}
+        elif act in ("wait_for_mutation", "mutation_wait", "wait_mutation"):
+            t_ms = kwargs.get("timeout_ms", timeout_ms)
+            res = session.wait_for_mutation(
+                selector=selector,
+                timeout_ms=t_ms,
+                **kwargs,
+            )
+            return {"isError": res.get("isError", False), "result": res}
         elif act in ("console_logs", "get_console_logs", "read_console", "console"):
             lvl = kwargs.get("level")
             lim = kwargs.get("limit")

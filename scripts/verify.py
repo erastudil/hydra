@@ -6644,6 +6644,105 @@ def form_autofill_contracts():
 
 
 @check
+def mutation_waiter_contracts():
+    from hydra_cli.browser import (
+        MutationWaiter,
+        create_mutation_waiter,
+        get_default_mutation_waiter,
+        reset_mutation_waiter,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import MutationWaiter as SandboxMutationWaiter
+    from hydra_cli import MutationWaiter as RootMutationWaiter
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxMutationWaiter is MutationWaiter
+    assert RootMutationWaiter is MutationWaiter
+
+    reset_mutation_waiter()
+
+    # 2. Construction and default parameters
+    waiter = create_mutation_waiter(default_timeout_ms=4000.0, default_selector="#app")
+    assert waiter.default_timeout_ms == 4000.0
+    assert waiter.default_selector == "#app"
+
+    # 3. HTML snapshot mutation detection
+    h1 = "<div>Initial state</div>"
+    h2 = "<div>Updated dynamic state</div>"
+    diff = waiter.detect_mutations(h1, h2)
+    assert diff["mutated"] is True
+    assert diff["length_difference"] > 0
+    assert diff["old_length"] == len(h1)
+
+    same = waiter.detect_mutations(h1, h1)
+    assert same["mutated"] is False
+    assert same["length_difference"] == 0
+
+    # 4. Mock Playwright page evaluation
+    class MockPage:
+        def __init__(self, mutated=True, timed_out=False, count=2):
+            self.mutated = mutated
+            self.timed_out = timed_out
+            self.count = count
+            self.scripts = []
+
+        def evaluate(self, script):
+            self.scripts.append(script)
+            return {
+                "success": self.mutated and not self.timed_out,
+                "mutated": self.mutated,
+                "timed_out": self.timed_out,
+                "mutations_observed": self.count,
+            }
+
+    mock_page = MockPage(mutated=True, timed_out=False, count=5)
+    res = waiter.wait_for_mutation(mock_page, selector="#target", timeout_ms=3000.0)
+    assert res["isError"] is False
+    assert res["mutated"] is True
+    assert res["timed_out"] is False
+    assert res["mutations_observed"] == 5
+    assert len(mock_page.scripts) == 1
+
+    # Simulated timeout evaluation
+    timeout_mock = MockPage(mutated=False, timed_out=True, count=0)
+    t_res = waiter.wait_for_mutation(timeout_mock, selector="#container")
+    assert t_res["isError"] is False
+    assert t_res["mutated"] is False
+    assert t_res["timed_out"] is True
+
+    # 5. None target boundary check
+    none_res = waiter.wait_for_mutation(None)
+    assert none_res["isError"] is True
+    assert "compliance : not possible" in none_res["error"]
+
+    # 6. Browser action integration
+    if not PLAYWRIGHT_AVAILABLE:
+        act_res = dispatch_browser_action("wait_for_mutation", selector="#test")
+        assert act_res["isError"] is True
+        assert "Playwright uninstalled" in act_res["error"]
+
+    # 7. Telemetry metrics and reset
+    met = waiter.get_metrics()
+    assert met["total_waits"] >= 2
+    assert met["successful_waits"] >= 1
+    assert met["timed_out_waits"] >= 1
+
+    waiter.reset_metrics()
+    clean_met = waiter.get_metrics()
+    assert clean_met["total_waits"] == 0
+    assert clean_met["successful_waits"] == 0
+    assert clean_met["timed_out_waits"] == 0
+
+    # 8. Default singleton
+    reset_mutation_waiter()
+    default_waiter = get_default_mutation_waiter()
+    assert default_waiter is not None
+    assert default_waiter.default_timeout_ms == 10000.0
+    reset_mutation_waiter()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
