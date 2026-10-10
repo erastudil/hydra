@@ -1385,6 +1385,231 @@ def create_mutation_waiter(
     return MutationWaiter(default_timeout_ms=default_timeout_ms, default_selector=default_selector)
 
 
+class NetworkIdleLatch:
+    """Playwright network activity and idle state latching engine."""
+
+    def __init__(
+        self,
+        default_idle_ms: float = 500.0,
+        default_timeout_ms: float = 10000.0,
+        default_max_inflight: int = 0,
+        ignored_patterns: Optional[Sequence[str]] = None,
+    ):
+        """Initialize network idle latch with timing and filter configurations."""
+        self.default_idle_ms = float(default_idle_ms)
+        self.default_timeout_ms = float(default_timeout_ms)
+        self.default_max_inflight = int(default_max_inflight)
+        self.ignored_patterns = [re.compile(p) if isinstance(p, str) else p for p in (ignored_patterns or [])]
+        self._lock = threading.RLock()
+        self._inflight: Dict[str, float] = {}
+        self._attached_pages: Set[int] = set()
+        self.reset()
+
+    def reset_metrics(self) -> None:
+        """Reset telemetry counters preserving configuration."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_requests: int = 0
+            self._finished_requests: int = 0
+            self._failed_requests: int = 0
+            self._total_waits: int = 0
+            self._successful_waits: int = 0
+            self._timed_out_waits: int = 0
+            self._last_wait_ms: float = 0.0
+
+    def reset(self) -> None:
+        """Reset network latch state and telemetry."""
+        with self._lock:
+            self._inflight.clear()
+            self._attached_pages.clear()
+            self.reset_metrics()
+
+    def _should_ignore(self, url: str) -> bool:
+        """Evaluate whether URL matches ignored pattern filters."""
+        if not url or not self.ignored_patterns:
+            return False
+        return any(pat.search(url) for pat in self.ignored_patterns)
+
+    def record_request(self, request_id: str, url: str) -> None:
+        """Record outbound network request initiation."""
+        if self._should_ignore(url):
+            return
+        with self._lock:
+            self._inflight[request_id] = time.time()
+            self._total_requests += 1
+
+    def record_finished(self, request_id: str) -> None:
+        """Record completed network request settlement."""
+        with self._lock:
+            if request_id in self._inflight:
+                del self._inflight[request_id]
+                self._finished_requests += 1
+
+    def record_failed(self, request_id: str) -> None:
+        """Record aborted or failed network request settlement."""
+        with self._lock:
+            if request_id in self._inflight:
+                del self._inflight[request_id]
+                self._failed_requests += 1
+
+    def get_inflight_count(self) -> int:
+        """Return number of currently active in-flight requests."""
+        with self._lock:
+            return len(self._inflight)
+
+    def is_idle(self, max_inflight: Optional[int] = None) -> bool:
+        """Evaluate whether in-flight request count satisfies idle threshold."""
+        limit = max_inflight if max_inflight is not None else self.default_max_inflight
+        with self._lock:
+            return len(self._inflight) <= limit
+
+    def attach_to_page(self, page: Any) -> bool:
+        """Attach network event listeners to Playwright page target."""
+        if page is None or not hasattr(page, "on"):
+            return False
+        page_id = id(page)
+        with self._lock:
+            if page_id in self._attached_pages:
+                return True
+            self._attached_pages.add(page_id)
+
+        try:
+            def on_req(req: Any) -> None:
+                try:
+                    req_id = str(id(req))
+                    url = getattr(req, "url", "")
+                    self.record_request(req_id, url)
+                except Exception:
+                    pass
+
+            def on_finished(req: Any) -> None:
+                try:
+                    req_id = str(id(req))
+                    self.record_finished(req_id)
+                except Exception:
+                    pass
+
+            def on_failed(req: Any) -> None:
+                try:
+                    req_id = str(id(req))
+                    self.record_failed(req_id)
+                except Exception:
+                    pass
+
+            page.on("request", on_req)
+            page.on("requestfinished", on_finished)
+            page.on("requestfailed", on_failed)
+            return True
+        except Exception:
+            return False
+
+    def wait_until_idle(
+        self,
+        page: Any,
+        idle_time_ms: Optional[float] = None,
+        timeout_ms: Optional[float] = None,
+        max_inflight: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Wait until page network requests reach idle threshold."""
+        with self._lock:
+            self._total_waits += 1
+
+        if page is None:
+            return {
+                "is_idle": False,
+                "error": "compliance : not possible. Page target represents None.",
+                "duration_ms": 0.0,
+                "inflight_count": 0,
+            }
+
+        timeout = float(timeout_ms) if timeout_ms is not None else self.default_timeout_ms
+        limit = max_inflight if max_inflight is not None else self.default_max_inflight
+        t0 = time.perf_counter()
+
+        if hasattr(page, "wait_for_load_state"):
+            try:
+                page.wait_for_load_state("networkidle", timeout=timeout)
+                dur = round((time.perf_counter() - t0) * 1000.0, 2)
+                with self._lock:
+                    self._successful_waits += 1
+                    self._last_wait_ms = dur
+                return {
+                    "is_idle": True,
+                    "duration_ms": dur,
+                    "inflight_count": self.get_inflight_count(),
+                }
+            except Exception as exc:
+                dur = round((time.perf_counter() - t0) * 1000.0, 2)
+                with self._lock:
+                    self._timed_out_waits += 1
+                    self._last_wait_ms = dur
+                return {
+                    "is_idle": False,
+                    "error": str(exc),
+                    "duration_ms": dur,
+                    "inflight_count": self.get_inflight_count(),
+                }
+
+        dur = round((time.perf_counter() - t0) * 1000.0, 2)
+        idle = self.is_idle(limit)
+        with self._lock:
+            if idle:
+                self._successful_waits += 1
+            else:
+                self._timed_out_waits += 1
+            self._last_wait_ms = dur
+
+        return {
+            "is_idle": idle,
+            "duration_ms": dur,
+            "inflight_count": self.get_inflight_count(),
+        }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return network idle latch telemetry counters."""
+        with self._lock:
+            return {
+                "default_idle_ms": self.default_idle_ms,
+                "default_timeout_ms": self.default_timeout_ms,
+                "default_max_inflight": self.default_max_inflight,
+                "current_inflight": len(self._inflight),
+                "total_requests": self._total_requests,
+                "finished_requests": self._finished_requests,
+                "failed_requests": self._failed_requests,
+                "total_waits": self._total_waits,
+                "successful_waits": self._successful_waits,
+                "timed_out_waits": self._timed_out_waits,
+                "last_wait_ms": self._last_wait_ms,
+            }
+
+
+_DEFAULT_NETWORK_IDLE_LATCH = NetworkIdleLatch()
+
+
+def get_default_network_idle_latch() -> NetworkIdleLatch:
+    """Return default singleton network idle latch engine."""
+    return _DEFAULT_NETWORK_IDLE_LATCH
+
+
+def reset_network_idle_latch() -> None:
+    """Reset global network idle latch state."""
+    _DEFAULT_NETWORK_IDLE_LATCH.reset()
+
+
+def create_network_idle_latch(
+    default_idle_ms: float = 500.0,
+    default_timeout_ms: float = 10000.0,
+    default_max_inflight: int = 0,
+    ignored_patterns: Optional[Sequence[str]] = None,
+) -> NetworkIdleLatch:
+    """Instantiate a new dedicated network idle latch engine."""
+    return NetworkIdleLatch(
+        default_idle_ms=default_idle_ms,
+        default_timeout_ms=default_timeout_ms,
+        default_max_inflight=default_max_inflight,
+        ignored_patterns=ignored_patterns,
+    )
+
+
 class PlaywrightBrowserManager:
     """Managed Playwright browser lifecycle instance with automatic cleanup."""
 
@@ -1395,6 +1620,7 @@ class PlaywrightBrowserManager:
         self._context: Optional[BrowserContext] = None
         self._page: Optional[Page] = None
         self._console_capture = get_default_console_capture()
+        self._network_latch = get_default_network_idle_latch()
 
     def _ensure_page(self) -> Page:
         if not PLAYWRIGHT_AVAILABLE:
@@ -1413,6 +1639,7 @@ class PlaywrightBrowserManager:
                 )
             self._page = self._context.new_page()
             self._console_capture.attach_to_page(self._page)
+            self._network_latch.attach_to_page(self._page)
         return self._page
 
     def wait_for_dom_idle(
@@ -1591,6 +1818,26 @@ class PlaywrightBrowserManager:
         autofill = get_default_form_autofill()
         return autofill.inspect_form(page=page, form_selector=form_selector)
 
+    def wait_for_network_idle(
+        self,
+        idle_ms: float = 500.0,
+        timeout_ms: float = 10000.0,
+        max_inflight: int = 0,
+    ) -> Dict[str, Any]:
+        """Wait until browser network requests settle below idle threshold."""
+        page = self._ensure_page()
+        latch = get_default_network_idle_latch()
+        return latch.wait_until_idle(
+            page=page,
+            idle_time_ms=idle_ms,
+            timeout_ms=timeout_ms,
+            max_inflight=max_inflight,
+        )
+
+    def get_network_metrics(self) -> Dict[str, Any]:
+        """Return network idle latch telemetry counters."""
+        return self._network_latch.get_metrics()
+
     def close(self) -> None:
         """Close browser context and stop Playwright runner cleanly."""
         try:
@@ -1704,6 +1951,15 @@ def dispatch_browser_action(
                 **kwargs,
             )
             return {"isError": res.get("isError", False), "result": res}
+        elif act in ("wait_network_idle", "network_idle", "wait_for_network"):
+            idle_ms = kwargs.get("idle_ms", 500.0)
+            max_inf = kwargs.get("max_inflight", 0)
+            res = session.wait_for_network_idle(
+                idle_ms=idle_ms,
+                timeout_ms=timeout_ms,
+                max_inflight=max_inf,
+            )
+            return {"isError": res.get("isError", False) or not res.get("is_idle", True), "result": res}
         elif act in ("console_logs", "get_console_logs", "read_console", "console"):
             lvl = kwargs.get("level")
             lim = kwargs.get("limit")

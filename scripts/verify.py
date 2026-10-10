@@ -6743,6 +6743,139 @@ def mutation_waiter_contracts():
 
 
 @check
+def network_idle_contracts():
+    from hydra_cli.browser import (
+        NetworkIdleLatch,
+        create_network_idle_latch,
+        get_default_network_idle_latch,
+        reset_network_idle_latch,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import NetworkIdleLatch as SandboxNetworkIdleLatch
+    from hydra_cli import NetworkIdleLatch as RootNetworkIdleLatch
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxNetworkIdleLatch is NetworkIdleLatch
+    assert RootNetworkIdleLatch is NetworkIdleLatch
+
+    reset_network_idle_latch()
+
+    # 2. Construction and default parameters
+    latch = create_network_idle_latch(
+        default_idle_ms=250.0,
+        default_timeout_ms=4000.0,
+        default_max_inflight=1,
+        ignored_patterns=[r"/metrics", r"/beacon"],
+    )
+    assert latch.default_idle_ms == 250.0
+    assert latch.default_timeout_ms == 4000.0
+    assert latch.default_max_inflight == 1
+
+    # 3. Request lifecycle tracking
+    assert latch.is_idle() is True
+    assert latch.get_inflight_count() == 0
+
+    latch.record_request("req1", "https://api.hydra.local/v1/models")
+    assert latch.get_inflight_count() == 1
+    assert latch.is_idle() is True
+
+    latch.record_request("req2", "https://api.hydra.local/v1/completions")
+    assert latch.get_inflight_count() == 2
+    assert latch.is_idle() is False
+
+    # 4. Filter ignored patterns
+    latch.record_request("req3", "https://api.hydra.local/metrics/ping")
+    assert latch.get_inflight_count() == 2
+
+    # 5. Settlement via finished and failed
+    latch.record_finished("req1")
+    assert latch.get_inflight_count() == 1
+    assert latch.is_idle() is True
+
+    latch.record_failed("req2")
+    assert latch.get_inflight_count() == 0
+    assert latch.is_idle() is True
+
+    # 6. Mock Playwright page interaction
+    class MockPage:
+        def __init__(self, succeed=True):
+            self.succeed = succeed
+            self.handlers = {}
+            self.states_waited = []
+
+        def on(self, event, handler):
+            self.handlers[event] = handler
+
+        def wait_for_load_state(self, state, timeout=None):
+            self.states_waited.append(state)
+            if not self.succeed:
+                raise RuntimeError("Simulated timeout waiting for networkidle")
+            return None
+
+    class MockRequest:
+        def __init__(self, url):
+            self.url = url
+
+    mock_page = MockPage(succeed=True)
+    assert latch.attach_to_page(mock_page) is True
+    assert latch.attach_to_page(mock_page) is True
+
+    r_obj = MockRequest("https://cdn.local/app.js")
+    mock_page.handlers["request"](r_obj)
+    assert latch.get_inflight_count() == 1
+
+    mock_page.handlers["requestfinished"](r_obj)
+    assert latch.get_inflight_count() == 0
+
+    wait_res = latch.wait_until_idle(mock_page, timeout_ms=2000.0)
+    assert wait_res["is_idle"] is True
+    assert "networkidle" in mock_page.states_waited
+
+    fail_page = MockPage(succeed=False)
+    fail_res = latch.wait_until_idle(fail_page, timeout_ms=1000.0)
+    assert fail_res["is_idle"] is False
+    assert "Simulated timeout" in fail_res["error"]
+
+    # 7. None target boundary check
+    none_res = latch.wait_until_idle(None)
+    assert none_res["is_idle"] is False
+    assert "compliance : not possible" in none_res["error"]
+
+    # 8. Browser action integration
+    if not PLAYWRIGHT_AVAILABLE:
+        act_res = dispatch_browser_action("network_idle")
+        assert act_res["isError"] is True
+        assert "Playwright uninstalled" in act_res["error"]
+
+    # 9. Telemetry metrics and reset
+    met = latch.get_metrics()
+    assert met["total_requests"] >= 3
+    assert met["finished_requests"] >= 2
+    assert met["failed_requests"] >= 1
+    assert met["total_waits"] >= 2
+    assert met["successful_waits"] >= 1
+    assert met["timed_out_waits"] >= 1
+
+    latch.reset_metrics()
+    clean_met = latch.get_metrics()
+    assert clean_met["total_requests"] == 0
+    assert clean_met["finished_requests"] == 0
+    assert clean_met["failed_requests"] == 0
+    assert clean_met["total_waits"] == 0
+
+    latch.reset()
+    assert latch.get_inflight_count() == 0
+
+    # 10. Default singleton
+    reset_network_idle_latch()
+    default_latch = get_default_network_idle_latch()
+    assert default_latch is not None
+    assert default_latch.default_idle_ms == 500.0
+    reset_network_idle_latch()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
