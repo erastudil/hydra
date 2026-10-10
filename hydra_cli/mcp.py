@@ -15,7 +15,8 @@ import threading
 import time
 import concurrent.futures
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+import re
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 from hydra_cli._version import __version__
 
@@ -199,9 +200,11 @@ class McpNamespaceRouter:
         self,
         separator: str = DEFAULT_NAMESPACE_SEPARATOR,
         manifest_cache: Optional[Any] = None,
+        result_sanitizer: Optional[Any] = None,
     ) -> None:
         self.separator = separator
         self.manifest_cache = manifest_cache
+        self.result_sanitizer = result_sanitizer
         self.reset()
 
     def reset(self) -> None:
@@ -276,6 +279,7 @@ class McpNamespaceRouter:
         qualified_tool_name: str,
         arguments: Optional[Dict[str, Any]] = None,
         timeout: Optional[float] = None,
+        sanitize: bool = False,
     ) -> Any:
         """Route tool execution through namespace router."""
         self._dispatch_count += 1
@@ -287,10 +291,16 @@ class McpNamespaceRouter:
         if hasattr(client, "call_tool"):
             if timeout is not None:
                 try:
-                    return client.call_tool(tool_name, arguments or {}, timeout=timeout)
+                    res = client.call_tool(tool_name, arguments or {}, timeout=timeout)
                 except TypeError:
-                    return client.call_tool(tool_name, arguments or {})
-            return client.call_tool(tool_name, arguments or {})
+                    res = client.call_tool(tool_name, arguments or {})
+            else:
+                res = client.call_tool(tool_name, arguments or {})
+
+            if sanitize or self.result_sanitizer:
+                sanitizer = self.result_sanitizer or get_default_result_sanitizer()
+                return sanitizer.sanitize(res)
+            return res
         raise RuntimeError(f"Client for namespace '{ns}' does not implement call_tool")
 
     def dispatch_concurrent(
@@ -299,12 +309,14 @@ class McpNamespaceRouter:
         max_workers: Optional[int] = None,
         timeout: Optional[float] = None,
         fail_fast: bool = False,
+        sanitize: bool = False,
     ) -> List["McpDispatchResult"]:
         """Dispatch batch of tool calls concurrently across registered namespaces."""
         dispatcher = McpConcurrentDispatcher(
             router=self,
             max_workers=max_workers or 8,
             default_timeout=timeout,
+            sanitizer=self.result_sanitizer if (sanitize or self.result_sanitizer) else None,
         )
         return dispatcher.dispatch_batch(
             calls,
@@ -312,6 +324,7 @@ class McpNamespaceRouter:
             max_workers=max_workers,
             timeout=timeout,
             fail_fast=fail_fast,
+            sanitize=sanitize,
         )
 
     def register_lazy_client(
@@ -460,10 +473,12 @@ class McpConcurrentDispatcher:
         router: Optional[McpNamespaceRouter] = None,
         max_workers: int = 8,
         default_timeout: Optional[float] = None,
+        sanitizer: Optional[Any] = None,
     ) -> None:
         self.router = router
         self.max_workers = max(1, int(max_workers))
         self.default_timeout = default_timeout
+        self.sanitizer = sanitizer
         self._lock = threading.RLock()
         self._metrics: Dict[str, Any] = {
             "total_batches": 0,
@@ -481,6 +496,7 @@ class McpConcurrentDispatcher:
         call: McpToolCall,
         router: McpNamespaceRouter,
         timeout_override: Optional[float] = None,
+        sanitize: bool = False,
     ) -> McpDispatchResult:
         """Execute single tool call under timeout guard and record execution duration."""
         sep = getattr(router, "separator", DEFAULT_NAMESPACE_SEPARATOR)
@@ -494,6 +510,9 @@ class McpConcurrentDispatcher:
 
         try:
             output = router.dispatch(call.tool_name, call.arguments, timeout=effective_timeout)
+            if sanitize or self.sanitizer:
+                effective_sanitizer = self.sanitizer or get_default_result_sanitizer()
+                output = effective_sanitizer.sanitize(output)
             duration = round(time.perf_counter() - start_time, 4)
             return McpDispatchResult(
                 tool_name=call.tool_name,
@@ -539,6 +558,7 @@ class McpConcurrentDispatcher:
         max_workers: Optional[int] = None,
         timeout: Optional[float] = None,
         fail_fast: bool = False,
+        sanitize: bool = False,
     ) -> List[McpDispatchResult]:
         """Execute batch of tool calls concurrently while preserving submission sequence."""
         if not calls:
@@ -559,7 +579,7 @@ class McpConcurrentDispatcher:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as executor:
             futures_map: Dict[concurrent.futures.Future, Tuple[int, McpToolCall]] = {
-                executor.submit(self._execute_single, call, effective_router, timeout): (idx, call)
+                executor.submit(self._execute_single, call, effective_router, timeout, sanitize): (idx, call)
                 for idx, call in enumerate(normalized_calls)
             }
 
@@ -722,6 +742,7 @@ def dispatch_concurrent(
     max_workers: int = 8,
     timeout: Optional[float] = None,
     fail_fast: bool = False,
+    sanitize: bool = False,
 ) -> List[McpDispatchResult]:
     """Dispatch batch of tool calls concurrently via default dispatcher."""
     dispatcher = get_default_concurrent_dispatcher()
@@ -731,7 +752,223 @@ def dispatch_concurrent(
         max_workers=max_workers,
         timeout=timeout,
         fail_fast=fail_fast,
+        sanitize=sanitize,
     )
+
+
+class McpResultSanitizer:
+    """Sanitize raw MCP tool outputs against credential leaks, ANSI escapes, and payload overflow."""
+
+    ANSI_ESCAPE_PATTERN = re.compile(r"\x1B(?:\[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+    BEARER_PATTERN = re.compile(r"Bearer\s+([a-zA-Z0-9_\-\.\=]{20,})", re.IGNORECASE)
+    API_KEY_PATTERN = re.compile(r"\b(sk-[a-zA-Z0-9_\-]{20,}|ghp_[a-zA-Z0-9]{20,}|hf_[a-zA-Z0-9]{20,}|xox[baprs]-[a-zA-Z0-9\-]{20,})\b")
+    KV_SECRET_PATTERN = re.compile(r"""(?i)(["']?(?:api[_-]?key|secret|token|password|auth_token)["']?\s*[:=]\s*["']?)([a-zA-Z0-9_\-\.\=]{12,})(["']?)""")
+    PEM_KEY_PATTERN = re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----[\s\S]+?-----END [A-Z ]+ PRIVATE KEY-----")
+
+    def __init__(
+        self,
+        max_chars: int = 65536,
+        redact_secrets: bool = True,
+        strip_ansi: bool = True,
+        strip_null_bytes: bool = True,
+        custom_patterns: Optional[List[re.Pattern]] = None,
+    ) -> None:
+        self.max_chars = max(256, int(max_chars))
+        self.redact_secrets = redact_secrets
+        self.strip_ansi = strip_ansi
+        self.strip_null_bytes = strip_null_bytes
+        self.custom_patterns = custom_patterns or []
+        self._lock = threading.RLock()
+        self._metrics: Dict[str, Any] = {
+            "total_sanitized": 0,
+            "redacted_secrets_count": 0,
+            "stripped_ansi_count": 0,
+            "truncated_payloads_count": 0,
+            "null_bytes_cleaned_count": 0,
+        }
+
+    def sanitize_text(self, text: str) -> str:
+        """Sanitize textual payload through credential redaction, ANSI stripping, and length bounding."""
+        if not text:
+            return ""
+
+        redactions = 0
+        ansi_count = 0
+        null_count = 0
+        truncated = False
+
+        result = text
+
+        if self.strip_ansi and "\x1B" in result:
+            matches = len(self.ANSI_ESCAPE_PATTERN.findall(result))
+            if matches > 0:
+                ansi_count += matches
+                result = self.ANSI_ESCAPE_PATTERN.sub("", result)
+
+        if self.strip_null_bytes and "\x00" in result:
+            null_count += result.count("\x00")
+            result = result.replace("\x00", "")
+
+        if self.redact_secrets:
+            if "-----BEGIN " in result:
+                pem_matches = len(self.PEM_KEY_PATTERN.findall(result))
+                if pem_matches > 0:
+                    redactions += pem_matches
+                    result = self.PEM_KEY_PATTERN.sub("[REDACTED_PRIVATE_KEY]", result)
+
+            if "sk-" in result or "ghp_" in result or "hf_" in result or "xox" in result:
+                key_matches = len(self.API_KEY_PATTERN.findall(result))
+                if key_matches > 0:
+                    redactions += key_matches
+                    result = self.API_KEY_PATTERN.sub("[REDACTED_API_KEY]", result)
+
+            if "Bearer " in result or "bearer " in result:
+                bearer_matches = len(self.BEARER_PATTERN.findall(result))
+                if bearer_matches > 0:
+                    redactions += bearer_matches
+                    result = self.BEARER_PATTERN.sub("Bearer [REDACTED_BEARER]", result)
+
+            kv_matches = len(self.KV_SECRET_PATTERN.findall(result))
+            if kv_matches > 0:
+                redactions += kv_matches
+                result = self.KV_SECRET_PATTERN.sub(r"\g<1>[REDACTED_SECRET]\g<3>", result)
+
+            for pat in self.custom_patterns:
+                custom_matches = len(pat.findall(result))
+                if custom_matches > 0:
+                    redactions += custom_matches
+                    result = pat.sub("[REDACTED]", result)
+
+        if len(result) > self.max_chars:
+            truncated = True
+            original_len = len(result)
+            cutoff = self.max_chars
+            result = result[:cutoff] + f"\n[TRUNCATED: original payload {original_len} chars truncated to {cutoff} chars]"
+
+        with self._lock:
+            self._metrics["total_sanitized"] += 1
+            self._metrics["redacted_secrets_count"] += redactions
+            self._metrics["stripped_ansi_count"] += ansi_count
+            self._metrics["null_bytes_cleaned_count"] += null_count
+            if truncated:
+                self._metrics["truncated_payloads_count"] += 1
+
+        return result
+
+    def sanitize(
+        self,
+        data: Any,
+        seen: Optional[Set[int]] = None,
+    ) -> Any:
+        """Recursively sanitize nested data structure while guarding against cyclic references."""
+        if seen is None:
+            seen = set()
+
+        if isinstance(data, str):
+            return self.sanitize_text(data)
+
+        if isinstance(data, (bytes, bytearray)):
+            decoded = data.decode("utf-8", errors="replace")
+            return self.sanitize_text(decoded)
+
+        if isinstance(data, (int, float, bool)) or data is None:
+            return data
+
+        ptr = id(data)
+        if ptr in seen:
+            return "[CYCLIC_REFERENCE]"
+        seen.add(ptr)
+
+        try:
+            if isinstance(data, dict):
+                clean_dict: Dict[str, Any] = {}
+                for k, v in data.items():
+                    clean_k = self.sanitize_text(str(k))
+                    clean_dict[clean_k] = self.sanitize(v, seen=seen)
+                return clean_dict
+
+            if isinstance(data, (list, tuple)):
+                clean_list: List[Any] = [self.sanitize(item, seen=seen) for item in data]
+                return clean_list
+
+            if isinstance(data, set):
+                clean_set_list: List[Any] = [self.sanitize(item, seen=seen) for item in sorted(list(data), key=str)]
+                return clean_set_list
+
+            if isinstance(data, BaseException):
+                return self.sanitize_text(f"{type(data).__name__}: {data}")
+
+            return self.sanitize_text(str(data))
+        finally:
+            seen.remove(ptr)
+
+    def sanitize_mcp_result(self, raw_result: Any) -> Dict[str, Any]:
+        """Sanitize and format output into standard MCP content block envelope."""
+        if isinstance(raw_result, dict) and "content" in raw_result and isinstance(raw_result["content"], list):
+            sanitized_content = []
+            for item in raw_result["content"]:
+                if isinstance(item, dict):
+                    block = dict(item)
+                    if "text" in block and isinstance(block["text"], str):
+                        block["text"] = self.sanitize_text(block["text"])
+                    sanitized_content.append(block)
+                else:
+                    sanitized_content.append(self.sanitize(item))
+            return {
+                "content": sanitized_content,
+                "isError": bool(raw_result.get("isError", False)),
+            }
+
+        if isinstance(raw_result, str):
+            return {
+                "content": [{"type": "text", "text": self.sanitize_text(raw_result)}],
+                "isError": False,
+            }
+
+        sanitized_payload = self.sanitize(raw_result)
+        formatted_text = json.dumps(sanitized_payload, ensure_ascii=False)
+        return {
+            "content": [{"type": "text", "text": formatted_text}],
+            "isError": False,
+        }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return snapshot copy of result sanitizer telemetry counters."""
+        with self._lock:
+            return dict(self._metrics)
+
+    def reset_metrics(self) -> None:
+        """Reset result sanitizer telemetry counters to initial zero values."""
+        with self._lock:
+            for k in self._metrics:
+                self._metrics[k] = 0
+
+
+_DEFAULT_RESULT_SANITIZER = McpResultSanitizer()
+
+
+def get_default_result_sanitizer() -> McpResultSanitizer:
+    """Return default singleton MCP result sanitizer."""
+    return _DEFAULT_RESULT_SANITIZER
+
+
+def reset_result_sanitizer() -> None:
+    """Reset global result sanitizer singleton state and metrics."""
+    global _DEFAULT_RESULT_SANITIZER
+    _DEFAULT_RESULT_SANITIZER = McpResultSanitizer()
+
+
+def sanitize_mcp_result(
+    raw_result: Any,
+    max_chars: int = 65536,
+    redact_secrets: bool = True,
+) -> Any:
+    """Sanitize arbitrary MCP tool output via default result sanitizer."""
+    sanitizer = get_default_result_sanitizer()
+    if max_chars != sanitizer.max_chars:
+        custom_sanitizer = McpResultSanitizer(max_chars=max_chars, redact_secrets=redact_secrets)
+        return custom_sanitizer.sanitize(raw_result)
+    return sanitizer.sanitize(raw_result)
 
 
 class McpHeartbeatMonitor:

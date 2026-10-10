@@ -56,6 +56,7 @@ from hydra_cli.mcp import (
     McpManifestCache,
     McpNamespaceRouter,
     McpRegistryDiscoverer,
+    McpResultSanitizer,
     McpSubprocessClient,
     McpTimeoutGuard,
     McpToolCall,
@@ -66,10 +67,13 @@ from hydra_cli.mcp import (
     get_default_concurrent_dispatcher,
     get_default_discoverer,
     get_default_manifest_cache,
+    get_default_result_sanitizer,
     parse_qualified_tool_name,
     reset_concurrent_dispatcher,
     reset_discoverer,
     reset_manifest_cache,
+    reset_result_sanitizer,
+    sanitize_mcp_result,
 )
 from hydra_cli.mcp_registry import McpRegistry
 from hydra_cli.native_tools import NativeToolRegistry
@@ -155,6 +159,10 @@ __all__ = [
     "dispatch_concurrent",
     "get_default_concurrent_dispatcher",
     "reset_concurrent_dispatcher",
+    "McpResultSanitizer",
+    "get_default_result_sanitizer",
+    "reset_result_sanitizer",
+    "sanitize_mcp_result",
     "parse_qualified_tool_name",
     "format_qualified_tool_name",
     "McpRegistry",

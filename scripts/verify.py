@@ -5474,6 +5474,127 @@ def mcp_concurrent_dispatch_contracts():
 
 
 @check
+def mcp_result_sanitizer_contracts():
+    import time
+    from hydra_cli.mcp import (
+        McpConcurrentDispatcher,
+        McpNamespaceRouter,
+        McpResultSanitizer,
+        get_default_result_sanitizer,
+        reset_concurrent_dispatcher,
+        reset_namespace_router,
+        reset_result_sanitizer,
+        sanitize_mcp_result,
+    )
+
+    reset_result_sanitizer()
+    reset_namespace_router()
+
+    san = McpResultSanitizer(max_chars=256)
+
+    # 1. Text sanitization
+    ansi_text = chr(27) + "[31;1mError in worker" + chr(27) + "[0m"
+    assert san.sanitize_text(ansi_text) == "Error in worker"
+
+    null_text = "abc" + chr(0) + "def" + chr(0) + "ghi"
+    assert san.sanitize_text(null_text) == "abcdefghi"
+
+    bearer_text = "Authorization: Bearer mylongsecretbearertoken123456"
+    assert "[REDACTED_BEARER]" in san.sanitize_text(bearer_text)
+    assert "mylongsecretbearer" not in san.sanitize_text(bearer_text)
+
+    api_key_text = "key = sk-1234567890abcdef1234567890"
+    assert "[REDACTED_API_KEY]" in san.sanitize_text(api_key_text)
+    assert "1234567890abcdef" not in san.sanitize_text(api_key_text)
+
+    kv_text = 'credentials: {"password": "verysecretpassword123"}'
+    assert "[REDACTED_SECRET]" in san.sanitize_text(kv_text)
+    assert "verysecretpassword123" not in san.sanitize_text(kv_text)
+
+    pem_text = "\n".join(["-----BEGIN EC PRIVATE KEY-----", "MHcCAQEEI...", "-----END EC PRIVATE KEY-----"])
+    assert san.sanitize_text(pem_text) == "[REDACTED_PRIVATE_KEY]"
+
+    # 2. Payload truncation
+    long_text = "z" * 400
+    trunc = san.sanitize_text(long_text)
+    assert len(trunc) > 256
+    assert "[TRUNCATED:" in trunc
+    assert "400 chars truncated to 256 chars" in trunc
+
+    # 3. Recursive structure and cycle protection
+    nested = {
+        "msg": chr(27) + "[32mhello" + chr(27) + "[0m",
+        "token": "sk-12345678901234567890",
+        "raw_bytes": b"clean_bytes",
+        "items": [1, chr(0) + "null", None],
+        "err": ValueError("simulated test error"),
+    }
+    clean_nested = san.sanitize(nested)
+    assert clean_nested["msg"] == "hello"
+    assert clean_nested["token"] == "[REDACTED_API_KEY]"
+    assert clean_nested["raw_bytes"] == "clean_bytes"
+    assert clean_nested["items"][1] == "null"
+    assert "ValueError: simulated test error" in clean_nested["err"]
+
+    cyclic = {}
+    cyclic["loop"] = cyclic
+    assert san.sanitize(cyclic)["loop"] == "[CYCLIC_REFERENCE]"
+
+    # 4. Standard MCP envelope formatting
+    mcp_in = {
+        "content": [{"type": "text", "text": "secret: token123456789012"}],
+        "isError": True,
+    }
+    mcp_out = san.sanitize_mcp_result(mcp_in)
+    assert mcp_out["isError"] is True
+    assert "[REDACTED_SECRET]" in mcp_out["content"][0]["text"]
+
+    bare_out = san.sanitize_mcp_result("plain text message")
+    assert bare_out["content"][0]["text"] == "plain text message"
+    assert bare_out["isError"] is False
+
+    # 5. Telemetry and reset
+    met = san.get_metrics()
+    assert met["total_sanitized"] >= 6
+    assert met["redacted_secrets_count"] >= 4
+    assert met["stripped_ansi_count"] >= 2
+    assert met["truncated_payloads_count"] >= 1
+    assert met["null_bytes_cleaned_count"] >= 2
+
+    san.reset_metrics()
+    clean_m = san.get_metrics()
+    assert clean_m["total_sanitized"] == 0
+    assert clean_m["redacted_secrets_count"] == 0
+
+    # 6. Router and concurrent integration
+    class UnsafeClient:
+        def call_tool(self, tool_name, arguments, timeout=None):
+            return chr(27) + "[33mWarning" + chr(27) + "[0m: key = sk-1234567890abcdef1234567890 for " + str(arguments.get("u"))
+
+    router = McpNamespaceRouter(result_sanitizer=san)
+    router.register_client("unsafe", UnsafeClient())
+
+    single_out = router.dispatch("unsafe__run", {"u": "alice"}, sanitize=True)
+    assert single_out == "Warning: key = [REDACTED_API_KEY] for alice"
+
+    batch_out = router.dispatch_concurrent([{"name": "unsafe__run", "arguments": {"u": "bob"}}], sanitize=True)
+    assert len(batch_out) == 1
+    assert batch_out[0].result == "Warning: key = [REDACTED_API_KEY] for bob"
+
+    # 7. Default singleton and top level helper
+    reset_result_sanitizer()
+    default_san = get_default_result_sanitizer()
+    assert default_san is not None
+    helper_out = sanitize_mcp_result(chr(27) + "[36minfo" + chr(27) + "[0m: sk-1234567890abcdef1234567890")
+    assert helper_out == "info: [REDACTED_API_KEY]"
+
+    reset_result_sanitizer()
+    reset_namespace_router()
+    reset_concurrent_dispatcher()
+
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
