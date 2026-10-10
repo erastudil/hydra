@@ -4636,3 +4636,161 @@ def reset_ttft_tracker() -> None:
 def create_ttft_tracker(max_history: int = 1000) -> StreamTtftTracker:
     """Instantiate a new dedicated stream TTFT tracker."""
     return StreamTtftTracker(max_history=max_history)
+
+
+class StreamBackpressureController:
+    """
+    Streaming throughput backpressure controller and flow throttle manager for Hydra inference.
+    Regulates token generation pace via dual high and low watermarks to prevent buffer overflow.
+    """
+
+    def __init__(
+        self,
+        high_watermark: int = 100,
+        low_watermark: int = 20,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._high_watermark = max(2, int(high_watermark))
+        self._low_watermark = max(1, min(self._high_watermark - 1, int(low_watermark)))
+        self._queue: List[str] = []
+        self._is_paused = False
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_items_pushed: int = 0
+            self._total_items_pulled: int = 0
+            self._pause_events_count: int = 0
+            self._resume_events_count: int = 0
+            self._peak_queue_size: int = 0
+            self._queue.clear()
+            self._is_paused = False
+
+    def get_watermarks(self) -> Tuple[int, int]:
+        """Return high and low watermark threshold tuple."""
+        with self._lock:
+            return self._high_watermark, self._low_watermark
+
+    def set_watermarks(self, high: int, low: int) -> None:
+        """Configure high and low watermark buffer thresholds."""
+        with self._lock:
+            self._high_watermark = max(2, int(high))
+            self._low_watermark = max(1, min(self._high_watermark - 1, int(low)))
+
+    def push(self, item: str) -> bool:
+        """Enqueue stream token chunk. Trigger backpressure throttle if queue exceeds high watermark."""
+        with self._lock:
+            self._total_items_pushed += 1
+            self._queue.append(item)
+            q_len = len(self._queue)
+            if q_len > self._peak_queue_size:
+                self._peak_queue_size = q_len
+
+            if q_len >= self._high_watermark and not self._is_paused:
+                self._is_paused = True
+                self._pause_events_count += 1
+            return not self._is_paused
+
+    def pull(self) -> Optional[str]:
+        """Dequeue stream token chunk. Clear backpressure throttle if queue recedes below low watermark."""
+        with self._lock:
+            if not self._queue:
+                return None
+            self._total_items_pulled += 1
+            item = self._queue.pop(0)
+            if self._is_paused and len(self._queue) <= self._low_watermark:
+                self._is_paused = False
+                self._resume_events_count += 1
+            return item
+
+    def pause(self) -> None:
+        """Explicitly assert backpressure pause state."""
+        with self._lock:
+            if not self._is_paused:
+                self._is_paused = True
+                self._pause_events_count += 1
+
+    def resume(self) -> None:
+        """Explicitly clear backpressure pause state."""
+        with self._lock:
+            if self._is_paused:
+                self._is_paused = False
+                self._resume_events_count += 1
+
+    def is_throttled(self) -> bool:
+        """Evaluate whether backpressure throttling currently halts stream production."""
+        with self._lock:
+            return self._is_paused
+
+    def size(self) -> int:
+        """Return count of queued token items."""
+        with self._lock:
+            return len(self._queue)
+
+    def throttle_stream(
+        self,
+        token_stream: Iterable[str],
+        consumer_ready_fn: Optional[Callable[[], bool]] = None,
+        sleeper: Optional[Callable[[float], None]] = None,
+    ) -> Generator[str, None, None]:
+        """Throttle input token stream against consumer capacity and watermark thresholds."""
+        sleep_func = sleeper if sleeper is not None else time.sleep
+        for chunk in token_stream:
+            self.push(chunk)
+            while self.is_throttled():
+                if consumer_ready_fn is not None and consumer_ready_fn():
+                    self.pull()
+                else:
+                    sleep_func(0.01)
+                    if consumer_ready_fn is None:
+                        item = self.pull()
+                        if item is not None:
+                            yield item
+            item = self.pull()
+            if item is not None:
+                yield item
+
+        while self.size() > 0:
+            item = self.pull()
+            if item is not None:
+                yield item
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            return {
+                "high_watermark": self._high_watermark,
+                "low_watermark": self._low_watermark,
+                "current_size": len(self._queue),
+                "peak_queue_size": self._peak_queue_size,
+                "total_items_pushed": self._total_items_pushed,
+                "total_items_pulled": self._total_items_pulled,
+                "pause_events_count": self._pause_events_count,
+                "resume_events_count": self._resume_events_count,
+                "is_throttled": self._is_paused,
+            }
+
+
+_DEFAULT_BACKPRESSURE_CONTROLLER = StreamBackpressureController()
+
+
+def get_default_backpressure_controller() -> StreamBackpressureController:
+    """Return default singleton stream backpressure controller."""
+    return _DEFAULT_BACKPRESSURE_CONTROLLER
+
+
+def reset_backpressure_controller() -> None:
+    """Reset global stream backpressure controller telemetry and queue."""
+    _DEFAULT_BACKPRESSURE_CONTROLLER.reset_metrics()
+
+
+def create_backpressure_controller(
+    high_watermark: int = 100,
+    low_watermark: int = 20,
+) -> StreamBackpressureController:
+    """Instantiate a new dedicated stream backpressure controller."""
+    return StreamBackpressureController(
+        high_watermark=high_watermark,
+        low_watermark=low_watermark,
+    )

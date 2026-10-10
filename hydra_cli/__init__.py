@@ -212,6 +212,10 @@ from hydra_cli.providers import (
     create_ttft_tracker,
     get_default_ttft_tracker,
     reset_ttft_tracker,
+    StreamBackpressureController,
+    create_backpressure_controller,
+    get_default_backpressure_controller,
+    reset_backpressure_controller,
 )
 from hydra_cli.sandbox import (
     CommandInspector,
@@ -385,5 +389,9 @@ __all__ = [
     "create_ttft_tracker",
     "get_default_ttft_tracker",
     "reset_ttft_tracker",
+    "StreamBackpressureController",
+    "create_backpressure_controller",
+    "get_default_backpressure_controller",
+    "reset_backpressure_controller",
     "__version__",
 ]

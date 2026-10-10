@@ -8975,6 +8975,85 @@ def ttft_metrics_contracts():
 
 
 @check
+def backpressure_pause_contracts():
+    from hydra_cli.providers import (
+        StreamBackpressureController,
+        create_backpressure_controller,
+        get_default_backpressure_controller,
+        reset_backpressure_controller,
+    )
+    from hydra_cli import (
+        StreamBackpressureController as RootStreamBackpressureController,
+        create_backpressure_controller as root_create_backpressure_controller,
+        get_default_backpressure_controller as root_get_default_backpressure_controller,
+        reset_backpressure_controller as root_reset_backpressure_controller,
+    )
+
+    # 1. Re-exports parity
+    assert RootStreamBackpressureController is StreamBackpressureController
+    assert root_create_backpressure_controller is create_backpressure_controller
+    assert root_get_default_backpressure_controller is get_default_backpressure_controller
+    assert root_reset_backpressure_controller is reset_backpressure_controller
+
+    # 2. Watermark configuration
+    bp = create_backpressure_controller(high_watermark=5, low_watermark=2)
+    assert bp.get_watermarks() == (5, 2)
+    bp.set_watermarks(8, 3)
+    assert bp.get_watermarks() == (8, 3)
+
+    # 3. Watermark push and pull triggering
+    controller = create_backpressure_controller(high_watermark=4, low_watermark=2)
+    assert controller.is_throttled() is False
+
+    assert controller.push("a") is True
+    assert controller.push("b") is True
+    assert controller.push("c") is True
+    assert controller.is_throttled() is False
+
+    assert controller.push("d") is False
+    assert controller.is_throttled() is True
+
+    item1 = controller.pull()
+    assert item1 == "a"
+    assert controller.is_throttled() is True
+
+    item2 = controller.pull()
+    assert item2 == "b"
+    assert controller.is_throttled() is False
+
+    # 4. Explicit pause and resume
+    controller.pause()
+    assert controller.is_throttled() is True
+    controller.resume()
+    assert controller.is_throttled() is False
+
+    # 5. Throttle stream generator
+    stream_ctrl = create_backpressure_controller(high_watermark=4, low_watermark=2)
+    tokens = ["chunk1", "chunk2", "chunk3", "chunk4", "chunk5"]
+    output = list(stream_ctrl.throttle_stream(tokens))
+    assert output == tokens
+    assert stream_ctrl.size() == 0
+
+    # 6. Telemetry metrics and reset
+    metrics = controller.get_metrics()
+    assert metrics["total_items_pushed"] >= 4
+    assert metrics["total_items_pulled"] >= 2
+    assert metrics["pause_events_count"] >= 1
+
+    controller.reset_metrics()
+    clean_metrics = controller.get_metrics()
+    assert clean_metrics["total_items_pushed"] == 0
+    assert clean_metrics["total_items_pulled"] == 0
+    assert clean_metrics["pause_events_count"] == 0
+
+    # 7. Singleton lifecycle
+    reset_backpressure_controller()
+    default_bp = get_default_backpressure_controller()
+    assert default_bp is not None
+    reset_backpressure_controller()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
