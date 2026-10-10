@@ -13,7 +13,8 @@ import urllib.request
 import unicodedata
 import random
 import time
-from typing import Any, Callable, Dict, Generator, List, Optional, Tuple
+import threading
+from typing import Any, Callable, Dict, Generator, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 
 from hydra_cli.config import (
@@ -4213,3 +4214,153 @@ def complete(
         )
 
     raise ProviderError(redact(f"All configured providers failed for '{route['model']}'. Last error: {last_error}"))
+
+
+class StreamJitterSmoother:
+    """
+    Streaming token delivery pacing and jitter smoothing buffer for Hydra inference.
+    Absorbs bursty network chunk arrivals and paces emission using exponential smoothing.
+    """
+
+    def __init__(
+        self,
+        target_cps: float = 40.0,
+        max_buffer: int = 200,
+        smoothing_factor: float = 0.2,
+    ) -> None:
+        self._lock = threading.RLock()
+        self._target_cps = max(1.0, float(target_cps))
+        self._max_buffer = max(10, int(max_buffer))
+        self._alpha = min(1.0, max(0.01, float(smoothing_factor)))
+        self._buffer: List[str] = []
+        self._last_arrival_time: float = 0.0
+        self._smoothed_interval_ms: float = 1000.0 / self._target_cps
+        self.reset_metrics()
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_chunks_received: int = 0
+            self._total_chunks_emitted: int = 0
+            self._total_chars_emitted: int = 0
+            self._bursts_detected: int = 0
+            self._intervals_ms: List[float] = []
+            self._last_arrival_time = 0.0
+            self._smoothed_interval_ms = 1000.0 / self._target_cps
+
+    def get_target_cps(self) -> float:
+        """Return target characters per second pacing rate."""
+        with self._lock:
+            return self._target_cps
+
+    def set_target_cps(self, cps: float) -> None:
+        """Configure target emission characters per second."""
+        with self._lock:
+            self._target_cps = max(1.0, float(cps))
+
+    def feed_chunk(
+        self,
+        chunk: str,
+        now: Optional[float] = None,
+    ) -> List[str]:
+        """Record chunk arrival, update arrival jitter statistics, and return micro-chunk units."""
+        if not chunk:
+            return []
+
+        with self._lock:
+            current_time = now if now is not None else time.time()
+            self._total_chunks_received += 1
+
+            if self._last_arrival_time > 0.0:
+                delta_ms = max(0.0, (current_time - self._last_arrival_time) * 1000.0)
+                self._intervals_ms.append(delta_ms)
+                if len(self._intervals_ms) > 100:
+                    self._intervals_ms.pop(0)
+                self._smoothed_interval_ms = (
+                    self._alpha * delta_ms + (1.0 - self._alpha) * self._smoothed_interval_ms
+                )
+                if delta_ms < (1000.0 / (self._target_cps * 2.0)):
+                    self._bursts_detected += 1
+
+            self._last_arrival_time = current_time
+
+            if len(chunk) > 4:
+                step = max(2, len(chunk) // 4)
+                slices = [chunk[i:i + step] for i in range(0, len(chunk), step)]
+            else:
+                slices = [chunk]
+
+            self._total_chunks_emitted += len(slices)
+            self._total_chars_emitted += len(chunk)
+            return slices
+
+    def smooth_stream(
+        self,
+        token_stream: Iterable[str],
+        sleep_fn: Optional[Callable[[float], None]] = None,
+    ) -> Generator[str, None, None]:
+        """Consume input token stream and yield smoothed micro-chunks with paced timing."""
+        sleeper = sleep_fn if sleep_fn is not None else time.sleep
+        for chunk in token_stream:
+            micro_chunks = self.feed_chunk(chunk)
+            for m in micro_chunks:
+                with self._lock:
+                    delay_s = max(0.0, (self._smoothed_interval_ms / 1000.0) / max(1, len(micro_chunks)))
+                    capped_delay = min(0.025, delay_s)
+                if capped_delay > 0.001:
+                    sleeper(capped_delay)
+                yield m
+
+    def calculate_jitter_variance(self) -> float:
+        """Calculate mean absolute deviation of chunk arrival intervals in milliseconds."""
+        with self._lock:
+            if not self._intervals_ms:
+                return 0.0
+            mean_val = sum(self._intervals_ms) / len(self._intervals_ms)
+            deviations = [abs(x - mean_val) for x in self._intervals_ms]
+            return sum(deviations) / len(deviations)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters."""
+        with self._lock:
+            mean_int = (
+                sum(self._intervals_ms) / len(self._intervals_ms)
+                if self._intervals_ms
+                else 0.0
+            )
+            return {
+                "target_cps": self._target_cps,
+                "total_chunks_received": self._total_chunks_received,
+                "total_chunks_emitted": self._total_chunks_emitted,
+                "total_chars_emitted": self._total_chars_emitted,
+                "bursts_detected": self._bursts_detected,
+                "smoothed_interval_ms": round(self._smoothed_interval_ms, 2),
+                "mean_interval_ms": round(mean_int, 2),
+                "jitter_variance_ms": round(self.calculate_jitter_variance(), 2),
+            }
+
+
+_DEFAULT_JITTER_SMOOTHER = StreamJitterSmoother()
+
+
+def get_default_jitter_smoother() -> StreamJitterSmoother:
+    """Return default singleton stream jitter smoother."""
+    return _DEFAULT_JITTER_SMOOTHER
+
+
+def reset_jitter_smoother() -> None:
+    """Reset global stream jitter smoother telemetry."""
+    _DEFAULT_JITTER_SMOOTHER.reset_metrics()
+
+
+def create_jitter_smoother(
+    target_cps: float = 40.0,
+    max_buffer: int = 200,
+    smoothing_factor: float = 0.2,
+) -> StreamJitterSmoother:
+    """Instantiate a new dedicated stream jitter smoother."""
+    return StreamJitterSmoother(
+        target_cps=target_cps,
+        max_buffer=max_buffer,
+        smoothing_factor=smoothing_factor,
+    )

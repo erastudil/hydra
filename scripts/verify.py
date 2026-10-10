@@ -8728,6 +8728,78 @@ def exit_confirm_contracts():
 
 
 @check
+def jitter_smoothing_contracts():
+    from hydra_cli.providers import (
+        StreamJitterSmoother,
+        create_jitter_smoother,
+        get_default_jitter_smoother,
+        reset_jitter_smoother,
+    )
+    from hydra_cli import (
+        StreamJitterSmoother as RootStreamJitterSmoother,
+        create_jitter_smoother as root_create_jitter_smoother,
+        get_default_jitter_smoother as root_get_default_jitter_smoother,
+        reset_jitter_smoother as root_reset_jitter_smoother,
+    )
+
+    # 1. Re-exports parity
+    assert RootStreamJitterSmoother is StreamJitterSmoother
+    assert root_create_jitter_smoother is create_jitter_smoother
+    assert root_get_default_jitter_smoother is get_default_jitter_smoother
+    assert root_reset_jitter_smoother is reset_jitter_smoother
+
+    # 2. Pacing rate and configuration
+    smoother = create_jitter_smoother(target_cps=50.0, smoothing_factor=0.25)
+    assert smoother.get_target_cps() == 50.0
+    smoother.set_target_cps(80.0)
+    assert smoother.get_target_cps() == 80.0
+
+    # 3. Chunk feed and burst micro-slicing
+    slices_short = smoother.feed_chunk("hi", now=100.0)
+    assert slices_short == ["hi"]
+
+    slices_burst = smoother.feed_chunk("1234567890", now=100.05)
+    assert len(slices_burst) >= 2
+    assert "".join(slices_burst) == "1234567890"
+
+    assert smoother.feed_chunk("", now=100.1) == []
+
+    # 4. Inter-arrival jitter variance calculation
+    smoother.feed_chunk("chunkA", now=101.0)
+    smoother.feed_chunk("chunkB", now=101.02)
+    smoother.feed_chunk("chunkC", now=101.08)
+    smoother.feed_chunk("chunkD", now=101.09)
+    variance = smoother.calculate_jitter_variance()
+    assert variance >= 0.0
+
+    # 5. Generator stream smoothing with mocked pacing
+    delays = []
+    tokens = ["Hello", " world,", " this is a", " stream test."]
+    output = list(smoother.smooth_stream(tokens, sleep_fn=lambda s: delays.append(s)))
+    assert "".join(output) == "Hello world, this is a stream test."
+    assert len(delays) >= 1
+    assert all(d <= 0.025 for d in delays)
+
+    # 6. Telemetry metrics and reset
+    metrics = smoother.get_metrics()
+    assert metrics["total_chunks_received"] >= 5
+    assert metrics["total_chunks_emitted"] >= 5
+    assert metrics["total_chars_emitted"] >= 30
+
+    smoother.reset_metrics()
+    clean_metrics = smoother.get_metrics()
+    assert clean_metrics["total_chunks_received"] == 0
+    assert clean_metrics["total_chunks_emitted"] == 0
+    assert clean_metrics["total_chars_emitted"] == 0
+
+    # 7. Singleton lifecycle
+    reset_jitter_smoother()
+    default_js = get_default_jitter_smoother()
+    assert default_js is not None
+    reset_jitter_smoother()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

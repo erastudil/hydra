@@ -198,7 +198,13 @@ from hydra_cli.mcp import (
 )
 from hydra_cli.mcp_registry import McpRegistry
 from hydra_cli.native_tools import NativeToolRegistry
-from hydra_cli.providers import complete
+from hydra_cli.providers import (
+    StreamJitterSmoother,
+    complete,
+    create_jitter_smoother,
+    get_default_jitter_smoother,
+    reset_jitter_smoother,
+)
 from hydra_cli.sandbox import (
     CommandInspector,
     EnvironmentScrubber,
@@ -359,5 +365,9 @@ __all__ = [
     "create_exit_confirm",
     "get_default_exit_confirm",
     "reset_exit_confirm",
+    "StreamJitterSmoother",
+    "create_jitter_smoother",
+    "get_default_jitter_smoother",
+    "reset_jitter_smoother",
     "__version__",
 ]
