@@ -7860,6 +7860,178 @@ def color_scheme_tester_contracts():
     reset_color_scheme_tester()
 
 @check
+def status_assert_contracts():
+    from hydra_cli.browser import (
+        STATUS_TEXT_MAP,
+        ResponseStatusAssert,
+        create_status_assert,
+        get_default_status_assert,
+        reset_status_assert,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import (
+        ResponseStatusAssert as SandboxStatusAssert,
+        create_status_assert as sandbox_create_status_assert,
+    )
+    from hydra_cli import (
+        ResponseStatusAssert as RootStatusAssert,
+        create_status_assert as root_create_status_assert,
+    )
+
+    # 1. Re-exports parity
+    assert SandboxStatusAssert is ResponseStatusAssert
+    assert RootStatusAssert is ResponseStatusAssert
+    assert sandbox_create_status_assert is create_status_assert
+    assert root_create_status_assert is create_status_assert
+
+    # 2. Status classification and predicates
+    asserter = create_status_assert()
+    assert asserter.classify_status(100) == "informational"
+    assert asserter.classify_status(200) == "successful"
+    assert asserter.classify_status(201) == "successful"
+    assert asserter.classify_status(301) == "redirection"
+    assert asserter.classify_status(302) == "redirection"
+    assert asserter.classify_status(400) == "client_error"
+    assert asserter.classify_status(404) == "client_error"
+    assert asserter.classify_status(500) == "server_error"
+    assert asserter.classify_status(503) == "server_error"
+    assert asserter.classify_status(999) == "unknown"
+
+    assert asserter.is_ok(200) is True
+    assert asserter.is_ok(204) is True
+    assert asserter.is_ok(404) is False
+
+    assert asserter.is_redirect(301) is True
+    assert asserter.is_redirect(308) is True
+    assert asserter.is_redirect(200) is False
+
+    assert asserter.is_client_error(400) is True
+    assert asserter.is_client_error(429) is True
+    assert asserter.is_client_error(500) is False
+
+    assert asserter.is_server_error(500) is True
+    assert asserter.is_server_error(504) is True
+    assert asserter.is_server_error(404) is False
+
+    assert asserter.is_error(404) is True
+    assert asserter.is_error(500) is True
+    assert asserter.is_error(200) is False
+
+    assert asserter.get_status_text(200) == "OK"
+    assert asserter.get_status_text(404) == "Not Found"
+    assert asserter.get_status_text(500) == "Internal Server Error"
+    assert asserter.get_status_text(999) == "Unknown Status"
+
+    # 3. Status assertions by exact code, set, and category
+    res_exact = asserter.assert_status(200, expected=200)
+    assert res_exact["valid"] is True
+    assert res_exact["status"] == 200
+    assert res_exact["status_text"] == "OK"
+    assert res_exact["category"] == "successful"
+    assert len(res_exact["errors"]) == 0
+
+    res_fail = asserter.assert_status(404, expected=200)
+    assert res_fail["valid"] is False
+    assert len(res_fail["errors"]) == 1
+
+    res_set = asserter.assert_status(204, expected=[200, 201, 204])
+    assert res_set["valid"] is True
+
+    res_set_fail = asserter.assert_status(500, expected=[200, 201, 204])
+    assert res_set_fail["valid"] is False
+
+    res_cat_ok = asserter.assert_status(200, expected="ok")
+    assert res_cat_ok["valid"] is True
+
+    res_cat_redirect = asserter.assert_status(302, expected="redirect")
+    assert res_cat_redirect["valid"] is True
+
+    res_cat_client = asserter.assert_status(403, expected="client_error")
+    assert res_cat_client["valid"] is True
+
+    res_cat_server = asserter.assert_status(502, expected="server_error")
+    assert res_cat_server["valid"] is True
+
+    res_cat_err = asserter.assert_status(404, expected="error")
+    assert res_cat_err["valid"] is True
+
+    # 4. Header validation
+    headers_sample = {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-cache, no-store",
+        "x-request-id": "req-12345",
+    }
+    res_hdr_ok = asserter.assert_status(
+        200,
+        expected=200,
+        headers=headers_sample,
+        required_headers={"content-type": "application/json", "x-request-id": "req-12345"},
+    )
+    assert res_hdr_ok["valid"] is True
+
+    res_hdr_missing = asserter.assert_status(
+        200,
+        expected=200,
+        headers=headers_sample,
+        required_headers={"authorization": "Bearer token"},
+    )
+    assert res_hdr_missing["valid"] is False
+    assert any("Missing required header" in e for e in res_hdr_missing["errors"])
+
+    # 5. Response object assertions
+    class MockResponse:
+        """Mock response structure for status assertion verification."""
+        def __init__(self, status_val, headers_val):
+            self._status = status_val
+            self._headers = headers_val
+
+        def status(self):
+            return self._status
+
+        def headers(self):
+            return self._headers
+
+    mock_resp = MockResponse(201, {"content-type": "application/json"})
+    res_resp = asserter.assert_response(mock_resp, expected=201)
+    assert res_resp["valid"] is True
+    assert res_resp["status"] == 201
+
+    res_none = asserter.assert_response(None, expected=200)
+    assert res_none["valid"] is False
+    assert "compliance : not possible" in res_none["errors"][0]
+
+    # 6. Metrics telemetry and reset
+    metrics = asserter.get_metrics()
+    assert metrics["total_assertions"] >= 10
+    assert metrics["passed_assertions"] >= 5
+    assert metrics["failed_assertions"] >= 3
+
+    asserter.reset_metrics()
+    clean_metrics = asserter.get_metrics()
+    assert clean_metrics["total_assertions"] == 0
+    assert clean_metrics["passed_assertions"] == 0
+    assert clean_metrics["failed_assertions"] == 0
+
+    # 7. Browser action dispatch
+    if not PLAYWRIGHT_AVAILABLE:
+        action_res = dispatch_browser_action("assert_status", expected=200)
+        assert action_res["isError"] is True
+        assert "Playwright uninstalled" in action_res["error"]
+
+    action_cat = dispatch_browser_action("classify_status", text="404")
+    assert action_cat["isError"] is False
+    assert action_cat["category"] == "client_error"
+    assert action_cat["status"] == 404
+
+    # 8. Singleton lifecycle
+    reset_status_assert()
+    default_assert = get_default_status_assert()
+    assert default_assert is not None
+    reset_status_assert()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

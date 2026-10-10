@@ -3274,6 +3274,238 @@ def create_color_scheme_tester() -> ColorSchemeTester:
     return ColorSchemeTester()
 
 
+STATUS_TEXT_MAP: Dict[int, str] = {
+    100: "Continue",
+    101: "Switching Protocols",
+    200: "OK",
+    201: "Created",
+    202: "Accepted",
+    204: "No Content",
+    301: "Moved Permanently",
+    302: "Found",
+    304: "Not Modified",
+    307: "Temporary Redirect",
+    308: "Permanent Redirect",
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    408: "Request Timeout",
+    409: "Conflict",
+    410: "Gone",
+    422: "Unprocessable Entity",
+    429: "Too Many Requests",
+    500: "Internal Server Error",
+    502: "Bad Gateway",
+    503: "Service Unavailable",
+    504: "Gateway Timeout",
+}
+
+
+class ResponseStatusAssert:
+    """
+    HTTP response status and header assertion subsystem for Playwright browser automation.
+    Enforces status code matching, range classification, header validation, and telemetry tracking.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_assertions: int = 0
+            self._passed_assertions: int = 0
+            self._failed_assertions: int = 0
+            self._last_status: int = 0
+            self._last_category: str = "unknown"
+
+    def classify_status(self, status_code: int) -> str:
+        """Classify HTTP status code into standard category."""
+        code = int(status_code)
+        if 100 <= code <= 199:
+            return "informational"
+        if 200 <= code <= 299:
+            return "successful"
+        if 300 <= code <= 399:
+            return "redirection"
+        if 400 <= code <= 499:
+            return "client_error"
+        if 500 <= code <= 599:
+            return "server_error"
+        return "unknown"
+
+    def is_ok(self, status_code: int) -> bool:
+        """Return true when status code represents success."""
+        return 200 <= int(status_code) <= 299
+
+    def is_redirect(self, status_code: int) -> bool:
+        """Return true when status code represents redirection."""
+        return 300 <= int(status_code) <= 399
+
+    def is_client_error(self, status_code: int) -> bool:
+        """Return true when status code represents client error."""
+        return 400 <= int(status_code) <= 499
+
+    def is_server_error(self, status_code: int) -> bool:
+        """Return true when status code represents server error."""
+        return 500 <= int(status_code) <= 599
+
+    def is_error(self, status_code: int) -> bool:
+        """Return true when status code represents client or server error."""
+        return int(status_code) >= 400
+
+    def get_status_text(self, status_code: int) -> str:
+        """Return standard status text representation for given code."""
+        return STATUS_TEXT_MAP.get(int(status_code), "Unknown Status")
+
+    def assert_status(
+        self,
+        status_code: int,
+        expected: Any = 200,
+        headers: Optional[Dict[str, str]] = None,
+        required_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Validate response status against expected code, sequence, or category."""
+        code = int(status_code)
+        category = self.classify_status(code)
+        status_text = self.get_status_text(code)
+        errors: List[str] = []
+
+        matched = False
+        if isinstance(expected, int):
+            matched = (code == expected)
+            if not matched:
+                errors.append(f"Expected status code {expected} but received {code}")
+        elif isinstance(expected, (list, tuple, set)):
+            matched = (code in expected)
+            if not matched:
+                errors.append(f"Status code {code} not in expected set {list(expected)}")
+        elif isinstance(expected, str):
+            exp_lower = expected.strip().lower()
+            if exp_lower in ("ok", "success", "successful", "2xx"):
+                matched = self.is_ok(code)
+            elif exp_lower in ("redirect", "redirection", "3xx"):
+                matched = self.is_redirect(code)
+            elif exp_lower in ("client_error", "4xx"):
+                matched = self.is_client_error(code)
+            elif exp_lower in ("server_error", "5xx"):
+                matched = self.is_server_error(code)
+            elif exp_lower in ("error", "failed"):
+                matched = self.is_error(code)
+            elif exp_lower.isdigit():
+                matched = (code == int(exp_lower))
+            else:
+                matched = (category == exp_lower)
+            if not matched:
+                errors.append(f"Status code {code} ({category}) failed to match expected rule '{expected}'")
+        else:
+            errors.append(f"Invalid expected specification type: {type(expected).__name__}")
+
+        if required_headers and isinstance(required_headers, dict):
+            hdrs = {k.lower(): v for k, v in (headers or {}).items()}
+            for req_key, req_val in required_headers.items():
+                key_l = req_key.lower()
+                if key_l not in hdrs:
+                    errors.append(f"Missing required header: {req_key}")
+                elif req_val is not None and str(req_val).lower() not in hdrs[key_l].lower():
+                    errors.append(f"Header '{req_key}' value '{hdrs[key_l]}' does not match expected pattern '{req_val}'")
+
+        valid = matched and (len(errors) == 0)
+
+        with self._lock:
+            self._total_assertions += 1
+            if valid:
+                self._passed_assertions += 1
+            else:
+                self._failed_assertions += 1
+            self._last_status = code
+            self._last_category = category
+
+        return {
+            "valid": valid,
+            "status": code,
+            "status_text": status_text,
+            "category": category,
+            "expected": expected,
+            "errors": errors,
+        }
+
+    def assert_response(
+        self,
+        response: Any,
+        expected: Any = 200,
+        required_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Validate live Playwright response or response mock against assertions."""
+        if response is None:
+            with self._lock:
+                self._total_assertions += 1
+                self._failed_assertions += 1
+                self._last_status = 0
+                self._last_category = "unknown"
+            return {
+                "valid": False,
+                "status": 0,
+                "status_text": "No Response",
+                "category": "unknown",
+                "expected": expected,
+                "errors": ["compliance : not possible. Response represents None."],
+            }
+
+        status = getattr(response, "status", None)
+        if callable(status):
+            status = status()
+        if status is None:
+            status = 200
+
+        headers = getattr(response, "headers", {})
+        if callable(headers):
+            headers = headers()
+
+        return self.assert_status(
+            status_code=int(status),
+            expected=expected,
+            headers=headers if isinstance(headers, dict) else {},
+            required_headers=required_headers,
+        )
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return assertion telemetry counters."""
+        with self._lock:
+            return {
+                "total_assertions": self._total_assertions,
+                "passed_assertions": self._passed_assertions,
+                "failed_assertions": self._failed_assertions,
+                "last_status": self._last_status,
+                "last_category": self._last_category,
+            }
+
+    def reset_metrics(self) -> None:
+        """Reset telemetry counters preserving configuration."""
+        self.reset()
+
+
+_DEFAULT_STATUS_ASSERT = ResponseStatusAssert()
+
+
+def get_default_status_assert() -> ResponseStatusAssert:
+    """Return default singleton response status assertion engine."""
+    return _DEFAULT_STATUS_ASSERT
+
+
+def reset_status_assert() -> None:
+    """Reset global response status assertion state."""
+    _DEFAULT_STATUS_ASSERT.reset()
+
+
+def create_status_assert() -> ResponseStatusAssert:
+    """Instantiate a new dedicated response status assertion engine."""
+    return ResponseStatusAssert()
+
+
 class PlaywrightBrowserManager:
     """Managed Playwright browser lifecycle instance with automatic cleanup."""
 
@@ -3292,6 +3524,7 @@ class PlaywrightBrowserManager:
         self._keyboard_controller = get_default_keyboard_controller()
         self._touch_gesture = get_default_touch_gesture()
         self._color_scheme = get_default_color_scheme_tester()
+        self._status_assert = get_default_status_assert()
 
     def _ensure_page(self) -> Page:
         if not PLAYWRIGHT_AVAILABLE:
@@ -3697,6 +3930,47 @@ class PlaywrightBrowserManager:
         tester = get_default_color_scheme_tester()
         return tester.get_metrics()
 
+    def assert_response_status(
+        self,
+        expected: Any = 200,
+        response_or_status: Optional[Any] = None,
+        required_headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Validate status of response or status code."""
+        asserter = get_default_status_assert()
+        if isinstance(response_or_status, int):
+            return asserter.assert_status(
+                status_code=response_or_status,
+                expected=expected,
+                required_headers=required_headers,
+            )
+        if response_or_status is not None:
+            return asserter.assert_response(
+                response=response_or_status,
+                expected=expected,
+                required_headers=required_headers,
+            )
+        page = self._ensure_page()
+        res_obj = getattr(page, "response", None)
+        if callable(res_obj):
+            res_obj = res_obj()
+        if res_obj is not None:
+            return asserter.assert_response(
+                response=res_obj,
+                expected=expected,
+                required_headers=required_headers,
+            )
+        return asserter.assert_status(
+            status_code=200,
+            expected=expected,
+            required_headers=required_headers,
+        )
+
+    def get_status_metrics(self) -> Dict[str, Any]:
+        """Return response status assertion telemetry metrics."""
+        asserter = get_default_status_assert()
+        return asserter.get_metrics()
+
     def tap_touch(
         self,
         x: float = 0.0,
@@ -4006,6 +4280,29 @@ def dispatch_browser_action(
             return {"isError": False, "result": res}
         elif act in ("color_scheme_metrics", "dark_mode_metrics"):
             m = session.get_color_scheme_metrics()
+            return {"isError": False, "result": m}
+        elif act in ("assert_status", "status_assert", "assert_response"):
+            exp_val = kwargs.get("expected", 200)
+            if not exp_val and text:
+                try:
+                    exp_val = int(text)
+                except Exception:
+                    exp_val = text
+            req_h = kwargs.get("required_headers") or kwargs.get("headers")
+            res = session.assert_response_status(
+                expected=exp_val,
+                response_or_status=kwargs.get("response") or kwargs.get("status_code"),
+                required_headers=req_h,
+            )
+            return {"isError": not res.get("valid", False), "result": res}
+        elif act in ("classify_status", "status_category"):
+            code_val = int(kwargs.get("status_code") or text or 200)
+            asserter = get_default_status_assert()
+            cat = asserter.classify_status(code_val)
+            txt = asserter.get_status_text(code_val)
+            return {"isError": False, "status": code_val, "category": cat, "status_text": txt}
+        elif act in ("status_metrics", "status_telemetry"):
+            m = session.get_status_metrics()
             return {"isError": False, "result": m}
         elif act in ("close", "exit", "quit"):
             close_browser_session()
