@@ -6479,6 +6479,171 @@ def console_capture_contracts():
 
 
 @check
+def form_autofill_contracts():
+    from hydra_cli.browser import (
+        FormAutofill,
+        create_form_autofill,
+        get_default_form_autofill,
+        reset_form_autofill,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import FormAutofill as SandboxFormAutofill
+    from hydra_cli import FormAutofill as RootFormAutofill
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxFormAutofill is FormAutofill
+    assert RootFormAutofill is FormAutofill
+
+    reset_form_autofill()
+
+    # 2. Construction and default parameters
+    autofill = create_form_autofill(default_timeout_ms=5000.0)
+    assert autofill.default_timeout_ms == 5000.0
+
+    # 3. HTML parsing of complex form structures
+    html_markup = """
+    <html>
+    <body>
+        <form id="login_form">
+            <input type="text" name="username" id="user_in" placeholder="Username" required />
+            <input type="password" name="password" id="pass_in" required />
+            <input type="checkbox" name="remember" id="rem_check" value="1" />
+            <textarea name="bio" id="bio_area">Developer bio</textarea>
+            <select name="tier" id="tier_select"></select>
+            <button type="submit" id="submit_btn">Log In</button>
+        </form>
+        <form id="other_form">
+            <input type="text" name="search" />
+        </form>
+    </body>
+    </html>
+    """
+
+    fields = autofill.parse_form_html(html_markup, form_selector="login_form")
+    assert len(fields) == 6
+    field_names = [f["name"] for f in fields]
+    assert "username" in field_names
+    assert "password" in field_names
+    assert "remember" in field_names
+    assert "bio" in field_names
+    assert "tier" in field_names
+
+    # Check un-scoped parse returns all forms
+    all_fields = autofill.parse_form_html(html_markup)
+    assert len(all_fields) == 7
+
+    # 4. Payload validation
+    valid_payload = {"username": "alice", "password": "securepassword123"}
+    res_valid = autofill.validate_form_payload(valid_payload, required_fields=["username", "password"])
+    assert res_valid["valid"] is True
+    assert len(res_valid["missing_fields"]) == 0
+
+    invalid_payload = {"username": "alice", "password": ""}
+    res_invalid = autofill.validate_form_payload(invalid_payload, required_fields=["username", "password", "email"])
+    assert res_invalid["valid"] is False
+    assert "email" in res_invalid["missing_fields"]
+    assert "password" in res_invalid["empty_fields"]
+
+    # 5. Mock Playwright page interaction
+    class MockLocator:
+        def __init__(self, sel):
+            self.sel = sel
+            self.filled_text = None
+            self.checked_state = None
+            self.selected_options = None
+            self.clicked = False
+            self.first = self
+
+        def fill(self, text, timeout=None):
+            self.filled_text = text
+            return None
+
+        def check(self, timeout=None):
+            self.checked_state = True
+            return None
+
+        def uncheck(self, timeout=None):
+            self.checked_state = False
+            return None
+
+        def select_option(self, values, timeout=None):
+            self.selected_options = values
+            return None
+
+        def click(self, timeout=None):
+            self.clicked = True
+            return None
+
+    class MockPage:
+        def __init__(self):
+            self.locators = {}
+
+        def locator(self, sel):
+            if sel not in self.locators:
+                self.locators[sel] = MockLocator(sel)
+            return self.locators[sel]
+
+        def content(self):
+            return html_markup
+
+    mock_page = MockPage()
+    fill_plan = {
+        "#user_in": "tester_bob",
+        "#pass_in": "hunter2",
+        "#rem_check": True,
+        "#tier_select": ["pro"],
+    }
+    fill_res = autofill.fill_form(mock_page, fill_plan, form_selector="#login_form", submit=True)
+    assert fill_res["fields_filled"] == 4
+    assert fill_res["submitted"] is True
+    assert mock_page.locators["#login_form #user_in"].filled_text == "tester_bob"
+    assert mock_page.locators["#login_form #pass_in"].filled_text == "hunter2"
+    assert mock_page.locators["#login_form #rem_check"].checked_state is True
+
+    # 6. Page inspection via inspect_form
+    inspect_res = autofill.inspect_form(mock_page, form_selector="login_form")
+    assert inspect_res["isError"] is False
+    assert inspect_res["count"] == 6
+
+    # 7. None target boundary check
+    none_res = autofill.fill_form(None, {"#field": "value"})
+    assert none_res["isError"] is True
+    assert "compliance : not possible" in none_res["error"]
+
+    none_inspect = autofill.inspect_form(None)
+    assert none_inspect["isError"] is True
+    assert "compliance : not possible" in none_inspect["error"]
+
+    # 8. Browser action integration
+    if not PLAYWRIGHT_AVAILABLE:
+        act_res = dispatch_browser_action("autofill", text='{"#name": "val"}')
+        assert act_res["isError"] is True
+        assert "Playwright uninstalled" in act_res["error"]
+
+    # 9. Telemetry metrics and reset
+    met = autofill.get_metrics()
+    assert met["total_autofills"] >= 2
+    assert met["fields_filled"] >= 4
+    assert met["forms_submitted"] >= 1
+    assert met["failures"] >= 1
+
+    autofill.reset_metrics()
+    clean_met = autofill.get_metrics()
+    assert clean_met["total_autofills"] == 0
+    assert clean_met["fields_filled"] == 0
+    assert clean_met["forms_submitted"] == 0
+    assert clean_met["failures"] == 0
+
+    # 10. Default singleton
+    reset_form_autofill()
+    default_autofill = get_default_form_autofill()
+    assert default_autofill is not None
+    assert default_autofill.default_timeout_ms == 15000.0
+    reset_form_autofill()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

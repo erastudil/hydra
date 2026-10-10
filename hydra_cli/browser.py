@@ -7,6 +7,7 @@ Safe lazy import ensures clean execution whether Playwright is installed or unin
 from __future__ import annotations
 
 import atexit
+import json
 import re
 import os
 import time
@@ -910,6 +911,273 @@ def create_console_capture(
     return BrowserConsoleCapture(max_entries=max_entries, scrub_secrets=scrub_secrets)
 
 
+class _FormFieldsParser(html.parser.HTMLParser):
+    """HTML parser discovering form inputs, textareas, selects, and buttons."""
+
+    def __init__(self, target_form_id: Optional[str] = None) -> None:
+        super().__init__()
+        self.target_form_id = target_form_id.lstrip("#") if target_form_id else None
+        self.fields: List[Dict[str, Any]] = []
+        self._inside_target_form = self.target_form_id is None
+        self._current_tag: Optional[str] = None
+        self._current_attrs: Dict[str, str] = {}
+        self._current_text: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        attr_dict = {k.lower(): (v or "") for k, v in attrs}
+        t = tag.lower()
+        if t == "form":
+            if self.target_form_id:
+                form_id = attr_dict.get("id", "")
+                form_name = attr_dict.get("name", "")
+                if form_id == self.target_form_id or form_name == self.target_form_id:
+                    self._inside_target_form = True
+            return
+
+        if not self._inside_target_form:
+            return
+
+        if t == "input":
+            self.fields.append({
+                "tag": "input",
+                "type": attr_dict.get("type", "text").lower(),
+                "name": attr_dict.get("name", ""),
+                "id": attr_dict.get("id", ""),
+                "value": attr_dict.get("value", ""),
+                "required": "required" in attr_dict,
+                "placeholder": attr_dict.get("placeholder", ""),
+            })
+        elif t in ("textarea", "select", "button"):
+            self._current_tag = t
+            self._current_attrs = attr_dict
+            self._current_text = []
+
+    def handle_endtag(self, tag: str) -> None:
+        t = tag.lower()
+        if t == "form":
+            if self.target_form_id:
+                self._inside_target_form = False
+            return
+
+        if not self._inside_target_form:
+            return
+
+        if self._current_tag and t == self._current_tag:
+            text_val = "".join(self._current_text).strip()
+            self.fields.append({
+                "tag": self._current_tag,
+                "type": self._current_attrs.get("type", self._current_tag),
+                "name": self._current_attrs.get("name", ""),
+                "id": self._current_attrs.get("id", ""),
+                "value": self._current_attrs.get("value", text_val),
+                "required": "required" in self._current_attrs,
+                "placeholder": self._current_attrs.get("placeholder", ""),
+            })
+            self._current_tag = None
+            self._current_attrs = {}
+            self._current_text = []
+
+    def handle_data(self, data: str) -> None:
+        if self._current_tag:
+            self._current_text.append(data)
+
+
+class FormAutofill:
+    """Playwright automated form inspection, payload validation, and batch filling engine."""
+
+    def __init__(self, default_timeout_ms: float = 15000.0):
+        """Initialize form autofill engine with operational defaults."""
+        self.default_timeout_ms = float(default_timeout_ms)
+        self._lock = threading.RLock()
+        self.reset()
+
+    def reset_metrics(self) -> None:
+        """Reset telemetry counters preserving configuration."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_autofills: int = 0
+            self._fields_filled: int = 0
+            self._forms_submitted: int = 0
+            self._failures: int = 0
+
+    def reset(self) -> None:
+        """Reset form autofill state and telemetry."""
+        self.reset_metrics()
+
+    def parse_form_html(
+        self,
+        html_source: str,
+        form_selector: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Extract structured field descriptors from raw HTML source."""
+        if not html_source:
+            return []
+        parser = _FormFieldsParser(target_form_id=form_selector)
+        try:
+            parser.feed(html_source)
+            return parser.fields
+        except Exception:
+            return []
+
+    def validate_form_payload(
+        self,
+        fields: Dict[str, Any],
+        required_fields: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Any]:
+        """Validate field mapping dictionary against required field identifiers."""
+        missing: List[str] = []
+        empty: List[str] = []
+
+        if required_fields:
+            for req in required_fields:
+                if req not in fields:
+                    missing.append(req)
+                elif fields[req] is None or str(fields[req]).strip() == "":
+                    empty.append(req)
+
+        valid = (len(missing) == 0 and len(empty) == 0)
+        return {
+            "valid": valid,
+            "missing_fields": missing,
+            "empty_fields": empty,
+            "provided_count": len(fields),
+        }
+
+    def inspect_form(
+        self,
+        page: Any,
+        form_selector: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Inspect page form elements and extract structured field descriptors."""
+        if page is None:
+            return {
+                "isError": True,
+                "error": "compliance : not possible. Page target represents None.",
+                "fields": [],
+                "count": 0,
+            }
+        try:
+            content = page.content() if hasattr(page, "content") else ""
+            fields = self.parse_form_html(content, form_selector=form_selector)
+            return {
+                "isError": False,
+                "fields": fields,
+                "count": len(fields),
+                "form_selector": form_selector,
+            }
+        except Exception as exc:
+            return {
+                "isError": True,
+                "error": f"Error inspecting form: {exc}",
+                "fields": [],
+                "count": 0,
+            }
+
+    def fill_form(
+        self,
+        page: Any,
+        fields: Dict[str, Any],
+        form_selector: Optional[str] = None,
+        submit: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Execute batch input population across form controls with optional submission."""
+        with self._lock:
+            self._total_autofills += 1
+
+        if page is None:
+            with self._lock:
+                self._failures += 1
+            return {
+                "isError": True,
+                "error": "compliance : not possible. Page target represents None.",
+                "fields_filled": 0,
+                "submitted": False,
+            }
+
+        timeout = kwargs.get("timeout_ms", self.default_timeout_ms)
+        submit_selector = kwargs.get("submit_selector")
+        filled_count = 0
+        errors: List[str] = []
+
+        for selector, value in fields.items():
+            target_sel = f"{form_selector} {selector}" if form_selector and not selector.startswith(form_selector) else selector
+            try:
+                if hasattr(page, "locator"):
+                    loc = page.locator(target_sel).first
+                    if isinstance(value, bool):
+                        if value:
+                            loc.check(timeout=timeout) if hasattr(loc, "check") else None
+                        else:
+                            loc.uncheck(timeout=timeout) if hasattr(loc, "uncheck") else None
+                    elif isinstance(value, (list, tuple)):
+                        loc.select_option(list(value), timeout=timeout) if hasattr(loc, "select_option") else None
+                    else:
+                        loc.fill(str(value), timeout=timeout) if hasattr(loc, "fill") else None
+                filled_count += 1
+            except Exception as exc:
+                errors.append(f"Failed to fill control {target_sel}: {exc}")
+
+        submitted = False
+        if submit and hasattr(page, "locator"):
+            try:
+                if submit_selector:
+                    sub_loc = page.locator(submit_selector).first
+                    sub_loc.click(timeout=timeout)
+                elif form_selector:
+                    sub_loc = page.locator(f"{form_selector} button[type='submit'], {form_selector} input[type='submit']").first
+                    sub_loc.click(timeout=timeout)
+                else:
+                    sub_loc = page.locator("button[type='submit'], input[type='submit']").first
+                    sub_loc.click(timeout=timeout)
+                submitted = True
+                with self._lock:
+                    self._forms_submitted += 1
+            except Exception as exc:
+                errors.append(f"Failed to submit form: {exc}")
+
+        with self._lock:
+            self._fields_filled += filled_count
+            if errors:
+                self._failures += 1
+
+        return {
+            "isError": len(errors) > 0 and filled_count == 0,
+            "fields_filled": filled_count,
+            "total_requested": len(fields),
+            "submitted": submitted,
+            "errors": errors,
+        }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return form autofill telemetry counters."""
+        with self._lock:
+            return {
+                "default_timeout_ms": self.default_timeout_ms,
+                "total_autofills": self._total_autofills,
+                "fields_filled": self._fields_filled,
+                "forms_submitted": self._forms_submitted,
+                "failures": self._failures,
+            }
+
+
+_DEFAULT_FORM_AUTOFILL = FormAutofill()
+
+
+def get_default_form_autofill() -> FormAutofill:
+    """Return default singleton form autofill engine."""
+    return _DEFAULT_FORM_AUTOFILL
+
+
+def reset_form_autofill() -> None:
+    """Reset global form autofill engine state."""
+    _DEFAULT_FORM_AUTOFILL.reset()
+
+
+def create_form_autofill(default_timeout_ms: float = 15000.0) -> FormAutofill:
+    """Instantiate a new dedicated form autofill engine."""
+    return FormAutofill(default_timeout_ms=default_timeout_ms)
+
+
 class PlaywrightBrowserManager:
     """Managed Playwright browser lifecycle instance with automatic cleanup."""
 
@@ -1089,6 +1357,33 @@ class PlaywrightBrowserManager:
         """Clear captured browser console entries."""
         self._console_capture.clear()
 
+    def autofill_form(
+        self,
+        fields: Dict[str, Any],
+        form_selector: Optional[str] = None,
+        submit: bool = False,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Populate multiple form controls and optionally submit form."""
+        page = self._ensure_page()
+        autofill = get_default_form_autofill()
+        return autofill.fill_form(
+            page=page,
+            fields=fields,
+            form_selector=form_selector,
+            submit=submit,
+            **kwargs,
+        )
+
+    def inspect_form(
+        self,
+        form_selector: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Inspect current page and discover interactive form elements."""
+        page = self._ensure_page()
+        autofill = get_default_form_autofill()
+        return autofill.inspect_form(page=page, form_selector=form_selector)
+
     def close(self) -> None:
         """Close browser context and stop Playwright runner cleanly."""
         try:
@@ -1202,6 +1497,26 @@ def dispatch_browser_action(
         elif act in ("clear_console", "flush_console"):
             session.clear_console_logs()
             return {"isError": False, "result": "Console log buffer cleared."}
+        elif act in ("autofill", "autofill_form", "form_fill", "fill_form"):
+            fields_data = kwargs.get("fields")
+            if not fields_data and text:
+                try:
+                    fields_data = json.loads(text)
+                except Exception:
+                    fields_data = {}
+            if not isinstance(fields_data, dict):
+                return {"isError": True, "error": "Dictionary fields mapping required for autofill"}
+            sub = kwargs.get("submit", False)
+            res = session.autofill_form(
+                fields=fields_data,
+                form_selector=selector,
+                submit=sub,
+                **kwargs,
+            )
+            return {"isError": res.get("isError", False), "result": res}
+        elif act in ("inspect_form", "get_form_fields", "form_fields"):
+            res = session.inspect_form(form_selector=selector)
+            return {"isError": res.get("isError", False), "result": res}
         elif act in ("close", "exit", "quit"):
             close_browser_session()
             return {"isError": False, "result": "Browser session closed."}
