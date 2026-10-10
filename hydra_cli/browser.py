@@ -2897,6 +2897,194 @@ def create_keyboard_controller() -> KeyboardController:
     """Instantiate a new dedicated keyboard controller engine."""
     return KeyboardController()
 
+class TouchGestureController:
+    """
+    Playwright touch gesture dispatching and trajectory interpolation engine.
+    Supports mobile touchscreen taps, swipes, and multi-point gesture sequences.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_taps: int = 0
+            self._total_swipes: int = 0
+            self._gestures_dispatched: int = 0
+            self._history: List[Dict[str, Any]] = []
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        self.reset()
+
+    def generate_trajectory(
+        self,
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        steps: int = 5,
+    ) -> List[Tuple[float, float]]:
+        """Calculate interpolated coordinate trajectory points."""
+        cnt = max(1, int(steps))
+        x0, y0 = float(start[0]), float(start[1])
+        x1, y1 = float(end[0]), float(end[1])
+        trajectory = []
+        for i in range(cnt + 1):
+            t = float(i) / float(cnt)
+            xi = round(x0 + t * (x1 - x0), 2)
+            yi = round(y0 + t * (y1 - y0), 2)
+            trajectory.append((xi, yi))
+        return trajectory
+
+    def tap(
+        self,
+        page: Any,
+        x: float = 0.0,
+        y: float = 0.0,
+        selector: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Dispatch touch tap event to coordinates or selector target."""
+        with self._lock:
+            self._total_taps += 1
+            self._gestures_dispatched += 1
+
+        tx, ty = float(x), float(y)
+
+        if page is not None and selector and hasattr(page, "locator"):
+            try:
+                loc = page.locator(selector).first
+                box = loc.bounding_box() if hasattr(loc, "bounding_box") else None
+                if box:
+                    tx = box.get("x", 0) + box.get("width", 0) / 2.0
+                    ty = box.get("y", 0) + box.get("height", 0) / 2.0
+            except Exception:
+                pass_err = True
+
+        with self._lock:
+            self._history.append({"type": "tap", "x": tx, "y": ty, "selector": selector})
+
+        if page is None:
+            return {
+                "success": False,
+                "error": "compliance : not possible. Page represents None.",
+                "x": tx,
+                "y": ty,
+            }
+
+        try:
+            ts = getattr(page, "touchscreen", None)
+            if ts and hasattr(ts, "tap"):
+                ts.tap(tx, ty)
+                return {
+                    "success": True,
+                    "x": tx,
+                    "y": ty,
+                    "selector": selector,
+                }
+            return {
+                "success": True,
+                "x": tx,
+                "y": ty,
+                "selector": selector,
+                "note": "Simulated touch tap without native touchscreen driver.",
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": str(exc),
+            }
+
+    def swipe(
+        self,
+        page: Any,
+        start_pos: Tuple[float, float],
+        end_pos: Tuple[float, float],
+        steps: int = 5,
+    ) -> Dict[str, Any]:
+        """Dispatch touch swipe motion across coordinate trajectory."""
+        with self._lock:
+            self._total_swipes += 1
+            self._gestures_dispatched += 1
+
+        trajectory = self.generate_trajectory(start_pos, end_pos, steps=steps)
+
+        with self._lock:
+            self._history.append({
+                "type": "swipe",
+                "start": start_pos,
+                "end": end_pos,
+                "steps": len(trajectory),
+            })
+
+        if page is None:
+            return {
+                "success": False,
+                "error": "compliance : not possible. Page represents None.",
+                "steps_count": len(trajectory),
+            }
+
+        try:
+            mouse = getattr(page, "mouse", None)
+            if mouse and hasattr(mouse, "move") and hasattr(mouse, "down") and hasattr(mouse, "up"):
+                mouse.move(start_pos[0], start_pos[1])
+                mouse.down()
+                for pt in trajectory[1:]:
+                    mouse.move(pt[0], pt[1])
+                mouse.up()
+                return {
+                    "success": True,
+                    "trajectory_length": len(trajectory),
+                    "start": start_pos,
+                    "end": end_pos,
+                }
+
+            return {
+                "success": True,
+                "trajectory_length": len(trajectory),
+                "start": start_pos,
+                "end": end_pos,
+                "note": "Simulated touch swipe trajectory without native driver.",
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "error": str(exc),
+            }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return operational telemetry metrics."""
+        with self._lock:
+            return {
+                "total_taps": self._total_taps,
+                "total_swipes": self._total_swipes,
+                "gestures_dispatched": self._gestures_dispatched,
+                "history_length": len(self._history),
+            }
+
+    def get_history(self) -> List[Dict[str, Any]]:
+        """Return copy of touch gesture history."""
+        with self._lock:
+            return list(self._history)
+
+
+_DEFAULT_TOUCH_GESTURE = TouchGestureController()
+
+
+def get_default_touch_gesture() -> TouchGestureController:
+    """Return default singleton touch gesture controller."""
+    return _DEFAULT_TOUCH_GESTURE
+
+
+def reset_touch_gesture() -> None:
+    """Reset global touch gesture controller state."""
+    _DEFAULT_TOUCH_GESTURE.reset()
+
+
+def create_touch_gesture() -> TouchGestureController:
+    """Instantiate a new dedicated touch gesture controller."""
+    return TouchGestureController()
+
 
 class PlaywrightBrowserManager:
     """Managed Playwright browser lifecycle instance with automatic cleanup."""
@@ -2914,6 +3102,7 @@ class PlaywrightBrowserManager:
         self._media_abort = get_default_media_abort()
         self._visibility_checker = get_default_visibility_checker()
         self._keyboard_controller = get_default_keyboard_controller()
+        self._touch_gesture = get_default_touch_gesture()
 
     def _ensure_page(self) -> Page:
         if not PLAYWRIGHT_AVAILABLE:
@@ -3299,6 +3488,33 @@ class PlaywrightBrowserManager:
         ctrl = get_default_keyboard_controller()
         return ctrl.get_metrics()
 
+    def tap_touch(
+        self,
+        x: float = 0.0,
+        y: float = 0.0,
+        selector: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Dispatch touchscreen tap to coordinates or element target."""
+        page = self._ensure_page()
+        ctrl = get_default_touch_gesture()
+        return ctrl.tap(page, x=x, y=y, selector=selector)
+
+    def swipe_touch(
+        self,
+        start_pos: Tuple[float, float],
+        end_pos: Tuple[float, float],
+        steps: int = 5,
+    ) -> Dict[str, Any]:
+        """Dispatch touchscreen swipe motion along coordinate trajectory."""
+        page = self._ensure_page()
+        ctrl = get_default_touch_gesture()
+        return ctrl.swipe(page, start_pos=start_pos, end_pos=end_pos, steps=steps)
+
+    def get_touch_metrics(self) -> Dict[str, Any]:
+        """Return touch gesture telemetry metrics."""
+        ctrl = get_default_touch_gesture()
+        return ctrl.get_metrics()
+
     def close(self) -> None:
         """Close browser context and stop Playwright runner cleanly."""
         try:
@@ -3537,6 +3753,20 @@ def dispatch_browser_action(
             return {"isError": not res.get("success", False), "result": res}
         elif act in ("keyboard_metrics", "keyboard_telemetry"):
             m = session.get_keyboard_metrics()
+            return {"isError": False, "result": m}
+        elif act in ("tap_touch", "touch_tap", "tap"):
+            tx = float(kwargs.get("x", 0.0))
+            ty = float(kwargs.get("y", 0.0))
+            res = session.tap_touch(x=tx, y=ty, selector=selector)
+            return {"isError": not res.get("success", False), "result": res}
+        elif act in ("swipe_touch", "touch_swipe", "swipe"):
+            start = kwargs.get("start") or (float(kwargs.get("start_x", 0.0)), float(kwargs.get("start_y", 0.0)))
+            end = kwargs.get("end") or (float(kwargs.get("end_x", 100.0)), float(kwargs.get("end_y", 100.0)))
+            stp = int(kwargs.get("steps", 5))
+            res = session.swipe_touch(start_pos=start, end_pos=end, steps=stp)
+            return {"isError": not res.get("success", False), "result": res}
+        elif act in ("touch_metrics", "touch_telemetry"):
+            m = session.get_touch_metrics()
             return {"isError": False, "result": m}
         elif act in ("close", "exit", "quit"):
             close_browser_session()

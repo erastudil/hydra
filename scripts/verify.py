@@ -7628,6 +7628,143 @@ def keyboard_events_contracts():
     reset_keyboard_controller()
 
 @check
+def touch_gesture_contracts():
+    from hydra_cli.browser import (
+        TouchGestureController,
+        create_touch_gesture,
+        get_default_touch_gesture,
+        reset_touch_gesture,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import TouchGestureController as SandboxTouchGestureController
+    from hydra_cli import TouchGestureController as RootTouchGestureController
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxTouchGestureController is TouchGestureController
+    assert RootTouchGestureController is TouchGestureController
+
+    reset_touch_gesture()
+
+    # 2. Construction and default metrics
+    ctrl = create_touch_gesture()
+    m0 = ctrl.get_metrics()
+    assert m0["total_taps"] == 0
+    assert m0["total_swipes"] == 0
+    assert m0["gestures_dispatched"] == 0
+
+    # 3. Trajectory calculation
+    traj = ctrl.generate_trajectory((10.0, 20.0), (110.0, 220.0), steps=5)
+    assert len(traj) == 6
+    assert traj[0] == (10.0, 20.0)
+    assert traj[-1] == (110.0, 220.0)
+    assert traj[1] == (30.0, 60.0)
+
+    # 4. Touch tap simulation with Page
+    class TestTouchscreen:
+        """Structured touchscreen representation for verification."""
+        def __init__(self):
+            self.taps = []
+
+        def tap(self, x, y):
+            self.taps.append((x, y))
+            return None
+
+    class TestLocator:
+        """Structured locator representation with bounding box."""
+        def __init__(self, x=100.0, y=100.0, w=50.0, h=40.0):
+            self._box = {"x": x, "y": y, "width": w, "height": h}
+
+        @property
+        def first(self):
+            return self
+
+        def bounding_box(self):
+            return self._box
+
+    class TestMouse:
+        """Structured mouse representation for swipe trajectory tracking."""
+        def __init__(self):
+            self.moves = []
+            self.is_down = False
+
+        def move(self, x, y):
+            self.moves.append((x, y))
+            return None
+
+        def down(self):
+            self.is_down = True
+            return None
+
+        def up(self):
+            self.is_down = False
+            return None
+
+    class TestPage:
+        """Structured page representation for touch gestures."""
+        def __init__(self):
+            self.touchscreen = TestTouchscreen()
+            self.mouse = TestMouse()
+
+        def locator(self, selector):
+            return TestLocator(100.0, 200.0, 60.0, 40.0)
+
+    page = TestPage()
+
+    # Coordinate tap
+    r_tap_coord = ctrl.tap(page, x=45.0, y=85.0)
+    assert r_tap_coord["success"] is True
+    assert page.touchscreen.taps == [(45.0, 85.0)]
+
+    # Element selector tap
+    r_tap_elem = ctrl.tap(page, selector="#nav-menu")
+    assert r_tap_elem["success"] is True
+    # Center of 100+60/2=130, 200+40/2=220
+    assert (130.0, 220.0) in page.touchscreen.taps
+
+    # Swipe gesture
+    r_swipe = ctrl.swipe(page, start_pos=(50.0, 50.0), end_pos=(250.0, 50.0), steps=4)
+    assert r_swipe["success"] is True
+    assert r_swipe["trajectory_length"] == 5
+    assert len(page.mouse.moves) == 5
+    assert page.mouse.is_down is False
+
+    # 5. Invalid and null inputs
+    fail_tap = ctrl.tap(None, x=10.0, y=20.0)
+    assert fail_tap["success"] is False
+
+    fail_swipe = ctrl.swipe(None, start_pos=(0.0, 0.0), end_pos=(10.0, 10.0))
+    assert fail_swipe["success"] is False
+
+    # 6. Telemetry and history
+    metrics = ctrl.get_metrics()
+    assert metrics["total_taps"] >= 2
+    assert metrics["total_swipes"] >= 1
+    assert metrics["gestures_dispatched"] >= 3
+
+    hist = ctrl.get_history()
+    assert len(hist) >= 3
+
+    ctrl.reset_metrics()
+    clean_metrics = ctrl.get_metrics()
+    assert clean_metrics["total_taps"] == 0
+    assert clean_metrics["total_swipes"] == 0
+    assert clean_metrics["gestures_dispatched"] == 0
+    assert len(ctrl.get_history()) == 0
+
+    # 7. Browser action dispatch
+    if not PLAYWRIGHT_AVAILABLE:
+        action_res = dispatch_browser_action("tap_touch", x=20, y=30)
+        assert action_res["isError"] is True
+        assert "Playwright uninstalled" in action_res["error"]
+
+    # 8. Singleton lifecycle
+    reset_touch_gesture()
+    default_ctrl = get_default_touch_gesture()
+    assert default_ctrl is not None
+    reset_touch_gesture()
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
