@@ -1,7 +1,7 @@
 ﻿"""
 Computer Use Engine for Hydra.
 Exposes OS automation, coordinate boundary guards, screen capture,
-and Playwright browser automation.
+Playwright browser automation, and browser storage persistence.
 """
 
 from hydra_cli.computer_use import (
@@ -13,6 +13,10 @@ from hydra_cli.computer_use import (
     get_computer_use_engine,
     reset_computer_use_engine,
 )
+from computer_use.browser_storage import (
+    BrowserStorageManager,
+    CookieRecord,
+)
 
 __all__ = [
     "CoordinateBounds",
@@ -22,4 +26,6 @@ __all__ = [
     "ComputerUseEngine",
     "get_computer_use_engine",
     "reset_computer_use_engine",
+    "BrowserStorageManager",
+    "CookieRecord",
 ]

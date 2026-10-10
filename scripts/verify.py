@@ -9969,12 +9969,50 @@ def session_player_and_build_dist_contracts():
     assert player_ok is True, f"Session player failures: {player_errs}"
 
 
+
+@check
+def desktop_multi_workspace_and_browser_storage_contracts():
+    import tempfile
+    from desktop.multi_workspace import MultiWorkspaceManager, Workspace
+    from desktop.browser_storage import BrowserStorageManager, BrowserCookie
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        mgr = MultiWorkspaceManager(base_dir=tmp_dir)
+        ws_a = mgr.create_workspace("alpha")
+        ws_b = mgr.create_workspace("beta")
+        assert mgr.total_workspaces == 2
+        assert mgr.active_workspace.workspace_id == ws_a.workspace_id
+
+        ws_a.write_file("data.txt", "payload")
+        assert ws_a.read_file("data.txt") == "payload"
+        try:
+            ws_a.resolve_path("../escape.txt")
+            raise AssertionError("Sandbox escape should fail")
+        except PermissionError:
+            pass
+
+        mgr.switch_workspace(ws_b.workspace_id)
+        assert mgr.active_workspace.workspace_id == ws_b.workspace_id
+
+        storage = BrowserStorageManager()
+        c = storage.set_cookie({"name": "sid", "value": "xyz", "domain": "hydra.local", "path": "/"})
+        assert c.name == "sid"
+        assert storage.get_cookie("sid", "hydra.local") is not None
+
+        storage.set_local_item("https://hydra.local", "theme", "dark")
+        assert storage.get_local_item("https://hydra.local", "theme") == "dark"
+
+        state = storage.export_storage_state()
+        assert len(state["cookies"]) == 1
+        assert len(state["origins"]) == 1
+
+
 @check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed
