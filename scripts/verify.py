@@ -7505,6 +7505,129 @@ def visibility_check_contracts():
     reset_visibility_checker()
 
 @check
+def keyboard_events_contracts():
+    from hydra_cli.browser import (
+        KeyboardController,
+        create_keyboard_controller,
+        get_default_keyboard_controller,
+        reset_keyboard_controller,
+        dispatch_browser_action,
+        PLAYWRIGHT_AVAILABLE,
+    )
+    from hydra_cli.sandbox import KeyboardController as SandboxKeyboardController
+    from hydra_cli import KeyboardController as RootKeyboardController
+
+    # 1. Re-export integrity across subsystems
+    assert SandboxKeyboardController is KeyboardController
+    assert RootKeyboardController is KeyboardController
+
+    reset_keyboard_controller()
+
+    # 2. Construction and default metrics
+    ctrl = create_keyboard_controller()
+    m0 = ctrl.get_metrics()
+    assert m0["total_presses"] == 0
+    assert m0["total_chords"] == 0
+    assert m0["characters_typed"] == 0
+    assert m0["sequences_dispatched"] == 0
+
+    # 3. Key combination normalization
+    assert ctrl.normalize_chord("ctrl+c") == "Control+C"
+    assert ctrl.normalize_chord("cmd+v") == "Meta+V"
+    assert ctrl.normalize_chord("command+shift+p") == "Meta+Shift+P"
+    assert ctrl.normalize_chord("alt+f4") == "Alt+F4"
+    assert ctrl.normalize_chord("arrowdown") == "ArrowDown"
+    assert ctrl.normalize_chord("enter") == "Enter"
+    assert ctrl.normalize_chord("escape") == "Escape"
+    assert ctrl.normalize_chord("") == ""
+
+    # 4. Mock Page and Keyboard event execution
+    class TestKeyboard:
+        """Structured keyboard representation for verification."""
+        def __init__(self):
+            self.pressed_keys = []
+            self.typed_texts = []
+
+        def press(self, key, delay=0):
+            self.pressed_keys.append(key)
+            return None
+
+        def type(self, text, delay=0):
+            self.typed_texts.append(text)
+            return None
+
+    class TestPage:
+        """Structured page representation for keyboard interactions."""
+        def __init__(self):
+            self.keyboard = TestKeyboard()
+
+    page = TestPage()
+
+    # Press single key
+    p_res = ctrl.press(page, "Enter")
+    assert p_res["success"] is True
+    assert p_res["is_chord"] is False
+    assert page.keyboard.pressed_keys == ["Enter"]
+
+    # Press chord shortcut
+    c_res = ctrl.press(page, "ctrl+shift+i")
+    assert c_res["success"] is True
+    assert c_res["is_chord"] is True
+    assert page.keyboard.pressed_keys[-1] == "Control+Shift+I"
+
+    # Type text string
+    t_res = ctrl.type_text(page, "Hydra Kaizen Test")
+    assert t_res["success"] is True
+    assert t_res["chars_count"] == 17
+    assert page.keyboard.typed_texts == ["Hydra Kaizen Test"]
+
+    # Send multi-step sequence
+    s_res = ctrl.send_sequence(page, ["Tab", "type:admin", "Enter"])
+    assert s_res["success"] is True
+    assert s_res["steps_count"] == 3
+    assert page.keyboard.pressed_keys[-1] == "Enter"
+    assert "admin" in page.keyboard.typed_texts
+
+    # 5. Missing and invalid inputs
+    fail_empty = ctrl.press(page, "")
+    assert fail_empty["success"] is False
+
+    fail_none = ctrl.press(None, "Tab")
+    assert fail_none["success"] is False
+
+    fail_type_none = ctrl.type_text(None, "sample")
+    assert fail_type_none["success"] is False
+
+    # 6. Telemetry metrics and history inspection
+    metrics = ctrl.get_metrics()
+    assert metrics["total_presses"] >= 4
+    assert metrics["total_chords"] >= 1
+    assert metrics["characters_typed"] >= 22
+    assert metrics["sequences_dispatched"] == 1
+
+    history = ctrl.get_history()
+    assert len(history) >= 4
+
+    ctrl.reset_metrics()
+    clean_metrics = ctrl.get_metrics()
+    assert clean_metrics["total_presses"] == 0
+    assert clean_metrics["total_chords"] == 0
+    assert clean_metrics["characters_typed"] == 0
+    assert len(ctrl.get_history()) == 0
+
+    # 7. Browser action dispatch
+    if not PLAYWRIGHT_AVAILABLE:
+        action_res = dispatch_browser_action("press_key", text="Enter")
+        assert action_res["isError"] is True
+        assert "Playwright uninstalled" in action_res["error"]
+
+    # 8. Singleton lifecycle
+    reset_keyboard_controller()
+    default_ctrl = get_default_keyboard_controller()
+    assert default_ctrl is not None
+    reset_keyboard_controller()
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

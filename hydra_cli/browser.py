@@ -2679,6 +2679,224 @@ def create_visibility_checker(default_timeout_ms: float = 5000.0) -> VisibilityC
     """Instantiate a new dedicated visibility checker engine."""
     return VisibilityChecker(default_timeout_ms=default_timeout_ms)
 
+MODIFIER_MAP: Dict[str, str] = {
+    "ctrl": "Control",
+    "control": "Control",
+    "alt": "Alt",
+    "shift": "Shift",
+    "meta": "Meta",
+    "cmd": "Meta",
+    "command": "Meta",
+    "win": "Meta",
+}
+
+VALID_SPECIAL_KEYS: Set[str] = {
+    "Enter", "Escape", "Tab", "Backspace", "Delete", "Insert",
+    "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight",
+    "Home", "End", "PageUp", "PageDown",
+    "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+    "Space", "CapsLock", "NumLock", "ScrollLock", "PrintScreen", "Pause",
+}
+
+
+class KeyboardController:
+    """
+    Playwright keyboard event dispatching and sequence simulation engine.
+    Parses key combinations, standardizes modifier aliases, and simulates key sequences.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal telemetry counters."""
+        with getattr(self, "_lock", threading.RLock()):
+            self._total_presses: int = 0
+            self._total_chords: int = 0
+            self._characters_typed: int = 0
+            self._sequences_dispatched: int = 0
+            self._history: List[Dict[str, Any]] = []
+
+    def reset_metrics(self) -> None:
+        """Reset operational telemetry counters."""
+        self.reset()
+
+    def normalize_chord(self, chord: str) -> str:
+        """Normalize keyboard shortcut string with standard Playwright naming."""
+        if not chord:
+            return ""
+        parts = [p.strip() for p in chord.split("+")]
+        norm_parts = []
+        for p in parts:
+            p_lower = p.lower()
+            if p_lower in MODIFIER_MAP:
+                norm_parts.append(MODIFIER_MAP[p_lower])
+            else:
+                canonical = next((k for k in VALID_SPECIAL_KEYS if k.lower() == p_lower), None)
+                if canonical:
+                    norm_parts.append(canonical)
+                elif len(p) == 1:
+                    norm_parts.append(p.upper() if len(norm_parts) > 0 else p)
+                else:
+                    norm_parts.append(p)
+        return "+".join(norm_parts)
+
+    def press(
+        self,
+        page: Any,
+        key_or_chord: str,
+        delay_ms: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Dispatch single key or chord combination to target page."""
+        with self._lock:
+            self._total_presses += 1
+
+        if not key_or_chord:
+            return {
+                "success": False,
+                "error": "compliance : not possible. Key parameter empty.",
+            }
+
+        norm_key = self.normalize_chord(key_or_chord)
+        is_chord = "+" in norm_key
+
+        with self._lock:
+            if is_chord:
+                self._total_chords += 1
+            self._history.append({"type": "press", "key": norm_key, "delay_ms": delay_ms})
+
+        if page is None:
+            return {
+                "success": False,
+                "error": "compliance : not possible. Page represents None.",
+                "normalized_key": norm_key,
+            }
+
+        try:
+            kb = getattr(page, "keyboard", None)
+            if kb and hasattr(kb, "press"):
+                kb.press(norm_key, delay=delay_ms)
+                return {
+                    "success": True,
+                    "key": norm_key,
+                    "is_chord": is_chord,
+                    "delay_ms": delay_ms,
+                }
+            return {
+                "success": True,
+                "key": norm_key,
+                "is_chord": is_chord,
+                "note": "Simulated keyboard event without native page driver.",
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "key": norm_key,
+                "error": str(exc),
+            }
+
+    def type_text(
+        self,
+        page: Any,
+        text: str,
+        delay_ms: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Type character string into page focused element with optional delay."""
+        with self._lock:
+            self._characters_typed += len(text or "")
+            self._history.append({"type": "type", "text": text, "delay_ms": delay_ms})
+
+        if page is None:
+            return {
+                "success": False,
+                "error": "compliance : not possible. Page represents None.",
+                "chars_count": len(text or ""),
+            }
+
+        try:
+            kb = getattr(page, "keyboard", None)
+            if kb and hasattr(kb, "type"):
+                kb.type(text, delay=delay_ms)
+                return {
+                    "success": True,
+                    "text": text,
+                    "chars_count": len(text),
+                    "delay_ms": delay_ms,
+                }
+            return {
+                "success": True,
+                "text": text,
+                "chars_count": len(text),
+                "note": "Simulated keyboard typing without native page driver.",
+            }
+        except Exception as exc:
+            return {
+                "success": False,
+                "text": text,
+                "error": str(exc),
+            }
+
+    def send_sequence(
+        self,
+        page: Any,
+        sequence: Sequence[str],
+        delay_ms: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Dispatch sequence of keyboard actions or chords sequentially."""
+        with self._lock:
+            self._sequences_dispatched += 1
+
+        results = []
+        for step in (sequence or []):
+            if step.startswith("type:"):
+                payload = step[5:]
+                res = self.type_text(page, payload, delay_ms=delay_ms)
+            else:
+                res = self.press(page, step, delay_ms=delay_ms)
+            results.append(res)
+
+        all_ok = all(r.get("success", False) for r in results) if results else True
+        return {
+            "success": all_ok,
+            "steps_count": len(results),
+            "results": results,
+        }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return operational telemetry metrics."""
+        with self._lock:
+            return {
+                "total_presses": self._total_presses,
+                "total_chords": self._total_chords,
+                "characters_typed": self._characters_typed,
+                "sequences_dispatched": self._sequences_dispatched,
+                "history_length": len(self._history),
+            }
+
+    def get_history(self) -> List[Dict[str, Any]]:
+        """Return copy of keyboard event history."""
+        with self._lock:
+            return list(self._history)
+
+
+_DEFAULT_KEYBOARD_CONTROLLER = KeyboardController()
+
+
+def get_default_keyboard_controller() -> KeyboardController:
+    """Return default singleton keyboard controller engine."""
+    return _DEFAULT_KEYBOARD_CONTROLLER
+
+
+def reset_keyboard_controller() -> None:
+    """Reset global keyboard controller state."""
+    _DEFAULT_KEYBOARD_CONTROLLER.reset()
+
+
+def create_keyboard_controller() -> KeyboardController:
+    """Instantiate a new dedicated keyboard controller engine."""
+    return KeyboardController()
+
 
 class PlaywrightBrowserManager:
     """Managed Playwright browser lifecycle instance with automatic cleanup."""
@@ -2695,6 +2913,7 @@ class PlaywrightBrowserManager:
         self._iframe_traversal = get_default_iframe_traversal()
         self._media_abort = get_default_media_abort()
         self._visibility_checker = get_default_visibility_checker()
+        self._keyboard_controller = get_default_keyboard_controller()
 
     def _ensure_page(self) -> Page:
         if not PLAYWRIGHT_AVAILABLE:
@@ -3045,6 +3264,41 @@ class PlaywrightBrowserManager:
         content = page.content() if hasattr(page, "content") else ""
         return checker.inspect_html(content, selector)
 
+    def press_key(
+        self,
+        key_or_chord: str,
+        delay_ms: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Dispatch key press or chord shortcut to active page."""
+        page = self._ensure_page()
+        ctrl = get_default_keyboard_controller()
+        return ctrl.press(page, key_or_chord, delay_ms=delay_ms)
+
+    def type_keyboard(
+        self,
+        text: str,
+        delay_ms: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Type character string into page via keyboard simulation."""
+        page = self._ensure_page()
+        ctrl = get_default_keyboard_controller()
+        return ctrl.type_text(page, text, delay_ms=delay_ms)
+
+    def send_key_sequence(
+        self,
+        sequence: Sequence[str],
+        delay_ms: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Dispatch sequence of keyboard actions sequentially."""
+        page = self._ensure_page()
+        ctrl = get_default_keyboard_controller()
+        return ctrl.send_sequence(page, sequence, delay_ms=delay_ms)
+
+    def get_keyboard_metrics(self) -> Dict[str, Any]:
+        """Return keyboard controller telemetry counters."""
+        ctrl = get_default_keyboard_controller()
+        return ctrl.get_metrics()
+
     def close(self) -> None:
         """Close browser context and stop Playwright runner cleanly."""
         try:
@@ -3262,6 +3516,28 @@ def dispatch_browser_action(
                 return {"isError": True, "error": "Selector required for inspect visibility action"}
             res = session.inspect_element_visibility(selector=selector, html_content=text)
             return {"isError": not res.get("exists", False), "result": res}
+        elif act in ("press_key", "key_press", "keyboard_press", "press"):
+            key_name = kwargs.get("key") or text or selector
+            if not key_name:
+                return {"isError": True, "error": "Key or chord parameter required for press action"}
+            del_ms = kwargs.get("delay_ms", 0.0)
+            res = session.press_key(key_or_chord=key_name, delay_ms=del_ms)
+            return {"isError": not res.get("success", False), "result": res}
+        elif act in ("type_keyboard", "keyboard_type"):
+            text_val = text or kwargs.get("text", "")
+            del_ms = kwargs.get("delay_ms", 0.0)
+            res = session.type_keyboard(text=text_val, delay_ms=del_ms)
+            return {"isError": not res.get("success", False), "result": res}
+        elif act in ("key_sequence", "keyboard_sequence"):
+            seq = kwargs.get("sequence") or []
+            if not seq and text:
+                seq = [s.strip() for s in text.split(",")]
+            del_ms = kwargs.get("delay_ms", 0.0)
+            res = session.send_key_sequence(sequence=seq, delay_ms=del_ms)
+            return {"isError": not res.get("success", False), "result": res}
+        elif act in ("keyboard_metrics", "keyboard_telemetry"):
+            m = session.get_keyboard_metrics()
+            return {"isError": False, "result": m}
         elif act in ("close", "exit", "quit"):
             close_browser_session()
             return {"isError": False, "result": "Browser session closed."}
