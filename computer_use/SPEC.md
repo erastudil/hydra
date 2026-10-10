@@ -1,8 +1,8 @@
 ﻿# computer_use specification
 
-scope : formal specification for coordinate safety bounds, os input protocols, and screen capture.
+scope : formal specification for coordinate safety bounds, os input protocols, composite primitives, and screen capture.
 
-version : 1.0.0.
+version : 1.1.0.
 
 dialect : progen instruct.
 
@@ -24,15 +24,19 @@ fence enforcement : if coordinate falls within registered fence, then reject act
 failsafe coordinate : if cursor targets (0, 0) up to (2, 2) when failsafe enabled, then halt execution.
 
 
-## os input protocols
+## composite action invariants
 
-windows substrate : ctypes.windll.user32 interface for SetCursorPos, mouse_event, and keybd_event.
+form fill atomicity : if form field selector fails, then record partial progress and emit structured error without process abort.
 
-fallback substrate : virtual display state tracking cursor position, active window, and input history.
+scroll bounding : max_scrolls integer bound guarantees termination; each step advances viewport and audits selector visibility.
 
-mouse event codes : left down 0x0002, left up 0x0004, right down 0x0008, right up 0x0010, wheel 0x0800.
+table extraction : returns typed dictionary declaring headers list, rows matrix, and total row count.
 
-key event codes : virtual key mapping for standard ASCII, navigation, modifiers, and function keys F1 to F12.
+drag boundary verification : validates and clips both source and destination coordinates prior to mouse button engagement.
+
+window bounds mutation : coordinates clamped within primary desktop or virtual display envelope.
+
+key sequence interval : inter-keystroke interval bounded by lower clamp 0.005 seconds to prevent input buffer overflow.
 
 
 ## screen capture invariants
@@ -43,4 +47,4 @@ header invariant : first eight bytes match 0x89504E470D0A1A0A.
 
 synthetic fallback : if physical display surface unavailable, then generate synthetic RGB frame buffer.
 
-encoding format : base64 standard string representation for websocket and http transmission.
+active window bounding : extracts foreground window rectangle, clamps coordinates to display dimensions, and captures bounded region.

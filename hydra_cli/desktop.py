@@ -41,7 +41,7 @@ except ImportError:
 
 
 def get_desktop_html() -> str:
-    """Generate self-contained sovereign web desk HTML5 interface."""
+    """Generate self-contained sovereign web desk HTML5 interface with multi-session tabs and diff viewer."""
     return """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -61,6 +61,10 @@ def get_desktop_html() -> str:
   --text-secondary: #9ca3af;
   --text-muted: #6b7280;
   --error: #ef4444;
+  --diff-add: #064e3b;
+  --diff-add-text: #a7f3d0;
+  --diff-del: #7f1d1d;
+  --diff-del-text: #fecaca;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -145,13 +149,57 @@ button.secondary:hover { background: var(--border); }
   background: var(--accent);
   box-shadow: 0 0 8px var(--accent);
 }
+.session-bar {
+  background: #0f172a;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 4px 16px;
+  gap: 6px;
+  overflow-x: auto;
+}
+.session-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.session-tab.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.session-close {
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+}
+.session-close:hover { color: var(--error); }
+.add-session-btn {
+  background: transparent;
+  color: var(--accent);
+  border: 1px dashed var(--accent);
+  padding: 4px 8px;
+  font-size: 11px;
+  border-radius: 4px;
+}
 .workspace {
   flex: 1;
   display: flex;
   overflow: hidden;
 }
 .sidebar {
-  width: 220px;
+  width: 200px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   display: flex;
@@ -271,7 +319,7 @@ textarea {
 }
 textarea:focus { border-color: var(--accent); }
 .side-drawer {
-  width: 440px;
+  width: 480px;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border);
   display: flex;
@@ -295,7 +343,7 @@ textarea:focus { border-color: var(--accent); }
 .drawer-tab {
   flex: 1;
   text-align: center;
-  padding: 8px;
+  padding: 8px 4px;
   font-size: 12px;
   color: var(--text-secondary);
   cursor: pointer;
@@ -314,20 +362,29 @@ textarea:focus { border-color: var(--accent); }
   flex-direction: column;
   gap: 12px;
 }
-.screen-preview-box {
+.screen-container {
+  position: relative;
   width: 100%;
   aspect-ratio: 16/9;
   background: #000;
   border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
-  position: relative;
   cursor: crosshair;
 }
 .screen-preview-img {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  display: block;
+}
+.screen-canvas-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
 .terminal-view {
   background: #000;
@@ -341,6 +398,39 @@ textarea:focus { border-color: var(--accent); }
   white-space: pre-wrap;
   border: 1px solid #1e293b;
 }
+.diff-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.diff-card {
+  background: #0f172a;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.diff-header {
+  background: #1e293b;
+  padding: 8px 12px;
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--accent);
+}
+.diff-body {
+  padding: 8px 0;
+  overflow-x: auto;
+}
+.diff-line {
+  padding: 2px 12px;
+  white-space: pre;
+}
+.diff-line.add { background: var(--diff-add); color: var(--diff-add-text); }
+.diff-line.del { background: var(--diff-del); color: var(--diff-del-text); }
+.diff-line.ctx { color: var(--text-secondary); }
 .coord-readout {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -372,6 +462,13 @@ textarea:focus { border-color: var(--accent); }
     <button class="secondary" onclick="clearMessages()">Clear</button>
   </div>
 </header>
+<div class="session-bar" id="session-bar">
+  <div class="session-tab active" data-id="session-1" onclick="switchSession('session-1')">
+    <span>Session 1</span>
+    <span class="session-close" onclick="closeSession(event, 'session-1')">&times;</span>
+  </div>
+  <button class="add-session-btn" onclick="addNewSession()">+ New Session</button>
+</div>
 <div class="workspace">
   <div class="sidebar">
     <div class="nav-item active" onclick="switchNav('chat')">Chat Mode</div>
@@ -402,13 +499,16 @@ textarea:focus { border-color: var(--accent); }
     <div class="drawer-tabs">
       <div class="drawer-tab active" id="tab-screen" onclick="switchDrawerTab('screen')">Live Screen</div>
       <div class="drawer-tab" id="tab-term" onclick="switchDrawerTab('term')">Terminal Logs</div>
+      <div class="drawer-tab" id="tab-diff" onclick="switchDrawerTab('diff')">Diffs & Code</div>
     </div>
     <div class="drawer-body" id="drawer-screen-content">
-      <div class="screen-preview-box" id="screen-preview" onmousemove="updateCoord(event)" onclick="handleScreenClick(event)">
+      <div class="screen-container" id="screen-container" onmousemove="handleScreenHover(event)" onclick="handleScreenClick(event)">
         <img id="screen-img" class="screen-preview-img" src="/api/computer/screen" alt="Desktop Screen Preview" />
+        <canvas id="screen-overlay-canvas" class="screen-canvas-overlay"></canvas>
       </div>
       <div style="display: flex; gap: 8px;">
         <button class="secondary" style="flex: 1;" onclick="refreshScreen()">Capture Screen</button>
+        <button class="secondary" style="flex: 1;" onclick="toggleOverlayBounds()">Toggle Bounds</button>
         <button class="secondary" style="flex: 1;" onclick="testTypePrompt()">Type Text</button>
       </div>
       <div id="active-window-info" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary);">
@@ -418,6 +518,23 @@ textarea:focus { border-color: var(--accent); }
     <div class="drawer-body" id="drawer-term-content" style="display: none; height: 100%;">
       <div class="terminal-view" id="terminal-view">> Hydra Terminal Sandbox ready.\n> Port 7777 active.</div>
     </div>
+    <div class="drawer-body" id="drawer-diff-content" style="display: none; height: 100%;">
+      <div class="diff-container" id="diffs-container">
+        <div class="diff-card">
+          <div class="diff-header">
+            <span>hydra_cli/computer_use.py</span>
+            <span>MODIFIED</span>
+          </div>
+          <div class="diff-body">
+            <div class="diff-line ctx">@@ -180,6 +180,18 @@</div>
+            <div class="diff-line add">+    def fill_form(self, fields, form_selector=None, submit=False):</div>
+            <div class="diff-line add">+    def scroll_until_visible(self, selector, max_scrolls=10):</div>
+            <div class="diff-line add">+    def extract_table_data(self, selector='table'):</div>
+            <div class="diff-line add">+    def safe_drag_and_drop(self, from_coord, to_coord):</div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 <script>
@@ -425,26 +542,111 @@ let currentNav = 'chat';
 let activeDrawerTab = 'screen';
 let screenWidth = 1920;
 let screenHeight = 1080;
+let overlayBoundsEnabled = true;
+
+// Multi-session state store
+const sessions = {
+  'session-1': {
+    name: 'Session 1',
+    messages: [
+      { role: 'assistant', header: 'HYDRA ORCHESTRATOR', text: 'Sovereign multi-headed desktop environment primed.' }
+    ],
+    model: 'sonnet 5.5',
+    nav: 'chat'
+  }
+};
+let activeSessionId = 'session-1';
+let sessionCounter = 1;
+
+function switchSession(sid) {
+  if (!sessions[sid]) return;
+  activeSessionId = sid;
+  document.querySelectorAll('.session-tab').forEach(el => el.classList.remove('active'));
+  const targetTab = document.querySelector(`.session-tab[data-id="${sid}"]`);
+  if (targetTab) targetTab.classList.add('active');
+
+  const sess = sessions[sid];
+  document.getElementById('model-select').value = sess.model || 'sonnet 5.5';
+  renderSessionMessages(sid);
+}
+
+function addNewSession() {
+  sessionCounter++;
+  const sid = `session-${sessionCounter}`;
+  sessions[sid] = {
+    name: `Session ${sessionCounter}`,
+    messages: [
+      { role: 'assistant', header: 'HYDRA ORCHESTRATOR', text: `Session ${sessionCounter} primed. Dispatch instruction or summon heads.` }
+    ],
+    model: document.getElementById('model-select').value,
+    nav: currentNav
+  };
+
+  const bar = document.getElementById('session-bar');
+  const addBtn = bar.querySelector('.add-session-btn');
+  const tab = document.createElement('div');
+  tab.className = 'session-tab';
+  tab.dataset.id = sid;
+  tab.onclick = () => switchSession(sid);
+  tab.innerHTML = `<span>Session ${sessionCounter}</span><span class="session-close" onclick="closeSession(event, '${sid}')">&times;</span>`;
+  bar.insertBefore(tab, addBtn);
+
+  switchSession(sid);
+}
+
+function closeSession(e, sid) {
+  e.stopPropagation();
+  if (Object.keys(sessions).length <= 1) return;
+  delete sessions[sid];
+  const tab = document.querySelector(`.session-tab[data-id="${sid}"]`);
+  if (tab) tab.remove();
+
+  if (activeSessionId === sid) {
+    const firstRemaining = Object.keys(sessions)[0];
+    switchSession(firstRemaining);
+  }
+}
+
+function renderSessionMessages(sid) {
+  const pane = document.getElementById('chat-pane');
+  pane.innerHTML = '';
+  const sess = sessions[sid];
+  if (!sess) return;
+
+  sess.messages.forEach(msg => {
+    const msgEl = document.createElement('div');
+    msgEl.className = `message ${msg.role}`;
+    msgEl.innerHTML = `<div class="msg-header">${escapeHtml(msg.header)}</div><div class="msg-bubble">${escapeHtml(msg.text)}</div>`;
+    pane.appendChild(msgEl);
+  });
+  pane.scrollTop = pane.scrollHeight;
+}
 
 function switchNav(nav) {
   currentNav = nav;
-  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.sidebar .nav-item').forEach(el => el.classList.remove('active'));
   event.target.classList.add('active');
   const termView = document.getElementById('terminal-view');
-  termView.innerText += `\\n[MODE] Switched to mode: ${nav}`;
+  termView.innerText += `\n[MODE] Switched to mode: ${nav}`;
 }
 
 function switchDrawerTab(tab) {
   activeDrawerTab = tab;
   document.querySelectorAll('.drawer-tab').forEach(el => el.classList.remove('active'));
+  document.getElementById('drawer-screen-content').style.display = 'none';
+  document.getElementById('drawer-term-content').style.display = 'none';
+  document.getElementById('drawer-diff-content').style.display = 'none';
+
   if (tab === 'screen') {
     document.getElementById('tab-screen').classList.add('active');
     document.getElementById('drawer-screen-content').style.display = 'flex';
-    document.getElementById('drawer-term-content').style.display = 'none';
-  } else {
+  } else if (tab === 'term') {
     document.getElementById('tab-term').classList.add('active');
-    document.getElementById('drawer-screen-content').style.display = 'none';
     document.getElementById('drawer-term-content').style.display = 'flex';
+  } else if (tab === 'diff') {
+    document.getElementById('tab-diff').classList.add('active');
+    document.getElementById('drawer-diff-content').style.display = 'flex';
+    fetchDiffs();
   }
 }
 
@@ -455,13 +657,52 @@ function handleKey(e) {
   }
 }
 
-function updateCoord(e) {
+function updateCoord(event) { handleScreenHover(event); }
+
+function handleScreenHover(e) {
   const box = e.currentTarget.getBoundingClientRect();
   const relX = (e.clientX - box.left) / box.width;
   const relY = (e.clientY - box.top) / box.height;
   const targetX = Math.round(relX * screenWidth);
   const targetY = Math.round(relY * screenHeight);
   document.getElementById('coord-readout').innerText = `X: ${targetX} | Y: ${targetY}`;
+
+  // Draw overlay canvas crosshairs
+  const canvas = document.getElementById('screen-overlay-canvas');
+  if (canvas) {
+    canvas.width = box.width;
+    canvas.height = box.height;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (overlayBoundsEnabled) {
+      // Draw crosshair lines
+      ctx.strokeStyle = 'rgba(16, 185, 129, 0.4)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(e.clientX - box.left, 0);
+      ctx.lineTo(e.clientX - box.left, canvas.height);
+      ctx.moveTo(0, e.clientY - box.top);
+      ctx.lineTo(canvas.width, e.clientY - box.top);
+      ctx.stroke();
+
+      // Sample bounding box overlay for active window
+      ctx.strokeStyle = '#10b981';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(10, 10, canvas.width - 20, canvas.height - 20);
+      ctx.fillStyle = 'rgba(16, 185, 129, 0.08)';
+      ctx.fillRect(10, 10, canvas.width - 20, canvas.height - 20);
+    }
+  }
+}
+
+function toggleOverlayBounds() {
+  overlayBoundsEnabled = !overlayBoundsEnabled;
+  const canvas = document.getElementById('screen-overlay-canvas');
+  if (canvas && !overlayBoundsEnabled) {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
 }
 
 async function handleScreenClick(e) {
@@ -472,7 +713,7 @@ async function handleScreenClick(e) {
   const targetY = Math.round(relY * screenHeight);
   
   const termView = document.getElementById('terminal-view');
-  termView.innerText += `\\n[MOUSE] Click coordinate: (${targetX}, ${targetY})`;
+  termView.innerText += `\n[MOUSE] Click coordinate: (${targetX}, ${targetY})`;
   
   try {
     const res = await fetch('/api/computer/action', {
@@ -513,10 +754,35 @@ async function testTypePrompt() {
     body: JSON.stringify({ action: 'type_text', text: text })
   });
   const data = await res.json();
-  document.getElementById('terminal-view').innerText += `\\n[TYPE] Result: ${JSON.stringify(data)}`;
+  document.getElementById('terminal-view').innerText += `\n[TYPE] Result: ${JSON.stringify(data)}`;
+}
+
+async function fetchDiffs() {
+  try {
+    const res = await fetch('/api/diffs');
+    const data = await res.json();
+    if (data.diffs && data.diffs.length > 0) {
+      const container = document.getElementById('diffs-container');
+      container.innerHTML = '';
+      data.diffs.forEach(df => {
+        const card = document.createElement('div');
+        card.className = 'diff-card';
+        let linesHtml = '';
+        (df.lines || []).forEach(ln => {
+          const cls = ln.startsWith('+') ? 'add' : (ln.startsWith('-') ? 'del' : 'ctx');
+          linesHtml += `<div class="diff-line ${cls}">${escapeHtml(ln)}</div>`;
+        });
+        card.innerHTML = `<div class="diff-header"><span>${escapeHtml(df.path)}</span><span>${escapeHtml(df.type || 'MODIFIED')}</span></div><div class="diff-body">${linesHtml}</div>`;
+        container.appendChild(card);
+      });
+    }
+  } catch (e) {}
 }
 
 function clearMessages() {
+  if (sessions[activeSessionId]) {
+    sessions[activeSessionId].messages = [];
+  }
   document.getElementById('chat-pane').innerHTML = '';
 }
 
@@ -526,6 +792,13 @@ async function dispatchPrompt() {
   if (!text) return;
   input.value = '';
 
+  const model = document.getElementById('model-select').value;
+  const sess = sessions[activeSessionId];
+  if (sess) {
+    sess.messages.push({ role: 'user', header: 'USER', text: text });
+    sess.model = model;
+  }
+
   const pane = document.getElementById('chat-pane');
   const userMsg = document.createElement('div');
   userMsg.className = 'message user';
@@ -534,7 +807,6 @@ async function dispatchPrompt() {
 
   const assistMsg = document.createElement('div');
   assistMsg.className = 'message assistant';
-  const model = document.getElementById('model-select').value;
   assistMsg.innerHTML = `<div class="msg-header">${model.toUpperCase()}</div><div class="msg-bubble" id="stream-bubble">...</div>`;
   pane.appendChild(assistMsg);
   pane.scrollTop = pane.scrollHeight;
@@ -550,8 +822,10 @@ async function dispatchPrompt() {
         body: JSON.stringify({ command: text })
       });
       const data = await res.json();
-      bubble.innerText = `Exit: ${data.exit_code}\\n\\n${data.stdout || data.stderr || '(no output)'}`;
-      termView.innerText += `\\n$ ${text}\\n${data.stdout || ''}${data.stderr || ''}`;
+      const output = `Exit: ${data.exit_code}\n\n${data.stdout || data.stderr || '(no output)'}`;
+      bubble.innerText = output;
+      termView.innerText += `\n$ ${text}\n${data.stdout || ''}${data.stderr || ''}`;
+      if (sess) sess.messages.push({ role: 'assistant', header: model.toUpperCase(), text: output });
       return;
     }
 
@@ -561,7 +835,9 @@ async function dispatchPrompt() {
       body: JSON.stringify({ model: model, prompt: text, mode: currentNav })
     });
     const data = await res.json();
-    bubble.innerText = data.content || data.error || 'Done';
+    const reply = data.content || data.error || 'Done';
+    bubble.innerText = reply;
+    if (sess) sess.messages.push({ role: 'assistant', header: model.toUpperCase(), text: reply });
     if (data.tool_calls && data.tool_calls.length) {
       data.tool_calls.forEach(tc => {
         const tcCard = document.createElement('div');
@@ -583,6 +859,7 @@ function escapeHtml(str) {
 </body>
 </html>
 """
+
 
 def create_desktop_app() -> Any:
     """Create and configure FastAPI desktop application."""
@@ -800,6 +1077,35 @@ def create_desktop_app() -> Any:
                 "total_tokens": len(prompt.split()) + len(ans.split()),
             },
         }
+
+
+    _diff_records: List[Dict[str, Any]] = [
+        {
+            "path": "hydra_cli/computer_use.py",
+            "type": "MODIFIED",
+            "lines": [
+                "@@ -180,6 +180,24 @@",
+                "+    def fill_form(self, fields, form_selector=None, submit=False):",
+                "+    def scroll_until_visible(self, selector, max_scrolls=10):",
+                "+    def extract_table_data(self, selector='table'):",
+                "+    def safe_drag_and_drop(self, from_coord, to_coord):",
+                "+    def find_window_by_title_pattern(self, pattern):",
+                "+    def set_window_bounds(self, hwnd, x, y, width, height):",
+            ],
+        }
+    ]
+
+    @app.get("/api/diffs")
+    async def get_diffs():
+        return {"diffs": _diff_records, "count": len(_diff_records)}
+
+    @app.post("/api/diffs/record")
+    async def record_diff(req: Request):
+        body = await req.json()
+        _diff_records.append(body)
+        if len(_diff_records) > 100:
+            _diff_records.pop(0)
+        return {"isError": False, "recorded": True, "count": len(_diff_records)}
 
     @app.websocket("/ws/desktop")
     async def websocket_endpoint(ws: WebSocket):

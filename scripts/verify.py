@@ -866,7 +866,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and len(names) == 37
+        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and "browser_fill_form" in names and "computer_find_window" in names and len(names) == 45
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -9451,12 +9451,58 @@ def hydra_desktop_cli_launcher():
     assert res2.returncode == 0
     assert "Hydra Sovereign Desktop Application" in res2.stdout
 
+
+@check
+def desktop_packaging_and_composite_contracts():
+    import subprocess
+    import sys
+    from hydra_cli.desktop import get_desktop_html
+    from hydra_cli.computer_use import get_computer_use_engine
+    from hydra_cli.native_tools import NativeToolRegistry
+
+    pkg_script = os.path.join(REPO, "scripts", "package_desktop.py")
+    assert os.path.isfile(pkg_script)
+    res = subprocess.run([sys.executable, pkg_script], capture_output=True, text=True)
+    assert res.returncode == 0, f"scripts/package_desktop.py failed: {res.stdout}\n{res.stderr}"
+
+    html = get_desktop_html()
+    assert "session-bar" in html
+    assert "crosshair" in html
+    assert "diff-container" in html
+
+    eng = get_computer_use_engine()
+    for method in [
+        "fill_form",
+        "scroll_until_visible",
+        "extract_table_data",
+        "safe_drag_and_drop",
+        "find_window_by_title_pattern",
+        "set_window_bounds",
+        "capture_active_window",
+        "safe_key_sequence",
+    ]:
+        assert hasattr(eng, method), f"Engine missing composite method: {method}"
+
+    reg = NativeToolRegistry()
+    for tool in [
+        "browser_fill_form",
+        "browser_scroll_until_visible",
+        "browser_extract_table",
+        "computer_safe_drag_and_drop",
+        "computer_find_window",
+        "computer_set_window_bounds",
+        "computer_capture_active_window",
+        "computer_safe_key_sequence",
+    ]:
+        assert reg.has_tool(tool), f"Registry missing composite tool: {tool}"
+
+
 @check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

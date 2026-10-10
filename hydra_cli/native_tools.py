@@ -2345,6 +2345,22 @@ class NativeToolRegistry:
             "computer_dispatch_action": self.computer_dispatch_action,
             "browser_pdf_print": self.browser_pdf_print,
             "browser_network_inspect": self.browser_network_inspect,
+            "browser_fill_form": self.browser_fill_form,
+            "fill_form": self.browser_fill_form,
+            "browser_scroll_until_visible": self.browser_scroll_until_visible,
+            "scroll_until_visible": self.browser_scroll_until_visible,
+            "browser_extract_table": self.browser_extract_table,
+            "extract_table_data": self.browser_extract_table,
+            "computer_safe_drag_and_drop": self.computer_safe_drag_and_drop,
+            "safe_drag_and_drop": self.computer_safe_drag_and_drop,
+            "computer_find_window": self.computer_find_window,
+            "find_window_by_title_pattern": self.computer_find_window,
+            "computer_set_window_bounds": self.computer_set_window_bounds,
+            "set_window_bounds": self.computer_set_window_bounds,
+            "computer_capture_active_window": self.computer_capture_active_window,
+            "capture_active_window": self.computer_capture_active_window,
+            "computer_safe_key_sequence": self.computer_safe_key_sequence,
+            "safe_key_sequence": self.computer_safe_key_sequence,
         }
 
     @property
@@ -2793,6 +2809,83 @@ class NativeToolRegistry:
         from hydra_cli.computer_use import get_computer_use_engine
         engine = get_computer_use_engine()
         return engine.browser.get_network_logs(limit=limit)
+    def browser_fill_form(
+        self,
+        fields: Dict[str, str],
+        form_selector: Optional[str] = None,
+        submit: bool = False,
+    ) -> Dict[str, Any]:
+        """Fill multiple form fields and optionally submit via Playwright."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.dispatch("fill_form", fields=fields, form_selector=form_selector, submit=submit)
+
+    def browser_scroll_until_visible(
+        self,
+        selector: str,
+        max_scrolls: int = 10,
+        scroll_step: int = 400,
+    ) -> Dict[str, Any]:
+        """Scroll down page until element matching selector becomes visible."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.dispatch("scroll_until_visible", selector=selector, max_scrolls=max_scrolls, scroll_step=scroll_step)
+
+    def browser_extract_table(self, selector: str = "table") -> Dict[str, Any]:
+        """Extract structured tabular data from table element."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.dispatch("extract_table_data", selector=selector)
+
+    def computer_safe_drag_and_drop(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        steps: int = 10,
+        button: str = "left",
+    ) -> Dict[str, Any]:
+        """Execute safe coordinate drag and drop with boundary guards."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.dispatch("safe_drag_and_drop", from_coord=(start_x, start_y), to_coord=(end_x, end_y), steps=steps, button=button)
+
+    def computer_find_window(self, pattern: str, visible_only: bool = True) -> Dict[str, Any]:
+        """Find windows whose titles match regular expression pattern."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.dispatch("find_window_by_title_pattern", pattern=pattern, visible_only=visible_only)
+
+    def computer_set_window_bounds(
+        self,
+        hwnd: int,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> Dict[str, Any]:
+        """Relocate and resize window on desktop."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.dispatch("set_window_bounds", hwnd=hwnd, x=x, y=y, width=width, height=height)
+
+    def computer_capture_active_window(self, as_base64: bool = True) -> Dict[str, Any]:
+        """Capture screenshot of current active window bounding box."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.dispatch("capture_active_window", as_base64=as_base64)
+
+    def computer_safe_key_sequence(
+        self,
+        keys: List[str],
+        interval_ms: float = 50.0,
+    ) -> Dict[str, Any]:
+        """Execute sequence of key strokes with safety pauses."""
+        from hydra_cli.computer_use import get_computer_use_engine
+        engine = get_computer_use_engine()
+        return engine.dispatch("safe_key_sequence", keys=keys, interval_ms=interval_ms)
+
 
 
     def sort_imports(
@@ -4967,6 +5060,130 @@ class NativeToolRegistry:
                         "properties": {
                             "limit": {"type": "integer", "description": "Maximum log entries to return (default 50)."}
                         }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "browser_fill_form",
+                    "description": "Fill multiple form fields matching dictionary of selectors to values and optionally submit.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "fields": {"type": "object", "description": "Mapping of element selectors to text values."},
+                            "form_selector": {"type": "string", "description": "Optional enclosing form selector."},
+                            "submit": {"type": "boolean", "description": "Whether to submit form after filling (default false)."}
+                        },
+                        "required": ["fields"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "browser_scroll_until_visible",
+                    "description": "Scroll down webpage in bounded increments until element matching selector is visible.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "selector": {"type": "string", "description": "Target element selector to locate."},
+                            "max_scrolls": {"type": "integer", "description": "Maximum scroll iterations (default 10)."},
+                            "scroll_step": {"type": "integer", "description": "Pixel scroll distance per step (default 400)."}
+                        },
+                        "required": ["selector"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "browser_extract_table",
+                    "description": "Extract structured table headers and rows from webpage table element.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "selector": {"type": "string", "description": "Table element selector (default 'table')."}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "computer_safe_drag_and_drop",
+                    "description": "Execute mouse drag-and-drop between coordinate pairs with boundary and safety checks.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "start_x": {"type": "integer", "description": "Initial X coordinate."},
+                            "start_y": {"type": "integer", "description": "Initial Y coordinate."},
+                            "end_x": {"type": "integer", "description": "Destination X coordinate."},
+                            "end_y": {"type": "integer", "description": "Destination Y coordinate."},
+                            "steps": {"type": "integer", "description": "Interpolation steps (default 10)."}
+                        },
+                        "required": ["start_x", "start_y", "end_x", "end_y"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "computer_find_window",
+                    "description": "Locate top-level windows matching regular expression title pattern.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "pattern": {"type": "string", "description": "Regex pattern to match against window titles."},
+                            "visible_only": {"type": "boolean", "description": "Filter to visible windows only (default true)."}
+                        },
+                        "required": ["pattern"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "computer_set_window_bounds",
+                    "description": "Relocate and resize window on desktop screen.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "hwnd": {"type": "integer", "description": "Window handle integer identifier."},
+                            "x": {"type": "integer", "description": "New X coordinate position."},
+                            "y": {"type": "integer", "description": "New Y coordinate position."},
+                            "width": {"type": "integer", "description": "New window width."},
+                            "height": {"type": "integer", "description": "New window height."}
+                        },
+                        "required": ["hwnd", "x", "y", "width", "height"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "computer_capture_active_window",
+                    "description": "Capture screenshot of current foreground window bounding box.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "as_base64": {"type": "boolean", "description": "Whether to return base64 encoded PNG (default true)."}
+                        }
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "computer_safe_key_sequence",
+                    "description": "Execute sequence of keystrokes with pacing interval to prevent buffer overflow.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "keys": {"type": "array", "items": {"type": "string"}, "description": "Ordered list of key names to press."},
+                            "interval_ms": {"type": "number", "description": "Pause interval between keystrokes in ms (default 50.0)."}
+                        },
+                        "required": ["keys"]
                     }
                 }
             },

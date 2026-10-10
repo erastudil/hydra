@@ -7,10 +7,14 @@ and Playwright browser integration for autonomous agent loops.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import ctypes
 import datetime
 import hashlib
 import io
+import ipaddress
+import math
+import urllib.parse
 import json
 import os
 import re
@@ -82,6 +86,59 @@ MOUSEEVENTF_ABSOLUTE = 0x8000
 KEYEVENTF_KEYDOWN = 0x0000
 KEYEVENTF_KEYUP = 0x0002
 
+def _sanitize_coord(val: Any, default: float = 0.0) -> float:
+    """Sanitize coordinate value against NaN, infinity, None, and conversion errors."""
+    try:
+        if val is None:
+            return default
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_restricted_url(url: str) -> Tuple[bool, Optional[str]]:
+    """Verify target URL against cloud metadata, link-local, and obscured SSRF patterns."""
+    raw_url = urllib.parse.unquote(url or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(raw_url)
+        host = (parsed.hostname or "").strip("[]").strip()
+    except Exception:
+        host = raw_url
+
+    if not host:
+        return False, None
+
+    BLOCKED_DOMAINS = ("metadata.google.internal", "instance-data", "wpad")
+    host_lower = host.lower()
+    if any(d in host_lower for d in BLOCKED_DOMAINS):
+        return True, f"Security violation: access to metadata target '{host}' blocked"
+
+    if host_lower.startswith("169.254."):
+        return True, f"Security violation: access to link-local IP '{host}' blocked"
+
+    # Standard IP check
+    try:
+        ip = ipaddress.ip_address(host)
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if ip.is_link_local or str(ip).startswith("169.254."):
+            return True, f"Security violation: access to link-local IP '{ip}' blocked"
+    except ValueError:
+        # Check integer decimal / hex / octal IP representation
+        try:
+            int_val = int(host, 0)
+            if 0 <= int_val <= 0xFFFFFFFF:
+                ip = ipaddress.IPv4Address(int_val)
+                if ip.is_link_local or str(ip).startswith("169.254."):
+                    return True, f"Security violation: access to obscured IP '{ip}' blocked"
+        except Exception:
+            pass
+
+    return False, None
+
 class CoordinateBounds:
     """
     Coordinate boundary guard and safety clipping engine.
@@ -134,7 +191,7 @@ class CoordinateBounds:
         with self._lock:
             return dict(self._fences)
 
-    def clip(self, x: int, y: int) -> Tuple[int, int, bool]:
+    def clip(self, x: Any, y: Any) -> Tuple[int, int, bool]:
         """Clamp coordinates to active screen bounds minus margin."""
         with self._lock:
             self._total_checks += 1
@@ -143,41 +200,98 @@ class CoordinateBounds:
             min_y = self.margin
             max_y = max(min_y, self.height - 1 - self.margin)
 
-            clamped_x = max(min_x, min(int(x), max_x))
-            clamped_y = max(min_y, min(int(y), max_y))
-            was_clipped = (clamped_x != int(x)) or (clamped_y != int(y))
+            sx = _sanitize_coord(x, float(min_x))
+            sy = _sanitize_coord(y, float(min_y))
+
+            clamped_x = max(min_x, min(int(sx), max_x))
+            clamped_y = max(min_y, min(int(sy), max_y))
+            was_clipped = (clamped_x != sx) or (clamped_y != sy)
             if was_clipped:
                 self._clipped_actions += 1
             return clamped_x, clamped_y, was_clipped
 
-    def normalize(self, x: int, y: int) -> Tuple[float, float]:
+    def normalize(self, x: Any, y: Any) -> Tuple[float, float]:
         """Normalize pixel coordinates to [0.0, 1000.0] grid."""
         with self._lock:
-            norm_x = round((float(x) / max(1.0, float(self.width))) * 1000.0, 2)
-            norm_y = round((float(y) / max(1.0, float(self.height))) * 1000.0, 2)
+            sx = _sanitize_coord(x, 0.0)
+            sy = _sanitize_coord(y, 0.0)
+            norm_x = round((sx / max(1.0, float(self.width))) * 1000.0, 2)
+            norm_y = round((sy / max(1.0, float(self.height))) * 1000.0, 2)
             return max(0.0, min(1000.0, norm_x)), max(0.0, min(1000.0, norm_y))
 
-    def denormalize(self, norm_x: float, norm_y: float) -> Tuple[int, int]:
+    def denormalize(self, norm_x: Any, norm_y: Any) -> Tuple[int, int]:
         """Convert [0.0, 1000.0] grid coordinates to physical screen pixels."""
         with self._lock:
-            px = int((float(norm_x) / 1000.0) * self.width)
-            py = int((float(norm_y) / 1000.0) * self.height)
+            snx = max(0.0, min(1000.0, _sanitize_coord(norm_x, 0.0)))
+            sny = max(0.0, min(1000.0, _sanitize_coord(norm_y, 0.0)))
+            px = int((snx / 1000.0) * self.width)
+            py = int((sny / 1000.0) * self.height)
             cx, cy, _ = self.clip(px, py)
             return cx, cy
 
-    def check_safety(self, x: int, y: int) -> Tuple[bool, Optional[str]]:
+    def check_safety(self, x: Any, y: Any) -> Tuple[bool, Optional[str]]:
         """Verify coordinates against safety fences and failsafe triggers."""
         with self._lock:
-            if self.enable_failsafe and x <= 2 and y <= 2:
+            sx = _sanitize_coord(x, 0.0)
+            sy = _sanitize_coord(y, 0.0)
+            ix, iy = int(sx), int(sy)
+
+            if self.enable_failsafe and ix <= 2 and iy <= 2:
                 self._failsafe_trips += 1
                 return False, "Emergency failsafe triggered: cursor targeted screen corner (0, 0)"
 
             for label, (fx1, fy1, fx2, fy2) in self._fences.items():
-                if fx1 <= x <= fx2 and fy1 <= y <= fy2:
+                if fx1 <= ix <= fx2 and fy1 <= iy <= fy2:
                     self._fenced_violations += 1
-                    return False, f"Coordinate ({x}, {y}) inside restricted fence zone '{label}'"
+                    return False, f"Coordinate ({ix}, {iy}) inside restricted fence zone '{label}'"
 
             return True, None
+
+
+
+
+    def fill_form(
+        self,
+        fields: Dict[str, str],
+        form_selector: Optional[str] = None,
+        submit: bool = False,
+    ) -> Dict[str, Any]:
+        """Composite action: auto-fill web form fields."""
+        return self.browser.fill_form(fields=fields, form_selector=form_selector, submit=submit)
+
+    def scroll_until_visible(
+        self,
+        selector: str,
+        max_scrolls: int = 10,
+        scroll_step: int = 400,
+        timeout_ms: int = 5000,
+    ) -> Dict[str, Any]:
+        """Composite action: scroll page until target element visible."""
+        return self.browser.scroll_until_visible(
+            selector=selector, max_scrolls=max_scrolls, scroll_step=scroll_step, timeout_ms=timeout_ms
+        )
+
+    def extract_table_data(self, selector: str = "table") -> Dict[str, Any]:
+        """Composite action: extract structured table dataset."""
+        return self.browser.extract_table_data(selector=selector)
+
+    def find_window_by_title_pattern(
+        self, pattern: str, visible_only: bool = True
+    ) -> Dict[str, Any]:
+        """Composite action: find windows matching regex title pattern."""
+        return self.os.find_window_by_title_pattern(pattern=pattern, visible_only=visible_only)
+
+    def set_window_bounds(
+        self, hwnd: int, x: int, y: int, width: int, height: int
+    ) -> Dict[str, Any]:
+        """Composite action: reposition and resize window."""
+        return self.os.set_window_bounds(hwnd=hwnd, x=x, y=y, width=width, height=height)
+
+    def safe_key_sequence(
+        self, keys: Sequence[str], interval_ms: float = 50.0
+    ) -> Dict[str, Any]:
+        """Composite action: safely execute sequence of key presses."""
+        return self.os.safe_key_sequence(keys=keys, interval_ms=interval_ms)
 
     def get_telemetry(self) -> Dict[str, Any]:
         """Return telemetry counters."""
@@ -577,6 +691,53 @@ class OSController:
             self._sim_active_window["title"] = str(title_or_hwnd)
             return {"isError": False, "target": title_or_hwnd, "focused": True, "simulated": True}
 
+
+    def find_window_by_title_pattern(self, pattern: str, visible_only: bool = True) -> Dict[str, Any]:
+        """Find windows whose titles match regular expression pattern."""
+        try:
+            regex = re.compile(pattern, re.IGNORECASE)
+            windows = self.list_windows(visible_only=visible_only)
+            matches = [w for w in windows if regex.search(w.get("title", ""))]
+            return {"isError": False, "pattern": pattern, "matches": matches, "count": len(matches)}
+        except Exception as exc:
+            return {"isError": True, "error": str(exc)}
+
+    def set_window_bounds(self, hwnd: int, x: int, y: int, width: int, height: int) -> Dict[str, Any]:
+        """Relocate and resize window on desktop."""
+        if self.is_windows:
+            try:
+                ctypes.windll.user32.MoveWindow(hwnd, x, y, width, height, True)
+                return {
+                    "isError": False,
+                    "hwnd": hwnd,
+                    "rect": {"left": x, "top": y, "right": x + width, "bottom": y + height},
+                }
+            except Exception as exc:
+                return {"isError": True, "error": str(exc)}
+        with self._lock:
+            for w in self._sim_windows:
+                if w.get("hwnd") == hwnd:
+                    w["rect"] = {"left": x, "top": y, "right": x + width, "bottom": y + height}
+                    return {"isError": False, "hwnd": hwnd, "rect": w["rect"], "simulated": True}
+            return {
+                "isError": False,
+                "hwnd": hwnd,
+                "rect": {"left": x, "top": y, "right": x + width, "bottom": y + height},
+                "simulated": True,
+            }
+
+    def safe_key_sequence(self, keys: List[str], interval_ms: float = 50.0) -> Dict[str, Any]:
+        """Execute sequence of key strokes with safety pauses."""
+        pressed = []
+        sec = max(0.005, interval_ms / 1000.0)
+        for k in keys:
+            res = self.key_press(k)
+            if res.get("isError"):
+                return {"isError": True, "error": res.get("error"), "pressed": pressed}
+            pressed.append(k)
+            time.sleep(sec)
+        return {"isError": False, "sequence": keys, "keys_pressed": len(pressed)}
+
     def get_action_history(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Return recent action logs."""
         with self._lock:
@@ -660,16 +821,23 @@ class PlaywrightAutomationBridge:
     """
     Playwright browser automation bridge for computer use agents.
     Supports navigation, DOM inspection, element interactions, PDF printing, and network interception.
+    Executes all Playwright calls on a dedicated single-threaded executor to preserve greenlet thread affinity.
     """
 
     def __init__(self, headless: bool = True) -> None:
         self.headless = headless
         self._lock = threading.RLock()
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="hydra-playwright")
         self._playwright: Optional[Any] = None
         self._browser: Optional[Any] = None
         self._context: Optional[Any] = None
         self._page: Optional[Any] = None
         self._network_logs: List[Dict[str, Any]] = []
+
+    def _run(self, fn: Callable[..., Any], *args: Any, timeout: float = 30.0, **kwargs: Any) -> Any:
+        """Dispatch Playwright operation onto dedicated worker thread."""
+        fut = self._executor.submit(fn, *args, **kwargs)
+        return fut.result(timeout=timeout)
 
     def _ensure_browser(self) -> Any:
         """Launch browser instance on demand."""
@@ -710,10 +878,12 @@ class PlaywrightAutomationBridge:
 
     def navigate(self, url: str, timeout_ms: int = 30000) -> Dict[str, Any]:
         """Navigate to URL and return title and status."""
-        BLOCKED_HOST_PATTERNS = ("169.254.169.254", "metadata.google.internal", "169.254.", "instance-data", "wpad")
-        url_lower = (url or "").lower()
-        if any(b in url_lower for b in BLOCKED_HOST_PATTERNS):
-            return {"isError": True, "error": f"Security violation: navigation to restricted target '{url}' is blocked"}
+        restricted, reason = _is_restricted_url(url)
+        if restricted:
+            return {"isError": True, "error": reason}
+        return self._run(self._navigate_internal, url, timeout_ms)
+
+    def _navigate_internal(self, url: str, timeout_ms: int) -> Dict[str, Any]:
         try:
             page = self._ensure_browser()
             resp = page.goto(url, timeout=timeout_ms)
@@ -729,6 +899,9 @@ class PlaywrightAutomationBridge:
 
     def inspect_dom(self, selector: str = "body") -> Dict[str, Any]:
         """Extract semantic interactive elements from DOM tree."""
+        return self._run(self._inspect_dom_internal, selector)
+
+    def _inspect_dom_internal(self, selector: str = "body") -> Dict[str, Any]:
         try:
             page = self._ensure_browser()
             script = """
@@ -760,6 +933,9 @@ class PlaywrightAutomationBridge:
 
     def click_element(self, selector: str, timeout_ms: int = 15000) -> Dict[str, Any]:
         """Click element in DOM matching selector."""
+        return self._run(self._click_element_internal, selector, timeout_ms)
+
+    def _click_element_internal(self, selector: str, timeout_ms: int) -> Dict[str, Any]:
         try:
             page = self._ensure_browser()
             page.click(selector, timeout=timeout_ms)
@@ -769,6 +945,9 @@ class PlaywrightAutomationBridge:
 
     def type_element(self, selector: str, text: str, delay_ms: float = 10.0, timeout_ms: int = 15000) -> Dict[str, Any]:
         """Type text into element matching selector."""
+        return self._run(self._type_element_internal, selector, text, delay_ms, timeout_ms)
+
+    def _type_element_internal(self, selector: str, text: str, delay_ms: float, timeout_ms: int) -> Dict[str, Any]:
         try:
             page = self._ensure_browser()
             page.fill(selector, text, timeout=timeout_ms)
@@ -778,6 +957,9 @@ class PlaywrightAutomationBridge:
 
     def capture_screenshot(self, path: Optional[str] = None, full_page: bool = False) -> Dict[str, Any]:
         """Capture browser page screenshot."""
+        return self._run(self._capture_screenshot_internal, path, full_page)
+
+    def _capture_screenshot_internal(self, path: Optional[str], full_page: bool) -> Dict[str, Any]:
         try:
             page = self._ensure_browser()
             png_bytes = page.screenshot(path=path, full_page=full_page)
@@ -794,6 +976,9 @@ class PlaywrightAutomationBridge:
 
     def print_pdf(self, path: Optional[str] = None) -> Dict[str, Any]:
         """Print active page to PDF document."""
+        return self._run(self._print_pdf_internal, path)
+
+    def _print_pdf_internal(self, path: Optional[str]) -> Dict[str, Any]:
         try:
             page = self._ensure_browser()
             pdf_bytes = page.pdf(path=path)
@@ -806,6 +991,115 @@ class PlaywrightAutomationBridge:
         except Exception as exc:
             return {"isError": True, "error": str(exc)}
 
+    def fill_form(
+        self,
+        fields: Dict[str, str],
+        form_selector: Optional[str] = None,
+        submit: bool = False,
+        timeout_ms: int = 15000,
+    ) -> Dict[str, Any]:
+        """Fill multiple form fields and optionally submit."""
+        return self._run(self._fill_form_internal, fields, form_selector, submit, timeout_ms)
+
+    def _fill_form_internal(
+        self,
+        fields: Dict[str, str],
+        form_selector: Optional[str],
+        submit: bool,
+        timeout_ms: int,
+    ) -> Dict[str, Any]:
+        filled = []
+        try:
+            page = self._ensure_browser()
+            for sel, val in fields.items():
+                target = f"{form_selector} {sel}" if form_selector else sel
+                page.fill(target, str(val), timeout=timeout_ms)
+                filled.append(sel)
+            if submit:
+                if form_selector:
+                    page.eval_on_selector(form_selector, "form => form.submit()")
+                else:
+                    page.keyboard.press("Enter")
+            return {"isError": False, "filled": filled, "count": len(filled), "submitted": submit}
+        except Exception as exc:
+            return {"isError": True, "error": str(exc), "filled": filled}
+
+    def scroll_until_visible(
+        self,
+        selector: str,
+        max_scrolls: int = 10,
+        scroll_step: int = 400,
+        timeout_ms: int = 5000,
+    ) -> Dict[str, Any]:
+        """Scroll down page until element matching selector becomes visible."""
+        return self._run(self._scroll_until_visible_internal, selector, max_scrolls, scroll_step, timeout_ms)
+
+    def _scroll_until_visible_internal(
+        self,
+        selector: str,
+        max_scrolls: int,
+        scroll_step: int,
+        timeout_ms: int,
+    ) -> Dict[str, Any]:
+        try:
+            page = self._ensure_browser()
+            for i in range(max_scrolls):
+                if page.is_visible(selector):
+                    return {"isError": False, "selector": selector, "visible": True, "scrolls": i}
+                page.mouse.wheel(0, scroll_step)
+                time.sleep(0.1)
+            is_vis = page.is_visible(selector)
+            return {"isError": False, "selector": selector, "visible": is_vis, "scrolls": max_scrolls}
+        except Exception as exc:
+            return {"isError": True, "error": str(exc)}
+
+    def extract_table_data(self, selector: str = "table") -> Dict[str, Any]:
+        """Extract structured tabular data from table element."""
+        return self._run(self._extract_table_data_internal, selector)
+
+    def _extract_table_data_internal(self, selector: str = "table") -> Dict[str, Any]:
+        try:
+            page = self._ensure_browser()
+            script = """
+            (sel) => {
+                const tbl = document.querySelector(sel);
+                if (!tbl) return { found: false, headers: [], rows: [] };
+                const headers = [];
+                tbl.querySelectorAll("th").forEach(th => headers.push(th.innerText.trim()));
+                const rows = [];
+                tbl.querySelectorAll("tbody tr, tr").forEach(tr => {
+                    const row = [];
+                    tr.querySelectorAll("td").forEach(td => row.push(td.innerText.trim()));
+                    if (row.length > 0) rows.push(row);
+                });
+                return { found: true, headers: headers, rows: rows, count: rows.length };
+            }
+            """
+            res = page.evaluate(script, selector)
+            if not res.get("found"):
+                return {"isError": True, "error": f"Table matching '{selector}' not found"}
+            return {
+                "isError": False,
+                "selector": selector,
+                "headers": res.get("headers", []),
+                "rows": res.get("rows", []),
+                "row_count": len(res.get("rows", [])),
+            }
+        except Exception as exc:
+            return {"isError": True, "error": str(exc)}
+
+    def drag_and_drop(self, source_selector: str, target_selector: str, timeout_ms: int = 15000) -> Dict[str, Any]:
+        """Perform drag and drop between DOM elements."""
+        return self._run(self._drag_and_drop_internal, source_selector, target_selector, timeout_ms)
+
+    def _drag_and_drop_internal(self, source_selector: str, target_selector: str, timeout_ms: int = 15000) -> Dict[str, Any]:
+        try:
+            page = self._ensure_browser()
+            page.drag_and_drop(source_selector, target_selector, timeout=timeout_ms)
+            return {"isError": False, "source": source_selector, "target": target_selector, "dropped": True}
+        except Exception as exc:
+            return {"isError": True, "error": str(exc)}
+
     def get_network_logs(self, limit: int = 50) -> Dict[str, Any]:
         """Retrieve recorded network traffic logs."""
         with self._lock:
@@ -815,30 +1109,38 @@ class PlaywrightAutomationBridge:
     def close(self) -> None:
         """Close active browser and contexts."""
         with self._lock:
-            if self._page:
-                try:
-                    self._page.close()
-                except Exception:
-                    pass
-                self._page = None
-            if self._context:
-                try:
-                    self._context.close()
-                except Exception:
-                    pass
-                self._context = None
-            if self._browser:
-                try:
-                    self._browser.close()
-                except Exception:
-                    pass
-                self._browser = None
-            if self._playwright:
-                try:
-                    self._playwright.stop()
-                except Exception:
-                    pass
-                self._playwright = None
+            try:
+                self._executor.submit(self._close_internal).result(timeout=5.0)
+            except Exception:
+                pass
+            self._executor.shutdown(wait=False)
+            self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="hydra-playwright")
+
+    def _close_internal(self) -> None:
+        if self._page:
+            try:
+                self._page.close()
+            except Exception:
+                pass
+            self._page = None
+        if self._context:
+            try:
+                self._context.close()
+            except Exception:
+                pass
+            self._context = None
+        if self._browser:
+            try:
+                self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        if self._playwright:
+            try:
+                self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
 
 
 class ComputerUseEngine:
@@ -1001,6 +1303,55 @@ class ComputerUseEngine:
                 self.bounds.add_fence(label, x1, y1, x2, y2)
                 return {"isError": False, "label": label, "fences": self.bounds.list_fences()}
 
+
+            elif act in ("fill_form", "browser_fill_form"):
+                fields = kwargs.get("fields", {})
+                form_sel = kwargs.get("form_selector")
+                sub = bool(kwargs.get("submit", False))
+                return self.browser.fill_form(fields, form_selector=form_sel, submit=sub)
+
+            elif act in ("scroll_until_visible", "browser_scroll_until_visible"):
+                selector = kwargs.get("selector", "")
+                max_s = int(kwargs.get("max_scrolls", 10))
+                step = int(kwargs.get("scroll_step", 400))
+                return self.browser.scroll_until_visible(selector, max_scrolls=max_s, scroll_step=step)
+
+            elif act in ("extract_table_data", "browser_extract_table"):
+                selector = kwargs.get("selector", "table")
+                return self.browser.extract_table_data(selector=selector)
+
+            elif act in ("safe_drag_and_drop", "drag_and_drop"):
+                src_sel = kwargs.get("source_selector") or kwargs.get("source")
+                tgt_sel = kwargs.get("target_selector") or kwargs.get("target")
+                if src_sel and tgt_sel:
+                    return self.browser.drag_and_drop(str(src_sel), str(tgt_sel))
+                fc = kwargs.get("from_coord") or (int(kwargs.get("from_x", kwargs.get("start_x", 0))), int(kwargs.get("from_y", kwargs.get("start_y", 0))))
+                tc = kwargs.get("to_coord") or (int(kwargs.get("to_x", kwargs.get("end_x", 100))), int(kwargs.get("to_y", kwargs.get("end_y", 100))))
+                stp = int(kwargs.get("steps", 10))
+                btn = kwargs.get("button", "left")
+                return self.safe_drag_and_drop(fc, tc, steps=stp, button=btn)
+
+            elif act in ("find_window_by_title_pattern", "find_window"):
+                pat = kwargs.get("pattern", "")
+                return self.os.find_window_by_title_pattern(pat)
+
+            elif act in ("set_window_bounds", "resize_window"):
+                hwnd = int(kwargs.get("hwnd", 0))
+                x = int(kwargs.get("x", 0))
+                y = int(kwargs.get("y", 0))
+                w = int(kwargs.get("width", 800))
+                h = int(kwargs.get("height", 600))
+                return self.os.set_window_bounds(hwnd, x, y, w, h)
+
+            elif act in ("capture_active_window", "active_window_screenshot"):
+                as_b64 = bool(kwargs.get("as_base64", True))
+                return self.capture_active_window(as_base64=as_b64)
+
+            elif act in ("safe_key_sequence", "key_sequence"):
+                keys = kwargs.get("keys", [])
+                interval = float(kwargs.get("interval_ms", 50.0))
+                return self.os.safe_key_sequence(keys, interval_ms=interval)
+
             elif act == "remove_fence":
                 label = kwargs.get("label", "")
                 removed = self.bounds.remove_fence(label)
@@ -1015,6 +1366,80 @@ class ComputerUseEngine:
             with self._lock:
                 self._actions_failed += 1
             return {"isError": True, "error": f"Computer use action '{action}' failed: {exc}"}
+
+    def capture_active_window(self, as_base64: bool = True) -> Dict[str, Any]:
+        """Capture screenshot of current active window bounding box."""
+        win = self.os.get_active_window()
+        rect = win.get("rect", {})
+        left = max(0, rect.get("left", 0))
+        top = max(0, rect.get("top", 0))
+        right = max(left + 10, rect.get("right", left + 100))
+        bottom = max(top + 10, rect.get("bottom", top + 100))
+        bbox = (left, top, right, bottom)
+        cap = self.screen.capture(bbox=bbox, as_base64=as_base64)
+        return {"isError": False, "window": win, "capture": cap}
+
+    def safe_drag_and_drop(
+        self,
+        from_coord: Tuple[int, int],
+        to_coord: Tuple[int, int],
+        steps: int = 10,
+        button: str = "left",
+    ) -> Dict[str, Any]:
+        """Execute safe coordinate drag and drop with boundary guards."""
+        fx, fy, _ = self.bounds.clip(from_coord[0], from_coord[1])
+        tx, ty, _ = self.bounds.clip(to_coord[0], to_coord[1])
+        safe_f, err_f = self.bounds.check_safety(fx, fy)
+        if not safe_f:
+            return {"isError": True, "error": f"From coordinate unsafe: {err_f}"}
+        safe_t, err_t = self.bounds.check_safety(tx, ty)
+        if not safe_t:
+            return {"isError": True, "error": f"To coordinate unsafe: {err_t}"}
+        return self.os.mouse_drag(fx, fy, tx, ty, steps=steps, button=button)
+
+
+    def fill_form(
+        self,
+        fields: Dict[str, str],
+        form_selector: Optional[str] = None,
+        submit: bool = False,
+    ) -> Dict[str, Any]:
+        """Composite action: auto-fill web form fields."""
+        return self.browser.fill_form(fields=fields, form_selector=form_selector, submit=submit)
+
+    def scroll_until_visible(
+        self,
+        selector: str,
+        max_scrolls: int = 10,
+        scroll_step: int = 400,
+        timeout_ms: int = 5000,
+    ) -> Dict[str, Any]:
+        """Composite action: scroll page until target element visible."""
+        return self.browser.scroll_until_visible(
+            selector=selector, max_scrolls=max_scrolls, scroll_step=scroll_step, timeout_ms=timeout_ms
+        )
+
+    def extract_table_data(self, selector: str = "table") -> Dict[str, Any]:
+        """Composite action: extract structured table dataset."""
+        return self.browser.extract_table_data(selector=selector)
+
+    def find_window_by_title_pattern(
+        self, pattern: str, visible_only: bool = True
+    ) -> Dict[str, Any]:
+        """Composite action: find windows matching regex title pattern."""
+        return self.os.find_window_by_title_pattern(pattern=pattern, visible_only=visible_only)
+
+    def set_window_bounds(
+        self, hwnd: int, x: int, y: int, width: int, height: int
+    ) -> Dict[str, Any]:
+        """Composite action: reposition and resize window."""
+        return self.os.set_window_bounds(hwnd=hwnd, x=x, y=y, width=width, height=height)
+
+    def safe_key_sequence(
+        self, keys: Sequence[str], interval_ms: float = 50.0
+    ) -> Dict[str, Any]:
+        """Composite action: safely execute sequence of key presses."""
+        return self.os.safe_key_sequence(keys=keys, interval_ms=interval_ms)
 
     def get_telemetry(self) -> Dict[str, Any]:
         """Return comprehensive engine telemetry."""
