@@ -9,7 +9,10 @@ from desktop.browser_storage import (
     BrowserStorageManager,
 )
 
+CookieRecord = BrowserCookie
+
 __all__ = [
     "BrowserCookie",
     "BrowserStorageManager",
+    "CookieRecord",
 ]
