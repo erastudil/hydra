@@ -6,6 +6,7 @@ from hydra_cli.context import (
     SessionContextLedger,
     context_label,
     format_context_picker,
+    normalize_context_mode,
     register_label,
     resolve_context_mode,
 )
@@ -31,6 +32,7 @@ import subprocess
 from hydra_cli.config import (
     DEFAULT_ORCHESTRATOR_MODEL,
     DEFAULT_AGENT_MODEL,
+    DEFAULT_CONTEXT_MODE,
     DEFAULT_CONTEXT_WINDOW,
     DEFAULT_LOCAL_MODEL,
     DEFAULT_SYSTEM_PROMPT,
@@ -41,6 +43,7 @@ from hydra_cli.config import (
     hydra_home,
     input_char_budget,
     resolve_route,
+    schema_chars,
 )
 from hydra_cli.hands import dispatch_native, native_openai_tools
 from hydra_cli.tool_adapter import (
@@ -58,6 +61,7 @@ from hydra_cli.providers import (
     describe_endpoint,
     detect_local_endpoint,
     ensure_temperature,
+    fetch_chat_completion,
     get_free_candidates,
     get_frontier_providers,
     providers_for_model,
@@ -991,7 +995,17 @@ def tool_result_text(result: Any) -> str:
         return json.dumps(str(result), ensure_ascii=False)
 
 
-def run_agent_loop(
+def run_agent_loop(*args: Any, **kwargs: Any) -> str:
+    """Run one agent turn, then close the session ledger so the next turn reloads from disk."""
+    ledger = kwargs.get("ledger")
+    try:
+        return _run_agent_loop(*args, **kwargs)
+    finally:
+        if ledger is not None:
+            ledger.end_turn()
+
+
+def _run_agent_loop(
     alias: str,
     prompt: str,
     system_prompt: Optional[str] = None,
@@ -1012,7 +1026,7 @@ def run_agent_loop(
     ledger: Optional[SessionContextLedger] = None,
     effort: Optional[str] = None,
     dialect: Optional[str] = None,
-    strategy: str = "recall",
+    strategy: Optional[str] = None,
     on_token: Optional[Callable[[str], None]] = None,
     max_context_chars: Optional[int] = None,
 ) -> str:
@@ -1086,16 +1100,11 @@ def run_agent_loop(
         effective_sys = f"{effective_sys}\n\n{register}"
 
     original_prompt = prompt
-    prior = ledger.render_prior(original_prompt, strategy) if ledger.turns else ""
-    if prior:
-        prompt = prior + "\n\n" + original_prompt
-
     sys_text = build_cached_system_prompt(effective_sys)
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": sys_text},
         {"role": "user", "content": prompt},
     ]
-    ledger.append_turn(role="user", content=original_prompt)
 
     # Native tools and MCP registry setup
     native_reg = None
@@ -1135,6 +1144,29 @@ def run_agent_loop(
     else:
         window_tokens = max(1024, max_context_chars // 4)
     context_chars = input_char_budget(window_tokens, tools, reserve_tokens)
+
+    mode = normalize_context_mode(strategy or DEFAULT_CONTEXT_MODE)
+    if mode == "compact":
+        def summarize(text: str) -> str:
+            ask = [
+                {"role": "system", "content": "Summarize the earlier turns. Keep file paths, identifiers, decisions and open tasks. Plain text."},
+                {"role": "user", "content": text},
+            ]
+            failure: Optional[Exception] = None
+            for provider in providers:
+                try:
+                    return fetch_chat_completion(provider["url"], provider["headers"], requested_model, ask, timeout=timeout)
+                except UsageError:
+                    raise
+                except Exception as exc:
+                    failure = exc
+            raise ProviderError(redact(f"Compaction failed on every provider: {failure}"))
+
+        ledger.compact_if_needed(window_tokens, summarize, len(sys_text) + len(prompt) + schema_chars(tools))
+    prior = ledger.render_prior(original_prompt, mode)
+    if prior:
+        messages[1]["content"] = prior + "\n\n" + original_prompt
+    ledger.append_turn(role="user", content=original_prompt)
 
     color_on = supports_color()
     c_bright = GREEN_BRIGHT if color_on else ""
@@ -2033,6 +2065,7 @@ def run_interactive_agent(
     session_id: Optional[str] = None,
     cwd: Optional[str] = None,
     steer_mode: bool = False,
+    strategy: Optional[str] = None,
 ) -> int:
     """
     Launch interactive terminal coding REPL (Cursor & Antigravity style) with slash commands.
@@ -2065,7 +2098,7 @@ def run_interactive_agent(
     last_gate = {"action": "", "route": ""}
     active_heat: Optional[float] = temperature
     active_window: Optional[int] = None
-    active_strategy = "recall"
+    active_strategy = normalize_context_mode(strategy or DEFAULT_CONTEXT_MODE)
     active_system_prompt = (
         DEFAULT_AGENT_SYSTEM_PROMPT
         if (not system_prompt or system_prompt == DEFAULT_SYSTEM_PROMPT)

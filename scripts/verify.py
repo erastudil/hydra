@@ -1797,7 +1797,9 @@ def context_recall():
     from hydra_cli.context import SessionContextLedger, normalize_context_mode
 
     assert normalize_context_mode("retrieve") == "recall"
-    assert normalize_context_mode("compact") == "recall"
+    assert normalize_context_mode("compact") == "compact"
+    assert normalize_context_mode("normal") == "compact"
+    assert normalize_context_mode("dynamic") == "recall"
     assert normalize_context_mode("sliding") == "sliding"
     assert normalize_context_mode("nope") == "recall"
 
@@ -1829,6 +1831,80 @@ def context_recall():
     assert report["pruned_messages"] == [] and report["turns_on_disk"] == 1
     reloaded = SessionContextLedger(session_id="gate_flush")
     assert reloaded.turns[0]["content"] == "keep this sentence intact"
+
+
+@check
+def context_modes_agent_loop():
+    """Both context modes through run_agent_loop. Only the model endpoint is scripted."""
+    import sqlite3
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from hydra_cli.agent import run_agent_loop
+    from hydra_cli.context import SessionContextLedger
+
+    seen = []
+
+    class Scripted(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append(body)
+            text = "SCRIPTED SUMMARY keeps parse_widget" if body["messages"][0]["content"].startswith("Summarize") else "done"
+            data = json.dumps({"choices": [{"message": {"role": "assistant", "content": text}, "finish_reason": "stop"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", 0), Scripted)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    def ask(ledger, mode, prompt, chars):
+        run_agent_loop("local", prompt, session_id=ledger.session_id, ledger=ledger, strategy=mode,
+                       tier="local", enable_native_tools=False, max_context_chars=chars)
+        return seen[-1]["messages"][1]["content"]
+
+    try:
+        with isolated(env={"LOCAL_AI_BASE": base}):
+            # Mode A: only keyword hits come back, turns are stored by category, the connection is dropped.
+            recall = SessionContextLedger(session_id="gate_modes_a")
+            recall.append_turn("instruction", "rule : answer in plain words")
+            recall.append_turn("user", "traceback in parse_widget\n" + "x = 1\n" * 30)
+            recall.append_turn("user", "lunch order for the team")
+            sent = ask(recall, "recall", "why does parse_widget fail", 40000)
+            assert "traceback in parse_widget" in sent and "rule : answer in plain words" in sent
+            assert "lunch order" not in sent and "[RETRIEVED CONTEXT]" in sent
+            assert recall._db is None
+            db = sqlite3.connect(recall.ledger_path)
+            cats = dict(db.execute("SELECT category, COUNT(*) FROM turns GROUP BY category"))
+            db.close()
+            assert cats.get("instruction") == 1 and cats.get("error") == 1 and cats.get("chat") == 2 and cats.get("code") == 1, cats
+            assert [t["role"] for t in SessionContextLedger(session_id="gate_modes_a").turns][-2:] == ["user", "assistant"]
+
+            # Mode B: turns stay live until 80 percent of the window, then older ones become one summary.
+            normal = SessionContextLedger(session_id="gate_modes_b")
+            window = 40000
+            filler = " pad" * 700
+            first = ask(normal, "compact", "turn0_marker" + filler, window)
+            assert "[CONVERSATION SO FAR]" not in first
+            for n in range(1, 8):
+                before = len(seen)
+                sent = ask(normal, "compact", f"turn{n}_marker" + filler, window)
+                summarized = any(b["messages"][0]["content"].startswith("Summarize") for b in seen[before:])
+                if summarized:
+                    break
+            assert summarized, "no compaction before the window filled"
+            assert "summary of earlier turns : SCRIPTED SUMMARY" in sent
+            assert "turn0_marker" not in sent.split("turn%d_marker" % n)[0].split("SCRIPTED SUMMARY")[1]
+            kept = normal.live_window()
+            assert kept[0]["role"] == "summary" and len(kept) == 7
+            assert sum(len(t["content"]) for t in normal.turns if t["role"] != "summary") > sum(len(t["content"]) for t in kept)
+            assert "SCRIPTED SUMMARY" in ask(normal, "compact", "next question", window)
+    finally:
+        httpd.shutdown()
 
 
 @check

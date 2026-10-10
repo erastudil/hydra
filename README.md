@@ -210,6 +210,16 @@ Credentials live in `~/.hydra/.env` or system environment:
 | `GITHUB_TOKEN` | Token for GitHub MCP server integration. |
 | `BRAVE_API_KEY` | Key for Brave Search MCP server integration. |
 
+## Context modes
+
+Pick one with `--context-mode recall|compact|sliding` or `HYDRA_CONTEXT_MODE`. In the REPL, `/strategy` switches live.
+
+- recall : dynamic context threading. Every turn lands in `~/.hydra/sessions/<id>/ledger.db` with a category and keyword labels, and the connection closes when the turn ends. The next prompt is matched against the keyword index, sqlite FTS5 with synonyms, and only hits reload, whole. Pinned instruction turns always reload. Default.
+- compact : normal mode. Turns stay live. Once live text passes 80 percent of the model window, estimated at 3 characters per token,, turns older than the last 4 collapse into one model-written summary.
+- sliding : the last 4 turns, whole.
+
+Tool rounds inside one turn still use the bounded window. The modes act between turns.
+
 ## Verification
 
 ```bash

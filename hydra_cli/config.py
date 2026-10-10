@@ -105,6 +105,8 @@ PROVIDER_KEY_NAMES: Dict[str, str] = {
 }
 
 DEFAULT_CONTEXT_WINDOW = 131072
+# recall: dynamic context threading. compact: normal mode, summarize at 80 percent. sliding: last turns.
+DEFAULT_CONTEXT_MODE = os.environ.get("HYDRA_CONTEXT_MODE", "recall")
 CONTEXT_PROFILES: Dict[str, int] = dict(CATALOG.get("context_profiles") or {"default": 131072, "128k": 131072})
 
 # JSON and source tokenize denser than prose. Three characters per token keeps the

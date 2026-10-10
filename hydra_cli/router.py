@@ -406,6 +406,7 @@ def route_command(argv: List[str]) -> int:
     interactive_mode = False
     agentic_mode = False
     steer_mode = False
+    context_mode = None
 
     idx = 0
     while idx < len(remaining):
@@ -494,6 +495,13 @@ def route_command(argv: List[str]) -> int:
         elif arg == "--steer":
             steer_mode = True
             idx += 1
+        elif arg == "--context-mode" and idx + 1 < len(remaining):
+            from hydra_cli.context import resolve_context_mode
+            context_mode = resolve_context_mode(remaining[idx + 1])
+            if context_mode is None:
+                sys.stderr.write("[ERROR] --context-mode takes recall, compact or sliding.\n")
+                return 1
+            idx += 2
         else:
             prompt_tokens.append(arg)
             idx += 1
@@ -522,6 +530,7 @@ def route_command(argv: List[str]) -> int:
                 tier=tier_override,
                 interactive=True,
                 steer_mode=steer_mode,
+                context_mode=context_mode,
             )
         sys.stderr.write(f"[ERROR] No prompt or piped input provided for '{command_or_alias}'.\n")
         return 1
@@ -540,6 +549,7 @@ def route_command(argv: List[str]) -> int:
                 tier=tier_override,
                 interactive=interactive_mode,
                 steer_mode=steer_mode,
+                context_mode=context_mode,
             )
         elif cmd_lower == "free":
             return execute_free(
@@ -1135,6 +1145,7 @@ def execute_agent_mode(
     tier: Optional[str] = None,
     interactive: bool = False,
     steer_mode: bool = False,
+    context_mode: Optional[str] = None,
 ) -> int:
     """Execute autonomous agent loop with discovered MCP tools and native coding tools."""
     from hydra_cli.agent import run_agent_loop, run_interactive_agent
@@ -1149,6 +1160,7 @@ def execute_agent_mode(
             max_tokens=max_tokens,
             session_id=session_id,
             steer_mode=steer_mode,
+            strategy=context_mode,
         )
 
     reg = McpRegistry(auto_load=True)
@@ -1168,6 +1180,7 @@ def execute_agent_mode(
             session_id=session_id,
             tier=tier,
             steer_mode=steer_mode,
+            strategy=context_mode,
         )
         print(ans)
         return 0
