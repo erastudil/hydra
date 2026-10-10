@@ -1908,6 +1908,16 @@ def context_modes_agent_loop():
 
 
 @check
+def knowledge_semver():
+    from hydra_cli import __version__
+    from hydra_cli.alice_knowledge import search_knowledge
+
+    card = search_knowledge("what is semver")
+    assert card and card["card_id"] == "std:semver", card
+    assert f"Hydra is {__version__}." in card["comment"]
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
