@@ -9569,11 +9569,134 @@ def agent_runner_safety_and_abort_contracts():
 
 
 @check
+def workspace_context_and_session_export_contracts():
+    import tempfile
+    from hydra_cli.agent_runner import (
+        AgentState,
+        AutonomousAgentRunner,
+        validate_session_trace,
+    )
+    from hydra_cli.desktop import (
+        FALLBACK_CHAINS,
+        resolve_and_complete_with_fallback,
+    )
+    from hydra_cli.native_tools import NativeToolRegistry
+
+    # 1. Path confinement contracts
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        sub_dir = os.path.join(tmp_dir, "pkg")
+        os.makedirs(sub_dir, exist_ok=True)
+        with open(os.path.join(tmp_dir, "inside.txt"), "w", encoding="utf-8") as f:
+            f.write("safe payload")
+
+        reg = NativeToolRegistry(cwd=tmp_dir)
+
+        # Confined inside workspace
+        target, err = reg._resolve_confined_path("inside.txt")
+        assert err is None
+        assert target == os.path.realpath(os.path.join(tmp_dir, "inside.txt"))
+
+        # Parent directory traversal blocked
+        target_traversal, err_traversal = reg._resolve_confined_path("../outside.txt")
+        assert target_traversal is None
+        assert "Security violation" in err_traversal
+
+        # Subdirectory traversal blocked
+        target_sub, err_sub = reg._resolve_confined_path("pkg/../../outside.txt")
+        assert target_sub is None
+        assert "Security violation" in err_sub
+
+        # Absolute path outside workspace blocked
+        ext_dir = tempfile.gettempdir()
+        ext_file = os.path.join(ext_dir, "hydra_canary_test.txt")
+        target_abs, err_abs = reg._resolve_confined_path(ext_file)
+        assert target_abs is None
+        assert "Security violation" in err_abs
+
+    # 2. Agent runner workspace tool execution contracts
+    with tempfile.TemporaryDirectory() as runner_dir:
+        with open(os.path.join(runner_dir, "test.txt"), "w", encoding="utf-8") as f:
+            f.write("sample workspace content")
+        tools = NativeToolRegistry(cwd=runner_dir)
+        runner = AutonomousAgentRunner(tools=tools, max_steps=5)
+
+        r_read = runner.execute_step("read_file", path="test.txt")
+        assert not r_read.get("isError")
+        assert "sample workspace content" in str(r_read)
+
+        r_write = runner.execute_step("write_file", path="new.txt", content="created")
+        assert not r_write.get("isError")
+
+        r_list = runner.execute_step("list_dir", path=".")
+        assert not r_list.get("isError")
+
+        r_search = runner.execute_step("search_files", pattern="*.txt")
+        assert not r_search.get("isError")
+
+        r_traversal = runner.execute_step("read_file", path="../outside.txt")
+        assert r_traversal.get("isError") is True
+        assert "Security violation" in r_traversal.get("error", "")
+
+    # 3. Session trace export and faithful reconstruction contracts
+    runner_trace = AutonomousAgentRunner(max_steps=3)
+    dummy_steps = [
+        {"action": "browser_inspect", "selector": "body"},
+        {"action": "browser_inspect", "selector": "body"},
+    ]
+    runner_trace.run_task("verify session trace export", steps=dummy_steps)
+    trace = runner_trace.export_session_trace()
+
+    is_valid, v_err = validate_session_trace(trace)
+    assert is_valid is True, f"Validation error: {v_err}"
+    assert trace["schema_version"] == "1.0.0"
+    assert trace["task"] == "verify session trace export"
+    assert trace["state"] == AgentState.COMPLETED
+    assert trace["step_count"] == 2
+    assert len(trace["history"]) == 2
+
+    # Reconstruct from trace
+    reconstructed = AutonomousAgentRunner.reconstruct_from_trace(trace)
+    assert reconstructed.state == AgentState.COMPLETED
+    assert reconstructed.current_step == 2
+    assert reconstructed.current_task == "verify session trace export"
+    assert len(reconstructed.history) == 2
+
+    # Invalid trace rejected
+    bad_valid, bad_err = validate_session_trace({"invalid": "trace"})
+    assert bad_valid is False
+    assert bad_err is not None
+
+    # 4. Model gateway fallback under simulated 429
+    call_log = []
+
+    def mock_completer(resolved_model: str, prompt: str) -> str:
+        call_log.append(resolved_model)
+        if "sonnet" in resolved_model.lower():
+            raise RuntimeError("Provider HTTP 429: rate limit exceeded on tier frontier")
+        return f"Response from {resolved_model} for {prompt}"
+
+    res = resolve_and_complete_with_fallback(
+        model="sonnet 5.5",
+        prompt="verify invariants",
+        fallbacks=["gemini 3.8", "gpt-6.1"],
+        completer=mock_completer,
+    )
+    assert not res.get("isError")
+    assert res.get("fallback_triggered") is True
+    assert res.get("model_requested") == "sonnet 5.5"
+    assert res.get("model_used") == "gemini 3.8"
+    assert "Response from" in res.get("content", "")
+    assert len(res.get("attempts", [])) == 1
+    assert "429" in res["attempts"][0]["error"]
+    assert len(call_log) == 2
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

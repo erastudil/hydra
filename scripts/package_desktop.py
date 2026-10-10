@@ -62,6 +62,8 @@ def run_checks() -> int:
         "agent-trace-log",
         "startAgentTask",
         "pauseAgentTask",
+        "exportAgentTrace",
+        "/api/agent/export",
         "/api/agent/run",
     ]
     for tok in html_tokens:
@@ -155,7 +157,26 @@ def run_checks() -> int:
         print("error : /api/agent/abort failed.\n")
         return 1
 
-    print("endpoint execution verification : status, diffs, screen, and agent endpoints functioning deterministically.\n")
+    # Export trace endpoint check
+    exp_res = client.get("/api/agent/export")
+    if exp_res.status_code != 200 or exp_res.json().get("schema_version") != "1.0.0":
+        print("error : /api/agent/export failed.\n")
+        return 1
+
+    exp_dl = client.get("/api/agent/export?download=true")
+    if exp_dl.status_code != 200 or "attachment" not in exp_dl.headers.get("content-disposition", ""):
+        print("error : /api/agent/export?download=true failed.\n")
+        return 1
+
+    # Workspace tools dispatch check
+    from hydra_cli.agent_runner import AutonomousAgentRunner
+    test_runner = AutonomousAgentRunner()
+    res_tool = test_runner.execute_step("read_file", path="hydra_cli/desktop.py", max_bytes=100)
+    if res_tool.get("isError"):
+        print("error : agent runner workspace tool dispatch failed.\n")
+        return 1
+
+    print("endpoint execution verification : status, diffs, screen, agent, and export endpoints functioning deterministically.\n")
 
     # 5. Composite Computer Use Primitives Verification
     from hydra_cli.computer_use import get_computer_use_engine

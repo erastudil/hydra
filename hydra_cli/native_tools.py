@@ -2276,6 +2276,7 @@ class NativeToolRegistry:
             "list_dir": self.list_dir,
             "grep_search": self.grep_search,
             "find_files": self.find_files,
+            "search_files": self.find_files,
             "run_command": self.run_command,
             "invoke_subagent": self.invoke_subagent,
             "swarm_fanout": self.swarm_fanout,
@@ -2370,6 +2371,27 @@ class NativeToolRegistry:
     def has_tool(self, name: str) -> bool:
         return name in self._tools
 
+    def _resolve_confined_path(self, path: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Validate path strictly confined within self.cwd.
+        Blocks parent traversal escapes (../) and external absolute paths.
+        """
+        real_cwd = os.path.realpath(os.path.abspath(self.cwd))
+        if os.path.isabs(path):
+            target = os.path.realpath(os.path.abspath(path))
+        else:
+            target = os.path.realpath(os.path.abspath(os.path.join(real_cwd, path)))
+
+        try:
+            common = os.path.commonpath([real_cwd, target])
+        except ValueError:
+            return None, f"Security violation: path traversal outside workspace '{path}'"
+
+        if common != real_cwd:
+            return None, f"Security violation: path traversal outside workspace '{path}'"
+
+        return target, None
+
     def read_file(
         self,
         path: str,
@@ -2378,7 +2400,9 @@ class NativeToolRegistry:
         max_bytes: int = 100_000,
     ) -> Any:
         """Read file contents with optional line slicing and byte limit."""
-        abs_path = os.path.abspath(os.path.join(self.cwd, path))
+        abs_path, err = self._resolve_confined_path(path)
+        if err:
+            return {"isError": True, "error": err}
         if not os.path.exists(abs_path):
             return {"isError": True, "error": f"File not found: {path}"}
         if os.path.isdir(abs_path):
@@ -2417,7 +2441,9 @@ class NativeToolRegistry:
 
     def write_file(self, path: str, content: str) -> Any:
         """Perform atomic write to file."""
-        abs_path = os.path.abspath(os.path.join(self.cwd, path))
+        abs_path, err = self._resolve_confined_path(path)
+        if err:
+            return {"isError": True, "error": err}
         parent = os.path.dirname(abs_path)
         try:
             os.makedirs(parent, exist_ok=True)
@@ -2431,7 +2457,9 @@ class NativeToolRegistry:
 
     def edit_file(self, path: str, old_text: str, new_text: str) -> Any:
         """Perform exact search-and-replace with unique-match validation."""
-        abs_path = os.path.abspath(os.path.join(self.cwd, path))
+        abs_path, err = self._resolve_confined_path(path)
+        if err:
+            return {"isError": True, "error": err}
         if not os.path.exists(abs_path):
             return {"isError": True, "error": f"File not found: {path}"}
         if os.path.isdir(abs_path):
@@ -2457,7 +2485,9 @@ class NativeToolRegistry:
 
     def list_dir(self, path: str = ".", max_depth: int = 2) -> Any:
         """Provide formatted file and folder directory tree."""
-        abs_path = os.path.abspath(os.path.join(self.cwd, path))
+        abs_path, err = self._resolve_confined_path(path)
+        if err:
+            return {"isError": True, "error": err}
         if not os.path.exists(abs_path):
             return {"isError": True, "error": f"Directory not found: {path}"}
         if not os.path.isdir(abs_path):
@@ -2510,7 +2540,9 @@ class NativeToolRegistry:
         max_results: int = 100,
     ) -> Any:
         """Provide regex or text search with file patterns and line numbers."""
-        abs_path = os.path.abspath(os.path.join(self.cwd, path))
+        abs_path, err = self._resolve_confined_path(path)
+        if err:
+            return {"isError": True, "error": err}
         if not os.path.exists(abs_path):
             return {"isError": True, "error": f"Path not found: {path}"}
 
@@ -2556,16 +2588,20 @@ class NativeToolRegistry:
         pattern: str = "*",
         path: str = ".",
         max_results: int = 100,
+        query: Optional[str] = None,
     ) -> Any:
         """Provide glob pattern file search."""
-        abs_path = os.path.abspath(os.path.join(self.cwd, path))
+        eff_pattern = pattern if pattern != "*" or not query else query
+        abs_path, err = self._resolve_confined_path(path)
+        if err:
+            return {"isError": True, "error": err}
         if not os.path.exists(abs_path):
             return {"isError": True, "error": f"Path not found: {path}"}
 
         matches: List[str] = []
         if os.path.isfile(abs_path):
             rel = os.path.relpath(abs_path, self.cwd)
-            if fnmatch.fnmatch(os.path.basename(abs_path), pattern) or fnmatch.fnmatch(rel, pattern):
+            if fnmatch.fnmatch(os.path.basename(abs_path), eff_pattern) or fnmatch.fnmatch(rel, eff_pattern):
                 matches.append(rel)
         else:
             for root, dirs, files in os.walk(abs_path):
@@ -2573,14 +2609,14 @@ class NativeToolRegistry:
                 for file in files:
                     full_p = os.path.join(root, file)
                     rel = os.path.relpath(full_p, self.cwd)
-                    if fnmatch.fnmatch(file, pattern) or fnmatch.fnmatch(rel, pattern):
+                    if fnmatch.fnmatch(file, eff_pattern) or fnmatch.fnmatch(rel, eff_pattern):
                         matches.append(rel)
                         if len(matches) >= max_results:
                             matches.append(f"[TRUNCATED: reached max_results={max_results}]")
                             return "\n".join(matches)
 
         if not matches:
-            return f"No files matching {pattern!r} found in {path}"
+            return f"No files matching {eff_pattern!r} found in {path}"
         return "\n".join(matches)
 
     def run_command(
@@ -2588,12 +2624,20 @@ class NativeToolRegistry:
         command: str,
         cwd: Optional[str] = None,
         timeout: Optional[float] = None,
+        timeout_sec: Optional[float] = None,
     ) -> Any:
         """Execute command safely via SandboxRunner and CommandInspector."""
         from hydra_cli.sandbox import SandboxConfig, SandboxRunner
 
-        target_cwd = os.path.abspath(os.path.join(self.cwd, cwd)) if cwd else self.cwd
-        config = SandboxConfig(timeout_seconds=timeout if timeout is not None else 30.0)
+        if cwd:
+            target_cwd, err = self._resolve_confined_path(cwd)
+            if err:
+                return {"isError": True, "error": err}
+        else:
+            target_cwd = self.cwd
+
+        eff_timeout = timeout if timeout is not None else (timeout_sec if timeout_sec is not None else 30.0)
+        config = SandboxConfig(timeout_seconds=eff_timeout)
         runner = SandboxRunner(config=config)
         res = runner.run_command(command=command, cwd=target_cwd)
         out = res.to_dict()
@@ -5194,6 +5238,7 @@ class NativeToolRegistry:
         name: str,
         args: Optional[Dict[str, Any]] = None,
         context: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> Any:
         """Dispatch tool call by name with arguments and execution context."""
         if not self.has_tool(name):
@@ -5201,6 +5246,8 @@ class NativeToolRegistry:
 
         handler = self._tools[name]
         call_args = dict(args or {})
+        if kwargs:
+            call_args.update(kwargs)
 
         # Context updates (e.g. depth, cwd)
         if context:

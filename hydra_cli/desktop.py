@@ -452,6 +452,11 @@ textarea:focus { border-color: var(--accent); }
     </div>
     <select id="model-select">
       <option value="sonnet 5.5">Claude Sonnet 5.5</option>
+      <option value="claude-3-7-sonnet">Claude 3.7 Sonnet</option>
+      <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+      <option value="qwen-3.8-27b:free">Qwen 3.8 27B (Free)</option>
+      <option value="deepseek-chat:free">DeepSeek Chat (Free)</option>
+      <option value="llama-3.3-70b-instruct:free">Llama 3.3 70B (Free)</option>
       <option value="opus 5.5">Claude Opus 5.5</option>
       <option value="sol 6.1 pro">GPT-6.1 Sol Pro</option>
       <option value="glm 5.3 flash">GLM 5.3 Flash</option>
@@ -549,6 +554,7 @@ textarea:focus { border-color: var(--accent); }
           <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="pauseAgentTask()" id="btn-agent-pause">Pause</button>
           <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="resumeAgentTask()" id="btn-agent-resume">Resume</button>
           <button class="secondary" style="padding: 6px 8px; font-size: 12px; color: var(--error);" onclick="abortAgentTask()" id="btn-agent-abort">Abort</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="exportAgentTrace()" id="btn-agent-export">Export Trace</button>
         </div>
         <div style="background: #1f2937; border-radius: 4px; height: 6px; width: 100%; overflow: hidden; margin-top: 4px;">
           <div id="agent-progress-bar" style="background: var(--accent); width: 0%; height: 100%; transition: width 0.3s;"></div>
@@ -933,6 +939,10 @@ async function resumeAgentTask() {
   if (badge) { badge.innerText = 'RUNNING'; badge.style.background = 'var(--accent)'; }
 }
 
+function exportAgentTrace() {
+  window.open('/api/agent/export?download=true', '_blank');
+}
+
 async function abortAgentTask() {
   await fetch('/api/agent/abort', { method: 'POST' });
   const badge = document.getElementById('agent-status-badge');
@@ -1028,6 +1038,65 @@ function renderAgentStatus(st) {
 </body>
 </html>
 """
+
+
+FALLBACK_CHAINS: Dict[str, List[str]] = {
+    "sonnet 5.5": ["gemini 3.8", "gpt-6.1", "qwen"],
+    "opus 5.5": ["sonnet 5.5", "gpt-6.1", "gemini 3.8"],
+    "gpt-6.1": ["sonnet 5.5", "gemini 3.8", "qwen"],
+    "default": ["gemini 3.8", "free", "glm 5.3 flash"],
+}
+
+
+def resolve_and_complete_with_fallback(
+    model: str,
+    prompt: str,
+    fallbacks: Optional[List[str]] = None,
+    completer: Optional[Callable[[str, str], str]] = None,
+) -> Dict[str, Any]:
+    """
+    Resolve model alias and execute completion with fallback resilience under 429 rate limits.
+    """
+    from hydra_cli.config import MODEL_MAP
+    from hydra_cli import complete
+
+    completer_fn = completer or complete
+    chain = [model]
+    if fallbacks:
+        chain.extend(fallbacks)
+    else:
+        chain.extend(FALLBACK_CHAINS.get(model.lower(), FALLBACK_CHAINS["default"]))
+
+    attempts = []
+    last_err = None
+
+    for m in chain:
+        resolved_id = MODEL_MAP.get(m.lower(), m)
+        try:
+            ans = completer_fn(resolved_id, prompt)
+            return {
+                "isError": False,
+                "content": ans,
+                "model_requested": model,
+                "model_used": m,
+                "resolved_model_id": resolved_id,
+                "fallback_triggered": (m != model),
+                "attempts": attempts,
+            }
+        except Exception as exc:
+            err_str = str(exc)
+            attempts.append({"model": m, "error": err_str})
+            last_err = exc
+            is_rate_limit = "429" in err_str or "rate limit" in err_str.lower() or "quota" in err_str.lower()
+            if not is_rate_limit and len(attempts) > 1:
+                pass
+
+    return {
+        "isError": True,
+        "error": f"All model providers in fallback chain failed: {last_err}",
+        "model_requested": model,
+        "attempts": attempts,
+    }
 
 
 def create_desktop_app() -> Any:
@@ -1210,6 +1279,44 @@ def create_desktop_app() -> Any:
         from hydra_cli.agent_runner import get_agent_runner
         runner = get_agent_runner()
         return runner.abort()
+
+    @app.get("/api/agent/export")
+    @app.get("/api/agent/session/export")
+    @app.get("/api/session/export")
+    async def session_export(download: bool = False):
+        from hydra_cli.agent_runner import get_agent_runner
+        runner = get_agent_runner()
+        trace = runner.export_session_trace()
+        if download:
+            content = json.dumps(trace, indent=2)
+            filename = f"agent-session-trace-{int(time.time())}.json"
+            return Response(
+                content,
+                media_type="application/json",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        return JSONResponse(trace)
+
+    @app.post("/api/agent/session/replay")
+    @app.post("/api/session/replay")
+    async def session_replay(req: Request):
+        from hydra_cli.agent_runner import AutonomousAgentRunner, validate_session_trace
+        body = await req.json()
+        valid, err = validate_session_trace(body)
+        if not valid:
+            return JSONResponse({"isError": True, "error": err}, status_code=400)
+        reconstructed = AutonomousAgentRunner.reconstruct_from_trace(body)
+        return {"isError": False, "status": "reconstructed", "reconstructed_state": reconstructed.get_status()}
+
+    @app.post("/api/gateway/complete")
+    async def gateway_complete(req: Request):
+        body = await req.json()
+        model = body.get("model", "sonnet 5.5")
+        prompt = body.get("prompt", "")
+        fallbacks = body.get("fallbacks")
+        res = await asyncio.to_thread(resolve_and_complete_with_fallback, model, prompt, fallbacks)
+        return res
+
 
 
     @app.get("/v1/models")

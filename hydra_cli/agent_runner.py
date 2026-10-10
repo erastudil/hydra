@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import subprocess
+import uuid
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Sequence
@@ -48,11 +49,23 @@ class AutonomousAgentRunner:
     def __init__(
         self,
         computer_use: Optional[ComputerUseEngine] = None,
+        tools: Optional[Any] = None,
+        default_model: str = "sonnet 5.5",
         max_steps: int = 15,
         step_timeout_sec: float = 30.0,
         total_timeout_sec: float = 300.0,
     ) -> None:
         self.computer_use = computer_use or get_computer_use_engine()
+        if tools is not None:
+            self.tools = tools
+        else:
+            try:
+                from hydra_cli.native_tools import NativeToolRegistry
+                self.tools = NativeToolRegistry()
+            except Exception:
+                self.tools = None
+        self.default_model = default_model
+        self.current_model = default_model
         self.max_steps = max(1, int(max_steps))
         self.step_timeout_sec = float(step_timeout_sec)
         self.total_timeout_sec = float(total_timeout_sec)
@@ -216,7 +229,14 @@ class AutonomousAgentRunner:
             if self._abort_event.is_set():
                 return {"isError": True, "error": "Execution aborted by developer signal", "aborted": True}
 
-            result = self.computer_use.dispatch(action, **kwargs)
+            if self.tools and self.tools.has_tool(action):
+                raw = self.tools.dispatch(action, kwargs)
+                if isinstance(raw, dict):
+                    result = raw
+                else:
+                    result = {"isError": False, "output": raw}
+            else:
+                result = self.computer_use.dispatch(action, **kwargs)
         except Exception as exc:
             result = {"isError": True, "error": str(exc)}
 
@@ -637,6 +657,38 @@ class AutonomousAgentRunner:
             else:
                 return {"thought": "Screenshot recorded", "action": "finish", "params": {"summary": "Screen captured"}}
 
+        # Workspace context tools heuristic detection
+        if "read_file" in task_lower or "read file" in task_lower:
+            m = re.search(r'(?:read_file|read file)\s+([^\s]+)', task, re.IGNORECASE)
+            p = m.group(1) if m else "README.md"
+            if step_num == 1:
+                return {"thought": f"Read workspace file {p}", "action": "read_file", "params": {"path": p}}
+            return {"thought": f"File {p} read", "action": "finish", "params": {"summary": f"Read {p}"}}
+
+        if "write_file" in task_lower or "write file" in task_lower:
+            m = re.search(r'(?:write_file|write file)\s+([^\s]+)', task, re.IGNORECASE)
+            p = m.group(1) if m else "output.txt"
+            if step_num == 1:
+                return {"thought": f"Write to workspace file {p}", "action": "write_file", "params": {"path": p, "content": "hydra agent output"}}
+            return {"thought": f"File {p} written", "action": "finish", "params": {"summary": f"Wrote {p}"}}
+
+        if "list_dir" in task_lower or "list dir" in task_lower or "list files" in task_lower:
+            if step_num == 1:
+                return {"thought": "List workspace files", "action": "list_dir", "params": {"path": "."}}
+            return {"thought": "Directory listing complete", "action": "finish", "params": {"summary": "Listed files"}}
+
+        if "search_files" in task_lower or "find_files" in task_lower:
+            if step_num == 1:
+                return {"thought": "Search workspace files", "action": "search_files", "params": {"pattern": "*"}}
+            return {"thought": "File search complete", "action": "finish", "params": {"summary": "Searched files"}}
+
+        if "run_command" in task_lower or "run command" in task_lower or "exec" in task_lower:
+            m = re.search(r'(?:run_command|run command|exec)\s+(.+)', task, re.IGNORECASE)
+            cmd = m.group(1) if m else "echo test"
+            if step_num == 1:
+                return {"thought": f"Execute sandboxed command: {cmd}", "action": "run_command", "params": {"command": cmd}}
+            return {"thought": "Command execution complete", "action": "finish", "params": {"summary": "Command executed"}}
+
         # Default completion
         if step_num == 1:
             return {"thought": f"Inspect active environment for task: {task}", "action": "window_action", "params": {"sub_action": "active"}}
@@ -698,6 +750,92 @@ class AutonomousAgentRunner:
             self._start_time = None
             self._stop_time = None
             self._last_highlights = []
+
+
+
+    def summon_with_fallback(
+        self,
+        model: Optional[str] = None,
+        prompt: str = "",
+        system_prompt: Optional[str] = None,
+        fallbacks: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Summon LLM model with automatic fallback routing across providers on 429/disconnect.
+        """
+        from hydra_cli.desktop import resolve_and_complete_with_fallback
+        target_model = model or self.current_model or self.default_model
+        return resolve_and_complete_with_fallback(
+            model=target_model,
+            prompt=prompt,
+            fallbacks=fallbacks,
+        )
+
+    def export_session_trace(self) -> Dict[str, Any]:
+        """
+        Export complete execution session trace in structured JSON format.
+        Contains schema_version, task, timestamps, step count, and full history records.
+        """
+        with self._lock:
+            trace_id = f"trace-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+            duration_ms = 0.0
+            if self._start_time and self._stop_time:
+                duration_ms = (self._stop_time - self._start_time) * 1000.0
+            elif self._start_time:
+                duration_ms = (time.time() - self._start_time) * 1000.0
+
+            return {
+                "schema_version": "1.0.0",
+                "session_id": trace_id,
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "task": self.current_task or "",
+                "state": self.state,
+                "step_count": self.current_step,
+                "max_steps": self.max_steps,
+                "duration_ms": round(duration_ms, 2),
+                "start_time": self._start_time,
+                "stop_time": self._stop_time,
+                "is_aborted": self._abort_event.is_set(),
+                "history": list(self.history),
+                "snapshots": list(self._last_highlights),
+            }
+
+    @classmethod
+    def reconstruct_from_trace(cls, trace_data: Dict[str, Any]) -> "AutonomousAgentRunner":
+        """
+        Reconstruct runner state faithfully from serialized JSON trace.
+        Validates schema version and recreates execution history snapshot.
+        """
+        valid, err = validate_session_trace(trace_data)
+        if not valid:
+            raise ValueError(f"Invalid trace schema: {err}")
+
+        runner = cls(max_steps=trace_data.get("max_steps", 15))
+        runner.current_task = trace_data.get("task", "")
+        runner.state = trace_data.get("state", AgentState.IDLE)
+        runner.current_step = trace_data.get("step_count", 0)
+        runner.history = list(trace_data.get("history", []))
+        runner._start_time = trace_data.get("start_time")
+        runner._stop_time = trace_data.get("stop_time")
+        if trace_data.get("is_aborted", False):
+            runner._abort_event.set()
+        return runner
+
+
+
+def validate_session_trace(trace: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    """Validate JSON trace schema against v1.0.0 specification."""
+    if not isinstance(trace, dict):
+        return False, "Trace must be a dictionary"
+    required_keys = ["schema_version", "session_id", "task", "state", "step_count", "history"]
+    for k in required_keys:
+        if k not in trace:
+            return False, f"Missing required field: {k}"
+    if trace.get("schema_version") != "1.0.0":
+        return False, f"Unsupported schema version: {trace.get('schema_version')}"
+    if not isinstance(trace.get("history"), list):
+        return False, "'history' field must be a list"
+    return True, None
 
 
 AutonomousComputerUseAgentRunner = AutonomousAgentRunner
