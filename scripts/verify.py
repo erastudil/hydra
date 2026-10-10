@@ -5595,6 +5595,216 @@ def mcp_result_sanitizer_contracts():
 
 
 @check
+def mcp_lifecycle_fsm_contracts():
+    from hydra_cli.mcp import (
+        IllegalStateTransitionError,
+        McpLifecycleFSM,
+        McpLifecycleTransition,
+        McpServerState,
+        McpNamespaceRouter,
+        create_lifecycle_fsm,
+        get_default_lifecycle_fsm,
+        reset_lifecycle_fsm,
+        reset_namespace_router,
+    )
+
+    reset_lifecycle_fsm()
+    reset_namespace_router()
+
+    # 1. State enum and string equivalence
+    assert McpServerState.UNINITIALIZED == "uninitialized"
+    assert McpServerState.STARTING == "starting"
+    assert McpServerState.INITIALIZING == "initializing"
+    assert McpServerState.READY == "ready"
+    assert McpServerState.STOPPING == "stopping"
+    assert McpServerState.STOPPED == "stopped"
+    assert McpServerState.FAILED == "failed"
+    assert McpServerState.RESTARTING == "restarting"
+
+    # 2. Deterministic transitions
+    fsm = create_lifecycle_fsm(name="worker_alpha")
+    assert fsm.state == McpServerState.UNINITIALIZED
+    assert not fsm.is_ready
+    assert not fsm.is_active
+    assert not fsm.is_terminal
+
+    assert fsm.can_transition(McpServerState.STARTING)
+    assert not fsm.can_transition(McpServerState.READY)
+
+    fsm.transition_to(McpServerState.STARTING, reason="process fork")
+    assert fsm.state == McpServerState.STARTING
+    assert fsm.is_active
+
+    fsm.transition_to(McpServerState.INITIALIZING, reason="rpc handshake")
+    assert fsm.state == McpServerState.INITIALIZING
+    assert fsm.is_active
+
+    fsm.transition_to(McpServerState.READY, reason="handshake ack")
+    assert fsm.state == McpServerState.READY
+    assert fsm.is_ready
+    assert fsm.is_running
+    assert fsm.is_active
+
+    fsm.transition_to(McpServerState.STOPPING, reason="drain queue")
+    assert fsm.state == McpServerState.STOPPING
+    assert not fsm.is_ready
+
+    fsm.transition_to(McpServerState.STOPPED, reason="process exit")
+    assert fsm.state == McpServerState.STOPPED
+    assert fsm.is_terminal
+
+    # Restart cycle from stopped
+    fsm.transition_to(McpServerState.STARTING, reason="respawn")
+    fsm.transition_to(McpServerState.READY, reason="fast recovery")
+    assert fsm.state == McpServerState.READY
+
+    # Failure and restart cycle
+    fsm.transition_to(McpServerState.FAILED, reason="pipe broke")
+    assert fsm.state == McpServerState.FAILED
+    assert fsm.is_failed
+    assert fsm.is_terminal
+
+    fsm.transition_to(McpServerState.RESTARTING, reason="backoff restart")
+    assert fsm.state == McpServerState.RESTARTING
+    fsm.transition_to(McpServerState.READY, reason="reconnected")
+    assert fsm.state == McpServerState.READY
+
+    # 3. Illegal state transition rejection
+    try:
+        fsm.transition_to(McpServerState.UNINITIALIZED)
+        assert False, "Illegal transition should fail"
+    except IllegalStateTransitionError as exc:
+        assert "compliance : not possible" in str(exc)
+        assert "worker_alpha" in str(exc)
+
+    try:
+        fsm.transition_to(McpServerState.STARTING)
+        assert False, "Direct READY to STARTING transition should fail"
+    except IllegalStateTransitionError as exc:
+        assert "compliance : not possible" in str(exc)
+
+    # Self-transition rejection when allow_noop is False
+    try:
+        fsm.transition_to(McpServerState.READY, allow_noop=False)
+        assert False, "Self-transition without allow_noop should fail"
+    except IllegalStateTransitionError as exc:
+        assert "compliance : not possible" in str(exc)
+
+    # Self-transition success when allow_noop is True
+    assert fsm.transition_to(McpServerState.READY, allow_noop=True) is True
+
+    # 4. Emergency force state
+    fsm.force_state(McpServerState.FAILED, reason="sigkill")
+    assert fsm.state == McpServerState.FAILED
+    history = fsm.get_history()
+    assert history[-1]["metadata"].get("forced") is True
+    assert history[-1]["reason"] == "sigkill"
+
+    # 5. Event hooks
+    fsm2 = create_lifecycle_fsm(name="worker_beta")
+    entered_ready = []
+    exited_starting = []
+    all_transitions = []
+
+    fsm2.on_enter(McpServerState.READY, lambda tr: entered_ready.append(tr.target.value))
+    fsm2.on_exit(McpServerState.STARTING, lambda tr: exited_starting.append(tr.source.value))
+    fsm2.on_transition(lambda tr: all_transitions.append((tr.source.value, tr.target.value)))
+
+    fsm2.transition_to(McpServerState.STARTING)
+    fsm2.transition_to(McpServerState.INITIALIZING)
+    fsm2.transition_to(McpServerState.READY)
+
+    assert len(exited_starting) == 1
+    assert exited_starting[0] == "starting"
+    assert len(entered_ready) == 1
+    assert entered_ready[0] == "ready"
+    assert len(all_transitions) == 3
+    assert all_transitions[-1] == ("initializing", "ready")
+
+    # 6. History ledger
+    hist = fsm2.get_history()
+    assert len(hist) == 3
+    assert hist[0]["source"] == "uninitialized"
+    assert hist[0]["target"] == "starting"
+    assert hist[1]["source"] == "starting"
+    assert hist[1]["target"] == "initializing"
+    assert hist[2]["source"] == "initializing"
+    assert hist[2]["target"] == "ready"
+
+    sliced = fsm2.get_history(limit=2)
+    assert len(sliced) == 2
+    assert sliced[0]["target"] == "initializing"
+    assert sliced[1]["target"] == "ready"
+
+    # 7. Telemetry metrics and reset
+    met = fsm.get_metrics()
+    assert met["name"] == "worker_alpha"
+    assert met["current_state"] == "failed"
+    assert met["transitions_count"] >= 8
+    assert met["failed_transitions_count"] >= 3
+    assert met["time_in_current_state_seconds"] >= 0.0
+
+    fsm.reset_metrics()
+    clean_met = fsm.get_metrics()
+    assert clean_met["transitions_count"] == 0
+    assert clean_met["failed_transitions_count"] == 0
+    assert clean_met["history_length"] == 0
+
+    fsm.reset()
+    assert fsm.state == McpServerState.UNINITIALIZED
+
+    # 8. Context manager support
+    with McpLifecycleFSM(name="ctx_clean") as cm:
+        assert cm.state == McpServerState.STARTING
+        cm.transition_to(McpServerState.READY)
+        assert cm.is_ready
+    assert cm.state == McpServerState.STOPPED
+
+    try:
+        with McpLifecycleFSM(name="ctx_err") as cm_err:
+            assert cm_err.state == McpServerState.STARTING
+            raise RuntimeError("simulated pipeline error")
+    except RuntimeError:
+        pass
+    assert cm_err.state == McpServerState.FAILED
+
+    # 9. Client binding and Router integration
+    class MockClient:
+        def __init__(self, name):
+            self.name = name
+
+    cli1 = MockClient("agent_one")
+    fsm_cli = create_lifecycle_fsm(name="agent_one")
+    fsm_cli.bind_client(cli1)
+    assert hasattr(cli1, "lifecycle")
+    assert cli1.lifecycle.state == McpServerState.UNINITIALIZED
+
+    router = McpNamespaceRouter()
+    router.register_client("agent_one", cli1)
+    assert router.get_client_lifecycle_state("agent_one") == "uninitialized"
+
+    fsm_cli.transition_to(McpServerState.STARTING)
+    fsm_cli.transition_to(McpServerState.READY)
+    assert router.get_client_lifecycle_state("agent_one") == "ready"
+
+    states_map = router.list_lifecycle_states()
+    assert states_map.get("agent_one") == "ready"
+
+    # 10. Default singleton and top-level helpers
+    reset_lifecycle_fsm()
+    default_fsm = get_default_lifecycle_fsm()
+    assert default_fsm is not None
+    assert default_fsm.state == McpServerState.UNINITIALIZED
+    default_fsm.transition_to(McpServerState.STARTING)
+    assert default_fsm.state == McpServerState.STARTING
+    reset_lifecycle_fsm()
+    assert default_fsm.state == McpServerState.UNINITIALIZED
+
+    reset_lifecycle_fsm()
+    reset_namespace_router()
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

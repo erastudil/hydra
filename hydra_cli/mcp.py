@@ -4,6 +4,7 @@ Manages JSON-RPC 2.0 stdio subprocess connection with thread-safe RPC lock
 and background daemon thread for stderr to prevent pipe deadlocks.
 """
 
+import enum
 import fnmatch
 import hashlib
 import json
@@ -246,6 +247,23 @@ class McpNamespaceRouter:
             visited.add(current)
             current = self._aliases[current]
         return current
+
+    def get_client_lifecycle_state(self, namespace: str) -> Optional[str]:
+        """Return lifecycle state string for named client namespace."""
+        client = self.get_client(namespace)
+        if client and hasattr(client, "lifecycle"):
+            return client.lifecycle.state.value
+        return None
+
+    def list_lifecycle_states(self) -> Dict[str, str]:
+        """Return dictionary mapping client namespaces to their current lifecycle state string."""
+        res: Dict[str, str] = {}
+        for ns, c in self._namespaces.items():
+            if hasattr(c, "lifecycle"):
+                res[ns] = c.lifecycle.state.value
+            else:
+                res[ns] = "unknown"
+        return res
 
     def get_client(self, namespace: str) -> Optional[Any]:
         """Retrieve client associated with namespace or alias."""
@@ -1296,6 +1314,457 @@ def reset_manifest_cache() -> None:
     _DEFAULT_MANIFEST_CACHE.clear()
 
 
+class McpServerState(str, enum.Enum):
+    """
+    Formal enumeration of MCP server lifecycle states.
+    Permits direct string equivalence and deterministic serialization.
+    """
+    UNINITIALIZED = "uninitialized"
+    STARTING = "starting"
+    INITIALIZING = "initializing"
+    READY = "ready"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+    FAILED = "failed"
+    RESTARTING = "restarting"
+
+
+VALID_TRANSITIONS: Dict[McpServerState, Set[McpServerState]] = {
+    McpServerState.UNINITIALIZED: {
+        McpServerState.STARTING,
+        McpServerState.STOPPED,
+    },
+    McpServerState.STARTING: {
+        McpServerState.INITIALIZING,
+        McpServerState.READY,
+        McpServerState.FAILED,
+        McpServerState.STOPPING,
+        McpServerState.STOPPED,
+    },
+    McpServerState.INITIALIZING: {
+        McpServerState.READY,
+        McpServerState.FAILED,
+        McpServerState.STOPPING,
+        McpServerState.STOPPED,
+    },
+    McpServerState.READY: {
+        McpServerState.STOPPING,
+        McpServerState.STOPPED,
+        McpServerState.FAILED,
+        McpServerState.RESTARTING,
+    },
+    McpServerState.STOPPING: {
+        McpServerState.STOPPED,
+        McpServerState.FAILED,
+    },
+    McpServerState.STOPPED: {
+        McpServerState.STARTING,
+        McpServerState.UNINITIALIZED,
+    },
+    McpServerState.FAILED: {
+        McpServerState.RESTARTING,
+        McpServerState.STARTING,
+        McpServerState.STOPPING,
+        McpServerState.STOPPED,
+        McpServerState.UNINITIALIZED,
+    },
+    McpServerState.RESTARTING: {
+        McpServerState.STARTING,
+        McpServerState.INITIALIZING,
+        McpServerState.READY,
+        McpServerState.FAILED,
+        McpServerState.STOPPING,
+        McpServerState.STOPPED,
+    },
+}
+
+
+class IllegalStateTransitionError(ValueError):
+    """
+    Raised when an illegal MCP lifecycle state transition requested.
+    Asserts compliance : not possible in error details.
+    """
+    pass
+
+
+def _coerce_mcp_state(val: Union[McpServerState, str]) -> McpServerState:
+    """Convert input string or state enum to canonical McpServerState."""
+    if isinstance(val, McpServerState):
+        return val
+    try:
+        return McpServerState(str(val).strip().lower())
+    except (ValueError, KeyError):
+        valid = ", ".join(s.value for s in McpServerState)
+        raise ValueError(f"Unknown MCP server state '{val}'. Valid states: {valid}")
+
+
+@dataclass
+class McpLifecycleTransition:
+    """
+    Immutable lifecycle transition event record.
+    """
+    source: McpServerState
+    target: McpServerState
+    timestamp: float = field(default_factory=time.time)
+    reason: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize transition record to standard dictionary format."""
+        return {
+            "source": self.source.value,
+            "target": self.target.value,
+            "timestamp": self.timestamp,
+            "reason": self.reason,
+            "metadata": dict(self.metadata),
+        }
+
+
+class McpLifecycleFSM:
+    """
+    Finite state machine governing Model Context Protocol client lifecycle.
+    Maintains deterministic transition tables, transition ledger, and event hooks.
+    """
+
+    def __init__(
+        self,
+        name: Optional[str] = None,
+        initial_state: Union[McpServerState, str] = McpServerState.UNINITIALIZED,
+        max_history: int = 500,
+    ) -> None:
+        self.name: str = str(name or "default").strip()
+        self._state: McpServerState = _coerce_mcp_state(initial_state)
+        self._max_history: int = max(10, int(max_history))
+        self._lock = threading.RLock()
+
+        self._history: List[McpLifecycleTransition] = []
+        self._enter_hooks: Dict[McpServerState, List[Callable[[McpLifecycleTransition], None]]] = {
+            s: [] for s in McpServerState
+        }
+        self._exit_hooks: Dict[McpServerState, List[Callable[[McpLifecycleTransition], None]]] = {
+            s: [] for s in McpServerState
+        }
+        self._transition_hooks: List[Callable[[McpLifecycleTransition], None]] = []
+
+        self._transitions_count: int = 0
+        self._failed_transitions_count: int = 0
+        self._state_entry_time: float = time.time()
+        self._cumulative_ready_time: float = 0.0
+        self._last_ready_enter: Optional[float] = None
+        self._bound_client: Any = None
+
+    @property
+    def state(self) -> McpServerState:
+        """Current lifecycle state."""
+        with self._lock:
+            return self._state
+
+    @property
+    def is_ready(self) -> bool:
+        """Return true when current state equals READY."""
+        with self._lock:
+            return self._state == McpServerState.READY
+
+    @property
+    def is_running(self) -> bool:
+        """Return true when current state equals READY."""
+        with self._lock:
+            return self._state == McpServerState.READY
+
+    @property
+    def is_active(self) -> bool:
+        """Return true when current state represents active server."""
+        with self._lock:
+            return self._state in (
+                McpServerState.STARTING,
+                McpServerState.INITIALIZING,
+                McpServerState.READY,
+                McpServerState.RESTARTING,
+            )
+
+    @property
+    def is_terminal(self) -> bool:
+        """Return true when current state represents terminal state."""
+        with self._lock:
+            return self._state in (McpServerState.STOPPED, McpServerState.FAILED)
+
+    @property
+    def is_failed(self) -> bool:
+        """Return true when current state equals FAILED."""
+        with self._lock:
+            return self._state == McpServerState.FAILED
+
+    def can_transition(
+        self,
+        target_state: Union[McpServerState, str],
+        allow_noop: bool = False,
+    ) -> bool:
+        """Evaluate whether transition to target state permitted from current state."""
+        target = _coerce_mcp_state(target_state)
+        with self._lock:
+            if target == self._state:
+                return bool(allow_noop)
+            allowed = VALID_TRANSITIONS.get(self._state, set())
+            return target in allowed
+
+    def transition_to(
+        self,
+        target_state: Union[McpServerState, str],
+        reason: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        allow_noop: bool = False,
+    ) -> bool:
+        """Execute deterministic state transition with hook dispatch and ledger recording."""
+        target = _coerce_mcp_state(target_state)
+        now = time.time()
+
+        with self._lock:
+            source = self._state
+            if source == target:
+                if allow_noop:
+                    return True
+                self._failed_transitions_count += 1
+                raise IllegalStateTransitionError(
+                    f"compliance : not possible. Invalid state transition from {source.value} to {target.value} for server '{self.name}'. reason: self-transition disallowed."
+                )
+
+            allowed = VALID_TRANSITIONS.get(source, set())
+            if target not in allowed:
+                self._failed_transitions_count += 1
+                detail = f"compliance : not possible. Invalid state transition from {source.value} to {target.value} for server '{self.name}'."
+                if reason:
+                    detail += f" reason: {reason}"
+                raise IllegalStateTransitionError(detail)
+
+            trans = McpLifecycleTransition(
+                source=source,
+                target=target,
+                timestamp=now,
+                reason=reason,
+                metadata=dict(metadata or {}),
+            )
+
+            for cb in self._exit_hooks.get(source, []):
+                self._safe_invoke_callback(cb, trans)
+
+            if source == McpServerState.READY and self._last_ready_enter is not None:
+                self._cumulative_ready_time += max(0.0, now - self._last_ready_enter)
+                self._last_ready_enter = None
+            if target == McpServerState.READY:
+                self._last_ready_enter = now
+
+            self._state = target
+            self._state_entry_time = now
+            self._transitions_count += 1
+
+            self._history.append(trans)
+            if len(self._history) > self._max_history:
+                self._history = self._history[-self._max_history:]
+
+            for cb in self._enter_hooks.get(target, []):
+                self._safe_invoke_callback(cb, trans)
+
+            for cb in self._transition_hooks:
+                self._safe_invoke_callback(cb, trans)
+
+            return True
+
+    def force_state(
+        self,
+        target_state: Union[McpServerState, str],
+        reason: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Forcibly set state overriding transition table for emergency recovery."""
+        target = _coerce_mcp_state(target_state)
+        now = time.time()
+        meta = dict(metadata or {})
+        meta["forced"] = True
+
+        with self._lock:
+            source = self._state
+            trans = McpLifecycleTransition(
+                source=source,
+                target=target,
+                timestamp=now,
+                reason=reason or "emergency force state",
+                metadata=meta,
+            )
+
+            for cb in self._exit_hooks.get(source, []):
+                self._safe_invoke_callback(cb, trans)
+
+            if source == McpServerState.READY and self._last_ready_enter is not None:
+                self._cumulative_ready_time += max(0.0, now - self._last_ready_enter)
+                self._last_ready_enter = None
+            if target == McpServerState.READY:
+                self._last_ready_enter = now
+
+            self._state = target
+            self._state_entry_time = now
+            self._transitions_count += 1
+
+            self._history.append(trans)
+            if len(self._history) > self._max_history:
+                self._history = self._history[-self._max_history:]
+
+            for cb in self._enter_hooks.get(target, []):
+                self._safe_invoke_callback(cb, trans)
+
+            for cb in self._transition_hooks:
+                self._safe_invoke_callback(cb, trans)
+
+    def on_enter(
+        self,
+        state: Union[McpServerState, str],
+        callback: Callable[..., Any],
+    ) -> None:
+        """Register callback executed upon entering designated target state."""
+        st = _coerce_mcp_state(state)
+        with self._lock:
+            self._enter_hooks[st].append(callback)
+
+    def on_exit(
+        self,
+        state: Union[McpServerState, str],
+        callback: Callable[..., Any],
+    ) -> None:
+        """Register callback executed upon exiting designated state."""
+        st = _coerce_mcp_state(state)
+        with self._lock:
+            self._exit_hooks[st].append(callback)
+
+    def on_transition(self, callback: Callable[..., Any]) -> None:
+        """Register callback executed on all valid state transitions."""
+        with self._lock:
+            self._transition_hooks.append(callback)
+
+    def _safe_invoke_callback(
+        self,
+        cb: Callable[..., Any],
+        transition: McpLifecycleTransition,
+    ) -> None:
+        """Safely invoke callback catching exceptions to prevent lifecycle pipeline aborts."""
+        try:
+            cb(transition)
+        except TypeError:
+            try:
+                cb()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def get_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Return list of recorded transition events in chronological order."""
+        with self._lock:
+            items = [t.to_dict() for t in self._history]
+            if limit is not None and limit > 0:
+                return items[-limit:]
+            return items
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return lifecycle telemetry counters and transition statistics."""
+        with self._lock:
+            now = time.time()
+            time_in_state = max(0.0, now - self._state_entry_time)
+            ready_time = self._cumulative_ready_time
+            if self._state == McpServerState.READY and self._last_ready_enter is not None:
+                ready_time += max(0.0, now - self._last_ready_enter)
+
+            return {
+                "name": self.name,
+                "current_state": self._state.value,
+                "transitions_count": self._transitions_count,
+                "failed_transitions_count": self._failed_transitions_count,
+                "history_length": len(self._history),
+                "state_entry_time": self._state_entry_time,
+                "time_in_current_state_seconds": time_in_state,
+                "ready_duration_seconds": ready_time,
+                "is_ready": self._state == McpServerState.READY,
+                "is_active": self.is_active,
+                "is_terminal": self.is_terminal,
+            }
+
+    def reset_metrics(self) -> None:
+        """Reset transition counters, active timers, and clear history ledger."""
+        with self._lock:
+            self._transitions_count = 0
+            self._failed_transitions_count = 0
+            self._cumulative_ready_time = 0.0
+            self._last_ready_enter = time.time() if self._state == McpServerState.READY else None
+            self._state_entry_time = time.time()
+            self._history.clear()
+
+    def reset(
+        self,
+        initial_state: Union[McpServerState, str] = McpServerState.UNINITIALIZED,
+    ) -> None:
+        """Reset state machine to initial state and clear hooks and history."""
+        with self._lock:
+            self._state = _coerce_mcp_state(initial_state)
+            self._state_entry_time = time.time()
+            self._last_ready_enter = None
+            self._cumulative_ready_time = 0.0
+            self._transitions_count = 0
+            self._failed_transitions_count = 0
+            self._history.clear()
+            self._enter_hooks = {s: [] for s in McpServerState}
+            self._exit_hooks = {s: [] for s in McpServerState}
+            self._transition_hooks.clear()
+
+    def bind_client(self, client: Any) -> None:
+        """Bind state machine to target MCP client instance."""
+        with self._lock:
+            self._bound_client = client
+            try:
+                setattr(client, "lifecycle", self)
+                setattr(client, "_lifecycle_fsm", self)
+            except Exception:
+                pass
+
+    def __enter__(self) -> "McpLifecycleFSM":
+        """Enter context manager transitioning state toward starting."""
+        if self.can_transition(McpServerState.STARTING):
+            self.transition_to(McpServerState.STARTING, reason="context manager entered")
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        """Exit context manager transitioning state toward stopped."""
+        if exc_type is not None:
+            if self.can_transition(McpServerState.FAILED):
+                self.transition_to(McpServerState.FAILED, reason=str(exc_val))
+            elif self.can_transition(McpServerState.STOPPED):
+                self.transition_to(McpServerState.STOPPED, reason="context manager error")
+        else:
+            if self.can_transition(McpServerState.STOPPING):
+                self.transition_to(McpServerState.STOPPING, reason="context manager exit")
+            if self.can_transition(McpServerState.STOPPED):
+                self.transition_to(McpServerState.STOPPED, reason="context manager completed")
+
+
+_DEFAULT_LIFECYCLE_FSM = McpLifecycleFSM(name="default_singleton")
+
+
+def get_default_lifecycle_fsm() -> McpLifecycleFSM:
+    """Return default singleton MCP lifecycle state machine."""
+    return _DEFAULT_LIFECYCLE_FSM
+
+
+def reset_lifecycle_fsm() -> None:
+    """Reset global MCP lifecycle state machine."""
+    _DEFAULT_LIFECYCLE_FSM.reset()
+
+
+def create_lifecycle_fsm(
+    name: Optional[str] = None,
+    initial_state: Union[McpServerState, str] = McpServerState.UNINITIALIZED,
+    max_history: int = 500,
+) -> McpLifecycleFSM:
+    """Instantiate a new dedicated MCP lifecycle finite state machine."""
+    return McpLifecycleFSM(name=name, initial_state=initial_state, max_history=max_history)
+
+
 class McpSubprocessClient:
     """
     MCP stdio subprocess client implementing JSON-RPC 2.0.
@@ -1349,6 +1818,13 @@ class McpSubprocessClient:
         self.server_capabilities: Dict[str, Any] = {}
         self._heartbeat_monitor: Optional[McpHeartbeatMonitor] = None
         self._timeout_guard: McpTimeoutGuard = McpTimeoutGuard(default_timeout=self.timeout)
+        self.lifecycle: McpLifecycleFSM = create_lifecycle_fsm(name=self.namespace or self.command or "subprocess")
+        self.lifecycle.bind_client(self)
+
+    @property
+    def lifecycle_state(self) -> McpServerState:
+        """Current lifecycle state."""
+        return self.lifecycle.state
 
     @property
     def is_spawned(self) -> bool:
@@ -1416,6 +1892,8 @@ class McpSubprocessClient:
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 return
+            if self.lifecycle.can_transition(McpServerState.STARTING):
+                self.lifecycle.transition_to(McpServerState.STARTING, reason="starting subprocess")
             self._closed = False
             use_shell = should_use_shell(self.command)
             cmd = [self.command] + self.args
@@ -1438,6 +1916,8 @@ class McpSubprocessClient:
 
             self.spawn_count += 1
             self.last_spawn_time = time.time()
+            if self.lifecycle.can_transition(McpServerState.INITIALIZING):
+                self.lifecycle.transition_to(McpServerState.INITIALIZING, reason="initializing mcp handshake")
 
             self._stderr_thread = threading.Thread(target=self._drain_stderr, daemon=True)
             self._stderr_thread.start()
@@ -1446,7 +1926,11 @@ class McpSubprocessClient:
         # Handshake outside lock so _send_rpc can acquire lock
         try:
             self._initialize()
-        except Exception:
+            if self.lifecycle.can_transition(McpServerState.READY):
+                self.lifecycle.transition_to(McpServerState.READY, reason="handshake complete")
+        except Exception as exc:
+            if self.lifecycle.can_transition(McpServerState.FAILED):
+                self.lifecycle.transition_to(McpServerState.FAILED, reason=f"handshake failed: {exc}")
             self.close()
             raise
 
@@ -1715,6 +2199,8 @@ class McpSubprocessClient:
             if self._closed:
                 return
             self._closed = True
+            if self.lifecycle.can_transition(McpServerState.STOPPING):
+                self.lifecycle.transition_to(McpServerState.STOPPING, reason="close initiated")
             if self._heartbeat_monitor:
                 try:
                     self._heartbeat_monitor.stop()
@@ -1800,6 +2286,13 @@ class McpLazyClient:
         self.spawn_count: int = 0
         self.last_spawn_time: Optional[float] = None
         self.total_calls: int = 0
+        self.lifecycle: McpLifecycleFSM = create_lifecycle_fsm(name=self.namespace or "mcp_lazy_client")
+        self.lifecycle.bind_client(self)
+
+    @property
+    def lifecycle_state(self) -> McpServerState:
+        """Current lifecycle state."""
+        return self.lifecycle.state
 
     @property
     def is_spawned(self) -> bool:
@@ -1923,6 +2416,8 @@ class McpLazyClient:
     def close(self) -> None:
         """Close and shutdown underlying client process."""
         with self._lock:
+            if self.lifecycle.can_transition(McpServerState.STOPPING):
+                self.lifecycle.transition_to(McpServerState.STOPPING, reason="lazy client close initiated")
             if self._client is not None:
                 try:
                     if hasattr(self._client, "close"):
@@ -1930,6 +2425,8 @@ class McpLazyClient:
                 except Exception:
                     pass
                 self._client = None
+            if self.lifecycle.can_transition(McpServerState.STOPPED):
+                self.lifecycle.transition_to(McpServerState.STOPPED, reason="lazy client closed")
 
     def get_metrics(self) -> Dict[str, Any]:
         """Return lazy spawning telemetry and lifecycle metrics."""
