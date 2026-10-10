@@ -10031,11 +10031,37 @@ def desktop_model_evaluator_and_command_registry_contracts():
 
 
 @check
+def desktop_audio_transcriber_and_notification_hub_contracts():
+    from desktop.audio_transcriber import AudioTranscriber, AudioBuffer, PTTState, pcm_to_wav
+    from desktop.notification_hub import NotificationHub, NotificationPriority
+
+    buf = AudioBuffer(sample_rate=16000)
+    buf.write(b"\x00" * 3200)
+    assert buf.total_bytes == 3200
+    wav = buf.get_wav_bytes()
+    assert wav.startswith(b"RIFF")
+
+    transcriber = AudioTranscriber(backend="mock")
+    transcriber.start_listening()
+    assert transcriber.state == PTTState.LISTENING
+    transcriber.feed_audio(b"\x00" * 1600)
+    res = transcriber.stop_listening()
+    assert res.text == "hydra voice command executed"
+
+    hub = NotificationHub()
+    notif = hub.publish("System Alert", "Worker healthy", priority=NotificationPriority.HIGH)
+    assert hub.total_notifications == 1
+    assert hub.unread_count == 1
+    popped = hub.pop_highest_priority()
+    assert popped.notification_id == notif.notification_id
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed
