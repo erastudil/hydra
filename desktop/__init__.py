@@ -74,6 +74,24 @@ from desktop.theme_manager import (
     reset_theme_manager,
 )
 
+from desktop.clipboard_manager import (
+    SmartClipboardManager,
+    ClipboardItem,
+    ClipboardContentType,
+    redact_sensitive_credentials,
+    normalize_clipboard_tokens,
+    parse_png_dimensions,
+    get_clipboard_manager,
+    reset_clipboard_manager,
+)
+from desktop.telemetry_gate import (
+    SovereignTelemetryGate,
+    LocalMetricRecord,
+    is_telemetry_endpoint,
+    get_telemetry_gate,
+    reset_telemetry_gate,
+)
+
 __all__ = [
     "create_desktop_app",
     "DesktopServer",
@@ -122,4 +140,17 @@ __all__ = [
     "check_wcag_compliance",
     "get_theme_manager",
     "reset_theme_manager",
+    "SmartClipboardManager",
+    "ClipboardItem",
+    "ClipboardContentType",
+    "redact_sensitive_credentials",
+    "normalize_clipboard_tokens",
+    "parse_png_dimensions",
+    "get_clipboard_manager",
+    "reset_clipboard_manager",
+    "SovereignTelemetryGate",
+    "LocalMetricRecord",
+    "is_telemetry_endpoint",
+    "get_telemetry_gate",
+    "reset_telemetry_gate",
 ]

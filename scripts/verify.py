@@ -10100,11 +10100,53 @@ def desktop_extension_system_and_theme_manager_contracts():
 
 
 @check
+def desktop_clipboard_manager_and_telemetry_gate_contracts():
+    from desktop.clipboard_manager import (
+        SmartClipboardManager,
+        ClipboardContentType,
+        redact_sensitive_credentials,
+        normalize_clipboard_tokens,
+        parse_png_dimensions,
+    )
+    from desktop.telemetry_gate import (
+        SovereignTelemetryGate,
+        is_telemetry_endpoint,
+    )
+
+    # Clipboard manager contracts
+    text = "Key: sk-ant-api03-abcdef12345678901234567890\r\n"
+    clean = normalize_clipboard_tokens(text)
+    assert "\r" not in clean
+    redacted, count = redact_sensitive_credentials(clean)
+    assert count == 1
+    assert "[REDACTED_ANTHROPIC_KEY]" in redacted
+
+    cm = SmartClipboardManager()
+    item = cm.copy_text("test sk-live1234567890abcdef1234567890")
+    assert item.content_type == ClipboardContentType.TEXT
+    assert item.has_credentials_redacted is True
+    assert "[REDACTED_API_KEY]" in item.clean_text
+
+    # Telemetry gate contracts
+    blocked, reason = is_telemetry_endpoint("https://www.google-analytics.com/collect")
+    assert blocked is True
+    allowed, _ = is_telemetry_endpoint("https://api.openai.com/v1/chat")
+    assert allowed is False
+
+    gate = SovereignTelemetryGate(strict_mode=True)
+    gate.record_local_event("heartbeat", category="system")
+    assert gate.total_local_events == 1
+    summary = gate.get_summary()
+    assert summary["fence_status"] == "ENFORCING"
+    assert summary["event_counters"]["heartbeat"] == 1
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed
