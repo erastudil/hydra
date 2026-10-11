@@ -21,7 +21,7 @@ def _section(text: str) -> QLabel:
     return label
 
 
-MODE_LABELS = {"recall": "Dynamic threading", "compact": "Compaction"}
+MODE_LABELS = {"recall": "Dynamic threading", "compact": "Compaction", "sliding": "Sliding window"}
 
 
 class Sidebar(QWidget):
@@ -116,10 +116,8 @@ class Composer(QWidget):
         self.model.setMinimumWidth(180)
         row.addWidget(self.model)
         self.mode = QComboBox()
-        known = {name for name, _ in CONTEXT_MODES}
-        for name in ("recall", "compact"):
-            if name in known:
-                self.mode.addItem(MODE_LABELS[name], name)
+        for name, _note in CONTEXT_MODES:
+            self.mode.addItem(MODE_LABELS[name], name)
         row.addWidget(self.mode)
         self.approve = QPushButton("Approve tools")
         self.approve.setCheckable(True)
