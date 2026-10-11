@@ -15,7 +15,7 @@ import unicodedata
 import random
 import time
 import threading
-from typing import Any, Callable, Dict, Generator, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Generator, Iterable, List, Optional, Tuple, Type
 from urllib.parse import urlparse
 
 from hydra_cli.config import (
