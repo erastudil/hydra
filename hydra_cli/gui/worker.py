@@ -72,7 +72,8 @@ class AgentWorker(QObject):
                 max_context_chars=get_context_window(alias) * 4,
                 cancel=self._cancel,
             )
-            self.finished.emit(answer or "", answer != CANCELLED_TEXT)
+            stopped = self._cancel.is_set() or answer in (CANCELLED_TEXT, "[Turn aborted by developer]")
+            self.finished.emit(CANCELLED_TEXT if stopped else (answer or ""), not stopped)
         except Exception as exc:  # surfaced to the transcript, not swallowed
             self.finished.emit(f"{type(exc).__name__}: {exc}", False)
         finally:

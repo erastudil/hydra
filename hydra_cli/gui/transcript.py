@@ -112,9 +112,9 @@ class TranscriptView(QPlainTextEdit):
     def line(self, role: str, text: str) -> None:
         self.flush()
         pal = theme.PALETTE
-        label = {"user": "you", "assistant": "hydra", "tool": "tool", "error": "error"}.get(role, role)
-        label_color = {"user": pal["accent"], "assistant": pal["accent"], "error": pal["danger"]}.get(role, pal["muted"])
-        body_color = {"tool": pal["muted"], "error": pal["text"]}.get(role, pal["text"])
+        label = {"user": "you", "assistant": "hydra", "tool": "tool", "error": "error", "cancelled": "stopped"}.get(role, role)
+        label_color = {"user": pal["accent"], "assistant": pal["accent"], "error": pal["danger"], "cancelled": pal["muted"]}.get(role, pal["muted"])
+        body_color = {"tool": pal["muted"], "error": pal["text"], "cancelled": pal["muted"]}.get(role, pal["text"])
         self._block(role)
         self._label(label, label_color)
         self._write(text, body_color)

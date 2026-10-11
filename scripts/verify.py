@@ -145,10 +145,13 @@ def run_cli(args, stdin=None, timeout=20, extra_env=None):
 def _runtime_files():
     names = ["bin/hydra", "bin/hydra.js"]
     cli = os.path.join(REPO, "hydra_cli")
-    for name in sorted(os.listdir(cli)):
-        path = os.path.join(cli, name)
-        if os.path.isfile(path) and name.endswith((".py", ".json")):
-            names.append(f"hydra_cli/{name}")
+    found = []
+    for sub in ("", "gui"):
+        folder = os.path.join(cli, sub)
+        for name in os.listdir(folder):
+            if os.path.isfile(os.path.join(folder, name)) and name.endswith((".py", ".json")):
+                found.append(f"hydra_cli/{sub + '/' if sub else ''}{name}")
+    names.extend(sorted(found))
     return names
 
 
@@ -1945,7 +1948,7 @@ def _sse(handler, tokens, pause, sent):
             time.sleep(pause)
         handler.wfile.write(b"data: [DONE]\n\n")
         handler.wfile.flush()
-    except (BrokenPipeError, ConnectionResetError):
+    except ConnectionError:
         sent.append("<client closed>")
 
 
@@ -1994,12 +1997,13 @@ def _gui_thread(worker):
 
     until(tokens) runs on the main thread for every streamed token and may call worker.cancel().
     """
-    from PySide6.QtCore import QCoreApplication, QEventLoop, QObject, QThread, QTimer, Signal
+    from PySide6.QtCore import QEventLoop, QObject, QThread, QTimer, Signal
+    from PySide6.QtWidgets import QApplication
 
     class Starter(QObject):
         start = Signal(dict)
 
-    app = QCoreApplication.instance() or QCoreApplication([])
+    app = QApplication.instance() or QApplication(["verify"])
     thread = QThread()
     worker.moveToThread(thread)
     starter = Starter()
@@ -10984,6 +10988,7 @@ def gui_window_agent_turn_diff_approval_cancel():
                 assert _gui_pump(app, lambda: not win.busy), "Stop did not end the turn"
                 assert not os.path.exists(os.path.join(work, "stop.txt"))
                 assert "late" not in win.transcript.toPlainText()
+                assert "turn cancelled" in win.transcript.toPlainText()
 
                 # context mode selector persists on the thread
                 win.composer.mode.setCurrentIndex(win.composer.mode.findData("compact"))
@@ -10992,7 +10997,7 @@ def gui_window_agent_turn_diff_approval_cancel():
                 win.close()
                 saved = Store(state).thread(tid)
                 roles = [m["role"] for m in saved["messages"]]
-                assert roles.count("user") == 3 and "assistant" in roles and saved["diffs"]
+                assert roles.count("user") == 3 and "assistant" in roles and "cancelled" in roles and saved["diffs"]
         finally:
             _gui_stop(httpd)
 

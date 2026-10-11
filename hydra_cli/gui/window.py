@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QMainWindow, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
+from hydra_cli.agent import CANCELLED_TEXT
 from hydra_cli.config import DEFAULT_ORCHESTRATOR_MODEL
 from hydra_cli.gui import motion
 from hydra_cli.gui.panes import ApprovalPane, Composer, DiffPane, Sidebar
@@ -223,8 +224,9 @@ class MainWindow(QMainWindow):
                 self.transcript.line("assistant", text)
             self.store.add_message(self.thread_id, "assistant", final)
         else:
-            self.transcript.line("error", text)
-            self.store.add_message(self.thread_id, "error", text)
+            role = "cancelled" if text == CANCELLED_TEXT else "error"
+            self.transcript.line(role, "turn cancelled" if role == "cancelled" else text)
+            self.store.add_message(self.thread_id, role, "turn cancelled" if role == "cancelled" else text)
         self._set_busy(False)
 
     def closeEvent(self, event) -> None:  # noqa: N802
