@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 
 from hydra_cli import __version__
 from hydra_cli.config import (
+    DEFAULT_MODEL,
     DEFAULT_ORCHESTRATOR_MODEL,
     DEFAULT_AGENT_MODEL,
     DEFAULT_CLOUDFLARE_MODEL,
@@ -83,7 +84,7 @@ USAGE:
     hydra <alias> -- <prompt>            # Keep prompt words that match an alias
 
 POPULAR ALIASES:
-    opus 5.5 high, sol 6.1 pro, sonnet 5.5, gemini 3.8, grok 4.7, llama 4 scout, hermes, pi
+    mimo 2.6 pro, mimo 2.6 flash, deepseek 4.1 flash, glm 5.3 flash, opus 5.5 high, sol 6.1 pro, sonnet 5.5, hermes, pi
 
 OPTIONS:
     --system <prompt>       Custom system prompt

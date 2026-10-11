@@ -80,6 +80,10 @@ WORKSPACE_ACTIONS: Set[str] = {
     "find_files",
     "search_files",
     "run_command",
+    "git_commit_and_push",
+    "trigger_vercel_deploy",
+    "inspect_environment",
+    "execute_bash",
 }
 
 OS_ACTIONS: Set[str] = {

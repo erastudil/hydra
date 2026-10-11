@@ -30,7 +30,9 @@ hydra_cli/_version.py
 hydra_cli/agent.py
 hydra_cli/agent_runner.py
 hydra_cli/agent_runners.py
+hydra_cli/alice_chat.py
 hydra_cli/alice_gate.py
+hydra_cli/alice_gcloud.py
 hydra_cli/alice_interpret.py
 hydra_cli/alice_knowledge.py
 hydra_cli/alice_retrieve.py
@@ -56,6 +58,7 @@ hydra_cli/repl.py
 hydra_cli/router.py
 hydra_cli/sandbox.py
 hydra_cli/serve.py
+hydra_cli/session_logger.py
 hydra_cli/speculative.py
 hydra_cli/swarm.py
 hydra_cli/tool_adapter.py

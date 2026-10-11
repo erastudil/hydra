@@ -56,3 +56,8 @@ ponytail wu wei : pull all verification complexity into single-grip deterministi
 zero fake tests : synthetic mocks asserting mocked return values denote zero truth value; banned universally; verification requires real runnable execution gates.
 
 zero stubs : either code executes against real subprocesses and interfaces returning exit code 0 or code rejected from main branch.
+
+
+## universal principles
+
+live intelligence : for every task involving AI tools, models, harnesses, context limits, or machine learning, search the web or live documentation first to verify current upstream state; never accept internal training weights regarding AI or ML; treat state older than three months as obsolete; set model context defaults to match true hardware and provider capability; zero undersizing.

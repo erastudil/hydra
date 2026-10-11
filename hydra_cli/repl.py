@@ -760,7 +760,11 @@ DEFAULT_MODEL_ALIASES: Dict[str, str] = {
     "qwen": "qwen 3.8",
     "deepseek": "deepseek 4.1 flash",
     "glm": "glm 5.3 flash",
-    "mimo": "mimo 2.6 flash",
+    "mimo": "mimo 2.6 pro",
+    "mimo pro": "mimo 2.6 pro",
+    "mimo flash": "mimo 2.6 flash",
+    "driver": "mimo 2.6 pro",
+    "daily driver": "mimo 2.6 pro",
 }
 
 
@@ -1270,7 +1274,7 @@ class ReplSession:
         self.history: ReplHistoryDedup = get_default_history_dedup()
         self.menu_pager: ReplMenuPager = get_default_menu_pager()
         self.exit_confirm: ReplExitConfirm = get_default_exit_confirm()
-        self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "sonnet 5.5").strip() or "sonnet 5.5"
+        self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "mimo 2.6 pro").strip() or "mimo 2.6 pro"
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.effort: Optional[str] = None
         self.reasoning_mode: Optional[str] = None

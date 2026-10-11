@@ -12,7 +12,8 @@ import sys
 import time
 from typing import Any, Dict, List, Optional
 
-from hydra_cli.config import SWARM_HEADS, resolve_model
+from hydra_cli.config import DEFAULT_FANOUT_SWARM_ALIASES, SWARM_HEADS, resolve_model
+from hydra_cli.session_logger import get_swarm_session_logger
 from hydra_cli.providers import (
     CredentialsMissingError,
     ProviderError,
@@ -31,10 +32,16 @@ HEAD_ICONS = {
     "auditor": "[AUDIT]",
     "synthesizer": "[SYNTH]",
     "alice": "[ALICE]",
+    "glm 5.3 flash": "[GLM]",
+    "deepseek 4.1 flash": "[DEEPSEEK]",
+    "mimo 2.6 flash": "[MIMO]",
+    "open_architect": "[ARCH]",
+    "open_coder": "[CODE]",
+    "open_auditor": "[AUDIT]",
 }
 
 # Heads that review the other heads' work, so they run after them.
-REVIEW_ROLES = ("auditor",)
+REVIEW_ROLES = ("auditor", "open_auditor", "mimo 2.6 flash", "mimo-2.6-flash", "mimo")
 
 
 class SwarmResult:
@@ -387,14 +394,20 @@ def execute_swarm(
                 "Set OPENROUTER_API_KEY or AI_GATEWAY_API_KEY in your environment."
             )
 
-    requested = heads or ["architect", "coder", "auditor"]
-    if len(requested) == 1 and requested[0].lower().strip() in ("open swarm", "open-swarm", "open_swarm"):
-        requested = ["open_architect", "open_coder", "open_auditor"]
+    requested = heads or list(DEFAULT_FANOUT_SWARM_ALIASES)
+    if len(requested) == 1 and requested[0].lower().strip() in (
+        "open swarm",
+        "open-swarm",
+        "open_swarm",
+        "default",
+        "default swarm",
+    ):
+        requested = list(DEFAULT_FANOUT_SWARM_ALIASES)
 
     explicit_synth = "synthesizer" in requested
     worker_roles = [role for role in requested if role != "synthesizer"]
     if not worker_roles:
-        worker_roles = ["architect", "coder", "auditor"]
+        worker_roles = list(DEFAULT_FANOUT_SWARM_ALIASES)
 
     if resolved_tier not in ("free", "local"):
         from hydra_cli.config import model_providers
@@ -420,6 +433,19 @@ def execute_swarm(
     first_roles = [role for role in worker_roles if role not in review_roles]
     if not first_roles:
         first_roles, review_roles = review_roles, []
+
+    sess_logger = get_swarm_session_logger()
+    session_id = sess_logger.start_session(task=task, swarm_name="swarm")
+
+    for r in worker_roles:
+        cfg = _head_config(r, custom_model)
+        sess_logger.record_dispatch(
+            session_id=session_id,
+            role=r,
+            title=cfg.get("title", r.capitalize()),
+            model=cfg.get("model", ""),
+            provider=cfg.get("provider"),
+        )
 
     if not json_output:
         sys.stderr.write(f"\n[HYDRA SWARM] Fanning out {len(first_roles)} specialist heads in parallel...\n")
@@ -465,6 +491,30 @@ def execute_swarm(
         results.append(synth_res)
         if not json_output:
             _print_head(synth_res)
+
+    for r in results:
+        sess_logger.record_head_completion(
+            session_id=session_id,
+            role=r.role,
+            title=r.title,
+            model=r.model,
+            content=r.content,
+            duration_sec=r.duration_sec,
+            provider=r.provider,
+            served_model=r.served_model,
+            cost=r.cost,
+            error=r.error,
+        )
+
+    exit_status = 1 if any(result.error for result in results) else 0
+    sess_logger.finalize_session(session_id=session_id, exit_status=exit_status)
+    try:
+        md_path, json_path = sess_logger.write_summary_to_disk(session_id=session_id)
+        if not json_output:
+            sys.stderr.write(f"\n[HYDRA SWARM] Session summary logged to: {md_path}\n")
+            sys.stderr.flush()
+    except Exception:
+        pass
 
     if not json_output:
         costs = [r.cost for r in results if r.cost is not None]

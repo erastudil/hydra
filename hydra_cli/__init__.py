@@ -197,6 +197,19 @@ from hydra_cli.mcp import (
     sanitize_mcp_result,
 )
 from hydra_cli.mcp_registry import McpRegistry
+from hydra_cli.config import (
+    DEFAULT_MODEL,
+    DEFAULT_FANOUT_SWARM_ALIASES,
+)
+from hydra_cli.session_logger import (
+    SwarmHeadDispatch,
+    SwarmToolExecution,
+    SwarmHeadSummary,
+    SwarmSessionSummary,
+    SwarmSessionLogger,
+    get_swarm_session_logger,
+    reset_swarm_session_logger,
+)
 from hydra_cli.native_tools import NativeToolRegistry
 from hydra_cli.providers import (
     StreamJitterSmoother,
@@ -411,5 +424,14 @@ __all__ = [
     "get_default_frozen_detector",
     "reset_frozen_detector",
     "StreamFrozenTimeoutError",
+    "DEFAULT_MODEL",
+    "DEFAULT_FANOUT_SWARM_ALIASES",
+    "SwarmHeadDispatch",
+    "SwarmToolExecution",
+    "SwarmHeadSummary",
+    "SwarmSessionSummary",
+    "SwarmSessionLogger",
+    "get_swarm_session_logger",
+    "reset_swarm_session_logger",
     "__version__",
 ]

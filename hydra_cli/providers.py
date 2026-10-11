@@ -3676,6 +3676,8 @@ def adapt_model_for_url(url: str, model: str) -> str:
             return "z-ai/" + model
         if model.startswith("deepseek-"):
             return "deepseek/" + model
+        if model.startswith("mimo-"):
+            return "xiaomi/" + model
     elif "cheaperinference.com" in host or "cheaperinference" in host:
         if "/" in model:
             return model.split("/", 1)[1]

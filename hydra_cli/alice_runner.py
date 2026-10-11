@@ -1,7 +1,7 @@
 ﻿"""
 Alice cognitive engine native agent runner for Hydra CLI.
 Integrates Alice (snowgate-alice) as native orchestrator and baseline worker.
-Evaluates prompts through Alice's cognitive grammar and deterministic tool pipeline
+Evaluates prompts through Alice's cognitive grammar, logic map, and deterministic tool pipeline
 before falling back to model generation.
 """
 
@@ -105,7 +105,7 @@ def run_alice(
     prompt: str,
     model: Optional[str] = None,
     timeout: int = 60,
-    fallback_model: Optional[str] = "glm 5.3 flash",
+    fallback_model: Optional[str] = "gemini-2.5-flash",
     env: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """
@@ -114,6 +114,17 @@ def run_alice(
     before falling back to model generation.
     Returns agent string output or None if Alice is unavailable.
     """
+    # Pre-check: logic map sorites
+    try:
+        from hydra_cli.alice_chat import AliceCognitiveAgent
+        agent = AliceCognitiveAgent()
+        sorites_check = agent.consult_logic_map(prompt)
+        if sorites_check and sorites_check.get("type") == "sorites" and sorites_check.get("data", {}).get("valid"):
+            sdata = sorites_check["data"]
+            return f"[VERIFIED_PROOF] {sdata['final_conclusion']}\n\nroute : DETERMINISTIC_LOGIC.\n\nsorites chain : {sdata['chain']}."
+    except Exception:
+        pass
+
     from hydra_cli.alice_retrieve import answer as retrieve, is_inquiry
 
     alice_eval = evaluate_with_alice(prompt, timeout=timeout) if alice_available() else None
@@ -150,8 +161,17 @@ def run_alice(
             output_parts.append("\n" + progen_stream)
         return "\n".join(output_parts).strip()
 
-    # Route requires synthetic generation or epistemic gap research
+    # Route requires synthetic generation or epistemic gap research via Alice GCloud
     target_fallback = model or fallback_model
+    try:
+        from hydra_cli.alice_chat import alice_respond
+        res = alice_respond(prompt, model=target_fallback if target_fallback and "gemini" in target_fallback else "gemini-2.5-flash")
+        if res and res.get("answer"):
+            return f"[ALICE_GCLOUD_SYNTHESIS] {res['answer']}\n\n{res.get('progen_stream', '')}".strip()
+    except Exception:
+        pass
+
+    # Fallback to general complete provider if needed
     if target_fallback:
         try:
             from hydra_cli.providers import complete

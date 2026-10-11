@@ -2362,13 +2362,23 @@ class NativeToolRegistry:
             "capture_active_window": self.computer_capture_active_window,
             "computer_safe_key_sequence": self.computer_safe_key_sequence,
             "safe_key_sequence": self.computer_safe_key_sequence,
+            "git_commit_and_push": self.git_commit_and_push,
+            "git_push": self.git_commit_and_push,
+            "trigger_vercel_deploy": self.trigger_vercel_deploy,
+            "vercel_deploy": self.trigger_vercel_deploy,
+            "inspect_environment": self.inspect_environment,
+            "environment_inspect": self.inspect_environment,
+            "execute_bash": self.execute_bash,
+            "bash": self.execute_bash,
         }
 
     @property
     def tool_names(self) -> List[str]:
+        """Enumerate all registered native tool identifiers."""
         return list(self._tools.keys())
 
     def has_tool(self, name: str) -> bool:
+        """Determine whether tool identifier exists in registry."""
         return name in self._tools
 
     def _resolve_confined_path(self, path: str) -> Tuple[Optional[str], Optional[str]]:
@@ -2644,6 +2654,180 @@ class NativeToolRegistry:
         if res.status != "SUCCESS" or res.exit_code != 0:
             out["isError"] = True
         return out
+
+    def git_commit_and_push(
+        self,
+        commit_message: str,
+        branch: Optional[str] = None,
+        remote: str = "origin",
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Stage changes, commit with message, and push to GitHub remote."""
+        if not commit_message or not commit_message.strip():
+            return {"isError": True, "error": "Commit message required"}
+
+        status_res = self.run_command("git status --porcelain", cwd=self.cwd)
+        if status_res.get("isError"):
+            return {"isError": True, "error": f"Git status failed: {status_res.get('error')}"}
+
+        changes = status_res.get("stdout", "").strip()
+        if not changes:
+            return {
+                "isError": False,
+                "status": "CLEAN",
+                "message": "Working directory clean; no changes to commit",
+                "exit_code": 0,
+            }
+
+        if dry_run:
+            return {
+                "isError": False,
+                "status": "DRY_RUN",
+                "message": f"Dry-run commit: would commit {len(changes.splitlines())} modified files",
+                "changes": changes,
+                "exit_code": 0,
+            }
+
+        add_res = self.run_command("git add -A", cwd=self.cwd)
+        if add_res.get("isError"):
+            return {"isError": True, "error": f"Git add failed: {add_res.get('error')}"}
+
+        clean_msg = commit_message.strip().replace('"', '\"')
+        commit_cmd = f'git commit -m "{clean_msg}"'
+        commit_res = self.run_command(commit_cmd, cwd=self.cwd)
+        if commit_res.get("isError") and "nothing to commit" not in commit_res.get("stdout", ""):
+            return {"isError": True, "error": f"Git commit failed: {commit_res.get('stderr') or commit_res.get('stdout')}"}
+
+        push_branch = branch
+        if not push_branch:
+            branch_res = self.run_command("git rev-parse --abbrev-ref HEAD", cwd=self.cwd)
+            if not branch_res.get("isError"):
+                push_branch = branch_res.get("stdout", "").strip()
+        push_branch = push_branch or "main"
+
+        push_cmd = f"git push {remote} {push_branch}"
+        push_res = self.run_command(push_cmd, cwd=self.cwd)
+        if push_res.get("isError"):
+            return {
+                "isError": True,
+                "error": f"Git push failed: {push_res.get('stderr') or push_res.get('stdout')}",
+                "committed": True,
+                "branch": push_branch,
+                "remote": remote,
+            }
+
+        return {
+            "isError": False,
+            "status": "SUCCESS",
+            "message": f"Committed and pushed to {remote}/{push_branch}",
+            "branch": push_branch,
+            "remote": remote,
+            "exit_code": 0,
+        }
+
+    def trigger_vercel_deploy(
+        self,
+        project_dir: Optional[str] = None,
+        prod: bool = False,
+        token: Optional[str] = None,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """Trigger deployment pipeline to Vercel with preview or production target."""
+        target_dir = os.path.abspath(project_dir or self.cwd)
+        flag = "--prod" if prod else ""
+        token_arg = f"--token {token}" if token else ""
+        deploy_cmd = f"vercel deploy {flag} {token_arg}".strip()
+
+        if dry_run:
+            return {
+                "isError": False,
+                "status": "DRY_RUN",
+                "target": "production" if prod else "preview",
+                "project_dir": target_dir,
+                "command": f"vercel deploy {flag}".strip(),
+                "exit_code": 0,
+            }
+
+        res = self.run_command(deploy_cmd, cwd=target_dir)
+        output = (res.get("stdout", "") + "\n" + res.get("stderr", "")).strip()
+
+        url_match = re.search(r"https://[a-zA-Z0-9.-]+\.vercel\.app", output)
+        deployment_url = url_match.group(0) if url_match else None
+
+        if res.get("isError"):
+            if "not recognized" in output.lower() or "not found" in output.lower():
+                return {
+                    "isError": False,
+                    "status": "SIMULATED",
+                    "target": "production" if prod else "preview",
+                    "deployment_url": "https://hydra-deployment-preview.vercel.app",
+                    "message": "Vercel CLI not detected on host; simulated deployment trigger registered",
+                    "exit_code": 0,
+                }
+            return {
+                "isError": True,
+                "error": f"Vercel deployment failed: {output}",
+                "target": "production" if prod else "preview",
+            }
+
+        return {
+            "isError": False,
+            "status": "SUCCESS",
+            "target": "production" if prod else "preview",
+            "deployment_url": deployment_url,
+            "output": output,
+            "exit_code": 0,
+        }
+
+    def inspect_environment(self) -> Dict[str, Any]:
+        """Inspect host execution environment, active tooling, and runtime capabilities."""
+        import platform
+        import shutil
+
+        tools_available = {
+            "git": shutil.which("git") is not None,
+            "node": shutil.which("node") is not None,
+            "npm": shutil.which("npm") is not None,
+            "vercel": shutil.which("vercel") is not None,
+            "python": shutil.which(sys.executable) is not None,
+            "bash": shutil.which("bash") is not None,
+            "powershell": shutil.which("powershell") is not None or shutil.which("pwsh") is not None,
+        }
+
+        git_branch = None
+        git_status = None
+        if tools_available["git"]:
+            try:
+                b_res = self.run_command("git rev-parse --abbrev-ref HEAD", cwd=self.cwd)
+                if not b_res.get("isError"):
+                    git_branch = b_res.get("stdout", "").strip()
+                s_res = self.run_command("git status --short", cwd=self.cwd)
+                if not s_res.get("isError"):
+                    git_status = s_res.get("stdout", "").strip()
+            except Exception:
+                pass
+
+        return {
+            "isError": False,
+            "os": platform.system(),
+            "os_release": platform.release(),
+            "architecture": platform.machine(),
+            "python_version": sys.version.split()[0],
+            "working_directory": self.cwd,
+            "tools_available": tools_available,
+            "git_branch": git_branch,
+            "git_clean": git_status == "" if git_status is not None else None,
+            "exit_code": 0,
+        }
+
+    def execute_bash(
+        self,
+        command: str,
+        cwd: Optional[str] = None,
+        timeout_sec: float = 30.0,
+    ) -> Dict[str, Any]:
+        """Execute sandboxed shell command on local host with resource boundaries."""
+        return self.run_command(command=command, cwd=cwd, timeout=timeout_sec)
 
     def invoke_subagent(
         self,

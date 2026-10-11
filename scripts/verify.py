@@ -1939,7 +1939,8 @@ def open_swarm_and_catalog():
 
     assert model_providers("glm 5.3 flash") == ["cheaperinference", "openrouter"]
     assert model_providers("deepseek 4.1 flash") == ["cheaperinference", "openrouter"]
-    assert model_providers("mimo 2.6 flash") == ["cheaperinference"]
+    assert model_providers("mimo 2.6 flash") == ["cheaperinference", "openrouter"]
+    assert model_providers("mimo 2.6 pro") == ["cheaperinference", "openrouter"]
 
     ci_url = "https://api.cheaperinference.com/v1/chat/completions"
     or_url = "https://openrouter.ai/api/v1/chat/completions"
@@ -1947,11 +1948,14 @@ def open_swarm_and_catalog():
     assert adapt_model_for_url(ci_url, "glm-5.3-flash") == "glm-5.3-flash"
     assert adapt_model_for_url(ci_url, "deepseek-4.1-flash") == "deepseek-4.1-flash"
     assert adapt_model_for_url(ci_url, "mimo-2.6-flash") == "mimo-2.6-flash"
+    assert adapt_model_for_url(ci_url, "mimo-2.6-pro") == "mimo-2.6-pro"
     assert adapt_model_for_url(ci_url, "z-ai/glm-5.3-flash") == "glm-5.3-flash"
     assert adapt_model_for_url(ci_url, "deepseek/deepseek-4.1-flash") == "deepseek-4.1-flash"
 
     assert adapt_model_for_url(or_url, "glm-5.3-flash") == "z-ai/glm-5.3-flash"
     assert adapt_model_for_url(or_url, "deepseek-4.1-flash") == "deepseek/deepseek-4.1-flash"
+    assert adapt_model_for_url(or_url, "mimo-2.6-flash") == "xiaomi/mimo-2.6-flash"
+    assert adapt_model_for_url(or_url, "mimo-2.6-pro") == "xiaomi/mimo-2.6-pro"
 
     assert "open swarm" in SWARM_COMBOS
     combo = SWARM_COMBOS["open swarm"]
@@ -10603,11 +10607,83 @@ def desktop_rag_reranker_and_replay_debugger_contracts():
 
 
 @check
+def wave22_session_logger_and_mimo_routing():
+    from hydra_cli.config import (
+        DEFAULT_MODEL,
+        DEFAULT_ORCHESTRATOR_MODEL,
+        DEFAULT_AGENT_MODEL,
+        DEFAULT_FANOUT_SWARM_ALIASES,
+        DEFAULT_CONTEXT_WINDOW,
+        IMMUTABLE_AGENT_INVARIANTS,
+        resolve_model,
+        get_context_window,
+        model_providers,
+    )
+    from hydra_cli.session_logger import (
+        SwarmSessionLogger,
+        get_swarm_session_logger,
+    )
+    from hydra_cli.native_tools import NativeToolRegistry
+
+    assert DEFAULT_MODEL == "mimo 2.6 pro"
+    assert DEFAULT_ORCHESTRATOR_MODEL == "mimo 2.6 pro"
+    assert DEFAULT_AGENT_MODEL == "mimo 2.6 pro"
+    assert resolve_model("mimo 2.6 pro") == "mimo-2.6-pro"
+    assert resolve_model("mimo") == "mimo-2.6-pro"
+    assert resolve_model("daily driver") == "mimo-2.6-pro"
+    assert resolve_model("mimo 2.6 flash") == "mimo-2.6-flash"
+
+    assert set(DEFAULT_FANOUT_SWARM_ALIASES) == {"glm 5.3 flash", "deepseek 4.1 flash", "mimo 2.6 flash"}
+    assert model_providers("mimo 2.6 pro")[0] == "cheaperinference"
+
+    assert DEFAULT_CONTEXT_WINDOW == 1048576
+    assert get_context_window("mimo 2.6 pro") == 1048576
+    assert get_context_window("gemma-e4b") == 131072
+
+    assert "AI/ML Research Invariant" in IMMUTABLE_AGENT_INVARIANTS
+
+    temp_s = tempfile.mkdtemp(prefix="hydra_v22_")
+    try:
+        slog = SwarmSessionLogger(sessions_dir=temp_s)
+        sid = slog.start_session("Wave 22 verification task", swarm_name="verify_swarm")
+        slog.record_dispatch(sid, "architect", "GLM Architect", "glm-5.3-flash", "cheaperinference")
+        slog.record_tool_call(sid, "architect", "inspect_environment", {}, "linux x86_64", 10.0)
+        slog.record_head_completion(sid, "architect", "GLM Architect", "glm-5.3-flash", "Architecture certified.", 1.2, "cheaperinference")
+        sum_obj = slog.finalize_session(sid, 0)
+        assert sum_obj.exit_status == 0
+        md_p, js_p = slog.write_summary_to_disk(sid)
+        assert os.path.isfile(md_p) and os.path.isfile(js_p)
+        with open(md_p, "r", encoding="utf-8") as fh:
+            md_txt = fh.read()
+        assert "Wave 22 verification task" in md_txt
+        assert "GLM Architect" in md_txt
+        assert "PASSING (EXIT CODE 0)" in md_txt
+
+        reg = NativeToolRegistry(cwd=temp_s)
+        assert reg.has_tool("git_commit_and_push")
+        assert reg.has_tool("trigger_vercel_deploy")
+        assert reg.has_tool("inspect_environment")
+        assert reg.has_tool("execute_bash")
+
+        env_d = reg.inspect_environment()
+        assert env_d["isError"] is False
+        assert "os" in env_d
+
+        bash_d = reg.execute_bash("echo 'wave 22'")
+        assert "wave 22" in bash_d.get("stdout", "")
+
+        vd = reg.trigger_vercel_deploy(project_dir=temp_s, prod=False, dry_run=True)
+        assert vd["isError"] is False and vd["status"] == "DRY_RUN"
+    finally:
+        shutil.rmtree(temp_s, ignore_errors=True)
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py", "test_model_distillation_pipeline.py", "test_sandbox_jail_enforcer.py", "test_model_lora_adapter_hotloader.py", "test_concurrency_throttle_queue.py", "test_model_rag_reranker.py", "test_session_replay_debugger.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py", "test_model_distillation_pipeline.py", "test_sandbox_jail_enforcer.py", "test_model_lora_adapter_hotloader.py", "test_concurrency_throttle_queue.py", "test_model_rag_reranker.py", "test_session_replay_debugger.py", "test_swarm_session_logger.py", "test_alice_gcloud.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed
