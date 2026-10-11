@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
@@ -2680,12 +2681,26 @@ def _empty_stream_state() -> Dict[str, Any]:
     return {"content": [], "reasoning": [], "tools": {}}
 
 
-def _consume_completion_body(resp: Any, on_token: Optional[Callable[[str], None]], where: str) -> Dict[str, Any]:
+CANCELLED_TEXT = "[Turn cancelled by user]"
+
+
+class TurnCancelled(Exception):
+    """Raised inside a model call when the caller set the cancel event."""
+
+
+def _consume_completion_body(
+    resp: Any,
+    on_token: Optional[Callable[[str], None]],
+    where: str,
+    cancel: Optional[threading.Event] = None,
+) -> Dict[str, Any]:
     """Read an SSE stream, or one JSON body, and return an OpenAI chat completion object."""
     state = _empty_stream_state()
     saw_done = False
     buffered: List[str] = []
     for raw_line in resp:
+        if cancel is not None and cancel.is_set():
+            raise TurnCancelled()
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line or line.startswith(":"):
             continue
@@ -2753,6 +2768,7 @@ def _fetch_streaming_completion(
     payload: Dict[str, Any],
     timeout: int = 120,
     on_token: Optional[Callable[[str], None]] = None,
+    cancel: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     """Stream one chat completion and return the assembled message JSON."""
     body = dict(payload)
@@ -2762,7 +2778,7 @@ def _fetch_streaming_completion(
     where = describe_endpoint(url)
     try:
         with urlopen(req, timeout=timeout) as resp:
-            return _consume_completion_body(resp, on_token, where)
+            return _consume_completion_body(resp, on_token, where, cancel)
     except HTTPError as e:
         error_body = ""
         try:
@@ -2820,6 +2836,7 @@ def _run_agent_loop(
     strategy: Optional[str] = None,
     on_token: Optional[Callable[[str], None]] = None,
     max_context_chars: Optional[int] = None,
+    cancel: Optional[threading.Event] = None,
 ) -> str:
     """
     Execute autonomous agent loop with native coding tools and MCP tool invocation until completion or max turns.
@@ -3022,12 +3039,13 @@ def _run_agent_loop(
                             payload,
                             timeout=timeout,
                             on_token=on_token,
+                            cancel=cancel,
                         )
                     else:
                         res_json = _fetch_raw_completion(provider["url"], provider["headers"], payload, timeout=timeout)
                     if not res_json.get("choices"):
                         raise ProviderError(f"{provider.get('name', 'Provider')} returned an empty choices array.")
-                except UsageError:
+                except (UsageError, TurnCancelled):
                     raise
                 except Exception as exc:
                     last_error = exc
@@ -3079,7 +3097,18 @@ def _run_agent_loop(
     turn_idx = 0
     active_skip_next = skip_next_tool
 
+    def cancelled() -> bool:
+        return cancel is not None and cancel.is_set()
+
+    def finish_cancelled() -> str:
+        checkpointer.transition("COMPLETED")
+        checkpointer.final_response = CANCELLED_TEXT
+        checkpointer.save()
+        return CANCELLED_TEXT
+
     while turn_idx < max_turns:
+        if cancelled():
+            return finish_cancelled()
         for directive in drain_steering():
             directive_msg = {
                 "role": "user",
@@ -3103,6 +3132,8 @@ def _run_agent_loop(
                 ],
             ):
                 res_json = complete_turn()
+        except TurnCancelled:
+            return finish_cancelled()
         except KeyboardInterrupt:
             try:
                 steer_input = prompt_input(
@@ -3193,8 +3224,10 @@ def _run_agent_loop(
             except Exception:
                 args = {}
 
+            if cancelled() and not skip_remaining_tools:
+                skip_remaining_tools = True
             if skip_remaining_tools:
-                obs_text = "[Tool execution skipped by developer for steering]"
+                obs_text = "[Tool execution cancelled by user]" if cancelled() else "[Tool execution skipped by developer for steering]"
                 if use_prompt_tool_adapter:
                     tool_msg = {
                         "role": "user",
