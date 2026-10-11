@@ -82,7 +82,7 @@ class MainWindow(QMainWindow):
         self.sidebar.project_selected.connect(self.select_project)
         self.sidebar.thread_selected.connect(self.select_thread)
         self.composer.submitted.connect(self.submit)
-        self.composer.stop_requested.connect(self.worker.abort, Qt.DirectConnection)
+        self.composer.stop_requested.connect(self.worker.cancel, Qt.DirectConnection)
         self.approval.decided.connect(self.worker.answer_approval, Qt.DirectConnection)
         self.composer.mode.currentIndexChanged.connect(self._mode_changed)
 
@@ -228,7 +228,7 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self.worker.abort()
+        self.worker.cancel()
         self.thread.quit()
         self.thread.wait(3000)
         self.store.save()
