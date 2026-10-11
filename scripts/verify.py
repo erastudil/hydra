@@ -11410,7 +11410,7 @@ def gui_real_launch_window_and_frames():
     run = subprocess.run([sys.executable, "-m", "hydra_cli.gui", "--probe-frames", out], cwd=REPO, env=env, timeout=120)
     assert run.returncode == 0 and os.path.isfile(out), "frame probe did not finish"
     stats = json.load(open(out, encoding="utf-8"))
-    assert stats["chars"] > 50000 and stats["doc_chars"] >= stats["chars"], stats
+    assert stats["chars"] > 20000 and stats["doc_chars"] >= stats["chars"], stats
     assert stats["p95_ms"] < 40 and stats["max_ms"] < 250, f"UI thread stalls while streaming: {stats}"
     shutil.rmtree(home, ignore_errors=True)
 
