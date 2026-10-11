@@ -10423,11 +10423,56 @@ def desktop_speculative_decoder_and_session_checkpoint_contracts():
 
 
 @check
+def desktop_ensemble_voter_and_token_rotator_contracts():
+    from desktop.model_ensemble_voter import (
+        EnsembleConsensusVoter,
+        ModelVote,
+        VotingMethod,
+    )
+    from desktop.secure_token_rotator import (
+        SecureTokenRotator,
+        KeyLifecycleState,
+    )
+
+    # Ensemble voter contracts
+    voter = EnsembleConsensusVoter()
+    votes = [
+        ModelVote("m1", "action_exec", 0.9, model_weight=1.0),
+        ModelVote("m2", "action_exec", 0.8, model_weight=1.0),
+        ModelVote("m3", "action_abort", 0.7, model_weight=0.5),
+    ]
+    score = voter.evaluate_consensus(votes, method=VotingMethod.MAJORITY)
+    assert score.winning_candidate == "action_exec"
+    assert score.agreement_ratio > 0.6
+    assert "m3" in score.outlier_models
+
+    # Secure token rotator contracts
+    rotator = SecureTokenRotator(default_ttl_seconds=3600.0)
+    active = rotator.get_active_key()
+    assert active is not None
+    assert active.state == KeyLifecycleState.ACTIVE
+
+    payload = "auth:admin_session"
+    token = rotator.create_token_signature(payload)
+    assert rotator.verify_token_signature(payload, token) is True
+
+    new_key, old_key = rotator.rotate_key()
+    assert new_key.state == KeyLifecycleState.ACTIVE
+    assert old_key is not None
+    assert old_key.state == KeyLifecycleState.RETIRING
+    assert rotator.verify_token_signature(payload, token) is True
+
+    valid_log, violations = rotator.verify_audit_log_integrity()
+    assert valid_log is True
+    assert len(violations) == 0
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

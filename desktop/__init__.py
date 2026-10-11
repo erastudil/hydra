@@ -215,7 +215,49 @@ from desktop.session_checkpoint_manager import (
     reset_checkpoint_manager,
 )
 
+from desktop.model_ensemble_voter import (
+    VotingMethod,
+    ModelVote,
+    ConsensusScore,
+    EnsembleConsensusVoter,
+    compute_normalized_entropy,
+    tokenize_text,
+    compute_jaccard_similarity,
+    detect_semantic_divergence,
+    get_ensemble_voter,
+    reset_ensemble_voter,
+)
+from desktop.secure_token_rotator import (
+    KeyLifecycleState,
+    RotatedKeyRecord,
+    TokenAlarm,
+    AuditLogEvent,
+    compute_audit_hash,
+    SecureTokenRotator,
+    get_token_rotator,
+    reset_token_rotator,
+)
+
 __all__ = [
+    "VotingMethod",
+    "ModelVote",
+    "ConsensusScore",
+    "EnsembleConsensusVoter",
+    "compute_normalized_entropy",
+    "tokenize_text",
+    "compute_jaccard_similarity",
+    "detect_semantic_divergence",
+    "get_ensemble_voter",
+    "reset_ensemble_voter",
+    "KeyLifecycleState",
+    "RotatedKeyRecord",
+    "TokenAlarm",
+    "AuditLogEvent",
+    "compute_audit_hash",
+    "SecureTokenRotator",
+    "get_token_rotator",
+    "reset_token_rotator",
+
     "AcceptanceCriterion",
     "DraftTokenProposal",
     "VerificationResult",
