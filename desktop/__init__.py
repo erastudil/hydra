@@ -195,7 +195,43 @@ from desktop.audit_ledger_exporter import (
     reset_audit_ledger,
 )
 
+from desktop.model_speculative_decoder import (
+    AcceptanceCriterion,
+    DraftTokenProposal,
+    VerificationResult,
+    SpeculativeDecodingStep,
+    SpeculativeStats,
+    NGramDraftGenerator,
+    ModelSpeculativeDecoder,
+    get_speculative_decoder,
+    reset_speculative_decoder,
+)
+from desktop.session_checkpoint_manager import (
+    MergeStrategy,
+    SessionCheckpoint,
+    SessionCheckpointManager,
+    compute_checkpoint_hash,
+    get_checkpoint_manager,
+    reset_checkpoint_manager,
+)
+
 __all__ = [
+    "AcceptanceCriterion",
+    "DraftTokenProposal",
+    "VerificationResult",
+    "SpeculativeDecodingStep",
+    "SpeculativeStats",
+    "NGramDraftGenerator",
+    "ModelSpeculativeDecoder",
+    "get_speculative_decoder",
+    "reset_speculative_decoder",
+    "MergeStrategy",
+    "SessionCheckpoint",
+    "SessionCheckpointManager",
+    "compute_checkpoint_hash",
+    "get_checkpoint_manager",
+    "reset_checkpoint_manager",
+
     "create_desktop_app",
     "DesktopServer",
     "run_desktop_app",

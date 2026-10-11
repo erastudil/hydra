@@ -10375,11 +10375,59 @@ def desktop_model_router_balancer_and_audit_ledger_contracts():
 
 
 @check
+def desktop_speculative_decoder_and_session_checkpoint_contracts():
+    from desktop.model_speculative_decoder import (
+        ModelSpeculativeDecoder,
+        DraftTokenProposal,
+        AcceptanceCriterion,
+    )
+    from desktop.session_checkpoint_manager import (
+        SessionCheckpointManager,
+        MergeStrategy,
+    )
+
+    # Speculative decoder contracts
+    decoder = ModelSpeculativeDecoder(
+        default_lookahead=2,
+        criterion=AcceptanceCriterion.GREEDY_MATCH,
+    )
+
+    def draft_call(ctx, k):
+        return [
+            DraftTokenProposal("alpha", "alpha", 0.9, 1),
+            DraftTokenProposal("beta", "beta", 0.8, 2),
+        ]
+
+    def target_call(ctx, props):
+        return [
+            (props[0], 0.95, props[0]),
+            (props[1], 0.90, props[1]),
+        ]
+
+    step = decoder.execute_step("hydra", draft_call, target_call, lookahead=2)
+    assert len(step.emitted_tokens) == 2
+    assert step.verification.acceptance_rate == 1.0
+
+    # Session checkpoint DAG contracts
+    mgr = SessionCheckpointManager()
+    c1 = mgr.create_checkpoint(state_diff={"step": 1})
+    fork_chk = mgr.fork_branch("feature/exp", source_branch_or_id="main")
+    c2 = mgr.create_checkpoint(state_diff={"step": 2, "exp": True}, branch_name="feature/exp")
+    c_main = mgr.create_checkpoint(state_diff={"step": 2, "main_diverged": True}, branch_name="main")
+    merged = mgr.merge_branches("feature/exp", target_branch="main", strategy=MergeStrategy.UNION)
+    assert len(merged.parent_ids) == 2
+    assert merged.state_diff.get("exp") is True
+    assert merged.state_diff.get("main_diverged") is True
+    prov = mgr.get_provenance(merged.checkpoint_id)
+    assert prov["ancestor_count"] >= 2
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed
