@@ -10253,11 +10253,50 @@ def desktop_playwright_codegen_and_secret_vault_contracts():
 
 
 @check
+def desktop_system_metrics_and_model_quantizer_contracts():
+    from desktop.system_metrics_collector import (
+        SystemMetricsCollector,
+        RingBuffer,
+        MetricSample,
+    )
+    from desktop.model_quantizer_bridge import (
+        ModelQuantizerBridge,
+        QuantizationType,
+        calculate_weight_size_bytes,
+        calculate_kv_cache_bytes,
+    )
+
+    # Metrics collector contracts
+    rb = RingBuffer(capacity=5)
+    rb.append(MetricSample(cpu_percent=12.5))
+    assert rb.size == 1
+    assert rb.get_all()[0].cpu_percent == 12.5
+
+    collector = SystemMetricsCollector(buffer_capacity=10)
+    sample = collector.collect_sample()
+    assert sample.ram_total_bytes > 0
+    summary = collector.get_summary()
+    assert summary["sample_count"] >= 1
+
+    # Quantizer bridge contracts
+    weights = calculate_weight_size_bytes(8_000_000_000, 4.0)
+    assert weights == 4_000_000_000
+
+    kv_bytes = calculate_kv_cache_bytes(32, 8, 128, 8192)
+    assert kv_bytes == 1_073_741_824
+
+    bridge = ModelQuantizerBridge()
+    res = bridge.evaluate_quantization("llama-3.1-8b", QuantizationType.Q4_K_M, vram_mb=12288.0)
+    assert res.fits_in_vram is True
+    assert res.recommended_gpu_layers == 32
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

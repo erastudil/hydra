@@ -133,6 +133,27 @@ from desktop.secret_vault import (
     reset_secret_vault,
 )
 
+from desktop.system_metrics_collector import (
+    MetricSample,
+    RingBuffer,
+    SystemMetricsCollector,
+    query_nvidia_vram_metrics,
+    get_system_metrics_collector,
+    reset_system_metrics_collector,
+)
+from desktop.model_quantizer_bridge import (
+    QuantizationType,
+    GGUF_BPW_MAP,
+    OffloadStrategy,
+    ModelArchitectureProfile,
+    QuantizationEvaluationResult,
+    ModelQuantizerBridge,
+    calculate_weight_size_bytes,
+    calculate_kv_cache_bytes,
+    get_quantizer_bridge,
+    reset_quantizer_bridge,
+)
+
 __all__ = [
     "create_desktop_app",
     "DesktopServer",
@@ -225,4 +246,20 @@ __all__ = [
     "decrypt_payload",
     "get_secret_vault",
     "reset_secret_vault",
+    "MetricSample",
+    "RingBuffer",
+    "SystemMetricsCollector",
+    "query_nvidia_vram_metrics",
+    "get_system_metrics_collector",
+    "reset_system_metrics_collector",
+    "QuantizationType",
+    "GGUF_BPW_MAP",
+    "OffloadStrategy",
+    "ModelArchitectureProfile",
+    "QuantizationEvaluationResult",
+    "ModelQuantizerBridge",
+    "calculate_weight_size_bytes",
+    "calculate_kv_cache_bytes",
+    "get_quantizer_bridge",
+    "reset_quantizer_bridge",
 ]
