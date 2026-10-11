@@ -24,6 +24,7 @@ $Files = @(
     'hydra_cli/agent_runner.py',
     'hydra_cli/agent_runners.py',
     'hydra_cli/alice_chat.py',
+    'hydra_cli/alice_cloud_loop.py',
     'hydra_cli/alice_gate.py',
     'hydra_cli/alice_gcloud.py',
     'hydra_cli/alice_interpret.py',

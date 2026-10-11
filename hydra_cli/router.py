@@ -350,6 +350,13 @@ def route_command(argv: List[str]) -> int:
     if argv and argv[0] in ("desktop", "--desktop"):
         from hydra_cli.desktop import main as desktop_main
         return desktop_main(argv[1:])
+    if argv and argv[0] in ("alice-loop", "--alice-loop", "alice_loop"):
+        from hydra_cli.alice_cloud_loop import main as alice_loop_main
+        return alice_loop_main(argv[1:])
+    if argv and argv[0] in ("alice-chat", "--alice-chat"):
+        from hydra_cli.alice_chat import run_interactive_chat
+        run_interactive_chat()
+        return 0
     if argv and argv[0] in ("serve", "--serve"):
         host = "127.0.0.1"
         port = 7777
