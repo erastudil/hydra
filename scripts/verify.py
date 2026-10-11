@@ -161,6 +161,8 @@ def _quoted_files(text, pattern):
 
 @check
 def manifests():
+    import re
+
     from hydra_cli import __version__
     from hydra_cli.config import MODEL_MAP
 
@@ -168,6 +170,15 @@ def manifests():
     with open(catalog_path, encoding="utf-8") as handle:
         catalog = json.load(handle)
     assert catalog["version"] == __version__
+    pyproject = open(os.path.join(REPO, "pyproject.toml"), encoding="utf-8").read()
+    py_ver = re.search(r'(?m)^version = "([^"]+)"', pyproject)
+    assert py_ver and py_ver.group(1) == __version__, "pyproject.toml version drifted from hydra_cli._version"
+    setup_text = open(os.path.join(REPO, "setup.py"), encoding="utf-8").read()
+    setup_ver = re.search(r'version="([^"]+)"', setup_text)
+    assert setup_ver and setup_ver.group(1) == __version__, "setup.py version drifted from hydra_cli._version"
+    with open(os.path.join(REPO, "package.json"), encoding="utf-8") as handle:
+        package = json.load(handle)
+    assert package["version"] == __version__, "package.json version drifted from hydra_cli._version"
     assert "model_providers" in catalog and "aliases" in catalog
     assert set(MODEL_MAP) <= set(catalog["aliases"])
 
@@ -179,8 +190,6 @@ def manifests():
     expected = _runtime_files()
     sh_text = open(os.path.join(REPO, "install.sh"), encoding="utf-8").read()
     ps_text = open(os.path.join(REPO, "install.ps1"), encoding="utf-8").read()
-    import re
-
     sh_match = re.search(r'FILES="(.*?)"', sh_text, re.S)
     ps_match = re.search(r"\$Files = @\((.*?)\)", ps_text, re.S)
     assert sh_match and ps_match
@@ -217,11 +226,13 @@ def manifests():
 
 @check
 def cli_processes():
+    from hydra_cli import __version__
+
     cases = [
         (["--help"], 0, "USAGE:", ""),
         (["-h"], 0, "USAGE:", ""),
         (["help"], 0, "USAGE:", ""),
-        (["--version"], 0, "1.2.2", ""),
+        (["--version"], 0, __version__, ""),
         (["-v"], 0, "hydra ", ""),
         (["banner"], 0, "Sovereign Multi-Headed AI Shell", ""),
         (["setup"], 0, "HYDRA SETUP & INTEGRATION GUIDE", ""),
@@ -1420,7 +1431,7 @@ withEnv({ OPENROUTER_API_KEY: 'sk-or-v1-supersecret' }, () => {
   assert.equal(clean.includes('0123abcd'), false);
   assert.equal(clean.includes('sk-or-v1-supersecret'), false);
 });
-assert.equal(hydra.VERSION, '1.2.2');
+assert.equal(hydra.VERSION, process.argv[3]);
 assert.equal(Object.hasOwn(hydra.CATALOG.aliases, 'alice-emap'), false);
 assert.equal(hydra.resolveRoute('muse').model, 'meta/muse-spark-1.3');
 assert.equal(hydra.resolveRoute('llama 3.1 8b').model, 'meta-llama/Llama-3.1-8B-Instruct');
@@ -1430,6 +1441,8 @@ assert.equal(hydra.sanitizeStreamText('a\rb\x1b[?1000hc'), 'abc');
 
 @check
 def node_launcher():
+    from hydra_cli import __version__
+
     node = shutil.which("node")
     if not node:
         raise Skip("node is not installed; bin/hydra.js checks need Node.js 18+")
@@ -1438,7 +1451,7 @@ def node_launcher():
         with open(script, "w", encoding="utf-8") as handle:
             handle.write(NODE_SOURCE)
         proc = subprocess.run(
-            [node, script, os.path.join(REPO, "bin", "hydra.js")],
+            [node, script, os.path.join(REPO, "bin", "hydra.js"), __version__],
             capture_output=True,
             text=True,
             timeout=20,
