@@ -24,11 +24,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     from hydra_cli.gui import theme
     from hydra_cli.gui.window import MainWindow
 
-    app = QApplication.instance() or QApplication(list(argv if argv is not None else sys.argv))
+    app = QApplication.instance() or QApplication([sys.argv[0]])
     app.setApplicationName("Hydra")
     theme.apply(app)
+    args = list(argv if argv is not None else sys.argv[1:])
     win = MainWindow()
     win.show()
+    if "--probe-frames" in args:
+        from PySide6.QtCore import QTimer
+
+        from hydra_cli.gui import probe
+
+        out = args[args.index("--probe-frames") + 1]
+        QTimer.singleShot(1500, lambda: (probe.write(win, out), win.close()))
     return app.exec()
 
 

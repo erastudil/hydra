@@ -1715,43 +1715,6 @@ def tui_composer():
 
 
 @check
-def desktop_app_pythonw_launch():
-    """Desktop shortcut runs pythonw.exe, which has no stdout; the server must still come up."""
-    if os.name != "nt":
-        raise Skip("pythonw.exe launch; this host is POSIX")
-    import socket
-
-    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
-    if not os.path.isfile(pythonw):
-        raise Skip("pythonw.exe not found beside the interpreter")
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    home = tempfile.mkdtemp(prefix="hydra_pw_")
-    env = dict(os.environ, USERPROFILE=home, HOME=home)
-    proc = subprocess.Popen(
-        [pythonw, "-m", "hydra_cli.desktop", "--no-browser", "--port", str(port)],
-        cwd=REPO,
-        env=env,
-    )
-    try:
-        status = None
-        for _ in range(40):
-            if proc.poll() is not None:
-                break
-            try:
-                status = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2).status
-                break
-            except (urllib.error.URLError, OSError):
-                time.sleep(0.5)
-        assert status == 200, f"desktop server did not answer under pythonw (exit {proc.poll()})"
-    finally:
-        proc.kill()
-        proc.wait()
-        shutil.rmtree(home, ignore_errors=True)
-
-
-@check
 def windows_console():
     if os.name != "nt":
         raise Skip("Windows console Ctrl+Space reader; this host is POSIX")
@@ -9530,88 +9493,6 @@ def computer_use_native_tool_registry():
 
 
 @check
-def desktop_app_server_and_gateway_contracts():
-    import json
-    import time
-    import urllib.request
-    import hydra_cli.desktop as d
-    server = d.DesktopServer(host="127.0.0.1", port=7798)
-    server.start(open_browser=False, background=True)
-    time.sleep(1.0)
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:7798/api/status", timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            assert data["status"] == "ok"
-            assert data["gateway_url"] == "http://127.0.0.1:7777"
-        with urllib.request.urlopen("http://127.0.0.1:7798/api/models", timeout=5) as resp:
-            m = json.loads(resp.read().decode("utf-8"))
-            assert len(m["models"]) > 0
-        with urllib.request.urlopen("http://127.0.0.1:7798/api/computer/screen", timeout=5) as resp:
-            img_bytes = resp.read()
-            assert img_bytes.startswith(b"\x89PNG\r\n\x1a\n")
-    finally:
-        server.stop()
-
-
-@check
-def hydra_desktop_cli_launcher():
-    import subprocess
-    import sys
-    res1 = subprocess.run([sys.executable, "-m", "hydra_cli.desktop", "--help"], capture_output=True, text=True)
-    assert res1.returncode == 0
-    assert "Hydra Sovereign Desktop Application" in res1.stdout
-
-    res2 = subprocess.run([sys.executable, "-m", "hydra_cli.cli", "desktop", "--help"], capture_output=True, text=True)
-    assert res2.returncode == 0
-    assert "Hydra Sovereign Desktop Application" in res2.stdout
-
-
-@check
-def desktop_packaging_and_composite_contracts():
-    import subprocess
-    import sys
-    from hydra_cli.desktop import get_desktop_html
-    from hydra_cli.computer_use import get_computer_use_engine
-    from hydra_cli.native_tools import NativeToolRegistry
-
-    pkg_script = os.path.join(REPO, "scripts", "package_desktop.py")
-    assert os.path.isfile(pkg_script)
-    res = subprocess.run([sys.executable, pkg_script], capture_output=True, text=True)
-    assert res.returncode == 0, f"scripts/package_desktop.py failed: {res.stdout}\n{res.stderr}"
-
-    html = get_desktop_html()
-    assert "session-bar" in html
-    assert "crosshair" in html
-    assert "diff-container" in html
-
-    eng = get_computer_use_engine()
-    for method in [
-        "fill_form",
-        "scroll_until_visible",
-        "extract_table_data",
-        "safe_drag_and_drop",
-        "find_window_by_title_pattern",
-        "set_window_bounds",
-        "capture_active_window",
-        "safe_key_sequence",
-    ]:
-        assert hasattr(eng, method), f"Engine missing composite method: {method}"
-
-    reg = NativeToolRegistry()
-    for tool in [
-        "browser_fill_form",
-        "browser_scroll_until_visible",
-        "browser_extract_table",
-        "computer_safe_drag_and_drop",
-        "computer_find_window",
-        "computer_set_window_bounds",
-        "computer_capture_active_window",
-        "computer_safe_key_sequence",
-    ]:
-        assert reg.has_tool(tool), f"Registry missing composite tool: {tool}"
-
-
-@check
 def agent_runner_safety_and_abort_contracts():
     import subprocess
     import time
@@ -9690,7 +9571,7 @@ def workspace_context_and_session_export_contracts():
         AutonomousAgentRunner,
         validate_session_trace,
     )
-    from hydra_cli.desktop import (
+    from hydra_cli.desktop_core import (
         FALLBACK_CHAINS,
         resolve_and_complete_with_fallback,
     )
@@ -9807,7 +9688,7 @@ def workspace_context_and_session_export_contracts():
 
 @check
 def desktop_resilience_and_token_accounting_contracts():
-    from hydra_cli.desktop import (
+    from hydra_cli.desktop_core import (
         MODEL_PRICING,
         ResponsiveCoordinateScaler,
         TokenAccountingManager,
@@ -9897,7 +9778,7 @@ def desktop_tool_presets_and_markdown_report_contracts():
         is_tool_allowed_under_profile,
         generate_markdown_report,
     )
-    from hydra_cli.desktop import (
+    from hydra_cli.desktop_core import (
         COMMAND_PALETTE_ACTIONS,
         dispatch_command_palette_action,
     )
@@ -9976,7 +9857,7 @@ def desktop_scheduled_jobs_and_workflow_templates_contracts():
         list_workflow_templates,
         reset_job_scheduler,
     )
-    from hydra_cli.desktop import (
+    from hydra_cli.desktop_core import (
         COMMAND_PALETTE_ACTIONS,
         dispatch_command_palette_action,
     )
@@ -10061,26 +9942,6 @@ def desktop_scheduled_jobs_and_workflow_templates_contracts():
         assert disp_clear.get("cleared") is True
     finally:
         reset_job_scheduler()
-
-
-
-@check
-def session_player_and_build_dist_contracts():
-    from desktop.session_player import SessionTracePlayer, ActionTracer, create_player_from_runner
-    from desktop.build_dist import (
-        validate_asset_tree,
-        validate_api_contracts,
-        validate_session_playback_engine,
-    )
-
-    assets_ok, missing = validate_asset_tree()
-    assert assets_ok is True, f"Missing desktop assets: {missing}"
-
-    api_ok, api_errs = validate_api_contracts()
-    assert api_ok is True, f"API contract failures: {api_errs}"
-
-    player_ok, player_errs = validate_session_playback_engine()
-    assert player_ok is True, f"Session player failures: {player_errs}"
 
 
 
@@ -10788,12 +10649,305 @@ def wave22_session_logger_and_mimo_routing():
         shutil.rmtree(temp_s, ignore_errors=True)
 
 
+# ---- native desktop app (hydra_cli.gui) -------------------------------------------------
+
+
+def _gui_app():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication(["verify"])
+    from hydra_cli.gui import theme
+
+    theme.apply(app)
+    return app
+
+
+def _gui_pump(app, cond, seconds=30.0):
+    end = time.time() + seconds
+    while time.time() < end and not cond():
+        app.processEvents()
+        time.sleep(0.005)
+    return cond()
+
+
+def _gui_model_server(replies):
+    """Scripted model endpoint: pops one reply per request. Only the network edge is faked."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    queue_ = list(replies)
+
+    class Scripted(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            message = queue_.pop(0) if queue_ else {"role": "assistant", "content": "done"}
+            data = json.dumps({"choices": [{"message": message, "finish_reason": "stop"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", 0), Scripted)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+
+def _gui_stop(httpd):
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def _gui_write_call(path, content):
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "write_file", "arguments": json.dumps({"path": path, "content": content})},
+        }],
+    }
+
+
+@check
+def gui_store_persistence():
+    from hydra_cli.gui.store import Store
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "state.json")
+        store = Store(path)
+        proj = store.add_project(tmp)
+        assert store.add_project(tmp)["id"] == proj["id"]
+        thread = store.new_thread(proj["id"], "compact")
+        store.add_message(thread["id"], "user", "first line\nsecond")
+        store.add_message(thread["id"], "assistant", "ok")
+        store.add_diff(thread["id"], "a.txt", "+x\n")
+        again = Store(path)
+        t = again.thread(thread["id"])
+        assert t["title"] == "first line" and t["mode"] == "compact"
+        assert [m["role"] for m in t["messages"]] == ["user", "assistant"]
+        assert t["diffs"][0]["path"] == "a.txt"
+        assert again.threads(proj["id"])[0]["id"] == thread["id"]
+        again.delete_thread(thread["id"])
+        assert Store(path).thread(thread["id"]) is None
+        again.remove_project(proj["id"])
+        assert Store(path).projects() == []
+
+
+@check
+def gui_window_agent_turn_diff_approval_cancel():
+    """Real MainWindow, real worker thread, real run_agent_loop and write_file. Only the model endpoint is scripted."""
+    app = _gui_app()
+    from hydra_cli.gui.store import Store
+    from hydra_cli.gui.window import MainWindow
+
+    with tempfile.TemporaryDirectory() as tmp:
+        work = os.path.join(tmp, "proj")
+        os.makedirs(work)
+        httpd, base = _gui_model_server([])
+        try:
+            with isolated(home=tmp, env={"LOCAL_AI_BASE": base, **_cleared_secrets()}):
+                state = os.path.join(tmp, "state.json")
+                win = MainWindow(Store(state))
+                win.show()
+                win.add_project(work)
+                win.create_thread()
+                win.composer.model.setCurrentText("local")
+                assert win.windowTitle() == "Hydra" and win.isVisible()
+
+                # allowed tool call: approval pane arms, diff pane fills, file lands on disk
+                scripted = [_gui_write_call("hello.txt", "hello gui\n"), {"role": "assistant", "content": "wrote it"}]
+                _gui_stop(httpd)
+                httpd, base = _gui_model_server(scripted)
+                os.environ["LOCAL_AI_BASE"] = base
+                win.submit("make hello.txt")
+                assert _gui_pump(app, lambda: win.approval.allow.isEnabled()), "approval pane never armed"
+                assert win.approval.title.text().startswith("Approve tool : write_file")
+                win.approval.allow.click()
+                assert _gui_pump(app, lambda: not win.busy), "turn never finished"
+                assert open(os.path.join(work, "hello.txt"), encoding="utf-8").read() == "hello gui\n"
+                assert "+hello gui" in win.diffs.toPlainText() and "hello.txt" in win.diffs.toPlainText()
+                assert "wrote it" in win.transcript.toPlainText()
+
+                # skipped tool call: nothing written
+                _gui_stop(httpd)
+                httpd, base = _gui_model_server([_gui_write_call("skip.txt", "no\n"), {"role": "assistant", "content": "skipped"}])
+                os.environ["LOCAL_AI_BASE"] = base
+                win.submit("make skip.txt")
+                assert _gui_pump(app, lambda: win.approval.deny.isEnabled())
+                win.approval.deny.click()
+                assert _gui_pump(app, lambda: not win.busy)
+                assert not os.path.exists(os.path.join(work, "skip.txt"))
+
+                # Stop while a tool call waits: turn ends, nothing written, window stays usable
+                _gui_stop(httpd)
+                httpd, base = _gui_model_server([_gui_write_call("stop.txt", "no\n"), {"role": "assistant", "content": "late"}])
+                os.environ["LOCAL_AI_BASE"] = base
+                win.submit("make stop.txt")
+                assert _gui_pump(app, lambda: win.approval.allow.isEnabled())
+                win.composer.stop.click()
+                assert _gui_pump(app, lambda: not win.busy), "Stop did not end the turn"
+                assert not os.path.exists(os.path.join(work, "stop.txt"))
+                assert "late" not in win.transcript.toPlainText()
+
+                # context mode selector persists on the thread
+                win.composer.mode.setCurrentIndex(win.composer.mode.findData("compact"))
+                assert win.store.thread(win.thread_id)["mode"] == "compact"
+                tid = win.thread_id
+                win.close()
+                saved = Store(state).thread(tid)
+                roles = [m["role"] for m in saved["messages"]]
+                assert roles.count("user") == 3 and "assistant" in roles and saved["diffs"]
+        finally:
+            _gui_stop(httpd)
+
+
+@check
+def gui_cancel_hook_stops_streaming_turn():
+    """TurnCancelled raised from the token callback ends a real streamed turn and is not swallowed by provider fallback."""
+    from hydra_cli.agent import run_agent_loop
+    from hydra_cli.context import SessionContextLedger
+    from hydra_cli.ui import TurnCancelled, clear_cancel, request_cancel, check_cancel
+
+    httpd, base = _gui_model_server([{"role": "assistant", "content": "streamed words"}])
+    try:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp, isolated(home=tmp, env={"LOCAL_AI_BASE": base, **_cleared_secrets()}):
+            clear_cancel()
+
+            def on_token(text):
+                request_cancel()
+                check_cancel()
+
+            try:
+                run_agent_loop("local", "hi", tier="local", enable_native_tools=False, on_token=on_token, session_id="gate_cancel",
+                               ledger=SessionContextLedger(session_id="gate_cancel"))
+            except TurnCancelled:
+                pass
+            else:
+                raise AssertionError("cancel did not interrupt the turn")
+            finally:
+                clear_cancel()
+    finally:
+        _gui_stop(httpd)
+
+
+@check
+def gui_no_browser_app_remains():
+    assert not os.path.exists(os.path.join(REPO, "hydra_cli", "desktop.py"))
+    assert not os.path.exists(os.path.join(REPO, "scripts", "package_desktop.py"))
+    import re
+
+    pattern = re.compile(r"hydra_cli\.desktop(?!_core)\b|FastAPI|uvicorn|QtWebEngine|QWebEngine")
+    skip = {os.path.join(REPO, "scripts", "verify.py"), os.path.join(REPO, "scripts", "build_exe.py"), os.path.join(REPO, "hydra_cli", "desktop_core.py")}
+    hits = []
+    for base in ("hydra_cli", "desktop", "scripts", "launch"):
+        for root, _dirs, files in os.walk(os.path.join(REPO, base)):
+            for name in files:
+                full = os.path.join(root, name)
+                if full in skip or not name.endswith((".py", ".bat", ".ps1", ".sh")):
+                    continue
+                with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+                if pattern.search(text) and not full.endswith(("computer_use.py", "browser.py", "mcp.py", "native_tools.py")):
+                    hits.append(os.path.relpath(full, REPO))
+    assert not hits, "browser-app references remain: " + ", ".join(hits)
+    for rel in ("install.ps1", "install.sh"):
+        with open(os.path.join(REPO, rel), "r", encoding="utf-8") as fh:
+            assert "hydra_cli/desktop.py" not in fh.read()
+
+
+@check
+def gui_desktop_shortcut_targets_native_app():
+    if os.name != "nt":
+        raise Skip("Windows shortcut; this host is POSIX")
+    sys.path.insert(0, os.path.join(REPO, "scripts"))
+    import create_desktop_shortcut as cds
+
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"USERPROFILE": tmp}):
+        lnk = cds.create_shortcut(repo_root=REPO)
+        info = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f'$s=(New-Object -ComObject WScript.Shell).CreateShortcut("{lnk}"); "$($s.TargetPath)|$($s.Arguments)"'],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        target, args = info.split("|", 1)
+        assert os.path.isfile(target)
+        assert "hydra_cli.gui" in args or target.lower().endswith("hydra.exe"), info
+
+
+def _gui_find_windows(pid):
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _lparam):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(hwnd, buf, 256)
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            found.append((hwnd, buf.value, rect.right - rect.left, rect.bottom - rect.top))
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return found
+
+
+@check
+def gui_real_launch_window_and_frames():
+    """Launch the app the way the shortcut does (pythonw), find its visible top-level window, then time streaming frames."""
+    if os.name != "nt":
+        raise Skip("Win32 window handle check; this host is POSIX")
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    if not os.path.isfile(pythonw):
+        raise Skip("pythonw.exe not found beside the interpreter")
+    home = tempfile.mkdtemp(prefix="hydra_gui_")
+    env = dict(os.environ, USERPROFILE=home, HOME=home)
+    env.pop("QT_QPA_PLATFORM", None)
+    proc = subprocess.Popen([pythonw, "-m", "hydra_cli.gui"], cwd=REPO, env=env)
+    try:
+        windows = []
+        for _ in range(60):
+            if proc.poll() is not None:
+                break
+            windows = [w for w in _gui_find_windows(proc.pid) if w[1] == "Hydra"]
+            if windows:
+                break
+            time.sleep(0.5)
+        assert windows, f"no visible Hydra window (exit {proc.poll()})"
+        assert windows[0][2] >= 800 and windows[0][3] >= 500, windows
+        time.sleep(3)
+        assert proc.poll() is None, "app exited after opening"
+        assert [w for w in _gui_find_windows(proc.pid) if w[1] == "Hydra"], "window vanished"
+        log = os.path.join(home, ".hydra", "desktop.log")
+        assert not os.path.isfile(log) or "Traceback" not in open(log, encoding="utf-8", errors="replace").read()
+    finally:
+        proc.kill()
+        proc.wait()
+    out = os.path.join(home, "frames.json")
+    run = subprocess.run([sys.executable, "-m", "hydra_cli.gui", "--probe-frames", out], cwd=REPO, env=env, timeout=120)
+    assert run.returncode == 0 and os.path.isfile(out), "frame probe did not finish"
+    stats = json.load(open(out, encoding="utf-8"))
+    assert stats["chars"] > 50000 and stats["doc_chars"] >= stats["chars"], stats
+    assert stats["p95_ms"] < 40 and stats["max_ms"] < 250, f"UI thread stalls while streaming: {stats}"
+    shutil.rmtree(home, ignore_errors=True)
+
+
 @check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py", "test_model_distillation_pipeline.py", "test_sandbox_jail_enforcer.py", "test_model_lora_adapter_hotloader.py", "test_concurrency_throttle_queue.py", "test_model_rag_reranker.py", "test_session_replay_debugger.py", "test_swarm_session_logger.py", "test_alice_gcloud.py"}
+    allowed = {"test_computer_use.py", "test_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py", "test_model_distillation_pipeline.py", "test_sandbox_jail_enforcer.py", "test_model_lora_adapter_hotloader.py", "test_concurrency_throttle_queue.py", "test_model_rag_reranker.py", "test_session_replay_debugger.py", "test_swarm_session_logger.py", "test_alice_gcloud.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

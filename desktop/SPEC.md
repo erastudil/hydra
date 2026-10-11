@@ -1,42 +1,12 @@
-﻿# desktop specification
+﻿# hydra desktop specification
 
-scope : formal specification for the hydra desktop application server and web desk contract.
+scope : contract for the native hydra desktop app. there is no server and no http route.
 
-version : 1.0.0.
-
-dialect : progen instruct.
-
-
-## http routes
-
-get root : path `/`; returns text/html content for single-page web desk interface.
-
-get status : path `/api/status`; returns json with version, uptime, gateway url, and computer use state.
-
-get models : path `/api/models`; returns json list of catalog models and aliases.
-
-post chat : path `/api/chat`; accepts json payload with model, prompt, and execution mode; returns completion or stream.
-
-post terminal : path `/api/terminal/run`; executes shell command in zero-trust sandbox; returns stdout, stderr, and exit code.
-
-post computer action : path `/api/computer/action`; executes mouse, keyboard, or window command via computer use engine.
-
-get computer screen : path `/api/computer/screen`; returns image/png binary bytes of desktop screen or json with base64.
-
-post browser action : path `/api/browser/action`; executes playwright browser action and returns structured result.
-
-
-## websocket protocol
-
-endpoint : path `/ws/desktop`.
-
-client payload : json message declaring action `ping`, `chat`, `terminal`, or `screen`.
-
-server events : emitted json objects declaring event `pong`, `token`, `tool_call`, `screen`, `done`, or `error`.
-
-
-## lifecycle and isolation
-
-thread safety : thread-safe execution of uvicorn server in background daemon thread.
-
-clean shutdown : `server.stop()` sets `server.should_exit = True` and joins thread with bounded timeout.
+entry : `hydra_cli.gui.app.main(argv)` creates one QApplication and one MainWindow, returns the Qt exit code.
+store : `hydra_cli.gui.store.Store` reads and writes `~/.hydra/desktop/state.json` atomically; projects own threads; threads own messages and diffs.
+worker : `AgentWorker.run_turn(req)` runs in a QThread; req keys are prompt, alias, session_id, cwd, mode, approve.
+signals : token, tool, diff, approval, finished(text, ok).
+approval : with approve on, each tool call blocks the worker until `answer_approval` receives y, n, s or q.
+cancel : `request_cancel` makes the next token, tool call or turn boundary raise `TurnCancelled`.
+modes : recall is dynamic threading, compact is compaction; both come from `hydra_cli.context.CONTEXT_MODES`.
+windowless : under pythonw or a windowed exe, stdout and stderr go to `~/.hydra/desktop.log`.
