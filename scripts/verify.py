@@ -10522,11 +10522,48 @@ def desktop_distillation_pipeline_and_sandbox_jail_contracts():
 
 
 @check
+def desktop_lora_hotloader_and_throttle_queue_contracts():
+    from desktop.model_lora_adapter_hotloader import (
+        ModelLoraAdapterHotloader,
+        LoraLayerWeights,
+    )
+    from desktop.concurrency_throttle_queue import (
+        ConcurrencyThrottleQueue,
+        QueuePriority,
+    )
+
+    # LoRA hotloader contracts
+    hotloader = ModelLoraAdapterHotloader()
+    base_w = [[1.0, 0.0], [0.0, 1.0]]
+    layer = LoraLayerWeights(
+        layer_name="attn",
+        in_features=2,
+        out_features=2,
+        rank=1,
+        matrix_a=[[1.0, 0.0]],
+        matrix_b=[[1.0], [0.0]],
+    )
+    rec = hotloader.mount_adapter("adapt_v1", "Attn Adapt", 1, 1.0, {"attn": layer})
+    assert rec.scaling_factor == 1.0
+
+    x = [2.0, 3.0]
+    y = hotloader.apply_layer_forward("attn", base_w, x)
+    assert y == [4.0, 3.0]
+
+    # Concurrency throttle queue contracts
+    queue = ConcurrencyThrottleQueue(max_concurrency=2, refill_rate_per_sec=50.0, token_capacity=50.0)
+    with queue.lease("client_1", QueuePriority.CRITICAL) as permit:
+        assert permit is not None
+        assert queue.active_in_flight == 1
+    assert queue.active_in_flight == 0
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py", "test_model_distillation_pipeline.py", "test_sandbox_jail_enforcer.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py", "test_model_distillation_pipeline.py", "test_sandbox_jail_enforcer.py", "test_model_lora_adapter_hotloader.py", "test_concurrency_throttle_queue.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

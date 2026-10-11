@@ -260,7 +260,41 @@ from desktop.sandbox_jail_enforcer import (
     reset_sandbox_enforcer,
 )
 
+from desktop.model_lora_adapter_hotloader import (
+    AdapterStatus,
+    LoraLayerWeights,
+    LoraAdapterRecord,
+    compute_lora_delta_matrix,
+    ModelLoraAdapterHotloader,
+    get_lora_hotloader,
+    reset_lora_hotloader,
+)
+from desktop.concurrency_throttle_queue import (
+    QueuePriority,
+    TokenBucketRateLimiter,
+    QueuedTask,
+    ConcurrencySlotPermit,
+    ConcurrencyThrottleQueue,
+    get_throttle_queue,
+    reset_throttle_queue,
+)
+
 __all__ = [
+    "AdapterStatus",
+    "LoraLayerWeights",
+    "LoraAdapterRecord",
+    "compute_lora_delta_matrix",
+    "ModelLoraAdapterHotloader",
+    "get_lora_hotloader",
+    "reset_lora_hotloader",
+    "QueuePriority",
+    "TokenBucketRateLimiter",
+    "QueuedTask",
+    "ConcurrencySlotPermit",
+    "ConcurrencyThrottleQueue",
+    "get_throttle_queue",
+    "reset_throttle_queue",
+
     "PruningScheduleType",
     "stable_softmax",
     "compute_cross_entropy",
