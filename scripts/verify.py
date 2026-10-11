@@ -760,6 +760,7 @@ def tools_sandbox_and_memory():
         resolve_effort_choice,
         resolve_model_choice,
         session_model_label,
+        collapsed_action_line,
     )
     from hydra_cli.alice_gate import consult, load_skills, stack_report
     from hydra_cli.alice_runner import AliceOrchestrator
@@ -1011,6 +1012,15 @@ def tools_sandbox_and_memory():
 
     assert "read_file" in DEFAULT_AGENT_SYSTEM_PROMPT and "Inspect" in DEFAULT_AGENT_SYSTEM_PROMPT
     assert "summon" in DEFAULT_AGENT_SYSTEM_PROMPT and "opus 5.5" in DEFAULT_AGENT_SYSTEM_PROMPT
+    assert collapsed_action_line("thought", "12s") == "▸ Thought 12s"
+    assert collapsed_action_line("read", "hydra_cli/tui.py") == "▸ Read hydra_cli/tui.py"
+    assert collapsed_action_line("search", '"reflow_rows"', "3 matches") == '▸ Searched "reflow_rows" · 3 matches'
+    assert collapsed_action_line("ran", "pytest -q", "exit 0") == "▸ Ran pytest -q · exit 0"
+    assert collapsed_action_line("error", "turn") == "▸ Error turn"
+    from hydra_cli.desktop import get_desktop_html
+    desk = get_desktop_html()
+    assert "/api/chat/stream" in desk and "action-row" in desk and "hydra-think" in desk
+    assert "min(420px, 34vw)" in desk and "Ask anything, pick a model, and send." in desk
     assert resolve_model_choice("1") == "alice"
     assert resolve_model_choice("alise") == "alice"
     assert resolve_model_choice("nope") is None

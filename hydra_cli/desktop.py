@@ -349,7 +349,7 @@ button.primary:hover {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-width: 80%;
+  max-width: min(760px, 100%);
   animation: fadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 @keyframes fadeIn {
@@ -441,8 +441,60 @@ textarea:focus {
   border-color: var(--accent);
   box-shadow: var(--accent-glow);
 }
+.input-area.thinking textarea {
+  animation: hydra-think 1.6s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .input-area.thinking textarea {
+    animation: none;
+    border-color: #00ff66;
+    box-shadow: 0 0 14px #00ff66aa;
+  }
+}
+.input-area.error-flash textarea {
+  border-color: #ff3355;
+  box-shadow: 0 0 12px rgba(255, 51, 85, 0.45);
+}
+@keyframes hydra-think {
+  0%, 100% { border-color: #1f7a45; box-shadow: 0 0 0 rgba(0, 255, 102, 0); }
+  50% { border-color: #00ff66; box-shadow: 0 0 18px rgba(0, 255, 102, 0.55); }
+}
+.action-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  color: #d7e0da;
+  font: inherit;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.action-row .verb { color: var(--accent); }
+.action-body { display: none; color: var(--text-muted); padding: 4px 0 8px 16px; white-space: pre-wrap; }
+.action-row.open + .action-body { display: block; }
+.palette-container { max-width: 92vw !important; }
+@media (max-width: 800px) {
+  header { flex-wrap: wrap; }
+  .workspace { flex-direction: column; }
+  .sidebar {
+    width: 100%;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .nav-item { white-space: nowrap; }
+  .side-drawer {
+    width: 100%;
+    max-height: 42vh;
+    border-left: none;
+    border-top: 1px solid var(--border);
+  }
+  .message { max-width: 100%; }
+}
 .side-drawer {
-  width: 500px;
+  width: min(420px, 34vw);
   background: var(--bg-secondary);
   border-left: 1px solid var(--border);
   display: flex;
@@ -674,7 +726,7 @@ textarea:focus {
     <div class="chat-pane" id="chat-pane">
       <div class="message assistant">
         <div class="msg-header">HYDRA ORCHESTRATOR</div>
-        <div class="msg-bubble">Sovereign multi-headed desktop environment primed. Ready for prompt summon, agent execution, or OS computer control.</div>
+        <div class="msg-bubble">Ask anything, pick a model, and send.</div>
       </div>
     </div>
     <div class="input-area">
@@ -1147,6 +1199,51 @@ function clearMessages() {
   document.getElementById('chat-pane').innerHTML = '';
 }
 
+function consumeSseBuffer(buf, onEvent, flush) {
+  let rest = buf || '';
+  const blocks = [];
+  let idx;
+  while ((idx = rest.indexOf('\n\n')) !== -1) {
+    blocks.push(rest.slice(0, idx));
+    rest = rest.slice(idx + 2);
+  }
+  if (flush && rest.trim()) {
+    blocks.push(rest);
+    rest = '';
+  }
+  blocks.forEach(block => {
+    let event = 'message';
+    const dataLines = [];
+    block.split('\n').forEach(line => {
+      if (line.startsWith('event:')) event = line.slice(6).trim();
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
+    });
+    if (!dataLines.length) return;
+    let payload = {};
+    try { payload = JSON.parse(dataLines.join('\n')); }
+    catch (e) { payload = { text: dataLines.join('\n') }; }
+    onEvent(event, payload);
+  });
+  return rest;
+}
+
+function appendAction(parent, line) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'action-row';
+  const body = document.createElement('div');
+  body.className = 'action-body';
+  const match = /^(▸ )(\\S+)([\\s\\S]*)$/.exec(line || '');
+  if (match) {
+    row.innerHTML = escapeHtml(match[1]) + '<span class="verb">' + escapeHtml(match[2]) + '</span>' + escapeHtml(match[3]);
+  } else {
+    row.textContent = line || '';
+  }
+  row.addEventListener('click', () => row.classList.toggle('open'));
+  parent.appendChild(row);
+  parent.appendChild(body);
+}
+
 async function dispatchPrompt() {
   const input = document.getElementById('prompt-input');
   const text = input.value.trim();
@@ -1168,7 +1265,7 @@ async function dispatchPrompt() {
 
   const assistMsg = document.createElement('div');
   assistMsg.className = 'message assistant';
-  assistMsg.innerHTML = `<div class="msg-header">${model.toUpperCase()}</div><div class="msg-bubble" id="stream-bubble">...</div>`;
+  assistMsg.innerHTML = `<div class="msg-header">${model.toUpperCase()}</div><div class="msg-bubble">...</div>`;
   pane.appendChild(assistMsg);
   pane.scrollTop = pane.scrollHeight;
 
@@ -1190,25 +1287,85 @@ async function dispatchPrompt() {
       return;
     }
 
-    const res = await fetch('/api/chat', {
+    if (currentNav === 'swarm') {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: model, prompt: text, mode: currentNav })
+      });
+      const data = await res.json();
+      const reply = data.content || data.error || 'Done';
+      bubble.innerText = reply;
+      if (sess) sess.messages.push({ role: 'assistant', header: model.toUpperCase(), text: reply });
+      pane.scrollTop = pane.scrollHeight;
+      return;
+    }
+
+    const area = document.querySelector('.input-area');
+    if (area) area.classList.add('thinking');
+    const started = Date.now();
+    bubble.textContent = '◐ Thinking';
+    let thoughtSeen = false;
+    let answer = '';
+    const res = await fetch('/api/chat/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: model, prompt: text, mode: currentNav })
+      body: JSON.stringify({ model: model, prompt: text, mode: currentNav === 'agent' ? 'agent' : 'chat' })
     });
-    const data = await res.json();
-    const reply = data.content || data.error || 'Done';
-    bubble.innerText = reply;
-    if (sess) sess.messages.push({ role: 'assistant', header: model.toUpperCase(), text: reply });
-    if (data.tool_calls && data.tool_calls.length) {
-      data.tool_calls.forEach(tc => {
-        const tcCard = document.createElement('div');
-        tcCard.className = 'tool-card';
-        tcCard.innerHTML = `<div class="tool-title">Tool: ${tc.name}</div><div>${escapeHtml(JSON.stringify(tc.arguments))}</div>`;
-        assistMsg.appendChild(tcCard);
-      });
+    if (!res.ok || !res.body) {
+      bubble.textContent = 'That turn did not finish. Check the model key and try again.';
+      return;
     }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = '';
+    const takeBlocks = (flush) => {
+      pending = consumeSseBuffer(pending, (event, payload) => {
+        const chunk = payload.text || '';
+        if (event === 'thought' || event === 'tool') {
+          appendAction(assistMsg, chunk);
+          if (event === 'thought') thoughtSeen = true;
+          return;
+        }
+        if (event === 'token') {
+          if (!thoughtSeen) {
+            thoughtSeen = true;
+            const secs = Math.max(0, Math.round((Date.now() - started) / 1000));
+            appendAction(assistMsg, '▸ Thought ' + secs + 's');
+          }
+          answer += chunk;
+          bubble.textContent = answer;
+          pane.scrollTop = pane.scrollHeight;
+          return;
+        }
+        if (event === 'done') {
+          if (!answer && chunk) bubble.textContent = chunk;
+          return;
+        }
+        if (event === 'error') {
+          bubble.textContent = 'That turn did not finish. Check the model key and try again.';
+          if (chunk) appendAction(assistMsg, chunk.indexOf('▸') === 0 ? chunk : ('▸ Error ' + chunk));
+        }
+      }, flush);
+    };
+    while (true) {
+      const step = await reader.read();
+      if (step.done) break;
+      pending += decoder.decode(step.value, { stream: true });
+      takeBlocks(false);
+    }
+    pending += decoder.decode();
+    takeBlocks(true);
+    if (sess) sess.messages.push({ role: 'assistant', header: model.toUpperCase(), text: answer || bubble.textContent });
   } catch (err) {
-    bubble.innerText = `Error: ${err.message}`;
+    bubble.textContent = 'That turn did not finish. Check the model key and try again.';
+    appendAction(assistMsg, '▸ Error ' + (err && err.message ? err.message : 'turn'));
+    const area = document.querySelector('.input-area');
+    if (area) area.classList.add('error-flash');
+    setTimeout(() => area && area.classList.remove('error-flash'), 400);
+  } finally {
+    const area = document.querySelector('.input-area');
+    if (area) area.classList.remove('thinking');
   }
   pane.scrollTop = pane.scrollHeight;
 }
@@ -1762,7 +1919,12 @@ document.addEventListener('DOMContentLoaded', () => {
   initWebSocket();
   fetchTokenUsage();
   calculateViewportScale();
+  const screenBox = document.getElementById('screen-container');
+  if (screenBox && window.ResizeObserver) {
+    new ResizeObserver(() => calculateViewportScale()).observe(screenBox);
+  }
 });
+window.addEventListener('resize', () => calculateViewportScale());
 setTimeout(() => {
   initWebSocket();
   fetchTokenUsage();
@@ -2408,12 +2570,49 @@ def create_desktop_app() -> Any:
             models.append({"alias": alias, "model_id": model_id})
         return {"models": models, "free_models": FREE_MODELS}
 
+    def _sse_chat(model: str, prompt: str, mode: str):
+        async def events():
+            if not prompt:
+                payload = json.dumps({"text": "▸ Error empty prompt"})
+                yield f"event: error\ndata: {payload}\n\n"
+                return
+            loop = asyncio.get_running_loop()
+            bus: asyncio.Queue = asyncio.Queue()
+
+            def worker() -> None:
+                try:
+                    from hydra_cli.agent import iter_chat_events
+                    for ev in iter_chat_events(model, prompt, mode=mode if mode != "swarm" else "chat"):
+                        loop.call_soon_threadsafe(bus.put_nowait, ev)
+                except Exception as exc:
+                    from hydra_cli.providers import redact
+                    loop.call_soon_threadsafe(bus.put_nowait, {"event": "error", "text": redact(exc)})
+                finally:
+                    loop.call_soon_threadsafe(bus.put_nowait, None)
+
+            threading.Thread(target=worker, daemon=True).start()
+            while True:
+                ev = await bus.get()
+                if ev is None:
+                    break
+                payload = json.dumps({"text": ev.get("text", "")}, ensure_ascii=False)
+                yield f"event: {ev.get('event', 'token')}\ndata: {payload}\n\n"
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     @app.post("/api/chat")
     async def chat_endpoint(req: Request):
         body = await req.json()
         model = body.get("model", "sonnet 5.5")
         prompt = body.get("prompt", "")
         mode = body.get("mode", "chat")
+
+        if "text/event-stream" in (req.headers.get("accept") or "") and mode != "swarm":
+            return _sse_chat(model, prompt, mode)
 
         if not prompt:
             return JSONResponse({"error": "Empty prompt"}, status_code=400)
@@ -2443,6 +2642,14 @@ def create_desktop_app() -> Any:
                 return {"content": res}
             except Exception as exc:
                 return {"content": f"Hydra Desktop summon result for {model}:\nProcessed instruction: {prompt}\n(Status: {exc})"}
+
+    @app.post("/api/chat/stream")
+    async def chat_stream(req: Request):
+        body = await req.json()
+        model = body.get("model", "sonnet 5.5")
+        prompt = body.get("prompt", "")
+        mode = body.get("mode", "chat")
+        return _sse_chat(model, prompt, mode)
 
     @app.post("/api/terminal/run")
     async def terminal_run(req: Request):
@@ -3043,8 +3250,30 @@ def create_desktop_app() -> Any:
                         }))
                     elif action == "chat":
                         prompt = payload.get("prompt", "")
-                        await ws.send_text(json.dumps({"event": "token", "chunk": f"Summoned response: {prompt}"}))
-                        await ws.send_text(json.dumps({"event": "done"}))
+                        model_name = payload.get("model") or DEFAULT_ORCHESTRATOR_MODEL
+                        chat_mode = payload.get("mode") or "chat"
+                        if not prompt:
+                            await ws.send_text(json.dumps({"event": "error", "text": "▸ Error empty prompt"}))
+                            continue
+                        bus: asyncio.Queue = asyncio.Queue()
+
+                        def _chat_worker() -> None:
+                            try:
+                                from hydra_cli.agent import iter_chat_events
+                                for ev in iter_chat_events(model_name, prompt, mode=chat_mode if chat_mode != "swarm" else "chat"):
+                                    loop.call_soon_threadsafe(bus.put_nowait, ev)
+                            except Exception as exc:
+                                from hydra_cli.providers import redact
+                                loop.call_soon_threadsafe(bus.put_nowait, {"event": "error", "text": redact(exc)})
+                            finally:
+                                loop.call_soon_threadsafe(bus.put_nowait, None)
+
+                        threading.Thread(target=_chat_worker, daemon=True).start()
+                        while True:
+                            ev = await bus.get()
+                            if ev is None:
+                                break
+                            await ws.send_text(json.dumps(ev))
                     elif action == "screen":
                         engine = get_computer_use_engine()
                         cap = engine.screen.capture(as_base64=True)

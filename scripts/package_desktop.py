@@ -94,6 +94,7 @@ def run_checks() -> int:
         "/api/status",
         "/api/models",
         "/api/chat",
+        "/api/chat/stream",
         "/api/terminal/run",
         "/api/computer/action",
         "/api/computer/screen",
