@@ -224,7 +224,12 @@ def test_desktop_shortcut_properties():
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
 
-    from scripts.create_desktop_shortcut import get_desktop_dir, verify_shortcut, create_shortcut
+    from scripts.create_desktop_shortcut import (
+        get_desktop_dir,
+        verify_shortcut,
+        create_shortcut,
+        create_tui_shortcut,
+    )
 
     desktop_dir = get_desktop_dir()
     assert os.path.isdir(desktop_dir)
@@ -235,6 +240,12 @@ def test_desktop_shortcut_properties():
             create_shortcut(repo_root=repo_root)
         assert os.path.isfile(shortcut_path)
         assert verify_shortcut(shortcut_path) is True
+
+        tui_shortcut_path = os.path.join(desktop_dir, "Hydra TUI.lnk")
+        if not os.path.isfile(tui_shortcut_path):
+            create_tui_shortcut(repo_root=repo_root)
+        assert os.path.isfile(tui_shortcut_path)
+        assert verify_shortcut(tui_shortcut_path) is True
 
 
 def test_hydra_icon_generator():
