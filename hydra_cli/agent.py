@@ -125,6 +125,10 @@ DEFAULT_AGENT_SYSTEM_PROMPT = os.environ.get(
         "CONTEXT LEDGER & STEERING:\n"
         "- The system maintains a rigorous context ledger of your execution history. Commands like /compact and /retrieve manipulate this state.\n"
         "- The user may interrupt your execution or provide in-flight steering directives. You must immediately realign your plan to these directives.\n\n"
+        "AI/ML SPECIFICATION INVARIANT:\n"
+        "- Query live documentation and search web first for any task involving AI tools, models, harnesses, or machine learning.\n"
+        "- Zero reliance on internal weights for AI/ML specifications.\n"
+        "- Treat information older than 3 months as obsolete.\n\n"
         "TOOL USAGE INSTRUCTIONS:\n"
         "- Proactively invoke tools at every turn to inspect and modify state: read_file, edit_file, write_file, run_command, grep_search, find_files, list_dir.\n"
         "- Never guess or hallucinate file contents or test results. Always read files before modifying them.\n"
@@ -543,6 +547,14 @@ class SessionCheckpointer:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
             os.replace(tmp_path, self.file_path)
+            get_default_checkpoint_index().index_checkpoint(
+                session_id=self.session_id,
+                state=self.state,
+                model=self.model,
+                task=self.task,
+                turns_count=len(self.turns),
+                file_path=self.file_path,
+            )
         except Exception as e:
             sys.stderr.write(f"[HYDRA CHECKPOINT] Note: session save skipped ({redact(e)})\n")
             sys.stderr.flush()
@@ -574,6 +586,1746 @@ class SessionCheckpointer:
             return inst
         except Exception:
             return None
+
+
+PROGEN_REANCHOR_DIRECTIVE = (
+    "reanchor : context compaction event detected; dialect invariant enforced.\n\n"
+    "dialect : progen syntax.\n\n"
+    "unit structure : exactly one topic : comment per line.\n\n"
+    "statement delimiter : exactly one blank line between topic : comment statements.\n\n"
+    "predication P018 : never emit leading copulas is, are, was, were in comments; assert raw predicates directly.\n\n"
+    "tell P001 : never emit parentheticals in running prose.\n\n"
+    "tell P004 : never emit contrast dualism; assert positive operational state directly.\n\n"
+    "tell P005 : never emit conversational hooks or open-ended prompts at turn ends.\n\n"
+    "tell P006 : never emit recap headers or conclusion summaries.\n\n"
+    "state vectors : declare operational intent using canonical heads intention, requirement, course of action, end result, reason, demand, compliance.\n\n"
+    "truth : exit code zero is passing; unverified assertion carries zero truth value."
+)
+
+
+def build_progen_reanchor_block(unloaded_rounds: int = 0) -> str:
+    """Format canonical Progen re-anchor directive to prevent dialect drift."""
+    if unloaded_rounds > 0:
+        header = f"unloaded tool rounds : {unloaded_rounds}.\n\n"
+    else:
+        header = ""
+    return header + PROGEN_REANCHOR_DIRECTIVE
+
+
+def build_progen_reanchor_message(unloaded_rounds: int = 0, role: str = "system") -> Dict[str, str]:
+    """Construct message dictionary containing Progen re-anchor directive."""
+    return {
+        "role": role,
+        "content": build_progen_reanchor_block(unloaded_rounds=unloaded_rounds),
+    }
+
+
+def apply_progen_reanchor(
+    messages: List[Dict[str, Any]],
+    unloaded_rounds: int = 0,
+    role: str = "system",
+) -> List[Dict[str, Any]]:
+    """Inject Progen re-anchor message after compaction or context pruning."""
+    reanchor_msg = build_progen_reanchor_message(unloaded_rounds=unloaded_rounds, role=role)
+    reanchored = [copy.deepcopy(m) for m in messages]
+    for m in reanchored:
+        if "reanchor : context compaction event detected" in str(m.get("content", "")):
+            return reanchored
+    if reanchored and reanchored[0].get("role") in ("system", "developer"):
+        reanchored.insert(1, reanchor_msg)
+    else:
+        reanchored.insert(0, reanchor_msg)
+    return reanchored
+
+
+class ProgenReanchorController:
+    """Manage Progen syntax re-anchoring across compaction cycles and turn pruning."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal compaction registry and re-anchor event counters."""
+        self._session_compactions: Dict[str, int] = {}
+        self._total_reanchors: int = 0
+
+    def record_compaction(self, session_id: str, unloaded_rounds: int = 0) -> Dict[str, Any]:
+        """Record compaction event for session and increment compaction count."""
+        count = self._session_compactions.get(session_id, 0) + 1
+        self._session_compactions[session_id] = count
+        self._total_reanchors += 1
+        return {
+            "session_id": session_id,
+            "compaction_count": count,
+            "unloaded_rounds": unloaded_rounds,
+            "reanchor_directive": build_progen_reanchor_block(unloaded_rounds=unloaded_rounds),
+        }
+
+    def has_compacted(self, session_id: str) -> bool:
+        """Check whether session has undergone context compaction."""
+        return self._session_compactions.get(session_id, 0) > 0
+
+    def get_compaction_count(self, session_id: str) -> int:
+        """Return number of recorded compactions for session."""
+        return self._session_compactions.get(session_id, 0)
+
+    def reanchor_messages(
+        self,
+        session_id: str,
+        messages: List[Dict[str, Any]],
+        unloaded_rounds: int = 0,
+        role: str = "system",
+    ) -> List[Dict[str, Any]]:
+        """Apply Progen re-anchor directive to compacted session messages."""
+        self.record_compaction(session_id, unloaded_rounds=unloaded_rounds)
+        return apply_progen_reanchor(messages, unloaded_rounds=unloaded_rounds, role=role)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregate re-anchoring metrics."""
+        return {
+            "tracked_sessions": len(self._session_compactions),
+            "total_reanchors": self._total_reanchors,
+        }
+
+
+_DEFAULT_PROGEN_REANCHOR_CONTROLLER = ProgenReanchorController()
+
+
+def get_default_progen_reanchor_controller() -> ProgenReanchorController:
+    """Return default singleton Progen re-anchor controller instance."""
+    return _DEFAULT_PROGEN_REANCHOR_CONTROLLER
+
+
+def reset_progen_reanchor_controller() -> None:
+    """Reset global Progen re-anchor controller state."""
+    _DEFAULT_PROGEN_REANCHOR_CONTROLLER.reset()
+
+
+ROLE_BASE_WEIGHTS = {
+    "system": 1.0,
+    "developer": 1.0,
+    "user": 0.90,
+    "assistant": 0.75,
+    "tool": 0.50,
+}
+
+
+class ContextDecayWeighter:
+    """Evaluate recency decay and role importance weights for context compaction."""
+
+    def __init__(self, default_decay_factor: float = 0.85) -> None:
+        self.default_decay_factor = default_decay_factor
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset internal metrics and pruning operation counters."""
+        self._prune_events: int = 0
+        self._total_chars_pruned: int = 0
+
+    def calculate_weight(
+        self,
+        message: Dict[str, Any],
+        turn_index: int,
+        total_turns: int,
+        decay_factor: Optional[float] = None,
+    ) -> float:
+        """Compute composite retention weight combining role significance, recency decay, and size."""
+        import math
+        if message.get("pinned") or message.get("role") in ("system", "developer"):
+            return 1.0
+
+        factor = decay_factor if decay_factor is not None else self.default_decay_factor
+        age = max(0, total_turns - turn_index - 1)
+        recency = factor ** age
+
+        role = message.get("role", "user")
+        base_role = ROLE_BASE_WEIGHTS.get(role, 0.70)
+
+        content_len = len(str(message.get("content") or ""))
+        length_penalty = 1.0 / (1.0 + math.log1p(content_len / 2000.0))
+
+        composite = base_role * recency * length_penalty
+        return round(composite, 6)
+
+    def score_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        decay_factor: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Annotate message copies with computed decay weights."""
+        total = len(messages)
+        scored = []
+        for idx, m in enumerate(messages):
+            copy_m = dict(m)
+            copy_m["_decay_weight"] = self.calculate_weight(
+                m,
+                turn_index=idx,
+                total_turns=total,
+                decay_factor=decay_factor,
+            )
+            scored.append(copy_m)
+        return scored
+
+    def prune_by_decay(
+        self,
+        messages: List[Dict[str, Any]],
+        max_chars: int,
+        decay_factor: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Prune lowest-weight messages iteratively until total serialized characters fit budget."""
+        if not messages:
+            return []
+
+        def total_chars(msgs: List[Dict[str, Any]]) -> int:
+            return sum(len(str(m.get("content") or "")) for m in msgs)
+
+        current = [dict(m) for m in messages]
+        initial_chars = total_chars(current)
+        if initial_chars <= max_chars:
+            return current
+
+        while len(current) > 2 and total_chars(current) > max_chars:
+            total = len(current)
+            candidates = []
+            for idx in range(1, total - 1):
+                if current[idx].get("role") in ("system", "developer") or current[idx].get("pinned"):
+                    continue
+                w = self.calculate_weight(current[idx], idx, total, decay_factor=decay_factor)
+                candidates.append((w, idx))
+
+            if not candidates:
+                break
+
+            candidates.sort(key=lambda x: x[0])
+            lowest_idx = candidates[0][1]
+            removed = current.pop(lowest_idx)
+            self._total_chars_pruned += len(str(removed.get("content") or ""))
+
+        self._prune_events += 1
+        return current
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregate decay pruning metrics."""
+        return {
+            "prune_events": self._prune_events,
+            "total_chars_pruned": self._total_chars_pruned,
+        }
+
+
+_DEFAULT_CONTEXT_DECAY_WEIGHTER = ContextDecayWeighter()
+
+
+def get_default_decay_weighter() -> ContextDecayWeighter:
+    """Return default singleton context decay weighter instance."""
+    return _DEFAULT_CONTEXT_DECAY_WEIGHTER
+
+
+def calculate_turn_decay_weight(
+    message: Dict[str, Any],
+    turn_index: int,
+    total_turns: int,
+    decay_factor: Optional[float] = None,
+) -> float:
+    """Calculate decay retention weight for a specific message."""
+    return _DEFAULT_CONTEXT_DECAY_WEIGHTER.calculate_weight(
+        message,
+        turn_index=turn_index,
+        total_turns=total_turns,
+        decay_factor=decay_factor,
+    )
+
+
+def score_context_decay(
+    messages: List[Dict[str, Any]],
+    decay_factor: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Score messages with recency and role decay weights."""
+    return _DEFAULT_CONTEXT_DECAY_WEIGHTER.score_messages(messages, decay_factor=decay_factor)
+
+
+def prune_context_by_decay(
+    messages: List[Dict[str, Any]],
+    max_chars: int,
+    decay_factor: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Prune context messages according to decay weight ranking."""
+    return _DEFAULT_CONTEXT_DECAY_WEIGHTER.prune_by_decay(
+        messages,
+        max_chars=max_chars,
+        decay_factor=decay_factor,
+    )
+
+
+def reset_decay_weighter() -> None:
+    """Reset global context decay weighter state."""
+    _DEFAULT_CONTEXT_DECAY_WEIGHTER.reset()
+
+
+def compute_text_similarity(a: str, b: str) -> float:
+    """Compute normalized similarity ratio between two text sequences."""
+    if a == b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    len_a = len(a)
+    len_b = len(b)
+    if abs(len_a - len_b) / max(len_a, len_b) > 0.4:
+        return 0.0
+    sample_a = a[:1000] if len_a > 1000 else a
+    sample_b = b[:1000] if len_b > 1000 else b
+    return difflib.SequenceMatcher(None, sample_a, sample_b).ratio()
+
+
+class SemanticContextDeduplicator:
+    """Identify and compact semantic duplicate messages within context history."""
+
+    def __init__(self, default_threshold: float = 0.85) -> None:
+        self.default_threshold = default_threshold
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset deduplicator metrics and internal tracking state."""
+        self._total_duplicates_found: int = 0
+        self._total_chars_saved: int = 0
+
+    def deduplicate(
+        self,
+        messages: List[Dict[str, Any]],
+        similarity_threshold: Optional[float] = None,
+        replace_with_pointer: bool = True,
+    ) -> Dict[str, Any]:
+        """Detect and compact duplicate turns across conversation history."""
+        if not messages:
+            return {
+                "deduplicated_messages": [],
+                "duplicates_found": 0,
+                "chars_saved": 0,
+            }
+
+        threshold = similarity_threshold if similarity_threshold is not None else self.default_threshold
+        result = [copy.deepcopy(m) for m in messages]
+        duplicates_count = 0
+        chars_saved = 0
+
+        for i in range(1, len(result) - 1):
+            curr_msg = result[i]
+            if curr_msg.get("role") in ("system", "developer") or curr_msg.get("pinned"):
+                continue
+
+            curr_content = str(curr_msg.get("content") or "")
+            if len(curr_content) < 30:
+                continue
+
+            for j in range(0, i):
+                prev_msg = result[j]
+                if prev_msg.get("role") != curr_msg.get("role"):
+                    continue
+
+                prev_content = str(prev_msg.get("content") or "")
+                sim = compute_text_similarity(prev_content, curr_content)
+
+                if sim >= threshold:
+                    duplicates_count += 1
+                    old_len = len(curr_content)
+                    if replace_with_pointer:
+                        pointer = f"[DUPLICATE OF TURN {j}]"
+                        curr_msg["content"] = pointer
+                        saved = max(0, old_len - len(pointer))
+                    else:
+                        saved = old_len
+                    chars_saved += saved
+                    break
+
+        self._total_duplicates_found += duplicates_count
+        self._total_chars_saved += chars_saved
+
+        return {
+            "deduplicated_messages": result,
+            "duplicates_found": duplicates_count,
+            "chars_saved": chars_saved,
+        }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregate deduplication telemetry metrics."""
+        return {
+            "total_duplicates_found": self._total_duplicates_found,
+            "total_chars_saved": self._total_chars_saved,
+        }
+
+
+_DEFAULT_SEMANTIC_DEDUPLICATOR = SemanticContextDeduplicator()
+
+
+def get_default_semantic_deduplicator() -> SemanticContextDeduplicator:
+    """Return default singleton semantic context deduplicator instance."""
+    return _DEFAULT_SEMANTIC_DEDUPLICATOR
+
+
+def semantic_deduplicate_messages(
+    messages: List[Dict[str, Any]],
+    similarity_threshold: Optional[float] = None,
+    replace_with_pointer: bool = True,
+) -> List[Dict[str, Any]]:
+    """Deduplicate conversation messages using semantic similarity matching."""
+    res = _DEFAULT_SEMANTIC_DEDUPLICATOR.deduplicate(
+        messages,
+        similarity_threshold=similarity_threshold,
+        replace_with_pointer=replace_with_pointer,
+    )
+    return res["deduplicated_messages"]
+
+
+def reset_semantic_deduplicator() -> None:
+    """Reset global semantic context deduplicator state."""
+    _DEFAULT_SEMANTIC_DEDUPLICATOR.reset()
+
+
+class SessionCheckpointIndex:
+    """Index and catalog session checkpoints for fast retrieval and state querying."""
+
+    def __init__(self, index_file: Optional[str] = None) -> None:
+        self.index_file = index_file
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset in-memory index catalog and operational counters."""
+        self._entries: Dict[str, Dict[str, Any]] = {}
+        self._state_index: Dict[str, List[str]] = {}
+        self._index_writes: int = 0
+        self._index_queries: int = 0
+
+    def index_checkpoint(
+        self,
+        session_id: str,
+        state: str,
+        model: str,
+        task: str,
+        turns_count: int,
+        file_path: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        timestamp: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Index or update session checkpoint entry in catalog."""
+        now = timestamp if timestamp is not None else time.time()
+        record = {
+            "session_id": session_id,
+            "state": state,
+            "model": model,
+            "task": task,
+            "turns_count": turns_count,
+            "file_path": file_path,
+            "updated_at": now,
+            "metadata": dict(metadata or {}),
+        }
+        self._entries[session_id] = record
+
+        bucket = self._state_index.setdefault(state, [])
+        if session_id not in bucket:
+            bucket.append(session_id)
+
+        for s, s_list in self._state_index.items():
+            if s != state and session_id in s_list:
+                s_list.remove(session_id)
+
+        self._index_writes += 1
+        return dict(record)
+
+    def get_entry(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve indexed checkpoint metadata for session."""
+        entry = self._entries.get(session_id)
+        return dict(entry) if entry else None
+
+    def query(
+        self,
+        state: Optional[str] = None,
+        model: Optional[str] = None,
+        keyword: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Query indexed checkpoints matching state, model, or task keywords."""
+        self._index_queries += 1
+        matched: List[Dict[str, Any]] = []
+
+        if state and state in self._state_index:
+            candidates = [self._entries[sid] for sid in self._state_index[state] if sid in self._entries]
+        else:
+            candidates = list(self._entries.values())
+
+        for entry in candidates:
+            if model and entry.get("model") != model:
+                continue
+            if keyword:
+                kw = keyword.lower()
+                task_text = entry.get("task", "").lower()
+                meta_text = json.dumps(entry.get("metadata", {})).lower()
+                if kw not in task_text and kw not in meta_text and kw not in entry.get("session_id", "").lower():
+                    continue
+            matched.append(dict(entry))
+            if len(matched) >= limit:
+                break
+
+        matched.sort(key=lambda x: x.get("updated_at", 0), reverse=True)
+        return matched
+
+    def remove(self, session_id: str) -> bool:
+        """Remove session checkpoint from index catalog."""
+        if session_id in self._entries:
+            entry = self._entries.pop(session_id)
+            state = entry.get("state")
+            if state in self._state_index and session_id in self._state_index[state]:
+                self._state_index[state].remove(session_id)
+            return True
+        return False
+
+    def rebuild_from_directory(self, sessions_dir: str) -> int:
+        """Scan directory and index all valid session checkpoint JSON files."""
+        if not os.path.isdir(sessions_dir):
+            return 0
+        indexed_count = 0
+        for name in os.listdir(sessions_dir):
+            if not name.endswith(".json") or name == "index.json":
+                continue
+            fpath = os.path.join(sessions_dir, name)
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                sid = data.get("session_id", name[:-5])
+                self.index_checkpoint(
+                    session_id=sid,
+                    state=data.get("state", "UNKNOWN"),
+                    model=data.get("model", ""),
+                    task=data.get("task", ""),
+                    turns_count=len(data.get("turns", [])),
+                    file_path=fpath,
+                )
+                indexed_count += 1
+            except Exception:
+                continue
+        return indexed_count
+
+    def prune(
+        self,
+        max_entries: int = 50,
+        max_age_seconds: float = 86400.0,
+        current_time: Optional[float] = None,
+    ) -> int:
+        """Prune stale or excess entries from index catalog."""
+        now = current_time if current_time is not None else time.time()
+        pruned = 0
+
+        for sid in list(self._entries.keys()):
+            if (now - self._entries[sid]["updated_at"]) > max_age_seconds:
+                self.remove(sid)
+                pruned += 1
+
+        if len(self._entries) > max_entries:
+            sorted_sids = sorted(self._entries.keys(), key=lambda k: self._entries[k]["updated_at"])
+            excess = len(self._entries) - max_entries
+            for sid in sorted_sids[:excess]:
+                self.remove(sid)
+                pruned += 1
+
+        return pruned
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return aggregate checkpoint index telemetry metrics."""
+        return {
+            "indexed_checkpoints": len(self._entries),
+            "indexed_states": len(self._state_index),
+            "index_writes": self._index_writes,
+            "index_queries": self._index_queries,
+        }
+
+
+_DEFAULT_SESSION_CHECKPOINT_INDEX = SessionCheckpointIndex()
+
+
+def get_default_checkpoint_index() -> SessionCheckpointIndex:
+    """Return default singleton session checkpoint index instance."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX
+
+
+def register_checkpoint_index(
+    session_id: str,
+    state: str,
+    model: str,
+    task: str,
+    turns_count: int,
+    file_path: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    timestamp: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Record session checkpoint in global checkpoint index."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX.index_checkpoint(
+        session_id=session_id,
+        state=state,
+        model=model,
+        task=task,
+        turns_count=turns_count,
+        file_path=file_path,
+        metadata=metadata,
+        timestamp=timestamp,
+    )
+
+
+def get_checkpoint_index_entry(session_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve checkpoint index entry for session."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX.get_entry(session_id)
+
+
+def query_checkpoint_index(
+    state: Optional[str] = None,
+    model: Optional[str] = None,
+    keyword: Optional[str] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Query global checkpoint index with filtering criteria."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX.query(
+        state=state,
+        model=model,
+        keyword=keyword,
+        limit=limit,
+    )
+
+
+def remove_checkpoint_index_entry(session_id: str) -> bool:
+    """Remove session checkpoint entry from global index."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX.remove(session_id)
+
+
+def rebuild_checkpoint_index(sessions_dir: str) -> int:
+    """Rebuild global checkpoint index from directory scans."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX.rebuild_from_directory(sessions_dir)
+
+
+def prune_checkpoint_index(
+    max_entries: int = 50,
+    max_age_seconds: float = 86400.0,
+    current_time: Optional[float] = None,
+) -> int:
+    """Prune stale entries from global checkpoint index."""
+    return _DEFAULT_SESSION_CHECKPOINT_INDEX.prune(
+        max_entries=max_entries,
+        max_age_seconds=max_age_seconds,
+        current_time=current_time,
+    )
+
+
+def reset_checkpoint_index() -> None:
+    """Reset global checkpoint index state."""
+    _DEFAULT_SESSION_CHECKPOINT_INDEX.reset()
+
+
+class IsolatedContextBuffer:
+    """Isolated message buffer preventing context contamination."""
+
+    def __init__(
+        self,
+        name: str,
+        scope: str = "general",
+        max_chars: Optional[int] = None,
+        pinned: bool = False,
+    ) -> None:
+        self.name = name
+        self.scope = scope
+        self.max_chars = max_chars
+        self.pinned = pinned
+        self._messages: List[Dict[str, Any]] = []
+
+    def append(self, message: Dict[str, Any]) -> None:
+        """Append single message dictionary to buffer."""
+        self._messages.append(dict(message))
+
+    def extend(self, messages: List[Dict[str, Any]]) -> None:
+        """Extend buffer with sequence of message dictionaries."""
+        for msg in messages:
+            self.append(msg)
+
+    def get_messages(self) -> List[Dict[str, Any]]:
+        """Return shallow copy of buffered message dictionaries."""
+        return [dict(m) for m in self._messages]
+
+    def clear(self) -> None:
+        """Remove all messages from buffer."""
+        self._messages.clear()
+
+    def total_chars(self) -> int:
+        """Calculate total characters across message content in buffer."""
+        total = 0
+        for m in self._messages:
+            c = m.get("content")
+            if isinstance(c, str):
+                total += len(c)
+            elif isinstance(c, list):
+                total += sum(len(str(part)) for part in c)
+        return total
+
+    def is_pinned(self) -> bool:
+        """Return boolean pin status protecting buffer from eviction."""
+        return self.pinned
+
+    def compact(self, target_chars: int) -> int:
+        """Compact buffer contents to fit within target character budget."""
+        current = self.total_chars()
+        if current <= target_chars or self.pinned:
+            return 0
+        removed_chars = 0
+        while self._messages and self.total_chars() > target_chars:
+            evicted = self._messages.pop(0)
+            c = evicted.get("content", "")
+            removed_chars += len(str(c))
+        return removed_chars
+
+    def clone(self, new_name: Optional[str] = None) -> "IsolatedContextBuffer":
+        """Produce independent clone of buffer."""
+        name = new_name or f"{self.name}_clone"
+        cloned = IsolatedContextBuffer(
+            name=name,
+            scope=self.scope,
+            max_chars=self.max_chars,
+            pinned=self.pinned,
+        )
+        cloned.extend(self.get_messages())
+        return cloned
+
+
+class BufferIsolationManager:
+    """Manager orchestrating isolated context buffers and cross-scope routing."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset all registered buffers and counters."""
+        self._buffers: Dict[str, IsolatedContextBuffer] = {}
+        self._tool_counter: int = 0
+        self._merges_count: int = 0
+        self._purges_count: int = 0
+
+    def create_buffer(
+        self,
+        name: str,
+        scope: str = "general",
+        max_chars: Optional[int] = None,
+        pinned: bool = False,
+    ) -> IsolatedContextBuffer:
+        """Create and register isolated buffer."""
+        buf = IsolatedContextBuffer(
+            name=name,
+            scope=scope,
+            max_chars=max_chars,
+            pinned=pinned,
+        )
+        self._buffers[name] = buf
+        return buf
+
+    def get_buffer(self, name: str) -> Optional[IsolatedContextBuffer]:
+        """Retrieve registered buffer by name."""
+        return self._buffers.get(name)
+
+    def delete_buffer(self, name: str) -> bool:
+        """Delete registered buffer from manager."""
+        if name in self._buffers:
+            del self._buffers[name]
+            return True
+        return False
+
+    def list_buffers(self) -> List[str]:
+        """List names of all registered buffers."""
+        return list(self._buffers.keys())
+
+    def append_to_buffer(self, name: str, message: Dict[str, Any]) -> bool:
+        """Append message to named buffer."""
+        buf = self.get_buffer(name)
+        if not buf:
+            return False
+        buf.append(message)
+        return True
+
+    def isolate_tool_execution(
+        self,
+        tool_name: str,
+        raw_output: str,
+        max_chars: int = 2000,
+    ) -> Dict[str, Any]:
+        """Isolate raw tool output and return bounded tool response message."""
+        self._tool_counter += 1
+        buf_name = f"tool_{tool_name}_{self._tool_counter}"
+        buf = self.create_buffer(name=buf_name, scope="tool_raw", pinned=False)
+        buf.append({"role": "tool", "name": tool_name, "content": raw_output})
+
+        if max_chars > 0 and len(raw_output) > max_chars:
+            omitted = len(raw_output) - max_chars
+            bounded_text = raw_output[:max_chars] + f"\n... [TRUNCATED {omitted} CHARACTERS; BUFFER: {buf_name}]"
+        else:
+            bounded_text = raw_output
+
+        return {
+            "role": "tool",
+            "name": tool_name,
+            "content": bounded_text,
+            "isolated_buffer": buf_name,
+        }
+
+    def merge_buffers(
+        self,
+        buffer_names: List[str],
+        target_budget: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Merge sequence of isolated buffers into combined message list."""
+        self._merges_count += 1
+        merged: List[Dict[str, Any]] = []
+        for bname in buffer_names:
+            buf = self.get_buffer(bname)
+            if buf:
+                merged.extend(buf.get_messages())
+
+        if target_budget is not None:
+            total = sum(len(str(m.get("content", ""))) for m in merged)
+            while merged and total > target_budget:
+                evicted = merged.pop(0)
+                total -= len(str(evicted.get("content", "")))
+
+        return merged
+
+    def purge_ephemeral(self) -> int:
+        """Purge non-pinned scratchpad and raw tool buffers."""
+        self._purges_count += 1
+        ephemeral_scopes = {"scratchpad", "ephemeral", "tool_raw"}
+        to_delete = [
+            name for name, buf in self._buffers.items()
+            if not buf.is_pinned() and buf.scope in ephemeral_scopes
+        ]
+        for name in to_delete:
+            del self._buffers[name]
+        return len(to_delete)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters for buffer isolation."""
+        scope_counts: Dict[str, int] = {}
+        for buf in self._buffers.values():
+            scope_counts[buf.scope] = scope_counts.get(buf.scope, 0) + 1
+
+        return {
+            "total_buffers": len(self._buffers),
+            "scope_breakdown": scope_counts,
+            "tool_buffers_created": self._tool_counter,
+            "merges_executed": self._merges_count,
+            "purges_executed": self._purges_count,
+        }
+
+
+_DEFAULT_BUFFER_MANAGER = BufferIsolationManager()
+
+
+def get_default_buffer_manager() -> BufferIsolationManager:
+    """Return default singleton buffer isolation manager."""
+    return _DEFAULT_BUFFER_MANAGER
+
+
+def create_isolated_buffer(
+    name: str,
+    scope: str = "general",
+    max_chars: Optional[int] = None,
+    pinned: bool = False,
+) -> IsolatedContextBuffer:
+    """Create isolated context buffer in global manager."""
+    return _DEFAULT_BUFFER_MANAGER.create_buffer(
+        name=name,
+        scope=scope,
+        max_chars=max_chars,
+        pinned=pinned,
+    )
+
+
+def get_isolated_buffer(name: str) -> Optional[IsolatedContextBuffer]:
+    """Retrieve isolated buffer by name from global manager."""
+    return _DEFAULT_BUFFER_MANAGER.get_buffer(name)
+
+
+def isolate_tool_buffer(
+    tool_name: str,
+    raw_output: str,
+    max_chars: int = 2000,
+) -> Dict[str, Any]:
+    """Isolate tool output in global buffer and return bounded message."""
+    return _DEFAULT_BUFFER_MANAGER.isolate_tool_execution(
+        tool_name=tool_name,
+        raw_output=raw_output,
+        max_chars=max_chars,
+    )
+
+
+def merge_isolated_buffers(
+    buffer_names: List[str],
+    target_budget: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Merge registered buffers through global manager."""
+    return _DEFAULT_BUFFER_MANAGER.merge_buffers(
+        buffer_names=buffer_names,
+        target_budget=target_budget,
+    )
+
+
+def purge_ephemeral_buffers() -> int:
+    """Purge ephemeral buffers through global manager."""
+    return _DEFAULT_BUFFER_MANAGER.purge_ephemeral()
+
+
+def reset_buffer_isolation() -> None:
+    """Reset global buffer isolation manager state."""
+    _DEFAULT_BUFFER_MANAGER.reset()
+
+
+class ContextStateQuantizer:
+    """Discretizes continuous and verbose execution states into compact representations."""
+
+    STATUS_MAP = {
+        "running": "RUN",
+        "in_progress": "RUN",
+        "executing": "RUN",
+        "pending": "WAIT",
+        "queued": "WAIT",
+        "idle": "IDLE",
+        "completed": "DONE",
+        "success": "DONE",
+        "verified_passing": "PASS",
+        "pass": "PASS",
+        "failed": "FAIL",
+        "error": "ERR",
+        "blocked": "HALT",
+        "cancelled": "ABORT",
+    }
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset quantizer state and telemetry metrics."""
+        self._quantized_count: int = 0
+        self._chars_saved: int = 0
+
+    def quantize_status(self, status: str) -> str:
+        """Map raw status string to discrete canonical state code."""
+        if not status:
+            return "UNKNOWN"
+        normalized = status.strip().lower().replace("-", "_").replace(" ", "_")
+        return self.STATUS_MAP.get(normalized, normalized.upper()[:8])
+
+    def quantize_tokens(self, count: int) -> str:
+        """Quantize token counts into discrete logarithmic bucket labels."""
+        if count <= 0:
+            return "0T"
+        if count < 100:
+            return "<100T"
+        if count < 500:
+            return "<500T"
+        if count < 1000:
+            return "<1KT"
+        if count < 4000:
+            return "<4KT"
+        if count < 8000:
+            return "<8KT"
+        if count < 16000:
+            return "<16KT"
+        if count < 32000:
+            return "<32KT"
+        if count < 64000:
+            return "<64KT"
+        if count < 128000:
+            return "<128KT"
+        return ">=128KT"
+
+    def quantize_latency(self, latency_ms: float) -> str:
+        """Quantize execution latency milliseconds into discrete bucket labels."""
+        if latency_ms < 0:
+            return "0MS"
+        if latency_ms < 10:
+            return "<10MS"
+        if latency_ms < 50:
+            return "<50MS"
+        if latency_ms < 200:
+            return "<200MS"
+        if latency_ms < 1000:
+            return "<1S"
+        if latency_ms < 5000:
+            return "<5S"
+        if latency_ms < 15000:
+            return "<15S"
+        if latency_ms < 60000:
+            return "<1M"
+        return ">=1M"
+
+    def quantize_ratio(self, ratio: float) -> str:
+        """Quantize continuous ratio between zero and one into discrete tier percentage."""
+        clamped = max(0.0, min(1.0, float(ratio)))
+        if clamped < 0.25:
+            return "Q1_LOW"
+        if clamped < 0.50:
+            return "Q2_MED"
+        if clamped < 0.75:
+            return "Q3_HIGH"
+        return "Q4_MAX"
+
+    def quantize_message(self, message: Dict[str, Any], max_content_chars: int = 120) -> Dict[str, Any]:
+        """Quantize single message into discrete compact representation."""
+        self._quantized_count += 1
+        role = message.get("role", "unknown")
+        content = message.get("content", "")
+
+        original_size = len(str(content))
+        if isinstance(content, str) and len(content) > max_content_chars:
+            head = content[:max_content_chars // 2]
+            tail = content[-(max_content_chars // 2):]
+            quantized_content = f"{head}...[OMITTED]...{tail}"
+        else:
+            quantized_content = content
+
+        quantized_msg: Dict[str, Any] = {
+            "role": role,
+            "content": quantized_content,
+        }
+
+        if "tool_calls" in message:
+            quantized_msg["tool_calls_count"] = len(message["tool_calls"])
+        if "name" in message:
+            quantized_msg["name"] = message["name"]
+        if "state" in message:
+            quantized_msg["state"] = self.quantize_status(str(message["state"]))
+
+        new_size = len(str(quantized_content))
+        if original_size > new_size:
+            self._chars_saved += (original_size - new_size)
+
+        return quantized_msg
+
+    def quantize_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        max_content_chars: int = 120,
+    ) -> List[Dict[str, Any]]:
+        """Quantize list of messages across conversation history."""
+        return [self.quantize_message(m, max_content_chars=max_content_chars) for m in messages]
+
+    def quantize_state_vector(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Compress complex agent state dictionary into discrete quantized state vector."""
+        raw_status = str(state.get("status", state.get("state", "UNKNOWN")))
+        tokens = int(state.get("tokens", state.get("token_count", 0)))
+        latency = float(state.get("latency_ms", state.get("elapsed_ms", 0.0)))
+        cache_ratio = float(state.get("cache_hit_ratio", state.get("hit_rate", 0.0)))
+
+        return {
+            "state_code": self.quantize_status(raw_status),
+            "tokens_bucket": self.quantize_tokens(tokens),
+            "latency_bucket": self.quantize_latency(latency),
+            "cache_tier": self.quantize_ratio(cache_ratio),
+            "turns_count": int(state.get("turns_count", state.get("turns", 0))),
+        }
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return state quantization telemetry counters."""
+        return {
+            "quantized_units": self._quantized_count,
+            "chars_saved": self._chars_saved,
+        }
+
+
+_DEFAULT_STATE_QUANTIZER = ContextStateQuantizer()
+
+
+def get_default_state_quantizer() -> ContextStateQuantizer:
+    """Return default singleton context state quantizer."""
+    return _DEFAULT_STATE_QUANTIZER
+
+
+def quantize_session_state(status: str) -> str:
+    """Map raw status string to discrete canonical state code."""
+    return _DEFAULT_STATE_QUANTIZER.quantize_status(status)
+
+
+def quantize_metric_value(metric_type: str, value: Any) -> str:
+    """Quantize numerical metric value into discrete bucket label."""
+    if metric_type in ("tokens", "token_count"):
+        return _DEFAULT_STATE_QUANTIZER.quantize_tokens(int(value))
+    if metric_type in ("latency", "latency_ms", "elapsed_ms"):
+        return _DEFAULT_STATE_QUANTIZER.quantize_latency(float(value))
+    if metric_type in ("ratio", "hit_rate", "rate"):
+        return _DEFAULT_STATE_QUANTIZER.quantize_ratio(float(value))
+    return str(value)
+
+
+def quantize_agent_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Compress complex agent state dictionary into discrete quantized state vector."""
+    return _DEFAULT_STATE_QUANTIZER.quantize_state_vector(state)
+
+
+def quantize_messages_state(
+    messages: List[Dict[str, Any]],
+    max_content_chars: int = 120,
+) -> List[Dict[str, Any]]:
+    """Quantize list of messages across conversation history."""
+    return _DEFAULT_STATE_QUANTIZER.quantize_messages(
+        messages=messages,
+        max_content_chars=max_content_chars,
+    )
+
+
+def reset_state_quantizer() -> None:
+    """Reset global context state quantizer state."""
+    _DEFAULT_STATE_QUANTIZER.reset()
+
+
+_RECALL_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "if", "then", "else", "when",
+    "at", "by", "for", "with", "about", "against", "between", "into", "through",
+    "during", "before", "after", "above", "below", "to", "from", "up", "down",
+    "in", "out", "on", "off", "over", "under", "again", "further", "then",
+    "once", "here", "there", "all", "any", "both", "each", "few", "more",
+    "most", "other", "some", "such", "no", "nor", "not", "only", "own",
+    "same", "so", "than", "too", "very", "can", "will", "just", "should",
+    "now", "is", "are", "was", "were", "be", "been", "being", "have", "has",
+})
+
+_IDENTIFIER_PATTERN = re.compile(r"\b[a-zA-Z_][a-zA-Z0-9_\-\.]{2,}\b")
+
+
+def extract_recall_terms(text: str) -> List[str]:
+    """Extract filtered alphanumeric search terms and identifiers from text."""
+    if not text:
+        return []
+    terms: List[str] = []
+    for token in _IDENTIFIER_PATTERN.findall(text):
+        lowered = token.lower()
+        if lowered not in _RECALL_STOPWORDS and len(lowered) >= 3:
+            terms.append(lowered)
+    return list(dict.fromkeys(terms))
+
+
+def score_turn_relevance(
+    query_terms: List[str],
+    turn_content: str,
+    recency_index: int = 0,
+    total_turns: int = 1,
+) -> float:
+    """Compute numerical relevance score for turn content against query terms."""
+    if not turn_content:
+        return 0.0
+    turn_terms = set(extract_recall_terms(turn_content))
+    if not turn_terms:
+        return float(recency_index) / float(max(1, total_turns)) * 0.1
+
+    overlap = sum(1.0 for term in query_terms if term in turn_terms)
+    term_score = overlap / float(max(1, len(query_terms)))
+
+    bonus = 0.0
+    for term in query_terms:
+        if ("_" in term or "/" in term or "\\" in term or "." in term) and term in turn_terms:
+            bonus += 0.25
+
+    recency_score = (float(recency_index) / float(max(1, total_turns))) * 0.2
+
+    return term_score + bonus + recency_score
+
+
+class SelectiveRecallEngine:
+    """Selectively retrieves relevant conversation turns based on query terms and context budgets."""
+
+    def __init__(self, default_budget_chars: int = 12000, min_relevance_threshold: float = 0.15) -> None:
+        self.default_budget_chars = default_budget_chars
+        self.min_relevance_threshold = min_relevance_threshold
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset recall engine metrics counters."""
+        self._queries_processed: int = 0
+        self._turns_evaluated: int = 0
+        self._turns_recalled: int = 0
+        self._turns_omitted: int = 0
+        self._chars_saved: int = 0
+
+    def recall(
+        self,
+        messages: List[Dict[str, Any]],
+        query: str,
+        budget_chars: Optional[int] = None,
+        min_threshold: Optional[float] = None,
+        preserve_recent_count: int = 2,
+    ) -> List[Dict[str, Any]]:
+        """Recall relevant turns from message sequence within character budget."""
+        self._queries_processed += 1
+        budget = budget_chars if budget_chars is not None else self.default_budget_chars
+        threshold = min_threshold if min_threshold is not None else self.min_relevance_threshold
+
+        if not messages:
+            return []
+        if len(messages) <= 2:
+            return [dict(m) for m in messages]
+
+        pinned_indices: set = set()
+        for idx, m in enumerate(messages):
+            if m.get("role") in ("system", "instruction") or m.get("pinned"):
+                pinned_indices.add(idx)
+
+        tail_start = max(0, len(messages) - preserve_recent_count)
+        for idx in range(tail_start, len(messages)):
+            pinned_indices.add(idx)
+
+        query_terms = extract_recall_terms(query)
+
+        candidate_scores: List[Tuple[int, float]] = []
+        total_intermediate = len(messages)
+        for idx in range(len(messages)):
+            if idx in pinned_indices:
+                continue
+            self._turns_evaluated += 1
+            content = str(messages[idx].get("content", ""))
+            sc = score_turn_relevance(
+                query_terms=query_terms,
+                turn_content=content,
+                recency_index=idx,
+                total_turns=total_intermediate,
+            )
+            candidate_scores.append((idx, sc))
+
+        candidate_scores.sort(key=lambda item: item[1], reverse=True)
+
+        selected_indices = set(pinned_indices)
+        current_chars = sum(len(str(messages[i].get("content", ""))) for i in pinned_indices)
+
+        for idx, sc in candidate_scores:
+            if sc >= threshold:
+                c_len = len(str(messages[idx].get("content", "")))
+                if current_chars + c_len <= budget:
+                    selected_indices.add(idx)
+                    current_chars += c_len
+                    self._turns_recalled += 1
+                else:
+                    self._turns_omitted += 1
+                    self._chars_saved += c_len
+            else:
+                c_len = len(str(messages[idx].get("content", "")))
+                self._turns_omitted += 1
+                self._chars_saved += c_len
+
+        if len(selected_indices) == len(pinned_indices) and candidate_scores:
+            for idx in sorted([idx for idx, _ in candidate_scores], reverse=True):
+                c_len = len(str(messages[idx].get("content", "")))
+                if current_chars + c_len <= budget:
+                    selected_indices.add(idx)
+                    current_chars += c_len
+                    self._turns_recalled += 1
+                    break
+
+        result: List[Dict[str, Any]] = []
+        for idx in sorted(selected_indices):
+            result.append(dict(messages[idx]))
+
+        return result
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return selective recall telemetry metrics."""
+        return {
+            "queries_processed": self._queries_processed,
+            "turns_evaluated": self._turns_evaluated,
+            "turns_recalled": self._turns_recalled,
+            "turns_omitted": self._turns_omitted,
+            "chars_saved": self._chars_saved,
+        }
+
+
+_DEFAULT_SELECTIVE_RECALL = SelectiveRecallEngine()
+
+
+def get_default_selective_recall() -> SelectiveRecallEngine:
+    """Return default singleton selective recall engine."""
+    return _DEFAULT_SELECTIVE_RECALL
+
+
+def selective_recall_context(
+    messages: List[Dict[str, Any]],
+    query: str,
+    budget_chars: Optional[int] = None,
+    min_threshold: Optional[float] = None,
+    preserve_recent_count: int = 2,
+) -> List[Dict[str, Any]]:
+    """Recall relevant turns from conversation history using default engine."""
+    return _DEFAULT_SELECTIVE_RECALL.recall(
+        messages=messages,
+        query=query,
+        budget_chars=budget_chars,
+        min_threshold=min_threshold,
+        preserve_recent_count=preserve_recent_count,
+    )
+
+
+def reset_selective_recall() -> None:
+    """Reset global selective recall engine state."""
+    _DEFAULT_SELECTIVE_RECALL.reset()
+
+
+def is_null_or_empty(val: Any, strip_empty_str: bool = False) -> bool:
+    """Return boolean true if value represents null, empty collection, or optional empty string."""
+    if val is None:
+        return True
+    if isinstance(val, (list, dict, set, tuple)) and len(val) == 0:
+        return True
+    if strip_empty_str and isinstance(val, str) and not val.strip():
+        return True
+    return False
+
+
+class NullPayloadStripper:
+    """Recursively cleans null, empty, and redundant fields from context payloads."""
+
+    ESSENTIAL_KEYS = frozenset({"role", "content"})
+
+    def __init__(self, strip_empty_strings: bool = False) -> None:
+        self.strip_empty_strings = strip_empty_strings
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset stripper telemetry metrics."""
+        self._fields_stripped: int = 0
+        self._collections_stripped: int = 0
+        self._messages_cleaned: int = 0
+        self._chars_saved: int = 0
+
+    def clean_value(self, value: Any, is_root_key: bool = False, key_name: str = "") -> Any:
+        """Recursively clean nested data structure of null and empty values."""
+        if isinstance(value, dict):
+            cleaned_dict: Dict[str, Any] = {}
+            for k, v in value.items():
+                if v is None:
+                    if is_root_key and k in self.ESSENTIAL_KEYS:
+                        cleaned_dict[k] = v
+                    else:
+                        self._fields_stripped += 1
+                        continue
+                cleaned_v = self.clean_value(v, is_root_key=False, key_name=k)
+                if is_null_or_empty(cleaned_v, strip_empty_str=self.strip_empty_strings):
+                    if is_root_key and k in self.ESSENTIAL_KEYS:
+                        cleaned_dict[k] = cleaned_v
+                    else:
+                        self._collections_stripped += 1
+                        continue
+                cleaned_dict[k] = cleaned_v
+            return cleaned_dict
+        elif isinstance(value, list):
+            cleaned_list: List[Any] = []
+            for item in value:
+                if item is None:
+                    self._fields_stripped += 1
+                    continue
+                cleaned_item = self.clean_value(item, is_root_key=False, key_name=key_name)
+                if is_null_or_empty(cleaned_item, strip_empty_str=self.strip_empty_strings):
+                    self._collections_stripped += 1
+                    continue
+                cleaned_list.append(cleaned_item)
+            return cleaned_list
+        return value
+
+    def clean_message(self, message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Clean single message dictionary of null or empty fields."""
+        self._messages_cleaned += 1
+        orig_serialized = len(json.dumps(message, default=str))
+
+        cleaned: Dict[str, Any] = {}
+        for k, v in message.items():
+            if v is None:
+                if k in self.ESSENTIAL_KEYS:
+                    cleaned[k] = "" if k == "content" else v
+                else:
+                    self._fields_stripped += 1
+                continue
+
+            cleaned_v = self.clean_value(v, is_root_key=False, key_name=k)
+            if is_null_or_empty(cleaned_v, strip_empty_str=self.strip_empty_strings):
+                if k in self.ESSENTIAL_KEYS:
+                    cleaned[k] = cleaned_v
+                else:
+                    self._collections_stripped += 1
+                continue
+            cleaned[k] = cleaned_v
+
+        if "role" not in cleaned:
+            return None
+
+        new_serialized = len(json.dumps(cleaned, default=str))
+        if orig_serialized > new_serialized:
+            self._chars_saved += (orig_serialized - new_serialized)
+
+        return cleaned
+
+    def clean_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Clean message sequence by stripping null fields and empty phantom turns."""
+        cleaned_list: List[Dict[str, Any]] = []
+        for m in messages:
+            res = self.clean_message(m)
+            if res is not None:
+                cleaned_list.append(res)
+        return cleaned_list
+
+    def clean_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Clean full completion request payload including messages and parameters."""
+        orig_serialized = len(json.dumps(payload, default=str))
+        cleaned = self.clean_value(payload, is_root_key=True)
+        if isinstance(cleaned, dict):
+            new_serialized = len(json.dumps(cleaned, default=str))
+            if orig_serialized > new_serialized:
+                self._chars_saved += (orig_serialized - new_serialized)
+            return cleaned
+        return payload
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return telemetry counters for null payload stripping."""
+        return {
+            "fields_stripped": self._fields_stripped,
+            "collections_stripped": self._collections_stripped,
+            "messages_cleaned": self._messages_cleaned,
+            "chars_saved": self._chars_saved,
+        }
+
+
+_DEFAULT_NULL_STRIPPER = NullPayloadStripper()
+
+
+def get_default_null_payload_stripper() -> NullPayloadStripper:
+    """Return default singleton null payload stripper."""
+    return _DEFAULT_NULL_STRIPPER
+
+
+def strip_null_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Clean arbitrary payload dictionary of null and empty values."""
+    return _DEFAULT_NULL_STRIPPER.clean_payload(payload)
+
+
+def strip_message_nulls(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Clean single message dictionary of null and empty fields."""
+    return _DEFAULT_NULL_STRIPPER.clean_message(message)
+
+
+def strip_messages_null_payloads(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Clean message list of null fields and empty collections."""
+    return _DEFAULT_NULL_STRIPPER.clean_messages(messages)
+
+
+def reset_null_payload_stripper() -> None:
+    """Reset global null payload stripper state."""
+    _DEFAULT_NULL_STRIPPER.reset()
+
+
+def estimate_text_tokens(text: str) -> int:
+    """Estimate token count for arbitrary text string using heuristic tokenizer modeling."""
+    if not text:
+        return 0
+    total_len = len(text)
+    words = len(re.findall(r"\b\w+\b", text))
+    symbols = len(re.findall(r"[^\w\s]", text))
+    non_ascii = len(re.findall(r"[^\x00-\x7F]", text))
+
+    est = int((words * 1.3) + (symbols * 0.5) + (non_ascii * 1.5))
+    fallback = max(1, (total_len + 3) // 4)
+    return max(1, max(est, fallback))
+
+
+def estimate_message_tokens(message: Dict[str, Any]) -> int:
+    """Estimate tokens consumed by single message dictionary including framing overhead."""
+    base_overhead = 4
+    content = message.get("content", "")
+    if isinstance(content, str):
+        content_tokens = estimate_text_tokens(content)
+    elif isinstance(content, list):
+        content_tokens = sum(estimate_text_tokens(str(part)) for part in content)
+    else:
+        content_tokens = estimate_text_tokens(str(content)) if content else 0
+
+    role_tokens = estimate_text_tokens(str(message.get("role", "")))
+    name_tokens = estimate_text_tokens(str(message.get("name", ""))) if "name" in message else 0
+    tool_tokens = 0
+    if "tool_calls" in message:
+        tool_tokens = estimate_text_tokens(json.dumps(message["tool_calls"], default=str))
+
+    return base_overhead + content_tokens + role_tokens + name_tokens + tool_tokens
+
+
+def estimate_messages_tokens(messages: List[Dict[str, Any]]) -> int:
+    """Estimate total tokens across sequence of message dictionaries."""
+    if not messages:
+        return 0
+    priming_overhead = 3
+    return priming_overhead + sum(estimate_message_tokens(m) for m in messages)
+
+
+class TokenMeter:
+    """Tracks token expenditures, role breakdowns, capacity limits, and compaction savings."""
+
+    def __init__(self, default_window_tokens: int = 128000) -> None:
+        self.default_window_tokens = default_window_tokens
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset all metering ledgers and telemetry counters."""
+        self._prompt_tokens: int = 0
+        self._completion_tokens: int = 0
+        self._cached_tokens: int = 0
+        self._savings_tokens: int = 0
+        self._metered_turns: int = 0
+        self._role_breakdown: Dict[str, int] = {
+            "system": 0,
+            "user": 0,
+            "assistant": 0,
+            "tool": 0,
+        }
+        self._turn_ledger: List[Dict[str, Any]] = []
+
+    def meter_turn(
+        self,
+        messages: List[Dict[str, Any]],
+        completion_text: str = "",
+        cached_tokens: int = 0,
+        saved_tokens: int = 0,
+    ) -> Dict[str, Any]:
+        """Meter active turn prompt messages, completion, and cache stats."""
+        self._metered_turns += 1
+        prompt_t = estimate_messages_tokens(messages)
+        comp_t = estimate_text_tokens(completion_text)
+
+        self._prompt_tokens += prompt_t
+        self._completion_tokens += comp_t
+        self._cached_tokens += cached_tokens
+        self._savings_tokens += saved_tokens
+
+        turn_roles: Dict[str, int] = {}
+        for m in messages:
+            r = str(m.get("role", "other"))
+            t_count = estimate_message_tokens(m)
+            turn_roles[r] = turn_roles.get(r, 0) + t_count
+            self._role_breakdown[r] = self._role_breakdown.get(r, 0) + t_count
+
+        record = {
+            "turn_index": self._metered_turns,
+            "prompt_tokens": prompt_t,
+            "completion_tokens": comp_t,
+            "cached_tokens": cached_tokens,
+            "saved_tokens": saved_tokens,
+            "role_tokens": turn_roles,
+        }
+        self._turn_ledger.append(record)
+        if len(self._turn_ledger) > 100:
+            self._turn_ledger.pop(0)
+
+        return record
+
+    def check_capacity(
+        self,
+        messages: List[Dict[str, Any]],
+        window_tokens: Optional[int] = None,
+        reserve_tokens: int = 4096,
+    ) -> Dict[str, Any]:
+        """Evaluate context window capacity, utilization rate, and compaction need."""
+        max_window = window_tokens if window_tokens is not None else self.default_window_tokens
+        current_tokens = estimate_messages_tokens(messages)
+        effective_capacity = max(1024, max_window - reserve_tokens)
+        utilization = float(current_tokens) / float(effective_capacity)
+
+        return {
+            "current_tokens": current_tokens,
+            "max_window": max_window,
+            "reserve_tokens": reserve_tokens,
+            "effective_capacity": effective_capacity,
+            "available_tokens": max(0, effective_capacity - current_tokens),
+            "utilization_rate": min(1.0, utilization),
+            "compaction_recommended": utilization >= 0.75,
+            "capacity_exceeded": current_tokens > effective_capacity,
+        }
+
+    def record_savings(self, saved_tokens: int) -> None:
+        """Record tokens saved through context compaction or deduplication."""
+        if saved_tokens > 0:
+            self._savings_tokens += saved_tokens
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return cumulative token metering metrics."""
+        return {
+            "prompt_tokens": self._prompt_tokens,
+            "completion_tokens": self._completion_tokens,
+            "cached_tokens": self._cached_tokens,
+            "savings_tokens": self._savings_tokens,
+            "metered_turns": self._metered_turns,
+            "role_breakdown": dict(self._role_breakdown),
+        }
+
+
+_DEFAULT_TOKEN_METER = TokenMeter()
+
+
+def get_default_token_meter() -> TokenMeter:
+    """Return default singleton token meter."""
+    return _DEFAULT_TOKEN_METER
+
+
+def meter_context_turn(
+    messages: List[Dict[str, Any]],
+    completion_text: str = "",
+    cached_tokens: int = 0,
+    saved_tokens: int = 0,
+) -> Dict[str, Any]:
+    """Meter conversation turn using default token meter."""
+    return _DEFAULT_TOKEN_METER.meter_turn(
+        messages=messages,
+        completion_text=completion_text,
+        cached_tokens=cached_tokens,
+        saved_tokens=saved_tokens,
+    )
+
+
+def check_context_capacity(
+    messages: List[Dict[str, Any]],
+    window_tokens: Optional[int] = None,
+    reserve_tokens: int = 4096,
+) -> Dict[str, Any]:
+    """Check context capacity and compaction trigger using default meter."""
+    return _DEFAULT_TOKEN_METER.check_capacity(
+        messages=messages,
+        window_tokens=window_tokens,
+        reserve_tokens=reserve_tokens,
+    )
+
+
+def reset_token_meter() -> None:
+    """Reset global token meter state."""
+    _DEFAULT_TOKEN_METER.reset()
+
+
+_DISCURSIVE_PREAMBLE_PATTERNS = [
+    re.compile(r"^(?:sure|certainly|absolutely|okay|ok|i will|i can help|i would be happy to|i'd be glad to)[\s\.,!:]+", re.IGNORECASE),
+    re.compile(r"^(?:here is|here are|below is|the following is|as requested)[\s\.,!:]+", re.IGNORECASE),
+    re.compile(r"^(?:let me|allow me to|i understand|based on your request|in response to)[\s\.,!:]+", re.IGNORECASE),
+    re.compile(r"^(?:no problem|you got it|of course)[\s\.,!:]+", re.IGNORECASE),
+]
+
+
+def strip_discursive_preamble(text: str) -> Tuple[str, bool]:
+    """Strip leading conversational preamble filler from text while preserving substantive content."""
+    if not text or not isinstance(text, str):
+        return text, False
+
+    stripped = text.strip()
+    if ":" in stripped and not stripped.lower().startswith(("sure", "certainly", "okay", "here", "let me", "i can")):
+        parts = stripped.split(":", 1)
+        if parts[0].strip().replace(" ", "_").isalnum():
+            return text, False
+
+    if stripped.startswith("```") or stripped.startswith("#"):
+        return text, False
+
+    modified = False
+    working = stripped
+    for pat in _DISCURSIVE_PREAMBLE_PATTERNS:
+        match = pat.match(working)
+        if match:
+            working = working[match.end():].lstrip()
+            modified = True
+            break
+
+    if not working:
+        return text, False
+
+    if modified and working:
+        working = working[0].upper() + working[1:]
+
+    return working, modified
+
+
+class PreambleMasker:
+    """Masks or strips discursive and conversational preamble from context messages."""
+
+    def __init__(self, mask_replacement: Optional[str] = None) -> None:
+        self.mask_replacement = mask_replacement
+        self.reset()
+
+    def reset(self) -> None:
+        """Reset preamble masker telemetry counters."""
+        self._preambles_detected: int = 0
+        self._preambles_masked: int = 0
+        self._chars_saved: int = 0
+        self._turns_processed: int = 0
+
+    def mask_text(self, text: str) -> str:
+        """Mask or strip leading conversational preamble from text string."""
+        if not text:
+            return ""
+        cleaned, modified = strip_discursive_preamble(text)
+        if modified:
+            self._preambles_detected += 1
+            self._preambles_masked += 1
+            saved = len(text) - len(cleaned)
+            if self.mask_replacement:
+                res = f"{self.mask_replacement} {cleaned}"
+                self._chars_saved += max(0, len(text) - len(res))
+                return res
+            else:
+                self._chars_saved += max(0, saved)
+                return cleaned
+        return text
+
+    def mask_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """Mask leading conversational preamble from message dictionary."""
+        self._turns_processed += 1
+        role = message.get("role", "")
+        if role in ("system", "instruction"):
+            return dict(message)
+
+        content = message.get("content")
+        if not isinstance(content, str) or not content:
+            return dict(message)
+
+        masked_content = self.mask_text(content)
+        new_msg = dict(message)
+        new_msg["content"] = masked_content
+        return new_msg
+
+    def mask_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Mask leading discursive preambles across message sequence."""
+        return [self.mask_message(m) for m in messages]
+
+    def get_metrics(self) -> Dict[str, Any]:
+        """Return preamble masking telemetry counters."""
+        return {
+            "preambles_detected": self._preambles_detected,
+            "preambles_masked": self._preambles_masked,
+            "chars_saved": self._chars_saved,
+            "turns_processed": self._turns_processed,
+        }
+
+
+_DEFAULT_PREAMBLE_MASKER = PreambleMasker()
+
+
+def get_default_preamble_masker() -> PreambleMasker:
+    """Return default singleton preamble masker."""
+    return _DEFAULT_PREAMBLE_MASKER
+
+
+def mask_message_preamble(message: Dict[str, Any], mask_replacement: Optional[str] = None) -> Dict[str, Any]:
+    """Mask leading preamble in single message using default or custom replacement."""
+    if mask_replacement is not None:
+        masker = PreambleMasker(mask_replacement=mask_replacement)
+        return masker.mask_message(message)
+    return _DEFAULT_PREAMBLE_MASKER.mask_message(message)
+
+
+def mask_messages_preamble(messages: List[Dict[str, Any]], mask_replacement: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Mask leading preambles across message sequence."""
+    if mask_replacement is not None:
+        masker = PreambleMasker(mask_replacement=mask_replacement)
+        return masker.mask_messages(messages)
+    return _DEFAULT_PREAMBLE_MASKER.mask_messages(messages)
+
+
+def reset_preamble_masker() -> None:
+    """Reset global preamble masker state."""
+    _DEFAULT_PREAMBLE_MASKER.reset()
 
 
 _CONTEXT_MARKERS = (
@@ -648,7 +2400,12 @@ def _shrink_once(messages: List[Dict[str, Any]], frozen: set) -> bool:
         return False
     ranked.sort(key=lambda item: (item[0], item[1]))
     for _priority, _neg, key, message, field, value in ranked:
-        keep = 240 if field != "content" else max(240, len(value) // 2)
+        if field != "content":
+            keep = 240
+        elif role == "tool":
+            keep = min(1200, max(240, len(value) // 3))
+        else:
+            keep = max(240, len(value) // 2)
         fitted = _fit_output_text(value, keep)
         if len(fitted) >= len(value):
             frozen.add(key)
@@ -661,10 +2418,27 @@ def _shrink_once(messages: List[Dict[str, Any]], frozen: set) -> bool:
 def _fit_messages(messages: List[Dict[str, Any]], budget: int) -> None:
     frozen: set = set()
     guard = 0
-    while wire_chars(messages) > budget and guard < 64:
+    while wire_chars(messages) > budget and guard < 128:
         guard += 1
         if not _shrink_once(messages, frozen):
             break
+
+    if wire_chars(messages) > budget:
+        for message in messages:
+            if message.get("role") == "tool":
+                content = message.get("content")
+                if isinstance(content, str) and len(content) > 300:
+                    message["content"] = _fit_output_text(content, 240)
+            if wire_chars(messages) <= budget:
+                break
+
+    if wire_chars(messages) > budget:
+        idx = 2
+        while len(messages) > 3 and wire_chars(messages) > budget:
+            if idx < len(messages) - 1:
+                messages.pop(idx)
+            else:
+                break
 
 
 def _build_bounded_messages(
@@ -712,9 +2486,13 @@ def _build_bounded_messages(
                 f"{note}"
             ),
         })
+        reanchor_block = build_progen_reanchor_block(unloaded_rounds=unloaded)
         bounded.append({
             "role": "user",
-            "content": "Continue from the live tool rounds. Recall ledger turns when a name or path matters.",
+            "content": (
+                "Continue from the live tool rounds. Recall ledger turns when a name or path matters.\n\n"
+                f"{reanchor_block}"
+            ),
         })
     for group in recent_groups:
         bounded.extend(group)
@@ -722,6 +2500,8 @@ def _build_bounded_messages(
     _fit_messages(bounded, max_context_chars)
     if pinned_system is not None:
         bounded[0]["content"] = pinned_system
+    if wire_chars(bounded) > max_context_chars and len(bounded) > 1:
+        _fit_messages(bounded[1:], max(4096, max_context_chars - len(str(pinned_system or ""))))
     return bounded
 
 
@@ -2176,6 +3956,7 @@ def run_interactive_agent(
                 summon_alias=active_summon,
                 has_referent=prior is not None,
                 prior=prior,
+                session=active_session_id,
             )
             last_gate["action"] = decision.action
             last_gate["route"] = decision.route
@@ -2714,6 +4495,10 @@ def run_interactive_agent(
             elif cmd == "/compact":
                 summary = active_ledger.compact_session()
                 active_strategy = "recall"
+                get_default_progen_reanchor_controller().record_compaction(
+                    active_session_id,
+                    unloaded_rounds=summary.get("turns_pruned", 0),
+                )
                 sys.stdout.write(f"{c_mid}[{summary['summary']}]{c_reset}\n")
                 sys.stdout.write(f"{c_mid}[Live window set to recall. Ledger turns stay verbatim.]{c_reset}\n")
                 sys.stdout.flush()

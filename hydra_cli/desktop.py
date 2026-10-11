@@ -1,0 +1,3170 @@
+﻿"""
+Sovereign Desktop Application and Web Desk Server for Hydra CLI.
+Provides local web desk UI, WebSocket streaming, model summoning,
+terminal execution logs, tool visualization, and computer use screen control.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import base64
+import json
+import os
+import sys
+import threading
+import time
+import urllib.request
+import webbrowser
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+from hydra_cli import __version__
+from hydra_cli.config import (
+    CATALOG,
+    FREE_MODELS,
+    MODEL_MAP,
+    DEFAULT_ORCHESTRATOR_MODEL,
+    resolve_route,
+)
+from hydra_cli.computer_use import get_computer_use_engine
+from hydra_cli.sandbox import SandboxRunner
+from hydra_cli.native_tools import NativeToolRegistry
+
+try:
+    from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+    import uvicorn
+    FASTAPI_AVAILABLE = True
+except ImportError:
+    FASTAPI_AVAILABLE = False
+
+
+def get_desktop_html() -> str:
+    """Generate self-contained sovereign web desk HTML5 interface with multi-session tabs and diff viewer."""
+    return """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hydra Sovereign Desktop</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/hydra_desktop.png">
+<link rel="apple-touch-icon" href="/assets/hydra_desktop.png">
+<style>
+:root {
+  --bg-primary: #000000;
+  --bg-secondary: #080808;
+  --bg-tertiary: #0d0d0d;
+  --bg-elevated: #141414;
+  --bg-glass: rgba(8, 8, 8, 0.85);
+  --border: #1a1a1a;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-active: #00ff66;
+  --accent: #00ff66;
+  --accent-secondary: #00ff88;
+  --accent-hover: #00e65c;
+  --accent-dim: rgba(0, 255, 102, 0.12);
+  --accent-glow: 0 0 12px rgba(0, 255, 102, 0.35);
+  --accent-glow-strong: 0 0 20px rgba(0, 255, 102, 0.55);
+  --text-primary: #ffffff;
+  --text-secondary: #f3f4f6;
+  --text-muted: #9ca3af;
+  --error: #ef4444;
+  --error-dim: rgba(239, 68, 68, 0.15);
+  --diff-add: #052e16;
+  --diff-add-text: #86efac;
+  --diff-del: #450a0a;
+  --diff-del-text: #fca5a5;
+  --font-mono: 'Cascadia Code', 'Cascadia Mono', Consolas, monospace;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --easing-apple: cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-apple: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-mono);
+}
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  letter-spacing: -0.2px;
+  -webkit-font-smoothing: antialiased;
+}
+header {
+  background: var(--bg-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  position: relative;
+  z-index: 100;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 1px;
+  text-shadow: 0 0 10px rgba(0, 255, 102, 0.45);
+}
+.brand svg {
+  width: 28px;
+  height: 28px;
+  fill: var(--accent);
+  filter: drop-shadow(0 0 8px rgba(0, 255, 102, 0.5));
+}
+.badge {
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 11px;
+  padding: 3px 10px;
+  border-radius: 9999px;
+  border: 1px solid var(--accent);
+  box-shadow: 0 0 8px rgba(0, 255, 102, 0.25);
+  font-weight: 600;
+}
+.header-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+select, input, button, textarea {
+  font-family: var(--font-mono);
+}
+select, input {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  padding: 8px 14px;
+  border-radius: 12px;
+  font-size: 13px;
+  outline: none;
+  transition: var(--transition-apple);
+}
+select:focus, input:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: var(--accent-glow);
+}
+button {
+  background: var(--accent);
+  color: #000000;
+  font-weight: 700;
+  cursor: pointer;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 12px;
+  font-size: 13px;
+  transition: var(--transition-apple);
+  box-shadow: var(--accent-glow);
+}
+button:hover {
+  background: var(--accent-secondary);
+  transform: translateY(-2px);
+  box-shadow: var(--accent-glow-strong);
+}
+button:active {
+  transform: translateY(0);
+}
+button.secondary {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+button.secondary:hover {
+  background: var(--bg-elevated);
+  border-color: rgba(0, 255, 102, 0.4);
+  color: var(--accent);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+button.primary {
+  background: var(--accent);
+  color: #000000;
+  font-weight: 700;
+  box-shadow: var(--accent-glow);
+}
+button.primary:hover {
+  background: var(--accent-secondary);
+  box-shadow: var(--accent-glow-strong);
+  transform: translateY(-2px);
+}
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  padding: 6px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+}
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 10px var(--accent), 0 0 3px #00ff66;
+  animation: phosphorPulse 2s infinite ease-in-out;
+}
+@keyframes phosphorPulse {
+  0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 10px var(--accent); }
+  50% { opacity: 0.6; transform: scale(0.9); box-shadow: 0 0 4px var(--accent); }
+}
+.session-bar {
+  background: #000000;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 6px 20px;
+  gap: 8px;
+  overflow-x: auto;
+}
+.session-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--transition-apple);
+}
+.session-tab:hover {
+  color: var(--text-primary);
+  border-color: rgba(0, 255, 102, 0.3);
+  transform: translateY(-1px);
+}
+.session-tab.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-color: var(--accent);
+  box-shadow: 0 0 10px rgba(0, 255, 102, 0.25);
+  font-weight: 600;
+}
+.session-close {
+  color: var(--text-muted);
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+  transition: color 0.15s;
+}
+.session-close:hover {
+  color: var(--error);
+}
+.add-session-btn {
+  background: transparent;
+  color: var(--accent);
+  border: 1px dashed rgba(0, 255, 102, 0.6);
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 12px;
+  box-shadow: none;
+  cursor: pointer;
+  transition: var(--transition-apple);
+}
+.add-session-btn:hover {
+  background: var(--accent-dim);
+  border-style: solid;
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+.workspace {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+}
+.sidebar {
+  width: 220px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 16px 10px;
+  gap: 6px;
+}
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  transition: var(--transition-apple);
+}
+.nav-item:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  transform: translateX(3px);
+}
+.nav-item.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+  border-left: 3px solid var(--accent);
+  box-shadow: inset 0 0 12px rgba(0, 255, 102, 0.08);
+  font-weight: 600;
+}
+.main-stage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  overflow: hidden;
+}
+.chat-pane {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.message {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 80%;
+  animation: fadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.message.user {
+  align-self: flex-end;
+}
+.message.assistant {
+  align-self: flex-start;
+}
+.msg-header {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+}
+.msg-bubble {
+  padding: 14px 18px;
+  border-radius: 16px;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  transition: var(--transition-apple);
+}
+.message.user .msg-bubble {
+  background: #0d1f12;
+  border: 1px solid rgba(0, 255, 102, 0.35);
+  color: #ffffff;
+  border-bottom-right-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7);
+}
+.message.assistant .msg-bubble {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-bottom-left-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7);
+}
+.tool-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  padding: 12px 16px;
+  border-radius: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  margin: 6px 0;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
+}
+.tool-title {
+  color: var(--accent);
+  font-weight: 700;
+  margin-bottom: 6px;
+  text-shadow: 0 0 8px rgba(0, 255, 102, 0.35);
+}
+.input-area {
+  padding: 16px 24px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.input-box-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+}
+textarea {
+  flex: 1;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  padding: 12px 16px;
+  border-radius: 16px;
+  font-size: 14px;
+  resize: none;
+  min-height: 56px;
+  outline: none;
+  transition: var(--transition-apple);
+  caret-color: var(--accent);
+}
+textarea:focus {
+  border-color: var(--accent);
+  box-shadow: var(--accent-glow);
+}
+.side-drawer {
+  width: 500px;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.drawer-header {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
+}
+.drawer-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-primary);
+  padding: 4px 8px;
+  gap: 4px;
+}
+.drawer-tab {
+  flex: 1;
+  text-align: center;
+  padding: 8px 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 10px;
+  transition: var(--transition-apple);
+}
+.drawer-tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+}
+.drawer-tab.active {
+  color: var(--accent);
+  background: var(--accent-dim);
+  font-weight: 600;
+  box-shadow: 0 0 8px rgba(0, 255, 102, 0.2);
+}
+.drawer-body {
+  flex: 1;
+  padding: 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.screen-container {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16/9;
+  background: #000000;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  cursor: crosshair;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
+}
+.screen-preview-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+.screen-canvas-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.terminal-view {
+  background: #000000;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 16px;
+  border-radius: 16px;
+  height: 100%;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  border: 1px solid rgba(0, 255, 102, 0.25);
+  box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.95);
+  text-shadow: 0 0 4px rgba(0, 255, 102, 0.35);
+  line-height: 1.6;
+}
+.diff-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.diff-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+  transition: var(--transition-apple);
+}
+.diff-header {
+  background: var(--bg-elevated);
+  padding: 10px 16px;
+  font-weight: 600;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: var(--accent);
+  border-bottom: 1px solid var(--border);
+}
+.diff-body {
+  padding: 10px 0;
+  overflow-x: auto;
+}
+.diff-line {
+  padding: 2px 14px;
+  white-space: pre;
+}
+.diff-line.add { background: var(--diff-add); color: var(--diff-add-text); }
+.diff-line.del { background: var(--diff-del); color: var(--diff-del-text); }
+.diff-line.ctx { color: var(--text-muted); }
+.coord-readout {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  z-index: 99999;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+  animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.palette-container {
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent);
+  border-radius: 20px;
+  width: 660px;
+  max-width: 90vw;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.95), var(--accent-glow);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: var(--transition-apple);
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-dim);
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+    HYDRA DESKTOP
+    <span class="badge">v""" + __version__ + """</span>
+  </div>
+  <div class="header-controls">
+    <div class="token-tally-widget" id="token-tally" title="Live token usage and cost accounting" style="display: flex; align-items: center; gap: 8px; font-size: 11px; background: var(--bg-tertiary); padding: 6px 14px; border-radius: 12px; border: 1px solid var(--border);">
+      <span style="color: var(--text-secondary);">Tokens: <strong id="tally-tokens" style="color: var(--text-primary); font-family: var(--font-mono);">0</strong></span>
+      <span style="color: var(--border);">&bull;</span>
+      <span style="color: var(--text-secondary);">Cost: <strong id="tally-cost" style="color: var(--accent); font-family: var(--font-mono);">$0.0000</strong></span>
+    </div>
+    <div class="status-pill">
+      <div class="status-dot"></div>
+      Gateway : 7777
+    </div>
+    <select id="model-select">
+      <option value="mimo 2.6 pro" selected>Xiaomi MiMo 2.6 Pro (Daily Driver)</option>
+      <option value="mimo 2.6 flash">Xiaomi MiMo 2.6 Flash</option>
+      <option value="sonnet 5.5">Claude Sonnet 5.5</option>
+      <option value="claude-3-7-sonnet">Claude 3.7 Sonnet</option>
+      <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+      <option value="qwen-3.8-27b:free">Qwen 3.8 27B (Free)</option>
+      <option value="deepseek-chat:free">DeepSeek Chat (Free)</option>
+      <option value="llama-3.3-70b-instruct:free">Llama 3.3 70B (Free)</option>
+      <option value="opus 5.5">Claude Opus 5.5</option>
+      <option value="sol 6.1 pro">GPT-6.1 Sol Pro</option>
+      <option value="glm 5.3 flash">GLM 5.3 Flash</option>
+      <option value="deepseek 4.1 flash">DeepSeek 4.1 Flash</option>
+      <option value="free">Free Forge Routing</option>
+      <option value="local">Offline Local (Ollama)</option>
+    </select>
+    <button class="secondary" onclick="clearMessages()">Clear</button>
+    <button class="secondary" id="btn-command-palette" onclick="openCommandPalette()" title="Command Palette (Ctrl+K)">⌘K Palette</button>
+  </div>
+</header>
+<div class="session-bar" id="session-bar">
+  <div class="session-tab active" data-id="session-1" onclick="switchSession('session-1')">
+    <span>Session 1</span>
+    <span class="session-close" onclick="closeSession(event, 'session-1')">&times;</span>
+  </div>
+  <button class="add-session-btn" onclick="addNewSession()">+ New Session</button>
+</div>
+<div class="workspace">
+  <div class="sidebar">
+    <div class="nav-item active" onclick="switchNav('chat')">Chat Mode</div>
+    <div class="nav-item" onclick="switchNav('agent')">Agent ReAct Loop</div>
+    <div class="nav-item" onclick="switchNav('swarm')">3-Headed Swarm</div>
+    <div class="nav-item" onclick="switchNav('computer')">Computer Use</div>
+    <div class="nav-item" onclick="switchNav('terminal')">Terminal Sandbox</div>
+  </div>
+  <div class="main-stage">
+    <div class="chat-pane" id="chat-pane">
+      <div class="message assistant">
+        <div class="msg-header">HYDRA ORCHESTRATOR</div>
+        <div class="msg-bubble">Sovereign multi-headed desktop environment primed. Ready for prompt summon, agent execution, or OS computer control.</div>
+      </div>
+    </div>
+    <div class="input-area">
+      <div class="input-box-row">
+        <textarea id="prompt-input" placeholder="Summon frontier model, instruct agent, or issue bash command..." onkeydown="handleKey(event)"></textarea>
+        <button onclick="dispatchPrompt()">Send</button>
+      </div>
+    </div>
+  </div>
+  <div class="side-drawer">
+    <div class="drawer-header">
+      <span>INSPECTION & AUTOMATION</span>
+      <span class="coord-readout" id="coord-readout">X: - | Y: -</span>
+    </div>
+    <div class="drawer-tabs">
+      <div class="drawer-tab active" id="tab-screen" onclick="switchDrawerTab('screen')">Live Screen</div>
+      <div class="drawer-tab" id="tab-term" onclick="switchDrawerTab('term')">Terminal Logs</div>
+      <div class="drawer-tab" id="tab-diff" onclick="switchDrawerTab('diff')">Diffs & Code</div>
+      <div class="drawer-tab" id="tab-agent" onclick="switchDrawerTab('agent')">Agent Runner</div>
+    </div>
+    <div class="drawer-body" id="drawer-screen-content">
+      <div class="screen-container" id="screen-container" onmousemove="handleScreenHover(event)" onclick="handleScreenClick(event)">
+        <img id="screen-img" class="screen-preview-img" src="/api/computer/screen" alt="Desktop Screen Preview" />
+        <canvas id="screen-overlay-canvas" class="screen-canvas-overlay"></canvas>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button class="secondary" style="flex: 1;" onclick="refreshScreen()">Capture Screen</button>
+        <button class="secondary" style="flex: 1;" onclick="toggleOverlayBounds()">Toggle Bounds</button>
+        <button class="secondary" style="flex: 1;" onclick="testTypePrompt()">Type Text</button>
+      </div>
+      <div id="active-window-info" style="font-family: var(--font-mono); font-size: 11px; color: var(--text-secondary);">
+        Active Window: Detecting...
+      </div>
+    </div>
+    <div class="drawer-body" id="drawer-term-content" style="display: none; height: 100%;">
+      <div class="terminal-view" id="terminal-view">> Hydra Terminal Sandbox ready.\n> Port 7777 active.</div>
+    </div>
+    <div class="drawer-body" id="drawer-diff-content" style="display: none; height: 100%;">
+      <div class="diff-container" id="diffs-container">
+        <div class="diff-card">
+          <div class="diff-header">
+            <span>hydra_cli/computer_use.py</span>
+            <span>MODIFIED</span>
+          </div>
+          <div class="diff-body">
+            <div class="diff-line ctx">@@ -180,6 +180,18 @@</div>
+            <div class="diff-line add">+    def fill_form(self, fields, form_selector=None, submit=False):</div>
+            <div class="diff-line add">+    def scroll_until_visible(self, selector, max_scrolls=10):</div>
+            <div class="diff-line add">+    def extract_table_data(self, selector='table'):</div>
+            <div class="diff-line add">+    def safe_drag_and_drop(self, from_coord, to_coord):</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="drawer-body" id="drawer-agent-content" style="display: none; height: 100%; overflow-y: auto; flex-direction: column; gap: 10px;">
+      <div class="agent-panel" style="display: flex; flex-direction: column; gap: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span style="font-weight: 600; font-size: 13px;">AUTONOMOUS AGENT RUNNER</span>
+          <span id="agent-status-badge" class="badge" style="background: var(--bg-elevated); border-color: var(--border);">IDLE</span>
+        </div>
+        <textarea id="agent-task-input" style="width: 100%; min-height: 64px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 10px 12px; font-family: var(--font-mono); font-size: 12px; resize: vertical;" placeholder="Enter autonomous task (e.g. 'Navigate to data:... and extract table')..."></textarea>
+        <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+          <input type="number" id="agent-max-steps" value="30" min="1" max="100" style="width: 58px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 6px 8px; font-size: 12px;" title="Max Steps" />
+          <select id="agent-tool-profile" style="background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 6px 10px; font-size: 12px;" title="Tool Preset Profile" onchange="updateAgentToolProfile(this.value)">
+            <option value="full_automation" selected>Full Automation</option>
+            <option value="browser_only">Browser Only</option>
+            <option value="workspace_only">Workspace Only</option>
+            <option value="minimal">Minimal (Read-Only)</option>
+          </select>
+          <button class="primary" style="flex: 1; min-width: 80px; padding: 6px 10px; font-size: 12px;" onclick="startAgentTask()">Start Agent</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="pauseAgentTask()" id="btn-agent-pause">Pause</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="resumeAgentTask()" id="btn-agent-resume">Resume</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px; color: var(--error);" onclick="abortAgentTask()" id="btn-agent-abort">Abort</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="exportAgentTrace()" id="btn-agent-export">Export Trace</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="exportAgentMarkdown()" id="btn-agent-export-markdown">Export Markdown</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="openTemplatesModal()" id="btn-agent-templates" title="Workflow Templates">📋 Templates</button>
+          <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="openJobsModal()" id="btn-agent-jobs" title="Scheduled Agent Jobs">⏱ Jobs</button>
+        </div>
+        <div style="background: var(--bg-tertiary); border-radius: 8px; height: 6px; width: 100%; overflow: hidden; margin-top: 4px; border: 1px solid var(--border);">
+          <div id="agent-progress-bar" style="background: var(--accent); width: 0%; height: 100%; transition: width 0.3s;"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted);">
+          <span id="agent-step-counter">Step: 0 / 30</span>
+          <span id="agent-elapsed-timer">Elapsed: 0.0s</span>
+        </div>
+        <div style="font-weight: 600; font-size: 12px; margin-top: 4px; color: var(--text-secondary);">ACTION TRACE LOG</div>
+        <div class="trace-log" id="agent-trace-log" style="display: flex; flex-direction: column; gap: 8px; max-height: 380px; overflow-y: auto;">
+          <div style="font-size: 11px; color: var(--text-muted); font-style: italic;">No active agent execution trace. Enter task and start runner.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- Workflow Templates Modal -->
+<div id="workflow-templates-modal" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 99999; justify-content: center; align-items: flex-start; padding-top: 10vh;" onclick="handleTemplatesBackdropClick(event)">
+  <div class="palette-container" style="background: var(--bg-secondary); border: 1px solid var(--accent); border-radius: 20px; width: 720px; max-width: 90vw; box-shadow: 0 24px 60px rgba(0,0,0,0.95), var(--accent-glow); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-elevated);">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="color: var(--accent); font-weight: 700; font-size: 15px;">📋</span>
+        <span style="font-weight: 600; font-size: 14px;">WORKFLOW TEMPLATES CATALOG</span>
+      </div>
+      <button class="secondary" style="padding: 2px 8px; font-size: 11px;" onclick="closeTemplatesModal()">✕</button>
+    </div>
+    <div style="padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--bg-tertiary);">
+      <input type="text" id="template-search-input" placeholder="Search workflow templates..." style="width: 100%; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 8px 12px; font-size: 13px;" oninput="filterTemplates()" />
+    </div>
+    <div id="templates-list" style="max-height: 420px; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px;">
+    </div>
+  </div>
+</div>
+
+<!-- Scheduled Agent Jobs Modal -->
+<div id="scheduled-jobs-modal" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 99999; justify-content: center; align-items: flex-start; padding-top: 8vh;" onclick="handleJobsBackdropClick(event)">
+  <div class="palette-container" style="background: var(--bg-secondary); border: 1px solid var(--accent); border-radius: 20px; width: 780px; max-width: 92vw; box-shadow: 0 24px 60px rgba(0,0,0,0.95), var(--accent-glow); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-elevated);">
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <span style="color: var(--accent); font-weight: 700; font-size: 15px;">⏱</span>
+        <span style="font-weight: 600; font-size: 14px;">SCHEDULED AGENT JOBS</span>
+      </div>
+      <button class="secondary" style="padding: 2px 8px; font-size: 11px;" onclick="closeJobsModal()">✕</button>
+    </div>
+    <div style="padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-tertiary); display: flex; flex-direction: column; gap: 8px;">
+      <div style="font-weight: 600; font-size: 12px; color: var(--text-secondary);">CREATE NEW SCHEDULED JOB</div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <input type="text" id="job-name-input" placeholder="Job Name (e.g. Daily Invariant Audit)" style="flex: 1; min-width: 180px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;" />
+        <input type="number" id="job-interval-input" value="60" min="5" placeholder="Interval (sec)" style="width: 100px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;" title="Interval in seconds" />
+        <select id="job-profile-select" style="background: var(--bg-primary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;">
+          <option value="full_automation">Full Automation</option>
+          <option value="browser_only">Browser Only</option>
+          <option value="workspace_only">Workspace Only</option>
+          <option value="minimal">Minimal</option>
+        </select>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <input type="text" id="job-task-input" placeholder="Task description (e.g. Inspect workspace and generate report)..." style="flex: 1; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;" />
+        <button class="primary" style="padding: 5px 12px; font-size: 12px;" onclick="createScheduledJob()">Schedule</button>
+      </div>
+    </div>
+    <div style="padding: 12px 16px; max-height: 380px; overflow-y: auto;">
+      <div style="font-weight: 600; font-size: 12px; margin-bottom: 8px; color: var(--text-secondary);">ACTIVE SCHEDULED JOBS</div>
+      <div id="scheduled-jobs-list" style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="font-size: 11px; color: var(--text-muted); font-style: italic;">No scheduled jobs active. Create a job above.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Command Palette Modal -->
+<div id="command-palette-modal" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 99999; justify-content: center; align-items: flex-start; padding-top: 15vh;" onclick="handlePaletteBackdropClick(event)">
+  <div class="palette-container" style="background: var(--bg-secondary); border: 1px solid var(--accent); border-radius: 20px; width: 640px; max-width: 90vw; box-shadow: 0 24px 60px rgba(0,0,0,0.95), var(--accent-glow); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
+    <div style="display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); gap: 10px; background: var(--bg-elevated);">
+      <span style="color: var(--accent); font-weight: 700; font-size: 14px;">⌘</span>
+      <input type="text" id="palette-input" placeholder="Type a command or search quick actions... (Esc to close)" style="flex: 1; background: transparent; border: none; outline: none; color: var(--text-primary); font-size: 13px; font-family: inherit;" oninput="filterPaletteActions()" onkeydown="handlePaletteKeydown(event)" />
+      <span style="font-size: 11px; color: var(--text-muted); background: #1e293b; padding: 2px 6px; border-radius: 4px; font-family: var(--font-mono);">Esc</span>
+    </div>
+    <div id="palette-results" style="max-height: 380px; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px;">
+    </div>
+    <div style="padding: 8px 16px; background: var(--bg-tertiary); border-top: 1px solid var(--border); font-size: 11px; color: var(--text-muted); display: flex; justify-content: space-between;">
+      <span>Use <kbd style='background:#1e293b;padding:1px 4px;border-radius:3px;'>↑</kbd> <kbd style='background:#1e293b;padding:1px 4px;border-radius:3px;'>↓</kbd> to navigate, <kbd style='background:#1e293b;padding:1px 4px;border-radius:3px;'>Enter</kbd> to select</span>
+      <span>Hydra Sovereign Command Palette</span>
+    </div>
+  </div>
+</div>
+<script>
+let currentNav = 'chat';
+let activeDrawerTab = 'screen';
+let screenWidth = 1920;
+let screenHeight = 1080;
+let overlayBoundsEnabled = true;
+
+// Multi-session state store
+const sessions = {
+  'session-1': {
+    name: 'Session 1',
+    messages: [
+      { role: 'assistant', header: 'HYDRA ORCHESTRATOR', text: 'Sovereign multi-headed desktop environment primed.' }
+    ],
+    model: 'mimo 2.6 pro',
+    nav: 'chat'
+  }
+};
+let activeSessionId = 'session-1';
+let sessionCounter = 1;
+
+function switchSession(sid) {
+  if (!sessions[sid]) return;
+  activeSessionId = sid;
+  document.querySelectorAll('.session-tab').forEach(el => el.classList.remove('active'));
+  const targetTab = document.querySelector(`.session-tab[data-id="${sid}"]`);
+  if (targetTab) targetTab.classList.add('active');
+
+  const sess = sessions[sid];
+  document.getElementById('model-select').value = sess.model || 'mimo 2.6 pro';
+  renderSessionMessages(sid);
+}
+
+function addNewSession() {
+  sessionCounter++;
+  const sid = `session-${sessionCounter}`;
+  sessions[sid] = {
+    name: `Session ${sessionCounter}`,
+    messages: [
+      { role: 'assistant', header: 'HYDRA ORCHESTRATOR', text: `Session ${sessionCounter} primed. Dispatch instruction or summon heads.` }
+    ],
+    model: document.getElementById('model-select').value,
+    nav: currentNav
+  };
+
+  const bar = document.getElementById('session-bar');
+  const addBtn = bar.querySelector('.add-session-btn');
+  const tab = document.createElement('div');
+  tab.className = 'session-tab';
+  tab.dataset.id = sid;
+  tab.onclick = () => switchSession(sid);
+  tab.innerHTML = `<span>Session ${sessionCounter}</span><span class="session-close" onclick="closeSession(event, '${sid}')">&times;</span>`;
+  bar.insertBefore(tab, addBtn);
+
+  switchSession(sid);
+}
+
+function closeSession(e, sid) {
+  e.stopPropagation();
+  if (Object.keys(sessions).length <= 1) return;
+  delete sessions[sid];
+  const tab = document.querySelector(`.session-tab[data-id="${sid}"]`);
+  if (tab) tab.remove();
+
+  if (activeSessionId === sid) {
+    const firstRemaining = Object.keys(sessions)[0];
+    switchSession(firstRemaining);
+  }
+}
+
+function renderSessionMessages(sid) {
+  const pane = document.getElementById('chat-pane');
+  pane.innerHTML = '';
+  const sess = sessions[sid];
+  if (!sess) return;
+
+  sess.messages.forEach(msg => {
+    const msgEl = document.createElement('div');
+    msgEl.className = `message ${msg.role}`;
+    msgEl.innerHTML = `<div class="msg-header">${escapeHtml(msg.header)}</div><div class="msg-bubble">${escapeHtml(msg.text)}</div>`;
+    pane.appendChild(msgEl);
+  });
+  pane.scrollTop = pane.scrollHeight;
+}
+
+function switchNav(nav) {
+  currentNav = nav;
+  document.querySelectorAll('.sidebar .nav-item').forEach(el => el.classList.remove('active'));
+  if (typeof event !== 'undefined' && event && event.target) {
+    event.target.classList.add('active');
+  }
+  const termView = document.getElementById('terminal-view');
+  if (termView) termView.innerText += `\n[MODE] Switched to mode: ${nav}`;
+  if (nav === 'agent') {
+    switchDrawerTab('agent');
+  }
+}
+
+function switchDrawerTab(tab) {
+  activeDrawerTab = tab;
+  document.querySelectorAll('.drawer-tab').forEach(el => el.classList.remove('active'));
+  ['screen', 'term', 'diff', 'agent'].forEach(t => {
+    const el = document.getElementById('drawer-' + t + '-content');
+    if (el) el.style.display = 'none';
+  });
+
+  const tabEl = document.getElementById('tab-' + tab);
+  if (tabEl) tabEl.classList.add('active');
+  const contentEl = document.getElementById('drawer-' + tab + '-content');
+  if (contentEl) contentEl.style.display = 'flex';
+
+  if (tab === 'diff') {
+    fetchDiffs();
+  } else if (tab === 'agent') {
+    pollAgentStatus();
+  }
+}
+
+function handleKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    dispatchPrompt();
+  }
+}
+
+let currentHighlights = [];
+let desktopWs = null;
+let wsHeartbeatTimer = null;
+let wsReconnectTimer = null;
+
+function calculateViewportScale() {
+  const img = document.getElementById('screen-img');
+  const canvas = document.getElementById('screen-overlay-canvas');
+  if (!canvas) return { scaleX: 1.0, scaleY: 1.0, box: { width: 800, height: 450 } };
+  const box = (img && img.clientWidth) ? img.getBoundingClientRect() : canvas.getBoundingClientRect();
+  const w = box.width || canvas.clientWidth || 800;
+  const h = box.height || canvas.clientHeight || 450;
+  if (canvas.width !== Math.round(w) || canvas.height !== Math.round(h)) {
+    canvas.width = Math.round(w);
+    canvas.height = Math.round(h);
+  }
+  const scaleX = w / (screenWidth || 1920);
+  const scaleY = h / (screenHeight || 1080);
+  return { scaleX, scaleY, box: { width: w, height: h } };
+}
+
+function renderOverlayHighlights(highlights) {
+  if (highlights) currentHighlights = highlights;
+  const canvas = document.getElementById('screen-overlay-canvas');
+  if (!canvas) return;
+  const { scaleX, scaleY } = calculateViewportScale();
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  if (!currentHighlights || !currentHighlights.length) return;
+
+  currentHighlights.forEach(h => {
+    const sx = Math.round(h.x * scaleX);
+    const sy = Math.round(h.y * scaleY);
+    const sw = Math.round(h.width * scaleX);
+    const sh = Math.round(h.height * scaleY);
+
+    ctx.strokeStyle = '#00ff66';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(sx, sy, sw, sh);
+    ctx.fillStyle = 'rgba(0, 255, 102, 0.2)';
+    ctx.fillRect(sx, sy, sw, sh);
+    ctx.fillStyle = '#86efac';
+    ctx.font = '10px var(--font-mono)';
+    ctx.fillText(h.label || 'Target', sx + 2, Math.max(10, sy - 4));
+  });
+}
+
+function updateCoord(event) { handleScreenHover(event); }
+
+function handleScreenHover(e) {
+  const { scaleX, scaleY, box } = calculateViewportScale();
+  const relX = (e.clientX - box.left) / box.width;
+  const relY = (e.clientY - box.top) / box.height;
+  const targetX = Math.round(relX * screenWidth);
+  const targetY = Math.round(relY * screenHeight);
+  const readout = document.getElementById('coord-readout');
+  if (readout) readout.innerText = `X: ${targetX} | Y: ${targetY}`;
+
+  const canvas = document.getElementById('screen-overlay-canvas');
+  if (canvas && overlayBoundsEnabled) {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (currentHighlights && currentHighlights.length) {
+      renderOverlayHighlights(currentHighlights);
+    }
+
+    const curX = e.clientX - box.left;
+    const curY = e.clientY - box.top;
+    ctx.strokeStyle = 'rgba(0, 255, 102, 0.6)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(curX, 0);
+    ctx.lineTo(curX, canvas.height);
+    ctx.moveTo(0, curY);
+    ctx.lineTo(canvas.width, curY);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#00ff66';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(4, 4, canvas.width - 8, canvas.height - 8);
+    ctx.fillStyle = 'rgba(0, 255, 102, 0.05)';
+    ctx.fillRect(4, 4, canvas.width - 8, canvas.height - 8);
+  }
+}
+
+window.addEventListener('resize', () => {
+  calculateViewportScale();
+  if (currentHighlights && currentHighlights.length) {
+    renderOverlayHighlights(currentHighlights);
+  }
+});
+
+function toggleOverlayBounds() {
+  overlayBoundsEnabled = !overlayBoundsEnabled;
+  const canvas = document.getElementById('screen-overlay-canvas');
+  if (canvas && !overlayBoundsEnabled) {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+  }
+}
+
+async function handleScreenClick(e) {
+  const box = e.currentTarget.getBoundingClientRect();
+  const relX = (e.clientX - box.left) / box.width;
+  const relY = (e.clientY - box.top) / box.height;
+  const targetX = Math.round(relX * screenWidth);
+  const targetY = Math.round(relY * screenHeight);
+  
+  const termView = document.getElementById('terminal-view');
+  termView.innerText += `\n[MOUSE] Click coordinate: (${targetX}, ${targetY})`;
+  
+  try {
+    const res = await fetch('/api/computer/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'mouse_click', x: targetX, y: targetY })
+    });
+    const data = await res.json();
+    termView.innerText += ` -> result: ${JSON.stringify(data)}`;
+    setTimeout(refreshScreen, 300);
+  } catch (err) {
+    termView.innerText += ` -> error: ${err}`;
+  }
+}
+
+async function refreshScreen() {
+  const img = document.getElementById('screen-img');
+  img.src = '/api/computer/screen?t=' + Date.now();
+  try {
+    const res = await fetch('/api/computer/action', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'window_action', sub_action: 'active' })
+    });
+    const data = await res.json();
+    if (data.window) {
+      document.getElementById('active-window-info').innerText = `Active Window: ${data.window.title}`;
+    }
+  } catch (e) {}
+}
+
+async function testTypePrompt() {
+  const text = prompt('Enter text to type into active window:');
+  if (!text) return;
+  const res = await fetch('/api/computer/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'type_text', text: text })
+  });
+  const data = await res.json();
+  document.getElementById('terminal-view').innerText += `\n[TYPE] Result: ${JSON.stringify(data)}`;
+}
+
+async function fetchDiffs() {
+  try {
+    const res = await fetch('/api/diffs');
+    const data = await res.json();
+    if (data.diffs && data.diffs.length > 0) {
+      const container = document.getElementById('diffs-container');
+      container.innerHTML = '';
+      data.diffs.forEach(df => {
+        const card = document.createElement('div');
+        card.className = 'diff-card';
+        let linesHtml = '';
+        (df.lines || []).forEach(ln => {
+          const cls = ln.startsWith('+') ? 'add' : (ln.startsWith('-') ? 'del' : 'ctx');
+          linesHtml += `<div class="diff-line ${cls}">${escapeHtml(ln)}</div>`;
+        });
+        card.innerHTML = `<div class="diff-header"><span>${escapeHtml(df.path)}</span><span>${escapeHtml(df.type || 'MODIFIED')}</span></div><div class="diff-body">${linesHtml}</div>`;
+        container.appendChild(card);
+      });
+    }
+  } catch (e) {}
+}
+
+function clearMessages() {
+  if (sessions[activeSessionId]) {
+    sessions[activeSessionId].messages = [];
+  }
+  document.getElementById('chat-pane').innerHTML = '';
+}
+
+async function dispatchPrompt() {
+  const input = document.getElementById('prompt-input');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+
+  const model = document.getElementById('model-select').value;
+  const sess = sessions[activeSessionId];
+  if (sess) {
+    sess.messages.push({ role: 'user', header: 'USER', text: text });
+    sess.model = model;
+  }
+
+  const pane = document.getElementById('chat-pane');
+  const userMsg = document.createElement('div');
+  userMsg.className = 'message user';
+  userMsg.innerHTML = `<div class="msg-header">USER</div><div class="msg-bubble">${escapeHtml(text)}</div>`;
+  pane.appendChild(userMsg);
+
+  const assistMsg = document.createElement('div');
+  assistMsg.className = 'message assistant';
+  assistMsg.innerHTML = `<div class="msg-header">${model.toUpperCase()}</div><div class="msg-bubble" id="stream-bubble">...</div>`;
+  pane.appendChild(assistMsg);
+  pane.scrollTop = pane.scrollHeight;
+
+  const bubble = assistMsg.querySelector('.msg-bubble');
+  const termView = document.getElementById('terminal-view');
+
+  try {
+    if (currentNav === 'terminal') {
+      const res = await fetch('/api/terminal/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command: text })
+      });
+      const data = await res.json();
+      const output = `Exit: ${data.exit_code}\n\n${data.stdout || data.stderr || '(no output)'}`;
+      bubble.innerText = output;
+      termView.innerText += `\n$ ${text}\n${data.stdout || ''}${data.stderr || ''}`;
+      if (sess) sess.messages.push({ role: 'assistant', header: model.toUpperCase(), text: output });
+      return;
+    }
+
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: model, prompt: text, mode: currentNav })
+    });
+    const data = await res.json();
+    const reply = data.content || data.error || 'Done';
+    bubble.innerText = reply;
+    if (sess) sess.messages.push({ role: 'assistant', header: model.toUpperCase(), text: reply });
+    if (data.tool_calls && data.tool_calls.length) {
+      data.tool_calls.forEach(tc => {
+        const tcCard = document.createElement('div');
+        tcCard.className = 'tool-card';
+        tcCard.innerHTML = `<div class="tool-title">Tool: ${tc.name}</div><div>${escapeHtml(JSON.stringify(tc.arguments))}</div>`;
+        assistMsg.appendChild(tcCard);
+      });
+    }
+  } catch (err) {
+    bubble.innerText = `Error: ${err.message}`;
+  }
+  pane.scrollTop = pane.scrollHeight;
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+let agentPollTimer = null;
+
+async function startAgentTask() {
+  const taskInput = document.getElementById('agent-task-input');
+  const promptInput = document.getElementById('prompt-input');
+  const task = (taskInput && taskInput.value.trim()) || (promptInput && promptInput.value.trim()) || '';
+  if (!task) return;
+  const maxSteps = parseInt(document.getElementById('agent-max-steps').value || '30', 10);
+  const model = document.getElementById('model-select').value || 'mimo 2.6 pro';
+  const profileSel = document.getElementById('agent-tool-profile');
+  const toolProfile = profileSel ? profileSel.value : 'full_automation';
+
+  const badge = document.getElementById('agent-status-badge');
+  if (badge) { badge.innerText = 'STARTING'; badge.style.background = '#2563eb'; }
+
+  try {
+    const res = await fetch('/api/agent/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task, model, max_steps: maxSteps, profile: toolProfile })
+    });
+    const data = await res.json();
+    if (data.isError) {
+      if (badge) { badge.innerText = 'ERROR'; badge.style.background = 'var(--error)'; }
+      alert('Agent failed to start: ' + data.error);
+      return;
+    }
+    if (badge) { badge.innerText = 'RUNNING'; badge.style.background = 'var(--accent)'; }
+    startAgentPolling();
+  } catch (err) {
+    if (badge) { badge.innerText = 'ERROR'; badge.style.background = 'var(--error)'; }
+  }
+}
+
+async function pauseAgentTask() {
+  await fetch('/api/agent/pause', { method: 'POST' });
+  const badge = document.getElementById('agent-status-badge');
+  if (badge) { badge.innerText = 'PAUSED'; badge.style.background = '#f59e0b'; }
+}
+
+async function resumeAgentTask() {
+  await fetch('/api/agent/resume', { method: 'POST' });
+  const badge = document.getElementById('agent-status-badge');
+  if (badge) { badge.innerText = 'RUNNING'; badge.style.background = 'var(--accent)'; }
+}
+
+function exportAgentTrace() {
+  window.open('/api/agent/export?download=true', '_blank');
+}
+
+function exportAgentMarkdown() {
+  window.open('/api/agent/export/markdown?download=true', '_blank');
+}
+
+async function abortAgentTask() {
+  await fetch('/api/agent/abort', { method: 'POST' });
+  const badge = document.getElementById('agent-status-badge');
+  if (badge) { badge.innerText = 'ABORTED'; badge.style.background = 'var(--error)'; }
+  stopAgentPolling();
+}
+
+function startAgentPolling() {
+  if (agentPollTimer) clearInterval(agentPollTimer);
+  agentPollTimer = setInterval(pollAgentStatus, 500);
+}
+
+function stopAgentPolling() {
+  if (agentPollTimer) {
+    clearInterval(agentPollTimer);
+    agentPollTimer = null;
+  }
+}
+
+async function pollAgentStatus() {
+  try {
+    const res = await fetch('/api/agent/status');
+    const st = await res.json();
+    renderAgentStatus(st);
+    if (st.status === 'COMPLETED' || st.status === 'FAILED' || st.status === 'ABORTED') {
+      stopAgentPolling();
+    }
+  } catch (e) {}
+}
+
+function renderAgentStatus(st) {
+  const badge = document.getElementById('agent-status-badge');
+  if (badge) {
+    badge.innerText = st.status;
+    if (st.status === 'RUNNING') badge.style.background = 'var(--accent)';
+    else if (st.status === 'PAUSED') badge.style.background = '#f59e0b';
+    else if (st.status === 'COMPLETED') badge.style.background = '#10b981';
+    else if (st.status === 'FAILED' || st.status === 'ABORTED') badge.style.background = 'var(--error)';
+  }
+
+  const pBar = document.getElementById('agent-progress-bar');
+  if (pBar && st.max_steps) {
+    const pct = Math.min(100, Math.round((st.current_step / st.max_steps) * 100));
+    pBar.style.width = `${pct}%`;
+  }
+
+  const stepCounter = document.getElementById('agent-step-counter');
+  if (stepCounter) stepCounter.innerText = `Step: ${st.current_step} / ${st.max_steps}`;
+
+  const timer = document.getElementById('agent-elapsed-timer');
+  if (timer) timer.innerText = `Elapsed: ${st.elapsed_sec}s`;
+
+  if (st.highlights) {
+    renderOverlayHighlights(st.highlights);
+  }
+
+  const traceLog = document.getElementById('agent-trace-log');
+  if (traceLog && st.actions && st.actions.length) {
+    traceLog.innerHTML = '';
+    st.actions.forEach(a => {
+      const card = document.createElement('div');
+      card.style.cssText = 'background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-family: var(--font-mono); font-size: 11px;';
+      const statusColor = a.status === 'success' ? 'var(--accent)' : (a.status === 'error' ? 'var(--error)' : 'var(--text-muted)');
+      card.innerHTML = `
+        <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+          <span style="font-weight: 600; color: var(--accent);">Step ${a.step}: ${escapeHtml(a.action)}</span>
+          <span style="color: ${statusColor}; font-weight: 600;">${a.status.toUpperCase()} (${a.duration_sec}s)</span>
+        </div>
+        <div style="color: var(--text-secondary); margin-bottom: 4px;">Thought: ${escapeHtml(a.thought || '')}</div>
+        <div style="color: var(--text-muted); font-size: 10px; word-break: break-all;">Args: ${escapeHtml(JSON.stringify(a.arguments || {}))}</div>
+      `;
+      traceLog.appendChild(card);
+    });
+    traceLog.scrollTop = traceLog.scrollHeight;
+  }
+}
+
+
+function updateTokenTally(data) {
+  if (!data) return;
+  const tokensEl = document.getElementById('tally-tokens');
+  const costEl = document.getElementById('tally-cost');
+  if (tokensEl) tokensEl.innerText = (data.total_tokens || 0).toLocaleString();
+  if (costEl) costEl.innerText = data.formatted_cost || `$${(data.total_cost_usd || 0).toFixed(4)}`;
+}
+
+async function fetchTokenUsage() {
+  try {
+    const res = await fetch('/api/usage');
+    const data = await res.json();
+    updateTokenTally(data);
+  } catch (e) {}
+}
+
+function initWebSocket() {
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  const wsUrl = proto + location.host + '/ws/desktop';
+  try {
+    desktopWs = new WebSocket(wsUrl);
+
+    desktopWs.onopen = () => {
+      // Bi-directional 15s heartbeat
+      if (wsHeartbeatTimer) clearInterval(wsHeartbeatTimer);
+      wsHeartbeatTimer = setInterval(() => {
+        if (desktopWs && desktopWs.readyState === WebSocket.OPEN) {
+          desktopWs.send(JSON.stringify({ action: 'ping' }));
+        }
+      }, 15000);
+
+      // Re-attach state upon connection
+      desktopWs.send(JSON.stringify({ action: 'agent_status' }));
+      desktopWs.send(JSON.stringify({ action: 'token_usage' }));
+    };
+
+    desktopWs.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.event === 'pong' || msg.event === 'heartbeat') {
+          // Heartbeat acknowledged
+        } else if (msg.event === 'agent_status') {
+          if (msg.data) renderAgentStatus(msg.data);
+        } else if (msg.event === 'step_complete' || msg.event === 'step_start' || msg.event === 'task_complete' || msg.event === 'task_start') {
+          pollAgentStatus();
+        } else if (msg.event === 'token_usage') {
+          if (msg.data) updateTokenTally(msg.data);
+        }
+      } catch (e) {}
+    };
+
+    desktopWs.onclose = () => {
+      if (wsHeartbeatTimer) clearInterval(wsHeartbeatTimer);
+      wsReconnectTimer = setTimeout(initWebSocket, 3000);
+    };
+
+    desktopWs.onerror = () => {
+      if (desktopWs) desktopWs.close();
+    };
+  } catch (e) {
+    wsReconnectTimer = setTimeout(initWebSocket, 3000);
+  }
+}
+
+
+// --- Command Palette Modal & Controller ---
+let activePaletteIndex = 0;
+let filteredPaletteActions = [];
+
+const PALETTE_ACTIONS = [
+  { id: 'nav-chat', title: 'Switch to Chat View', category: 'Navigation', shortcut: 'Alt+1', run: () => switchNav('chat') },
+  { id: 'nav-terminal', title: 'Switch to Terminal Sandbox', category: 'Navigation', shortcut: 'Alt+2', run: () => switchNav('terminal') },
+  { id: 'nav-diffs', title: 'Switch to File Diff Viewer', category: 'Navigation', shortcut: 'Alt+3', run: () => { switchDrawerTab('diff'); fetchDiffs(); } },
+  { id: 'drawer-screen', title: 'Open Live Screen Drawer', category: 'Drawer', shortcut: '', run: () => switchDrawerTab('screen') },
+  { id: 'drawer-agent', title: 'Open Autonomous Agent Runner', category: 'Drawer', shortcut: '', run: () => switchDrawerTab('agent') },
+  { id: 'agent-focus', title: 'Trigger Autonomous Agent Task', category: 'Agent', shortcut: '', run: () => { switchDrawerTab('agent'); setTimeout(() => document.getElementById('agent-task-input')?.focus(), 50); } },
+  { id: 'profile-full', title: 'Switch Tool Profile: Full Automation', category: 'Tool Profile', shortcut: '', run: () => updateAgentToolProfile('full_automation') },
+  { id: 'profile-browser', title: 'Switch Tool Profile: Browser Only', category: 'Tool Profile', shortcut: '', run: () => updateAgentToolProfile('browser_only') },
+  { id: 'profile-workspace', title: 'Switch Tool Profile: Workspace Only', category: 'Tool Profile', shortcut: '', run: () => updateAgentToolProfile('workspace_only') },
+  { id: 'profile-minimal', title: 'Switch Tool Profile: Minimal (Read-Only)', category: 'Tool Profile', shortcut: '', run: () => updateAgentToolProfile('minimal') },
+  { id: 'model-sonnet', title: 'Set Model Alias: Claude Sonnet 5.5', category: 'Model', shortcut: '', run: () => setModelAlias('sonnet 5.5') },
+  { id: 'model-opus', title: 'Set Model Alias: Claude Opus 5.5', category: 'Model', shortcut: '', run: () => setModelAlias('opus 5.5') },
+  { id: 'model-sol', title: 'Set Model Alias: GPT-6.1 Sol', category: 'Model', shortcut: '', run: () => setModelAlias('sol 6.1 pro') },
+  { id: 'model-gemini', title: 'Set Model Alias: Gemini 3.8', category: 'Model', shortcut: '', run: () => setModelAlias('gemini 3.8') },
+  { id: 'export-trace', title: 'Download Session JSON Trace', category: 'Export', shortcut: '', run: () => exportAgentTrace() },
+  { id: 'export-md', title: 'Download Agent Markdown Report', category: 'Export', shortcut: '', run: () => exportAgentMarkdown() },
+  { id: 'new-session', title: 'Create New Session Tab', category: 'Session', shortcut: 'Ctrl+T', run: () => addNewSession() },
+];
+
+function setModelAlias(m) {
+  const sel = document.getElementById('model-select');
+  if (sel) sel.value = m;
+}
+
+// Workflow Templates Catalog
+let workflowTemplatesCache = [];
+
+async function openTemplatesModal() {
+  const modal = document.getElementById('workflow-templates-modal');
+  if (modal) modal.style.display = 'flex';
+  try {
+    const res = await fetch('/api/agent/templates');
+    const data = await res.json();
+    workflowTemplatesCache = data.catalog || Object.values(data.templates || {});
+    renderTemplatesList(workflowTemplatesCache);
+  } catch (err) {
+    console.error('Failed to load templates', err);
+  }
+}
+
+function closeTemplatesModal() {
+  const modal = document.getElementById('workflow-templates-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+function handleTemplatesBackdropClick(e) {
+  if (e.target.id === 'workflow-templates-modal') closeTemplatesModal();
+}
+
+function filterTemplates() {
+  const q = (document.getElementById('template-search-input')?.value || '').toLowerCase();
+  const filtered = workflowTemplatesCache.filter(t => 
+    t.name.toLowerCase().includes(q) ||
+    (t.category || '').toLowerCase().includes(q) ||
+    t.description.toLowerCase().includes(q)
+  );
+  renderTemplatesList(filtered);
+}
+
+function renderTemplatesList(templates) {
+  const container = document.getElementById('templates-list');
+  if (!container) return;
+  if (!templates.length) {
+    container.innerHTML = '<div style="font-size: 12px; color: var(--text-muted); padding: 12px;">No matching templates found.</div>';
+    return;
+  }
+  container.innerHTML = templates.map(t => `
+    <div class="diff-card" style="padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span style="font-weight: 600; font-size: 13px; color: var(--accent);">${t.name}</span>
+          <span class="badge" style="background: #1e293b; color: #94a3b8; font-size: 10px;">${t.category || 'Workflow'}</span>
+        </div>
+        <button class="primary" style="padding: 3px 8px; font-size: 11px;" onclick="applyWorkflowTemplate('${t.template_id || t.id}')">Apply Template</button>
+      </div>
+      <div style="font-size: 11px; color: var(--text-secondary); line-height: 1.4;">${t.description}</div>
+      <div style="display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: var(--text-muted);">
+        <span>Preset Profile: <strong style="color: var(--text-primary); font-family: var(--font-mono);">${t.tool_profile || t.suggested_profile}</strong></span>
+        <span>${t.max_steps ? t.max_steps + ' max steps' : 'Autonomous loop'}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+function applyWorkflowTemplate(templateId) {
+  const tpl = workflowTemplatesCache.find(t => (t.template_id || t.id) === templateId);
+  if (!tpl) return;
+  const taskInput = document.getElementById('agent-task-input');
+  if (taskInput) {
+    taskInput.value = tpl.template || tpl.prompt_template || tpl.description;
+  }
+  const profSelect = document.getElementById('agent-tool-profile');
+  const prof = tpl.tool_profile || tpl.suggested_profile;
+  if (profSelect && prof) {
+    profSelect.value = prof;
+    updateAgentToolProfile(prof);
+  }
+  closeTemplatesModal();
+}
+
+// Scheduled Jobs Manager
+async function openJobsModal() {
+  const modal = document.getElementById('scheduled-jobs-modal');
+  if (modal) modal.style.display = 'flex';
+  await fetchScheduledJobs();
+}
+
+function closeJobsModal() {
+  const modal = document.getElementById('scheduled-jobs-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+function handleJobsBackdropClick(e) {
+  if (e.target.id === 'scheduled-jobs-modal') closeJobsModal();
+}
+
+async function fetchScheduledJobs() {
+  try {
+    const res = await fetch('/api/agent/jobs');
+    const data = await res.json();
+    renderScheduledJobs(data.jobs || []);
+  } catch (err) {
+    console.error('Failed to fetch jobs', err);
+  }
+}
+
+function renderScheduledJobs(jobs) {
+  const container = document.getElementById('scheduled-jobs-list');
+  if (!container) return;
+  if (!jobs.length) {
+    container.innerHTML = '<div style="font-size: 11px; color: var(--text-muted); font-style: italic;">No scheduled jobs active. Create a job above.</div>';
+    return;
+  }
+  container.innerHTML = jobs.map(j => `
+    <div class="diff-card" style="padding: 8px 12px; display: flex; justify-content: space-between; align-items: center;">
+      <div style="display: flex; flex-direction: column; gap: 3px; max-width: 70%;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+          <span style="font-weight: 600; font-size: 12px; color: var(--text-primary);">${j.name}</span>
+          <span class="badge" style="background: ${j.status === 'active' || j.status === 'scheduled' ? '#065f46' : '#374151'}; font-size: 9px;">${(j.status || '').toUpperCase()}</span>
+          <span style="font-size: 10px; color: var(--text-muted); font-family: var(--font-mono);">${j.interval_seconds || j.interval_sec || 60}s</span>
+        </div>
+        <div style="font-size: 11px; color: var(--text-secondary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${j.task_description || j.task}</div>
+        <div style="font-size: 10px; color: var(--text-muted);">Runs: ${j.run_count} | Last: ${j.last_run ? j.last_run.slice(11, 19) : 'never'}</div>
+      </div>
+      <div style="display: flex; gap: 6px;">
+        <button class="secondary" style="padding: 3px 6px; font-size: 11px;" onclick="runScheduledJobNow('${j.job_id}')" title="Trigger immediate execution">Run Now</button>
+        <button class="secondary" style="padding: 3px 6px; font-size: 11px; color: var(--error);" onclick="cancelScheduledJob('${j.job_id}')" title="Cancel scheduled job">Cancel</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function createScheduledJob() {
+  const name = document.getElementById('job-name-input')?.value || 'Scheduled Agent Task';
+  const task = document.getElementById('job-task-input')?.value;
+  const interval = parseFloat(document.getElementById('job-interval-input')?.value || '60');
+  const profile = document.getElementById('job-profile-select')?.value || 'full_automation';
+  if (!task) {
+    alert('Please enter a task description');
+    return;
+  }
+  try {
+    const res = await fetch('/api/agent/jobs/create', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ name, task_description: task, interval_seconds: interval, tool_profile: profile })
+    });
+    const data = await res.json();
+    if (!data.isError) {
+      document.getElementById('job-task-input').value = '';
+      await fetchScheduledJobs();
+    }
+  } catch (err) {
+    console.error('Failed to create job', err);
+  }
+}
+
+async function runScheduledJobNow(jobId) {
+  try {
+    await fetch('/api/agent/jobs/run', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ job_id: jobId })
+    });
+    await fetchScheduledJobs();
+  } catch (err) {
+    console.error('Failed to run job now', err);
+  }
+}
+
+async function cancelScheduledJob(jobId) {
+  try {
+    await fetch('/api/agent/jobs/cancel', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ job_id: jobId })
+    });
+    await fetchScheduledJobs();
+  } catch (err) {
+    console.error('Failed to cancel job', err);
+  }
+}
+
+function openCommandPalette() {
+  const modal = document.getElementById('command-palette-modal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  const inp = document.getElementById('palette-input');
+  if (inp) {
+    inp.value = '';
+    inp.focus();
+  }
+  filterPaletteActions();
+}
+
+function closeCommandPalette() {
+  const modal = document.getElementById('command-palette-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+function toggleCommandPalette() {
+  const modal = document.getElementById('command-palette-modal');
+  if (!modal) return;
+  if (modal.style.display === 'flex') {
+    closeCommandPalette();
+  } else {
+    openCommandPalette();
+  }
+}
+
+function handlePaletteBackdropClick(e) {
+  if (e.target && e.target.id === 'command-palette-modal') {
+    closeCommandPalette();
+  }
+}
+
+function filterPaletteActions() {
+  const inp = document.getElementById('palette-input');
+  const q = (inp ? inp.value : '').toLowerCase().trim();
+  if (!q) {
+    filteredPaletteActions = [...PALETTE_ACTIONS];
+  } else {
+    filteredPaletteActions = PALETTE_ACTIONS.filter(a =>
+      a.title.toLowerCase().includes(q) ||
+      a.category.toLowerCase().includes(q) ||
+      (a.shortcut && a.shortcut.toLowerCase().includes(q))
+    );
+  }
+  activePaletteIndex = 0;
+  renderPaletteActions();
+}
+
+function renderPaletteActions() {
+  const container = document.getElementById('palette-results');
+  if (!container) return;
+  if (filteredPaletteActions.length === 0) {
+    container.innerHTML = '<div style="padding: 12px; font-size: 12px; color: var(--text-muted); text-align: center;">No matching actions found</div>';
+    return;
+  }
+  container.innerHTML = filteredPaletteActions.map((a, idx) => {
+    const isSel = idx === activePaletteIndex;
+    const bg = isSel ? 'var(--accent-dim)' : 'transparent';
+    const border = isSel ? 'var(--accent)' : 'transparent';
+    return `
+      <div class="palette-item" style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-radius: 12px; background: ${bg}; border: 1px solid ${border}; box-shadow: ${isSel ? 'var(--accent-glow)' : 'none'}; cursor: pointer; transition: var(--transition-apple);" onclick="executePaletteAction(${idx})" onmouseover="highlightPaletteItem(${idx})">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span style="font-size: 10px; font-weight: 700; text-transform: uppercase; background: var(--bg-elevated); color: var(--text-secondary); padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border);">${a.category}</span>
+          <span style="font-size: 13px; color: ${isSel ? 'var(--accent)' : 'var(--text-primary)'}; font-weight: ${isSel ? '700' : '400'};">${a.title}</span>
+        </div>
+        ${a.shortcut ? `<span style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);">${a.shortcut}</span>` : ''}
+      </div>
+    `;
+  }).join('');
+}
+
+function highlightPaletteItem(idx) {
+  activePaletteIndex = idx;
+  renderPaletteActions();
+}
+
+function executePaletteAction(idx) {
+  const item = filteredPaletteActions[idx];
+  if (item && item.run) {
+    closeCommandPalette();
+    item.run();
+  }
+}
+
+function handlePaletteKeydown(e) {
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    if (filteredPaletteActions.length > 0) {
+      activePaletteIndex = (activePaletteIndex + 1) % filteredPaletteActions.length;
+      renderPaletteActions();
+    }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (filteredPaletteActions.length > 0) {
+      activePaletteIndex = (activePaletteIndex - 1 + filteredPaletteActions.length) % filteredPaletteActions.length;
+      renderPaletteActions();
+    }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    executePaletteAction(activePaletteIndex);
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    closeCommandPalette();
+  }
+}
+
+async function updateAgentToolProfile(profile) {
+  const sel = document.getElementById('agent-tool-profile');
+  if (sel && sel.value !== profile) {
+    sel.value = profile;
+  }
+  try {
+    const res = await fetch('/api/agent/profile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: profile })
+    });
+    const data = await res.json();
+    console.log('Tool profile set to:', profile, data);
+  } catch (err) {
+    console.warn('Failed to update tool profile on backend:', err);
+  }
+}
+
+window.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    toggleCommandPalette();
+  }
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+  initWebSocket();
+  fetchTokenUsage();
+  calculateViewportScale();
+});
+setTimeout(() => {
+  initWebSocket();
+  fetchTokenUsage();
+  calculateViewportScale();
+}, 200);
+
+</script>
+</body>
+</html>
+"""
+
+
+MODEL_PRICING: Dict[str, Dict[str, Any]] = {
+    # Frontier tier ($ / 1M tokens)
+    "opus 5.5": {"tier": "frontier", "prompt_rate": 15.00, "completion_rate": 75.00},
+    "claude-3-opus": {"tier": "frontier", "prompt_rate": 15.00, "completion_rate": 75.00},
+    "sonnet 5.5": {"tier": "frontier", "prompt_rate": 3.00, "completion_rate": 15.00},
+    "claude-3.5-sonnet": {"tier": "frontier", "prompt_rate": 3.00, "completion_rate": 15.00},
+    "claude-3-7-sonnet": {"tier": "frontier", "prompt_rate": 3.00, "completion_rate": 15.00},
+    "gpt-6.1": {"tier": "frontier", "prompt_rate": 2.50, "completion_rate": 10.00},
+    "sol 6.1 pro": {"tier": "frontier", "prompt_rate": 2.50, "completion_rate": 10.00},
+    "gpt-4o": {"tier": "frontier", "prompt_rate": 2.50, "completion_rate": 10.00},
+
+    # Standard tier ($ / 1M tokens)
+    "gemini 3.8": {"tier": "standard", "prompt_rate": 0.50, "completion_rate": 1.50},
+    "gemini-2.5-flash": {"tier": "standard", "prompt_rate": 0.15, "completion_rate": 0.60},
+    "glm 5.3 flash": {"tier": "standard", "prompt_rate": 0.10, "completion_rate": 0.10},
+    "deepseek 4.1 flash": {"tier": "standard", "prompt_rate": 0.14, "completion_rate": 0.28},
+    "deepseek-chat": {"tier": "standard", "prompt_rate": 0.14, "completion_rate": 0.28},
+
+    # Free tier ($ / 1M tokens)
+    "free": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
+    "qwen": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
+    "qwen-3.8-27b:free": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
+    "deepseek-chat:free": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
+    "llama-3.3-70b-instruct:free": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
+
+    # Default rate
+    "default": {"tier": "standard", "prompt_rate": 1.00, "completion_rate": 3.00},
+}
+
+
+class TokenAccountingManager:
+    """Manages token accounting, cost calculations, and usage summaries across model tiers."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.reset()
+
+    def reset(self) -> None:
+        with self._lock:
+            self._total_prompt_tokens: int = 0
+            self._total_completion_tokens: int = 0
+            self._total_cost_usd: float = 0.0
+            self._records: List[Dict[str, Any]] = []
+            self._tier_breakdown: Dict[str, Dict[str, Any]] = {
+                "frontier": {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
+                "standard": {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
+                "free": {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0},
+            }
+
+    @staticmethod
+    def resolve_pricing(model: str) -> Dict[str, Any]:
+        clean = (model or "").lower().strip()
+        for k, v in MODEL_PRICING.items():
+            if k == clean or k in clean:
+                return v
+        return MODEL_PRICING["default"]
+
+    def record_usage(
+        self,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> Dict[str, Any]:
+        pt = max(0, int(prompt_tokens))
+        ct = max(0, int(completion_tokens))
+        tot = pt + ct
+        pricing = self.resolve_pricing(model)
+        tier = pricing["tier"]
+        prompt_rate = pricing["prompt_rate"]
+        completion_rate = pricing["completion_rate"]
+
+        cost_prompt = (pt / 1_000_000.0) * prompt_rate
+        cost_completion = (ct / 1_000_000.0) * completion_rate
+        total_cost = cost_prompt + cost_completion
+
+        entry = {
+            "model": model,
+            "tier": tier,
+            "prompt_tokens": pt,
+            "completion_tokens": ct,
+            "total_tokens": tot,
+            "prompt_cost_usd": round(cost_prompt, 8),
+            "completion_cost_usd": round(cost_completion, 8),
+            "total_cost_usd": round(total_cost, 8),
+            "timestamp": time.time(),
+        }
+
+        with self._lock:
+            self._total_prompt_tokens += pt
+            self._total_completion_tokens += ct
+            self._total_cost_usd += total_cost
+            self._records.append(entry)
+            if tier in self._tier_breakdown:
+                self._tier_breakdown[tier]["prompt_tokens"] += pt
+                self._tier_breakdown[tier]["completion_tokens"] += ct
+                self._tier_breakdown[tier]["cost_usd"] = round(
+                    self._tier_breakdown[tier]["cost_usd"] + total_cost, 8
+                )
+
+        return entry
+
+    def get_summary(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "total_prompt_tokens": self._total_prompt_tokens,
+                "total_completion_tokens": self._total_completion_tokens,
+                "total_tokens": self._total_prompt_tokens + self._total_completion_tokens,
+                "total_cost_usd": round(self._total_cost_usd, 8),
+                "record_count": len(self._records),
+                "tier_breakdown": {
+                    k: dict(v) for k, v in self._tier_breakdown.items()
+                },
+            }
+
+
+_GLOBAL_TOKEN_ACCOUNTING: Optional[TokenAccountingManager] = None
+
+
+def get_token_accounting() -> TokenAccountingManager:
+    global _GLOBAL_TOKEN_ACCOUNTING
+    if _GLOBAL_TOKEN_ACCOUNTING is None:
+        _GLOBAL_TOKEN_ACCOUNTING = TokenAccountingManager()
+    return _GLOBAL_TOKEN_ACCOUNTING
+
+
+def reset_token_accounting() -> None:
+    global _GLOBAL_TOKEN_ACCOUNTING
+    if _GLOBAL_TOKEN_ACCOUNTING is not None:
+        _GLOBAL_TOKEN_ACCOUNTING.reset()
+    else:
+        _GLOBAL_TOKEN_ACCOUNTING = TokenAccountingManager()
+
+
+class ResponsiveCoordinateScaler:
+    """
+    Computes responsive canvas scaling and coordinate transformations between
+    physical screen pixels, dynamic viewport/canvas dimensions, and normalized [0, 1000] grid.
+    """
+
+    def __init__(
+        self,
+        screen_width: int = 1920,
+        screen_height: int = 1080,
+        canvas_width: int = 960,
+        canvas_height: int = 540,
+    ) -> None:
+        self.screen_width = max(1, int(screen_width))
+        self.screen_height = max(1, int(screen_height))
+        self.canvas_width = max(1, int(canvas_width))
+        self.canvas_height = max(1, int(canvas_height))
+
+    @property
+    def scale_x(self) -> float:
+        return self.canvas_width / self.screen_width
+
+    @property
+    def scale_y(self) -> float:
+        return self.canvas_height / self.screen_height
+
+    def update_canvas_dimensions(self, width: int, height: int) -> None:
+        self.canvas_width = max(1, int(width))
+        self.canvas_height = max(1, int(height))
+
+    def update_screen_dimensions(self, width: int, height: int) -> None:
+        self.screen_width = max(1, int(width))
+        self.screen_height = max(1, int(height))
+
+    def canvas_to_normalized(self, cx: float, cy: float) -> Tuple[float, float]:
+        """Convert dynamic canvas pixel coordinate to normalized [0.0, 1000.0] grid."""
+        nx = max(0.0, min(1000.0, round((cx / self.canvas_width) * 1000.0, 2)))
+        ny = max(0.0, min(1000.0, round((cy / self.canvas_height) * 1000.0, 2)))
+        return nx, ny
+
+    def normalized_to_canvas(self, nx: float, ny: float) -> Tuple[int, int]:
+        """Convert normalized [0.0, 1000.0] grid coordinate to canvas pixel coordinate."""
+        cx = int(round((max(0.0, min(1000.0, nx)) / 1000.0) * self.canvas_width))
+        cy = int(round((max(0.0, min(1000.0, ny)) / 1000.0) * self.canvas_height))
+        return cx, cy
+
+    def normalized_to_screen(self, nx: float, ny: float) -> Tuple[int, int]:
+        """Convert normalized [0.0, 1000.0] coordinate to physical screen pixels."""
+        sx = int(round((max(0.0, min(1000.0, nx)) / 1000.0) * self.screen_width))
+        sy = int(round((max(0.0, min(1000.0, ny)) / 1000.0) * self.screen_height))
+        return sx, sy
+
+    def screen_to_normalized(self, sx: float, sy: float) -> Tuple[float, float]:
+        """Convert physical screen pixels to normalized [0.0, 1000.0] coordinate."""
+        nx = max(0.0, min(1000.0, round((sx / self.screen_width) * 1000.0, 2)))
+        ny = max(0.0, min(1000.0, round((sy / self.screen_height) * 1000.0, 2)))
+        return nx, ny
+
+    def canvas_to_screen(self, cx: float, cy: float) -> Tuple[int, int]:
+        """Convert canvas pixel coordinate directly to physical screen pixels."""
+        nx, ny = self.canvas_to_normalized(cx, cy)
+        return self.normalized_to_screen(nx, ny)
+
+    def screen_to_canvas(self, sx: float, sy: float) -> Tuple[int, int]:
+        """Convert physical screen pixels directly to canvas pixel coordinate."""
+        nx, ny = self.screen_to_normalized(sx, sy)
+        return self.normalized_to_canvas(nx, ny)
+
+
+
+class TokenTracker:
+    """Thread-safe token usage and cost accounting ledger for Hydra Desktop."""
+
+    RATES: Dict[str, Dict[str, float]] = {
+        "claude-3-7-sonnet": {"prompt": 3.00, "completion": 15.00},
+        "sonnet 5.5": {"prompt": 3.00, "completion": 15.00},
+        "opus 5.5": {"prompt": 15.00, "completion": 75.00},
+        "sol 6.1 pro": {"prompt": 2.50, "completion": 10.00},
+        "gpt-6.1": {"prompt": 2.50, "completion": 10.00},
+        "gemini-2.5-flash": {"prompt": 0.15, "completion": 0.60},
+        "gemini 3.8": {"prompt": 0.15, "completion": 0.60},
+        "glm 5.3 flash": {"prompt": 0.10, "completion": 0.40},
+        "deepseek 4.1 flash": {"prompt": 0.10, "completion": 0.40},
+        "qwen-3.8-27b:free": {"prompt": 0.0, "completion": 0.0},
+        "deepseek-chat:free": {"prompt": 0.0, "completion": 0.0},
+        "llama-3.3-70b-instruct:free": {"prompt": 0.0, "completion": 0.0},
+        "free": {"prompt": 0.0, "completion": 0.0},
+        "local": {"prompt": 0.0, "completion": 0.0},
+    }
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.prompt_tokens: int = 0
+        self.completion_tokens: int = 0
+        self.total_tokens: int = 0
+        self.total_cost_usd: float = 0.0
+        self.by_model: Dict[str, Dict[str, Any]] = {}
+
+    def _get_rates_for_model(self, model: str) -> Dict[str, float]:
+        m = model.lower()
+        if ":free" in m or m == "free" or m == "local" or "@cf/" in m:
+            return {"prompt": 0.0, "completion": 0.0}
+        for key, r in self.RATES.items():
+            if key in m:
+                return r
+        return {"prompt": 1.00, "completion": 3.00}
+
+    def record_usage(self, model: str, prompt_tokens: int, completion_tokens: int) -> Dict[str, Any]:
+        with self._lock:
+            pt = max(0, int(prompt_tokens))
+            ct = max(0, int(completion_tokens))
+            tot = pt + ct
+            rates = self._get_rates_for_model(model)
+            cost = (pt * rates["prompt"] + ct * rates["completion"]) / 1_000_000.0
+
+            self.prompt_tokens += pt
+            self.completion_tokens += ct
+            self.total_tokens += tot
+            self.total_cost_usd += cost
+
+            m_key = model.lower()
+            if m_key not in self.by_model:
+                self.by_model[m_key] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost_usd": 0.0}
+            self.by_model[m_key]["prompt_tokens"] += pt
+            self.by_model[m_key]["completion_tokens"] += ct
+            self.by_model[m_key]["total_tokens"] += tot
+            self.by_model[m_key]["cost_usd"] += cost
+
+            return self.get_usage()
+
+    def get_usage(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "total_tokens": self.total_tokens,
+                "total_cost_usd": round(self.total_cost_usd, 6),
+                "formatted_cost": f"${self.total_cost_usd:.4f}",
+                "by_model": dict(self.by_model),
+            }
+
+    def reset(self) -> None:
+        with self._lock:
+            self.prompt_tokens = 0
+            self.completion_tokens = 0
+            self.total_tokens = 0
+            self.total_cost_usd = 0.0
+            self.by_model.clear()
+
+
+_TOKEN_TRACKER: Optional[TokenTracker] = None
+
+
+def get_token_tracker() -> TokenTracker:
+    global _TOKEN_TRACKER
+    if _TOKEN_TRACKER is None:
+        _TOKEN_TRACKER = TokenTracker()
+    return _TOKEN_TRACKER
+
+
+COMMAND_PALETTE_ACTIONS: Dict[str, Dict[str, Any]] = {
+    "agent:start": {
+        "id": "agent:start",
+        "title": "Start Agent ReAct Task",
+        "description": "Initialize and launch autonomous agent execution loop",
+        "category": "agent",
+        "endpoint": "/api/agent/run",
+        "method": "POST",
+    },
+    "agent:pause": {
+        "id": "agent:pause",
+        "title": "Pause Agent Task",
+        "description": "Temporarily halt active agent step dispatch",
+        "category": "agent",
+        "endpoint": "/api/agent/pause",
+        "method": "POST",
+    },
+    "agent:resume": {
+        "id": "agent:resume",
+        "title": "Resume Agent Task",
+        "description": "Resume execution of paused agent task",
+        "category": "agent",
+        "endpoint": "/api/agent/resume",
+        "method": "POST",
+    },
+    "agent:abort": {
+        "id": "agent:abort",
+        "title": "Emergency Abort Agent",
+        "description": "Immediately abort active task and stop child processes within 100ms",
+        "category": "agent",
+        "endpoint": "/api/agent/abort",
+        "method": "POST",
+    },
+    "agent:export_trace": {
+        "id": "agent:export_trace",
+        "title": "Export Session Trace (JSON)",
+        "description": "Download serialized session execution history in JSON format",
+        "category": "session",
+        "endpoint": "/api/agent/export",
+        "method": "GET",
+    },
+    "agent:export_markdown": {
+        "id": "agent:export_markdown",
+        "title": "Export Session Report (Markdown)",
+        "description": "Generate and download comprehensive markdown execution audit report",
+        "category": "session",
+        "endpoint": "/api/agent/report/markdown",
+        "method": "GET",
+    },
+    "agent:set_profile": {
+        "id": "agent:set_profile",
+        "title": "Set Tool Preset Profile",
+        "description": "Configure agent tool constraints (full, browser_only, workspace_only, readonly)",
+        "category": "agent",
+        "endpoint": "/api/agent/profile",
+        "method": "POST",
+    },
+    "screen:capture": {
+        "id": "screen:capture",
+        "title": "Capture Screen Preview",
+        "description": "Grab full screenshot from primary display",
+        "category": "screen",
+        "endpoint": "/api/computer/screen",
+        "method": "GET",
+    },
+    "terminal:execute": {
+        "id": "terminal:execute",
+        "title": "Execute Terminal Command",
+        "description": "Run sandboxed bash/powershell command",
+        "category": "terminal",
+        "endpoint": "/api/terminal/run",
+        "method": "POST",
+    },
+    "token:summary": {
+        "id": "token:summary",
+        "title": "View Token Ledger Summary",
+        "description": "Inspect cumulative token accounting and cost breakdowns across model tiers",
+        "category": "tokens",
+        "endpoint": "/api/token/accounting",
+        "method": "GET",
+    },
+    "token:reset": {
+        "id": "token:reset",
+        "title": "Reset Token Ledger",
+        "description": "Zero out recorded token counts and cost totals",
+        "category": "tokens",
+        "endpoint": "/api/token/accounting/reset",
+        "method": "POST",
+    },
+    "gateway:complete": {
+        "id": "gateway:complete",
+        "title": "Gateway Model Completion",
+        "description": "Summon model with 429 provider failover",
+        "category": "gateway",
+        "endpoint": "/api/gateway/complete",
+        "method": "POST",
+    },
+    "template:browse": {
+        "id": "template:browse",
+        "title": "Browse Workflow Templates",
+        "description": "Select from pre-configured multi-step autonomous workflows",
+        "category": "templates",
+        "endpoint": "/api/agent/templates",
+        "method": "GET",
+    },
+    "templates:list": {
+        "id": "templates:list",
+        "title": "Browse Workflow Templates",
+        "description": "Explore pre-defined parameterized agent workflow templates",
+        "category": "templates",
+        "endpoint": "/api/templates",
+        "method": "GET",
+    },
+    "jobs:list": {
+        "id": "jobs:list",
+        "title": "List Scheduled Agent Jobs",
+        "description": "Inspect active and recurring scheduled agent tasks",
+        "category": "jobs",
+        "endpoint": "/api/jobs",
+        "method": "GET",
+    },
+    "jobs:clear": {
+        "id": "jobs:clear",
+        "title": "Cancel All Scheduled Jobs",
+        "description": "Terminate all recurring jobs and clear scheduler timers",
+        "category": "jobs",
+        "endpoint": "/api/jobs/clear",
+        "method": "POST",
+    },
+}
+
+
+def dispatch_command_palette_action(action_id: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Dispatch action by ID through the command palette dispatcher."""
+    if action_id not in COMMAND_PALETTE_ACTIONS:
+        return {"isError": True, "error": f"Unknown command palette action: {action_id}"}
+
+    action_meta = COMMAND_PALETTE_ACTIONS[action_id]
+    p = params or {}
+
+    from hydra_cli.agent_runner import get_agent_runner
+    runner = get_agent_runner()
+
+    if action_id == "agent:start":
+        task = p.get("task", "default command palette task")
+        steps = p.get("steps")
+        max_steps = int(p.get("max_steps", 15))
+        res = runner.run_task(task, steps=steps, max_steps=max_steps)
+        return {"isError": False, "dispatched": action_id, "result": res}
+    elif action_id == "agent:pause":
+        return {"isError": False, "dispatched": action_id, "result": runner.pause()}
+    elif action_id == "agent:resume":
+        return {"isError": False, "dispatched": action_id, "result": runner.resume()}
+    elif action_id == "agent:abort":
+        return {"isError": False, "dispatched": action_id, "result": runner.abort()}
+    elif action_id == "agent:export_trace":
+        return {"isError": False, "dispatched": action_id, "result": runner.export_session_trace()}
+    elif action_id == "agent:export_markdown":
+        from hydra_cli.agent_runner import generate_markdown_report
+        trace = runner.export_session_trace()
+        return {"isError": False, "dispatched": action_id, "markdown": generate_markdown_report(trace)}
+    elif action_id == "agent:set_profile":
+        prof = p.get("profile", "full")
+        runner.set_tool_profile(prof)
+        return {"isError": False, "dispatched": action_id, "profile": prof}
+    elif action_id == "token:summary":
+        return {"isError": False, "dispatched": action_id, "summary": get_token_accounting().get_summary()}
+    elif action_id == "token:reset":
+        reset_token_accounting()
+        return {"isError": False, "dispatched": action_id, "summary": get_token_accounting().get_summary()}
+    elif action_id == "screen:capture":
+        engine = get_computer_use_engine()
+        cap = engine.screen.capture(as_base64=True)
+        return {"isError": False, "dispatched": action_id, "captured": True, "data_length": len(cap)}
+    elif action_id == "terminal:execute":
+        cmd = p.get("command", "echo palette")
+        runner_sb = SandboxRunner()
+        sb_res = runner_sb.run_command(cmd)
+        return {"isError": False, "dispatched": action_id, "result": sb_res.to_dict()}
+    elif action_id == "gateway:complete":
+        m = p.get("model", "sonnet 5.5")
+        prompt = p.get("prompt", "ping")
+        gw_res = resolve_and_complete_with_fallback(m, prompt)
+        return {"isError": False, "dispatched": action_id, "result": gw_res}
+    elif action_id in ("templates:list", "template:browse"):
+        from hydra_cli.agent_runner import list_workflow_templates
+        return {"isError": False, "dispatched": action_id, "templates": list_workflow_templates()}
+    elif action_id == "jobs:list":
+        from hydra_cli.agent_runner import get_job_scheduler
+        return {"isError": False, "dispatched": action_id, "jobs": get_job_scheduler().list_jobs()}
+    elif action_id == "jobs:clear":
+        from hydra_cli.agent_runner import get_job_scheduler
+        get_job_scheduler().reset()
+        return {"isError": False, "dispatched": action_id, "cleared": True}
+
+    return {"isError": False, "dispatched": action_id, "meta": action_meta}
+
+
+FALLBACK_CHAINS: Dict[str, List[str]] = {
+    "sonnet 5.5": ["gemini 3.8", "gpt-6.1", "qwen"],
+    "opus 5.5": ["sonnet 5.5", "gpt-6.1", "gemini 3.8"],
+    "gpt-6.1": ["sonnet 5.5", "gemini 3.8", "qwen"],
+    "default": ["gemini 3.8", "free", "glm 5.3 flash"],
+}
+
+
+def resolve_and_complete_with_fallback(
+    model: str,
+    prompt: str,
+    fallbacks: Optional[List[str]] = None,
+    completer: Optional[Callable[[str, str], str]] = None,
+) -> Dict[str, Any]:
+    """
+    Resolve model alias and execute completion with fallback resilience under 429 rate limits.
+    """
+    from hydra_cli.config import MODEL_MAP
+    from hydra_cli import complete
+
+    completer_fn = completer or complete
+    chain = [model]
+    if fallbacks:
+        chain.extend(fallbacks)
+    else:
+        chain.extend(FALLBACK_CHAINS.get(model.lower(), FALLBACK_CHAINS["default"]))
+
+    attempts = []
+    last_err = None
+
+    for m in chain:
+        resolved_id = MODEL_MAP.get(m.lower(), m)
+        try:
+            ans = completer_fn(resolved_id, prompt)
+            pt = len(prompt.split())
+            ct = len(ans.split())
+            token_rec = get_token_accounting().record_usage(m, pt, ct)
+            return {
+                "isError": False,
+                "content": ans,
+                "model_requested": model,
+                "model_used": m,
+                "resolved_model_id": resolved_id,
+                "fallback_triggered": (m != model),
+                "attempts": attempts,
+                "usage": {
+                    "prompt_tokens": pt,
+                    "completion_tokens": ct,
+                    "total_tokens": pt + ct,
+                },
+                "token_accounting": token_rec,
+            }
+        except Exception as exc:
+            err_str = str(exc)
+            attempts.append({"model": m, "error": err_str})
+            last_err = exc
+            is_rate_limit = "429" in err_str or "rate limit" in err_str.lower() or "quota" in err_str.lower()
+            if not is_rate_limit and len(attempts) > 1:
+                pass
+
+    return {
+        "isError": True,
+        "error": f"All model providers in fallback chain failed: {last_err}",
+        "model_requested": model,
+        "attempts": attempts,
+    }
+
+
+def create_desktop_app() -> Any:
+    """Create and configure FastAPI desktop application."""
+    if not FASTAPI_AVAILABLE:
+        raise RuntimeError("FastAPI and Uvicorn required; run pip install fastapi uvicorn.")
+
+    app = FastAPI(title="Hydra Sovereign Desktop", version=__version__)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    start_time = time.time()
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index():
+        return HTMLResponse(content=get_desktop_html())
+
+    @app.get("/favicon.ico")
+    async def favicon():
+        """Serve desktop application favicon icon."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for p in [
+            os.path.join(repo_root, "desktop", "static", "favicon.ico"),
+            os.path.join(repo_root, "assets", "hydra_desktop.ico"),
+        ]:
+            if os.path.isfile(p):
+                with open(p, "rb") as f:
+                    return Response(content=f.read(), media_type="image/x-icon")
+        return Response(status_code=404)
+
+    @app.get("/assets/{filename}")
+    async def get_asset(filename: str):
+        """Serve application asset files."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        safe_name = os.path.basename(filename)
+        for p in [
+            os.path.join(repo_root, "assets", safe_name),
+            os.path.join(repo_root, "desktop", "static", safe_name),
+        ]:
+            if os.path.isfile(p):
+                media = "image/png" if safe_name.endswith(".png") else ("image/x-icon" if safe_name.endswith(".ico") else "application/octet-stream")
+                with open(p, "rb") as f:
+                    return Response(content=f.read(), media_type=media)
+        return Response(status_code=404)
+
+    @app.get("/api/status")
+    async def get_status():
+        engine = get_computer_use_engine()
+        w, h = engine.os.get_screen_size()
+        cx, cy = engine.os.get_cursor_position()
+        return {
+            "status": "ok",
+            "version": __version__,
+            "uptime_seconds": round(time.time() - start_time, 2),
+            "gateway_url": "http://127.0.0.1:7777",
+            "models_count": len(MODEL_MAP),
+            "computer_use": {
+                "screen_width": w,
+                "screen_height": h,
+                "cursor": [cx, cy],
+                "active_window": engine.os.get_active_window(),
+            },
+        }
+
+    @app.get("/api/models")
+    async def list_models():
+        models = []
+        for alias, model_id in sorted(MODEL_MAP.items()):
+            models.append({"alias": alias, "model_id": model_id})
+        return {"models": models, "free_models": FREE_MODELS}
+
+    @app.post("/api/chat")
+    async def chat_endpoint(req: Request):
+        body = await req.json()
+        model = body.get("model", "sonnet 5.5")
+        prompt = body.get("prompt", "")
+        mode = body.get("mode", "chat")
+
+        if not prompt:
+            return JSONResponse({"error": "Empty prompt"}, status_code=400)
+
+        # 1. Swarm mode fan-out
+        if mode == "swarm":
+            from hydra_cli.swarm import execute_swarm
+            res = execute_swarm(prompt, tier=None, custom_model=model)
+            return {"content": res.get("synthesis", ""), "heads": res.get("heads", {})}
+
+        # 2. Agent mode with tools
+        elif mode == "agent":
+            registry = NativeToolRegistry()
+            # Simple agent step
+            tool_calls = []
+            if "file" in prompt.lower():
+                tc = {"name": "list_dir", "arguments": {"path": "."}}
+                tool_calls.append(tc)
+            content = f"Hydra agent processed instruction: '{prompt}'."
+            return {"content": content, "tool_calls": tool_calls}
+
+        # 3. Direct completion
+        else:
+            try:
+                from hydra_cli import complete
+                res = complete(model, prompt)
+                return {"content": res}
+            except Exception as exc:
+                return {"content": f"Hydra Desktop summon result for {model}:\nProcessed instruction: {prompt}\n(Status: {exc})"}
+
+    @app.post("/api/terminal/run")
+    async def terminal_run(req: Request):
+        body = await req.json()
+        cmd = body.get("command", "")
+        cwd = body.get("cwd", os.getcwd())
+        if not cmd:
+            return JSONResponse({"error": "No command provided"}, status_code=400)
+
+        runner = SandboxRunner()
+        res = await asyncio.to_thread(runner.run_command, cmd, cwd=cwd)
+        return {
+            "command": cmd,
+            "exit_code": res.exit_code,
+            "stdout": res.stdout,
+            "stderr": res.stderr,
+            "duration_sec": res.duration_sec,
+        }
+
+    @app.post("/api/computer/action")
+    async def computer_action(req: Request):
+        body = await req.json()
+        body_params = dict(body)
+        action = body_params.pop("action", "")
+        if not action:
+            return JSONResponse({"error": "No action provided"}, status_code=400)
+
+        engine = get_computer_use_engine()
+        res = await asyncio.to_thread(engine.dispatch, action, **body_params)
+        return res
+
+    @app.api_route("/api/computer/screen", methods=["GET", "POST"])
+    async def computer_screen(req: Request, as_json: bool = False):
+        if req.method == "POST":
+            try:
+                body = await req.json()
+                if "as_json" in body:
+                    as_json = bool(body["as_json"])
+            except Exception:
+                pass
+        engine = get_computer_use_engine()
+        res = await asyncio.to_thread(engine.screen.capture, as_base64=True)
+        if as_json:
+            return res
+        b64 = res.get("base64", "")
+        raw = base64.b64decode(b64) if b64 else b""
+        return Response(content=raw, media_type="image/png")
+
+    @app.post("/api/browser/action")
+    async def browser_action(req: Request):
+        body = await req.json()
+        body_params = dict(body)
+        action = body_params.pop("action", "browser_navigate")
+        engine = get_computer_use_engine()
+        res = await asyncio.to_thread(engine.dispatch, action, **body_params)
+        return res
+
+    @app.post("/api/agent/run")
+    @app.post("/api/agent/start")
+    async def agent_start(req: Request):
+        from hydra_cli.agent_runner import get_agent_runner
+        body = await req.json()
+        task = body.get("task", "")
+        model = body.get("model", "sonnet 5.5")
+        steps = body.get("steps")
+        max_steps = int(body.get("max_steps", 30))
+        timeout_sec = float(body.get("timeout_sec", 300.0))
+        async_run = bool(body.get("async", False))
+
+        runner = get_agent_runner()
+        if "profile" in body:
+            runner.set_tool_profile(body["profile"])
+        if async_run:
+            runner.run_task_async(task_description=task, steps=steps, max_steps=max_steps, timeout_sec=timeout_sec)
+            return {"isError": False, "status": "running", "task": task, "async": True}
+        res = await asyncio.to_thread(runner.run_task, task_description=task, steps=steps, max_steps=max_steps, timeout_sec=timeout_sec)
+        return res
+
+    @app.post("/api/agent/pause")
+    async def agent_pause():
+        from hydra_cli.agent_runner import get_agent_runner
+        runner = get_agent_runner()
+        return runner.pause()
+
+    @app.post("/api/agent/resume")
+    async def agent_resume():
+        from hydra_cli.agent_runner import get_agent_runner
+        runner = get_agent_runner()
+        return runner.resume()
+
+    @app.get("/api/agent/status")
+    async def agent_status():
+        from hydra_cli.agent_runner import get_agent_runner
+        runner = get_agent_runner()
+        return runner.get_status()
+
+    @app.post("/api/agent/abort")
+    async def agent_abort():
+        from hydra_cli.agent_runner import get_agent_runner
+        runner = get_agent_runner()
+        return runner.abort()
+
+    
+    @app.get("/api/usage")
+    async def get_usage_endpoint():
+        return get_token_tracker().get_usage()
+
+    @app.post("/api/usage/record")
+    async def record_usage_endpoint(req: Request):
+        body = await req.json()
+        model = body.get("model", "sonnet 5.5")
+        pt = int(body.get("prompt_tokens", 0))
+        ct = int(body.get("completion_tokens", 0))
+        return get_token_tracker().record_usage(model, pt, ct)
+
+    @app.post("/api/usage/reset")
+    async def reset_usage_endpoint():
+        tracker = get_token_tracker()
+        tracker.reset()
+        return tracker.get_usage()
+
+    @app.get("/api/agent/export")
+    @app.get("/api/agent/session/export")
+    @app.get("/api/session/export")
+    async def session_export(download: bool = False):
+        from hydra_cli.agent_runner import get_agent_runner
+        runner = get_agent_runner()
+        trace = runner.export_session_trace()
+        if download:
+            content = json.dumps(trace, indent=2)
+            filename = f"agent-session-trace-{int(time.time())}.json"
+            return Response(
+                content,
+                media_type="application/json",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        return JSONResponse(trace)
+
+    @app.post("/api/agent/session/replay")
+    @app.post("/api/session/replay")
+    async def session_replay(req: Request):
+        from hydra_cli.agent_runner import AutonomousAgentRunner, validate_session_trace
+        body = await req.json()
+        valid, err = validate_session_trace(body)
+        if not valid:
+            return JSONResponse({"isError": True, "error": err}, status_code=400)
+        reconstructed = AutonomousAgentRunner.reconstruct_from_trace(body)
+        return {"isError": False, "status": "reconstructed", "reconstructed_state": reconstructed.get_status()}
+
+    @app.post("/api/gateway/complete")
+    async def gateway_complete(req: Request):
+        body = await req.json()
+        model = body.get("model", "sonnet 5.5")
+        prompt = body.get("prompt", "")
+        fallbacks = body.get("fallbacks")
+        res = await asyncio.to_thread(resolve_and_complete_with_fallback, model, prompt, fallbacks)
+        if not res.get("isError"):
+            pt = max(1, len(prompt) // 4)
+            ct = max(1, len(res.get("content", "")) // 4)
+            get_token_tracker().record_usage(res.get("model_used", model), pt, ct)
+        return res
+
+
+
+    @app.get("/api/agent/export/markdown")
+    @app.get("/api/agent/session/export/markdown")
+    @app.get("/api/agent/report/markdown")
+    @app.get("/api/session/report.md")
+    async def session_report_markdown(download: bool = False):
+        from hydra_cli.agent_runner import get_agent_runner, generate_markdown_report
+        runner = get_agent_runner()
+        trace = runner.export_session_trace()
+        md_content = generate_markdown_report(trace)
+        if download:
+            filename = f"agent-session-report-{int(time.time())}.md"
+            return Response(
+                md_content,
+                media_type="text/markdown",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        return Response(md_content, media_type="text/markdown")
+
+    @app.get("/api/agent/profiles")
+    async def get_agent_profiles():
+        from hydra_cli.agent_runner import TOOL_PROFILES, get_agent_runner
+        runner = get_agent_runner()
+        return {
+            "isError": False,
+            "current_profile": getattr(runner, "tool_profile", "full"),
+            "profiles": TOOL_PROFILES,
+        }
+
+    @app.post("/api/agent/profile")
+    async def set_agent_profile(req: Request):
+        from hydra_cli.agent_runner import get_agent_runner
+        body = await req.json()
+        profile = body.get("profile", "full")
+        runner = get_agent_runner()
+        runner.set_tool_profile(profile)
+        return {
+            "isError": False,
+            "profile": runner.tool_profile,
+            "status": "profile_updated",
+        }
+
+    @app.get("/api/palette/actions")
+    async def get_palette_actions():
+        return {
+            "isError": False,
+            "count": len(COMMAND_PALETTE_ACTIONS),
+            "actions": list(COMMAND_PALETTE_ACTIONS.values()),
+            "catalog": COMMAND_PALETTE_ACTIONS,
+        }
+
+    @app.post("/api/palette/dispatch")
+    async def dispatch_palette_action(req: Request):
+        body = await req.json()
+        action_id = body.get("action", "")
+        params = body.get("params") or {}
+        res = dispatch_command_palette_action(action_id, params)
+        status_code = 400 if res.get("isError") else 200
+        return JSONResponse(res, status_code=status_code)
+
+    @app.get("/api/token/accounting")
+    async def get_token_accounting_summary():
+        ledger = get_token_accounting()
+        return ledger.get_summary()
+
+    @app.post("/api/token/accounting/record")
+    async def record_token_accounting(req: Request):
+        body = await req.json()
+        ledger = get_token_accounting()
+        model = body.get("model", "default")
+        pt = int(body.get("prompt_tokens", 0))
+        ct = int(body.get("completion_tokens", 0))
+        res = ledger.record_usage(model, pt, ct)
+        return {"isError": False, "recorded": res, "summary": ledger.get_summary()}
+
+    @app.post("/api/token/accounting/reset")
+    async def reset_token_accounting_endpoint():
+        reset_token_accounting()
+        return {"isError": False, "status": "reset", "summary": get_token_accounting().get_summary()}
+
+    @app.get("/api/templates")
+    @app.get("/api/agent/templates")
+    async def get_templates_endpoint():
+        from hydra_cli.agent_runner import list_workflow_templates
+        templates = list_workflow_templates()
+        return {
+            "isError": False,
+            "count": len(templates),
+            "templates": templates,
+        }
+
+    @app.get("/api/templates/{template_id}")
+    async def get_template_by_id(template_id: str):
+        from hydra_cli.agent_runner import get_workflow_template
+        tpl = get_workflow_template(template_id)
+        if not tpl:
+            return JSONResponse({"isError": True, "error": f"Template '{template_id}' not found"}, status_code=404)
+        return {"isError": False, "template": tpl.to_dict()}
+
+    @app.post("/api/templates/interpolate")
+    @app.post("/api/agent/templates/instantiate")
+    async def interpolate_template_endpoint(req: Request):
+        from hydra_cli.agent_runner import interpolate_workflow_template
+        body = await req.json()
+        template_id = body.get("template_id", "")
+        params = body.get("params") or {}
+        res = interpolate_workflow_template(template_id, params)
+        status_code = 400 if res.get("isError") else 200
+        return JSONResponse(res, status_code=status_code)
+
+    @app.get("/api/jobs")
+    @app.get("/api/agent/jobs")
+    async def list_jobs_endpoint():
+        from hydra_cli.agent_runner import get_job_scheduler
+        scheduler = get_job_scheduler()
+        jobs = scheduler.list_jobs()
+        return {"isError": False, "count": len(jobs), "jobs": jobs}
+
+    @app.post("/api/jobs/schedule")
+    @app.post("/api/agent/jobs/create")
+    async def schedule_job_endpoint(req: Request):
+        from hydra_cli.agent_runner import get_job_scheduler
+        body = await req.json()
+        name = body.get("name", "Scheduled Agent Task")
+        task = body.get("task")
+        template_id = body.get("template_id")
+        params = body.get("params")
+        interval_sec = body.get("interval_sec")
+        if interval_sec is not None:
+            interval_sec = float(interval_sec)
+        delay_sec = float(body.get("delay_sec", 0.0))
+        recurring = bool(body.get("recurring", False))
+        max_runs = body.get("max_runs")
+        if max_runs is not None:
+            max_runs = int(max_runs)
+        tool_profile = body.get("tool_profile", "full_automation")
+        model = body.get("model")
+        max_steps = int(body.get("max_steps", 15))
+        steps = body.get("steps")
+        auto_arm = bool(body.get("auto_arm", True))
+
+        try:
+            scheduler = get_job_scheduler()
+            job = scheduler.schedule_job(
+                name=name,
+                task=task,
+                template_id=template_id,
+                params=params,
+                interval_sec=interval_sec,
+                delay_sec=delay_sec,
+                recurring=recurring,
+                max_runs=max_runs,
+                tool_profile=tool_profile,
+                model=model,
+                max_steps=max_steps,
+                steps=steps,
+                auto_arm=auto_arm,
+            )
+            return {"isError": False, "job": job.to_dict()}
+        except Exception as exc:
+            return JSONResponse({"isError": True, "error": str(exc)}, status_code=400)
+
+    @app.get("/api/jobs/{job_id}")
+    async def get_job_endpoint(job_id: str):
+        from hydra_cli.agent_runner import get_job_scheduler
+        scheduler = get_job_scheduler()
+        job = scheduler.get_job(job_id)
+        if not job:
+            return JSONResponse({"isError": True, "error": f"Job '{job_id}' not found"}, status_code=404)
+        return {"isError": False, "job": job.to_dict()}
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    async def cancel_job_endpoint(job_id: str):
+        from hydra_cli.agent_runner import get_job_scheduler
+        scheduler = get_job_scheduler()
+        job = scheduler.get_job(job_id)
+        if not job:
+            return JSONResponse({"isError": True, "error": f"Job '{job_id}' not found"}, status_code=404)
+        job.cancel()
+        return {"isError": False, "job_id": job_id, "status": "cancelled"}
+
+    @app.post("/api/jobs/{job_id}/run")
+    async def run_job_endpoint(job_id: str):
+        from hydra_cli.agent_runner import get_job_scheduler
+        scheduler = get_job_scheduler()
+        job = scheduler.get_job(job_id)
+        if not job:
+            return JSONResponse({"isError": True, "error": f"Job '{job_id}' not found"}, status_code=404)
+        res = await asyncio.to_thread(job.run)
+        status_code = 400 if res.get("isError") and not res.get("concurrent_blocked") else 200
+        return JSONResponse({"isError": res.get("isError", False), "job_id": job_id, "result": res}, status_code=status_code)
+
+    @app.post("/api/agent/jobs/cancel")
+    async def cancel_agent_job_body(req: Request):
+        from hydra_cli.agent_runner import get_job_scheduler
+        body = await req.json()
+        job_id = body.get("job_id", "")
+        scheduler = get_job_scheduler()
+        job = scheduler.get_job(job_id)
+        if not job:
+            return JSONResponse({"isError": True, "error": f"Job '{job_id}' not found"}, status_code=404)
+        job.cancel()
+        return {"isError": False, "job_id": job_id, "status": "cancelled"}
+
+    @app.get("/api/agent/jobs/history")
+    @app.get("/api/jobs/history")
+    async def get_jobs_history_endpoint(job_id: Optional[str] = None):
+        from hydra_cli.agent_runner import get_job_scheduler
+        scheduler = get_job_scheduler()
+        history = scheduler.get_job_history(job_id)
+        return {"isError": False, "job_id": job_id, "history": history, "count": len(history)}
+
+    @app.post("/api/agent/jobs/run")
+    async def run_agent_job_body(req: Request):
+        from hydra_cli.agent_runner import get_job_scheduler
+        body = await req.json()
+        job_id = body.get("job_id", "")
+        scheduler = get_job_scheduler()
+        job = scheduler.get_job(job_id)
+        if not job:
+            return JSONResponse({"isError": True, "error": f"Job '{job_id}' not found"}, status_code=404)
+        res = await asyncio.to_thread(job.run)
+        status_code = 400 if res.get("isError") and not res.get("concurrent_blocked") else 200
+        return JSONResponse({"isError": res.get("isError", False), "job_id": job_id, "result": res}, status_code=status_code)
+
+    @app.post("/api/jobs/clear")
+    async def clear_jobs_endpoint():
+        from hydra_cli.agent_runner import get_job_scheduler
+        scheduler = get_job_scheduler()
+        scheduler.reset()
+        return {"isError": False, "cleared": True, "count": 0}
+
+    @app.post("/api/coordinates/scale")
+    async def scale_coordinates(req: Request):
+        body = await req.json()
+        action = body.get("action", "canvas_to_screen")
+        x = float(body.get("x", 0))
+        y = float(body.get("y", 0))
+        sw = int(body.get("screen_width", 1920))
+        sh = int(body.get("screen_height", 1080))
+        cw = int(body.get("canvas_width", 960))
+        ch = int(body.get("canvas_height", 540))
+
+        scaler = ResponsiveCoordinateScaler(
+            screen_width=sw,
+            screen_height=sh,
+            canvas_width=cw,
+            canvas_height=ch,
+        )
+
+        if action == "canvas_to_screen":
+            out_x, out_y = scaler.canvas_to_screen(x, y)
+            nx, ny = scaler.canvas_to_normalized(x, y)
+        elif action == "screen_to_canvas":
+            out_x, out_y = scaler.screen_to_canvas(x, y)
+            nx, ny = scaler.screen_to_normalized(x, y)
+        elif action == "canvas_to_normalized":
+            out_x, out_y = scaler.canvas_to_normalized(x, y)
+            nx, ny = out_x, out_y
+        elif action == "normalized_to_screen":
+            out_x, out_y = scaler.normalized_to_screen(x, y)
+            nx, ny = x, y
+        elif action == "normalized_to_canvas":
+            out_x, out_y = scaler.normalized_to_canvas(x, y)
+            nx, ny = x, y
+        else:
+            return JSONResponse({"isError": True, "error": f"Unknown action: {action}"}, status_code=400)
+
+        return {
+            "isError": False,
+            "action": action,
+            "x": out_x,
+            "y": out_y,
+            "normalized": [nx, ny],
+            "scale_x": scaler.scale_x,
+            "scale_y": scaler.scale_y,
+            "screen_dimensions": [sw, sh],
+            "canvas_dimensions": [cw, ch],
+        }
+
+    @app.get("/v1/models")
+    async def v1_models():
+        from hydra_cli.serve import get_registered_models
+        return get_registered_models()
+
+    @app.post("/v1/chat/completions")
+    async def v1_chat_completions(req: Request):
+        from hydra_cli import complete
+        body = await req.json()
+        model = body.get("model", "sonnet 5.5")
+        messages = body.get("messages", [])
+        stream = bool(body.get("stream", False))
+
+        prompt = ""
+        for m in reversed(messages):
+            if m.get("role") == "user":
+                prompt = m.get("content", "")
+                break
+        if not prompt and messages:
+            prompt = str(messages[-1].get("content", ""))
+
+        if stream:
+            async def event_generator():
+                created = int(time.time())
+                try:
+                    ans = complete(model, prompt)
+                except Exception as e:
+                    ans = f"Error: {e}"
+                chunk_obj = {
+                    "id": f"chatcmpl-desktop-{int(time.time())}",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ans},
+                        "finish_reason": None,
+                    }],
+                }
+                yield f"data: {json.dumps(chunk_obj)}\n\n"
+                end_obj = {
+                    "id": f"chatcmpl-desktop-{int(time.time())}",
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }],
+                }
+                yield f"data: {json.dumps(end_obj)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+        created = int(time.time())
+        try:
+            ans = complete(model, prompt)
+        except Exception as e:
+            ans = f"Error: {e}"
+
+        return {
+            "id": f"chatcmpl-desktop-{int(time.time())}",
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": ans},
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": len(prompt.split()),
+                "completion_tokens": len(ans.split()),
+                "total_tokens": len(prompt.split()) + len(ans.split()),
+            },
+        }
+
+
+    _diff_records: List[Dict[str, Any]] = [
+        {
+            "path": "hydra_cli/computer_use.py",
+            "type": "MODIFIED",
+            "lines": [
+                "@@ -180,6 +180,24 @@",
+                "+    def fill_form(self, fields, form_selector=None, submit=False):",
+                "+    def scroll_until_visible(self, selector, max_scrolls=10):",
+                "+    def extract_table_data(self, selector='table'):",
+                "+    def safe_drag_and_drop(self, from_coord, to_coord):",
+                "+    def find_window_by_title_pattern(self, pattern):",
+                "+    def set_window_bounds(self, hwnd, x, y, width, height):",
+            ],
+        }
+    ]
+
+
+    @app.get("/api/diffs")
+    async def get_diffs():
+        return {"diffs": _diff_records, "count": len(_diff_records)}
+
+    @app.post("/api/diffs/record")
+    async def record_diff(req: Request):
+        body = await req.json()
+        _diff_records.append(body)
+        if len(_diff_records) > 100:
+            _diff_records.pop(0)
+        return {"isError": False, "recorded": True, "count": len(_diff_records)}
+
+    @app.websocket("/ws/desktop")
+    async def websocket_endpoint(ws: WebSocket):
+        await ws.accept()
+        unsub_agent = None
+        try:
+            loop = asyncio.get_running_loop()
+            from hydra_cli.agent_runner import get_agent_runner
+            runner = get_agent_runner()
+
+            def _ws_agent_cb(ev):
+                try:
+                    asyncio.run_coroutine_threadsafe(ws.send_text(json.dumps(ev)), loop)
+                except Exception:
+                    pass
+
+            unsub_agent = runner.subscribe(_ws_agent_cb)
+
+            while True:
+                msg_raw = await ws.receive_text()
+                try:
+                    if msg_raw.strip().lower() == "ping":
+                        await ws.send_text(json.dumps({"event": "pong", "time": time.time()}))
+                        continue
+
+                    payload = json.loads(msg_raw)
+                    action = payload.get("action") or payload.get("type") or "ping"
+                    if action == "ping":
+                        resp = {"event": "pong", "time": time.time()}
+                        if "id" in payload:
+                            resp["id"] = payload["id"]
+                        if "seq" in payload:
+                            resp["seq"] = payload["seq"]
+                        await ws.send_text(json.dumps(resp))
+                    elif action == "heartbeat":
+                        await ws.send_text(json.dumps({
+                            "event": "heartbeat_ack",
+                            "time": time.time(),
+                            "status": "healthy",
+                        }))
+                    elif action in ("reconnect", "attach"):
+                        await ws.send_text(json.dumps({
+                            "event": "attached",
+                            "data": runner.get_status(),
+                            "running_task": runner.current_task,
+                            "reconnected": True,
+                        }))
+                    elif action == "chat":
+                        prompt = payload.get("prompt", "")
+                        await ws.send_text(json.dumps({"event": "token", "chunk": f"Summoned response: {prompt}"}))
+                        await ws.send_text(json.dumps({"event": "done"}))
+                    elif action == "screen":
+                        engine = get_computer_use_engine()
+                        cap = engine.screen.capture(as_base64=True)
+                        await ws.send_text(json.dumps({"event": "screen", "data": cap}))
+                    elif action == "agent_abort":
+                        res = runner.abort()
+                        await ws.send_text(json.dumps({"event": "agent_aborted", "data": res}))
+                    elif action == "agent_status":
+                        await ws.send_text(json.dumps({"event": "agent_status", "data": runner.get_status()}))
+                    elif action == "token_accounting":
+                        ledger = get_token_accounting()
+                        await ws.send_text(json.dumps({"event": "token_accounting", "data": ledger.get_summary()}))
+                    elif action == "set_profile":
+                        p = payload.get("profile") or payload.get("tool_profile", "full_automation")
+                        res = runner.set_tool_profile(p)
+                        await ws.send_text(json.dumps({"event": "profile_updated", "data": res}))
+                    elif action == "get_profiles":
+                        from hydra_cli.agent_runner import TOOL_PROFILES
+                        await ws.send_text(json.dumps({
+                            "event": "profiles_catalog",
+                            "active": runner.get_tool_profile(),
+                            "profiles": list(TOOL_PROFILES.keys()),
+                        }))
+                    elif action == "list_templates":
+                        from hydra_cli.agent_runner import list_workflow_templates
+                        await ws.send_text(json.dumps({
+                            "event": "templates_catalog",
+                            "data": list_workflow_templates(),
+                        }))
+                    elif action == "list_jobs":
+                        from hydra_cli.agent_runner import get_job_scheduler
+                        await ws.send_text(json.dumps({
+                            "event": "jobs_list",
+                            "data": get_job_scheduler().list_jobs(),
+                        }))
+                    elif action == "cancel_job":
+                        from hydra_cli.agent_runner import get_job_scheduler
+                        jid = payload.get("job_id", "")
+                        ok = get_job_scheduler().cancel_job(jid)
+                        await ws.send_text(json.dumps({
+                            "event": "job_cancelled",
+                            "job_id": jid,
+                            "success": ok,
+                        }))
+                except Exception as inner_exc:
+                    await ws.send_text(json.dumps({"event": "error", "message": str(inner_exc)}))
+        except WebSocketDisconnect:
+            pass
+        finally:
+            if unsub_agent:
+                unsub_agent()
+
+    return app
+
+
+class DesktopServer:
+    """Desktop application server controller managing uvicorn lifecycle."""
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 7778) -> None:
+        self.host = host
+        self.port = port
+        self.app = create_desktop_app()
+        self._server: Optional[Any] = None
+        self._thread: Optional[threading.Thread] = None
+        self._running: bool = False
+
+    def start(self, open_browser: bool = True, background: bool = False) -> None:
+        """Launch desktop server in dedicated thread or blocking process."""
+        config = uvicorn.Config(self.app, host=self.host, port=self.port, log_level="warning")
+        self._server = uvicorn.Server(config)
+        self._running = True
+
+        if open_browser:
+            url = f"http://{self.host}:{self.port}"
+            threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+
+        if background:
+            self._thread = threading.Thread(target=self._server.run, daemon=True)
+            self._thread.start()
+            # Wait for server to bind
+            time.sleep(0.5)
+        else:
+            self._server.run()
+
+    def stop(self) -> None:
+        """Terminate active desktop server instance."""
+        if self._server:
+            self._server.should_exit = True
+            self._running = False
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3.0)
+
+
+def run_desktop_app(
+    host: str = "127.0.0.1",
+    port: int = 7778,
+    open_browser: bool = True,
+    background: bool = False,
+) -> DesktopServer:
+    """Initialize and run sovereign Hydra desktop application."""
+    server = DesktopServer(host=host, port=port)
+    server.start(open_browser=open_browser, background=background)
+    return server
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    """Command line entrypoint for hydra desktop."""
+    parser = argparse.ArgumentParser(description="Hydra Sovereign Desktop Application")
+    parser.add_argument("--host", default="127.0.0.1", help="Binding host address")
+    parser.add_argument("--port", type=int, default=7778, help="Server port number")
+    parser.add_argument("--no-browser", action="store_true", help="Do not open desktop browser on launch")
+    parser.add_argument("--headless", action="store_true", help="Run server in headless background mode")
+    
+    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+    open_browser = not (args.no_browser or args.headless)
+    
+    print(f"Hydra Desktop launching on http://{args.host}:{args.port}")
+    run_desktop_app(host=args.host, port=args.port, open_browser=open_browser, background=False)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

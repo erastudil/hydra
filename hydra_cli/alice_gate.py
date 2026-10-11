@@ -1,6 +1,8 @@
 """Local search before a Hydra summon.
 
-Order: typo table, vagueness rule, skill index, alice_core.js, then the selected inference alias.
+Order: typo table, pending clarification, vagueness rule, skill index, alice_core.js strict routes,
+sentence retrieval over the stacks and the web whitelist, remaining alice_core.js routes,
+then the selected inference alias.
 """
 
 from dataclasses import dataclass
@@ -27,6 +29,14 @@ ANSWER_ROUTES = {
 ASK_ROUTES = {
     "EPISTEMIC_GAP",
     "VAGUENESS_DETECTED",
+}
+
+STRICT_ROUTES = {
+    "DETERMINISTIC_EVAL",
+    "DETERMINISTIC_LOGIC",
+    "SYLLOGISTIC_DEDUCTION",
+    "SYSTEM_COMMAND",
+    "VERBATIM_RECALL",
 }
 
 WORD_TYPOS = {
@@ -183,16 +193,31 @@ def consult(
     has_referent: bool = False,
     prior: Optional[Tuple[str, str]] = None,
     evaluator: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+    session: str = "default",
 ) -> GateDecision:
     """Return a local answer, a clarification, or a summon decision. Never calls a provider."""
+    from hydra_cli import alice_retrieve
+
     if evaluator is None:
         from hydra_cli.alice_runner import evaluate_with_alice
         evaluator = evaluate_with_alice
 
     normalized, notes = normalize_words(prompt)
     note = ("normalized : " + "; ".join(notes) + "\n\n") if notes else ""
+    retrieval_gap: Optional[Any] = None
+    from_pending = alice_retrieve.is_followup(normalized, session)
+    if not from_pending:
+        alice_retrieve.clear_pending(session)
 
-    if VAGUE_RE.match(normalized.strip()) and not has_referent:
+    if from_pending:
+        found = alice_retrieve.answer(normalized, session=session)
+        if found.action == "answer":
+            return GateDecision(action="local", route=found.route, text=note + found.text)
+        if found.action == "ask":
+            return GateDecision(action="ask", route=found.route, text=note + found.text)
+        retrieval_gap = found
+
+    if retrieval_gap is None and VAGUE_RE.match(normalized.strip()) and not has_referent:
         return GateDecision(
             action="ask",
             route="VAGUENESS_DETECTED",
@@ -207,7 +232,7 @@ def consult(
     second = ranked[1][0] if len(ranked) > 1 else 0
     top = ranked[0][1] if ranked else None
 
-    if QUESTION_RE.match(normalized.strip()) and top is not None and top_score >= 1 and top_score == second:
+    if retrieval_gap is None and QUESTION_RE.match(normalized.strip()) and top is not None and top_score >= 1 and top_score == second:
         ids = [skill["id"] for score, skill in ranked if score == top_score]
         return GateDecision(
             action="ask",
@@ -218,7 +243,7 @@ def consult(
             ),
         )
 
-    if QUESTION_RE.match(normalized.strip()) and top is not None and top_score >= 1 and top_score > second:
+    if retrieval_gap is None and QUESTION_RE.match(normalized.strip()) and top is not None and top_score >= 1 and top_score > second:
         body = top["body"]
         if top["id"] in STACK_SKILLS:
             body = body + "\n\n" + stack_report()
@@ -234,12 +259,24 @@ def consult(
     except Exception:
         result = None
 
-    if result:
+    core_route = str((result or {}).get("route") or "")
+    if result and core_route in STRICT_ROUTES:
+        return GateDecision(action="local", route=core_route, text=note + _format_alice(result))
+
+    if retrieval_gap is None and alice_retrieve.is_inquiry(normalized):
+        found = alice_retrieve.answer(normalized, session=session)
+        if found.action == "answer":
+            return GateDecision(action="local", route=found.route, text=note + found.text)
+        if found.action == "ask":
+            return GateDecision(action="ask", route=found.route, text=note + found.text)
+        retrieval_gap = found
+
+    if result and not from_pending:
         route = str(result.get("route") or "")
         formatted = _format_alice(result)
         if route in ANSWER_ROUTES:
             return GateDecision(action="local", route=route, text=note + formatted)
-        if route in ASK_ROUTES:
+        if route in ASK_ROUTES and retrieval_gap is None:
             return GateDecision(action="ask", route=route, text=note + formatted)
 
     route = str((result or {}).get("route") or "ALICE_UNAVAILABLE")
@@ -248,6 +285,8 @@ def consult(
         summon_alias.lower().strip() in ("none", "off", "disabled", "alone")
         or os.environ.get("ALICE_NO_FALLBACK") == "1"
     )
+    if retrieval_gap is not None and no_fallback:
+        return GateDecision(action="local", route="EPISTEMIC_GAP", text=note + retrieval_gap.text)
     if no_fallback:
         if result and result.get("answer"):
             formatted = _format_alice(result)
@@ -271,6 +310,9 @@ def consult(
     prior_block = ""
     if prior:
         prior_block = f"prior prompt : {prior[0][:400]}\nprior answer : {prior[1][:400]}\n"
+    if retrieval_gap is not None:
+        miss = "sentence retrieval stayed below threshold after the whitelist harvest and clarification rounds."
+        prior_block += "retrieval :\n" + retrieval_gap.text[:1500] + "\n"
     discovery = (
         "[ALICE DISCOVERY]\n"
         f"{miss}\n"

@@ -248,6 +248,8 @@ function adaptModelForUrl(endpointUrl, model) {
     if (model.startsWith('meta/') && !model.startsWith('meta-llama/')) {
       return `meta-llama/${model.slice('meta/'.length)}`;
     }
+    if (model.startsWith('glm-')) return `z-ai/${model}`;
+    if (model.startsWith('deepseek-')) return `deepseek/${model}`;
   } else if (host.includes('cheaperinference.com') || host.includes('cheaperinference')) {
     if (model.includes('/')) {
       return model.slice(model.indexOf('/') + 1);

@@ -16,6 +16,65 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hydra_cli.config import sensitive_env_key
+from hydra_cli.browser import (
+    BrowserConsoleCapture,
+    BrowserConsoleEntry,
+    DomIdleLatch,
+    DownloadVerifier,
+    IframeTraversal,
+    MediaAbortController,
+    KeyboardController,
+    ColorSchemeTester,
+    ResponseStatusAssert,
+    TouchGestureController,
+    VisibilityChecker,
+    FormAutofill,
+    MutationWaiter,
+    NetworkIdleLatch,
+    ScreenshotGate,
+    create_console_capture,
+    create_dom_idle_latch,
+    create_download_verifier,
+    create_iframe_traversal,
+    create_media_abort,
+    create_keyboard_controller,
+    create_color_scheme_tester,
+    create_status_assert,
+    create_touch_gesture,
+    create_visibility_checker,
+    create_form_autofill,
+    create_mutation_waiter,
+    create_network_idle_latch,
+    create_screenshot_gate,
+    get_default_console_capture,
+    get_default_dom_idle_latch,
+    get_default_download_verifier,
+    get_default_iframe_traversal,
+    get_default_media_abort,
+    get_default_keyboard_controller,
+    get_default_color_scheme_tester,
+    get_default_status_assert,
+    get_default_touch_gesture,
+    get_default_visibility_checker,
+    get_default_form_autofill,
+    get_default_mutation_waiter,
+    get_default_network_idle_latch,
+    get_default_screenshot_gate,
+    reset_console_capture,
+    reset_dom_idle_latch,
+    reset_download_verifier,
+    reset_iframe_traversal,
+    reset_media_abort,
+    reset_keyboard_controller,
+    reset_color_scheme_tester,
+    reset_status_assert,
+    reset_touch_gesture,
+    reset_visibility_checker,
+    reset_form_autofill,
+    reset_mutation_waiter,
+    reset_network_idle_latch,
+    reset_screenshot_gate,
+)
 
 
 class SandboxConfig:
@@ -193,6 +252,11 @@ class SandboxExecutionResult:
         self.execution_time_ms = execution_time_ms
         self.violation = violation
         self.diff = diff
+
+    @property
+    def duration_sec(self) -> float:
+        """Execution duration in seconds."""
+        return round(self.execution_time_ms / 1000.0, 4)
 
     def to_dict(self) -> Dict[str, Any]:
         return {

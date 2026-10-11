@@ -28,17 +28,25 @@ hydra_cli/__init__.py
 hydra_cli/__main__.py
 hydra_cli/_version.py
 hydra_cli/agent.py
+hydra_cli/agent_runner.py
 hydra_cli/agent_runners.py
+hydra_cli/alice_chat.py
+hydra_cli/alice_cloud_loop.py
 hydra_cli/alice_gate.py
+hydra_cli/alice_gcloud.py
 hydra_cli/alice_interpret.py
 hydra_cli/alice_knowledge.py
+hydra_cli/alice_retrieve.py
 hydra_cli/alice_runner.py
 hydra_cli/alice_senses.py
 hydra_cli/auth.py
+hydra_cli/browser.py
 hydra_cli/catalog.json
 hydra_cli/cli.py
+hydra_cli/computer_use.py
 hydra_cli/config.py
 hydra_cli/context.py
+hydra_cli/desktop.py
 hydra_cli/dictation.py
 hydra_cli/display.py
 hydra_cli/hands.py
@@ -51,6 +59,7 @@ hydra_cli/repl.py
 hydra_cli/router.py
 hydra_cli/sandbox.py
 hydra_cli/serve.py
+hydra_cli/session_logger.py
 hydra_cli/speculative.py
 hydra_cli/swarm.py
 hydra_cli/tool_adapter.py
@@ -58,6 +67,7 @@ hydra_cli/tui.py
 hydra_cli/ui.py
 hydra_cli/voice.py
 hydra_cli/win_console.py
+hydra_cli/workflow_jobs.py
 "
 
 echo "==> Installing Hydra into ${ROOT}"

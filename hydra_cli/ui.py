@@ -93,6 +93,22 @@ HYDRA_WORDMARK = (
     "╚═╝  ╚═╝   ╚═╝   ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝"
 )
 
+HYDRA_ART_COMPACT = r"""
+             /\       /\             
+            /  \ _._ /  \            
+      _/\_  \   `   '   /  _/\_      
+   _-' _  `. | (@) (@) | .'  _ `-_   
+ <'_ -@'   \ \  `-.-'  / /   `@- _`> 
+  \vv.     |  \ \vVv/ /  |     .vv/  
+ <_ )      |   \ `^' /   |      ( _> 
+  `^'      |    `. .'    |      `^'  
+      `.  /       |       \  .'      
+       \  \ _.--~~~~~--._ /  /       
+     _.-~~ .--~~~~~~~~~--. ~~-._     
+  .-~   .~  .-~~~~~~~~~-.  ~.   ~-.  
+~^~^`-._ `-.____.-'-.____.-' _.-'^~^~
+"""
+
 # Revised 3-head TUI splash kept for compatibility
 HYDRA_TUI_3_HEADS = r"""
                          __====-_          _-====__
@@ -120,6 +136,7 @@ HYDRA_TUI_3_HEADS_COMPACT = r"""
 
 HYDRA_7_HEADS_DETAILED = HYDRA_ART_LARGE
 HYDRA_7_HEADS_MONSTER = HYDRA_ART_MEDIUM
+HYDRA_7_HEADS_COMPACT = HYDRA_ART_COMPACT
 
 TAGLINE = "Sovereign Multi-Headed AI Shell"
 
@@ -291,10 +308,62 @@ def paint_wordmark(mode: int, shimmer_at: Optional[float] = None) -> List[str]:
     return painted
 
 
+_ANSI_STRIP = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _vis_len(s: str) -> int:
+    """Visible column width of a string ignoring ANSI styling escapes."""
+    return len(_ANSI_STRIP.sub("", s))
+
+
+def _trim_val(text: str, max_w: int) -> str:
+    """Trim a value string with ellipsis if it exceeds max_w columns."""
+    if max_w <= 3:
+        return text[:max_w]
+    if len(text) <= max_w:
+        return text
+    return text[: max_w - 1] + "…"
+
+
+def _assemble_side_by_side(
+    art_lines: List[str], right_lines: List[str], art_w: int, gap: int = 2
+) -> List[str]:
+    """Merge creature art and right-column text side-by-side."""
+    rows = max(len(art_lines), len(right_lines))
+    out: List[str] = []
+    spacer = " " * gap
+    for i in range(rows):
+        if i < len(art_lines):
+            left = art_lines[i]
+            v = _vis_len(left)
+            left_padded = left + (" " * max(0, art_w - v))
+        else:
+            left_padded = " " * art_w
+        right = right_lines[i] if i < len(right_lines) else ""
+        if right:
+            out.append(f"{left_padded}{spacer}{right}".rstrip())
+        else:
+            out.append(left_padded.rstrip())
+    return out
+
+
 def select_art(columns: int, rows: int, detailed: bool = True) -> Optional[str]:
-    """Pick the largest hydra that fits the terminal without wrapping."""
+    """Pick the hydra art that best fits the terminal."""
     large_w = max(len(line) for line in _art_lines(HYDRA_ART_LARGE))
     medium_w = max(len(line) for line in _art_lines(HYDRA_ART_MEDIUM))
+    compact_w = max(len(line) for line in _art_lines(HYDRA_ART_COMPACT))
+    mark_w = 41
+    gap = 2
+
+    # Side-by-side candidates:
+    if detailed and columns >= large_w + gap + mark_w and rows >= 30:
+        return HYDRA_ART_LARGE
+    if columns >= medium_w + gap + mark_w and rows >= 20:
+        return HYDRA_ART_MEDIUM
+    if columns >= compact_w + gap + mark_w and rows >= 14:
+        return HYDRA_ART_COMPACT
+
+    # Stacked fallback for narrow terminals:
     if detailed and columns >= large_w + 4 and rows >= 38:
         return HYDRA_ART_LARGE
     if columns >= medium_w + 4 and rows >= 28:
@@ -302,7 +371,14 @@ def select_art(columns: int, rows: int, detailed: bool = True) -> Optional[str]:
     return None
 
 
-def _banner_parts(detailed: bool, version: str, columns: int, rows: int, mode: int, hot_art: bool = False) -> Tuple[List[str], List[str], str]:
+def _banner_parts(
+    detailed: bool,
+    version: str,
+    columns: int,
+    rows: int,
+    mode: int,
+    hot_art: bool = False,
+) -> Tuple[List[str], List[str], str, bool, int]:
     art = select_art(columns, rows, detailed)
     art_lines = paint_art(art, mode, hot=hot_art) if art else []
     art_w = max((len(line) for line in _art_lines(art)), default=0) if art else 0
@@ -313,17 +389,24 @@ def _banner_parts(detailed: bool, version: str, columns: int, rows: int, mode: i
         raw = HYDRA_LOGO_ASCII.strip("\n").splitlines()
         mark_w = max(len(line) for line in raw)
         mark = [fg(ACCENT_RGB, mode, True) + line + (RESET if mode else "") for line in raw]
-    block_w = max(art_w, mark_w)
-    pad = " " * max(0, (block_w - mark_w) // 2)
-    mark = [pad + line for line in mark]
+    side_by_side = bool(art and columns >= art_w + 2 + mark_w)
     dot = "·" if can_encode("·") else "-"
     tagline_plain = f"{TAGLINE} {dot} v{version}"
-    tag_pad = " " * max(0, (block_w - len(tagline_plain)) // 2)
-    if mode:
-        tagline = f"{tag_pad}{fg(DIM_RGB, mode)}{TAGLINE} {dot} {fg(ACCENT_RGB, mode, True)}v{version}{RESET}"
+    if side_by_side:
+        if mode:
+            tagline = f"{fg(DIM_RGB, mode)}{TAGLINE} {dot} {fg(ACCENT_RGB, mode, True)}v{version}{RESET}"
+        else:
+            tagline = tagline_plain
     else:
-        tagline = tag_pad + tagline_plain
-    return art_lines, mark, tagline
+        block_w = max(art_w, mark_w)
+        pad = " " * max(0, (block_w - mark_w) // 2)
+        mark = [pad + line for line in mark]
+        tag_pad = " " * max(0, (block_w - len(tagline_plain)) // 2)
+        if mode:
+            tagline = f"{tag_pad}{fg(DIM_RGB, mode)}{TAGLINE} {dot} {fg(ACCENT_RGB, mode, True)}v{version}{RESET}"
+        else:
+            tagline = tag_pad + tagline_plain
+    return art_lines, mark, tagline, side_by_side, art_w
 
 
 def get_help_header(version: Optional[str] = None) -> str:
@@ -336,15 +419,23 @@ def get_help_header(version: Optional[str] = None) -> str:
     return f"{header}\n{tagline}\n"
 
 
-def get_terminal_banner(detailed: bool = True, version: Optional[str] = None,
-                        columns: Optional[int] = None, rows: Optional[int] = None) -> str:
+def get_terminal_banner(
+    detailed: bool = True,
+    version: Optional[str] = None,
+    columns: Optional[int] = None,
+    rows: Optional[int] = None,
+) -> str:
     """Construct the Lernaean hydra banner sized to the terminal."""
     version = version or __version__
     size = shutil.get_terminal_size((100, 40))
     cols = columns or size.columns
     rws = rows or size.lines
-    art, mark, tagline = _banner_parts(detailed, version, cols, rws, color_mode())
-    block = art + ([""] if art else []) + mark + ["", tagline]
+    art, mark, tagline, side_by_side, art_w = _banner_parts(detailed, version, cols, rws, color_mode())
+    if side_by_side:
+        right = mark + ["", tagline]
+        block = _assemble_side_by_side(art, right, art_w, gap=2)
+    else:
+        block = art + ([""] if art else []) + mark + ["", tagline]
     return "\n".join(block) + "\n"
 
 
@@ -369,8 +460,11 @@ def _key_pressed() -> bool:
         return False
 
 
-def play_launch_banner(version: Optional[str] = None, info: Optional[List[Tuple[str, str]]] = None,
-                       stream: Optional[Any] = None) -> None:
+def play_launch_banner(
+    version: Optional[str] = None,
+    info: Optional[List[Tuple[str, str]]] = None,
+    stream: Optional[Any] = None,
+) -> None:
     """Animated launch: scanline reveal of the hydra, shimmer across the wordmark, then the session card.
 
     Every frame rewrites only the current line or the wordmark rows directly above
@@ -387,14 +481,45 @@ def play_launch_banner(version: Optional[str] = None, info: Optional[List[Tuple[
         and hasattr(out, "isatty")
         and out.isatty()
     )
-    art, mark, tagline = _banner_parts(True, version, size.columns, size.lines, mode)
-    hot_art = _banner_parts(True, version, size.columns, size.lines, mode, hot_art=True)[0] if animate else art
+    art, mark, tagline, side_by_side, art_w = _banner_parts(True, version, size.columns, size.lines, mode)
+    hot_art = (
+        _banner_parts(True, version, size.columns, size.lines, mode, hot_art=True)[0]
+        if animate
+        else art
+    )
 
     def emit(text: str) -> None:
         out.write(text)
         out.flush()
 
     skipped = not animate
+
+    if side_by_side:
+        right_w = size.columns - art_w - 2
+        card_lines: List[str] = []
+        if info:
+            key_w = max((len(k) for k, _ in info), default=0)
+            max_val_w = max(10, right_w - key_w - 6)
+            card_str = render_session_card(info, mode, indent="", max_val_w=max_val_w)
+            card_lines = card_str.splitlines() if card_str else []
+        right = mark + ["", tagline] + ([""] + card_lines if card_lines else [])
+        merged = _assemble_side_by_side(art, right, art_w, gap=2)
+        hot_merged = _assemble_side_by_side(hot_art, right, art_w, gap=2) if animate else merged
+
+        emit("\n")
+        for idx, line in enumerate(merged):
+            if not skipped and _key_pressed():
+                skipped = True
+            if skipped:
+                emit(line + "\n")
+                continue
+            emit(hot_merged[idx])
+            time.sleep(0.007)
+            emit("\r" + line + "\n")
+            time.sleep(0.004)
+        return
+
+    # Stacked fallback for narrow terminals:
     emit("\n")
     for idx, line in enumerate(art):
         if not skipped and _key_pressed():
@@ -443,7 +568,12 @@ def glyph(name: str) -> str:
     return uni if can_encode(uni) else ascii_
 
 
-def render_session_card(info: List[Tuple[str, str]], mode: Optional[int] = None) -> str:
+def render_session_card(
+    info: List[Tuple[str, str]],
+    mode: Optional[int] = None,
+    indent: str = "  ",
+    max_val_w: Optional[int] = None,
+) -> str:
     """Left-ruled key/value card; carries no right border, so terminal reflow on resize never breaks it."""
     mode = color_mode() if mode is None else mode
     bar = glyph("bar")
@@ -454,10 +584,11 @@ def render_session_card(info: List[Tuple[str, str]], mode: Optional[int] = None)
     key_w = max((len(k) for k, _ in info), default=0)
     rows = []
     for key, value in info:
+        val_str = _trim_val(value, max_val_w) if max_val_w is not None else value
         if not key:
-            rows.append(f"  {c_bar}{bar}{reset}  {c_key}{value}{reset}")
+            rows.append(f"{indent}{c_bar}{bar}{reset}  {c_key}{val_str}{reset}")
         else:
-            rows.append(f"  {c_bar}{bar}{reset}  {c_key}{key.ljust(key_w)}{reset}  {c_val}{value}{reset}")
+            rows.append(f"{indent}{c_bar}{bar}{reset}  {c_key}{key.ljust(key_w)}{reset}  {c_val}{val_str}{reset}")
     return "\n".join(rows)
 
 CR: str = chr(13)

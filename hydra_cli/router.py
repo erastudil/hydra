@@ -10,6 +10,7 @@ from typing import List, Optional, Tuple
 
 from hydra_cli import __version__
 from hydra_cli.config import (
+    DEFAULT_MODEL,
     DEFAULT_ORCHESTRATOR_MODEL,
     DEFAULT_AGENT_MODEL,
     DEFAULT_CLOUDFLARE_MODEL,
@@ -70,6 +71,7 @@ USAGE:
     hydra agent --local "<prompt>"       # Offline local agent loop (Ollama/llama.cpp)
     hydra <alias> --mcp "<prompt>"       # Tool-augmented execution loop
     hydra serve [--port 7777]            # Sovereign OpenAI Gateway for Hermes and Pi
+    hydra desktop [--port 7778]          # Sovereign Desktop App & local Web Desk UI
     hydra mcp list                       # List configured community MCP servers & tools
     hydra sandbox run "<cmd>"            # Isolated zero-trust command execution
     hydra banner                         # Display 3-head TUI Hydra + title wordmark
@@ -82,7 +84,7 @@ USAGE:
     hydra <alias> -- <prompt>            # Keep prompt words that match an alias
 
 POPULAR ALIASES:
-    opus 5.5 high, sol 6.1 pro, sonnet 5.5, gemini 3.8, grok 4.7, llama 4 scout, hermes, pi
+    mimo 2.6 pro, mimo 2.6 flash, deepseek 4.1 flash, glm 5.3 flash, opus 5.5 high, sol 6.1 pro, sonnet 5.5, hermes, pi
 
 OPTIONS:
     --system <prompt>       Custom system prompt
@@ -345,6 +347,16 @@ def route_command(argv: List[str]) -> int:
         return execute_hands_command(argv[1:])
     if argv and argv[0] in ("sandbox", "--sandbox"):
         return execute_sandbox_command(argv[1:])
+    if argv and argv[0] in ("desktop", "--desktop"):
+        from hydra_cli.desktop import main as desktop_main
+        return desktop_main(argv[1:])
+    if argv and argv[0] in ("alice-loop", "--alice-loop", "alice_loop"):
+        from hydra_cli.alice_cloud_loop import main as alice_loop_main
+        return alice_loop_main(argv[1:])
+    if argv and argv[0] in ("alice-chat", "--alice-chat"):
+        from hydra_cli.alice_chat import run_interactive_chat
+        run_interactive_chat()
+        return 0
     if argv and argv[0] in ("serve", "--serve"):
         host = "127.0.0.1"
         port = 7777
@@ -657,24 +669,23 @@ def execute_summon(
     """
     route = resolve_route(alias)
     if route.get("runner") == "alice" or alias.strip().lower() == "alice":
-        from hydra_cli.alice_runner import alice_available, run_alice
-        if alice_available():
-            output = run_alice(
-                prompt,
-                model=model_override or route.get("model"),
-                fallback_model=model_override or route.get("model"),
-            )
-            if output:
-                if json_mode:
-                    import json
-                    print(json.dumps({
-                        "model": "alice-cognitive-core",
-                        "runner": "alice",
-                        "content": output,
-                    }, indent=2))
-                else:
-                    print(output)
-                return 0
+        from hydra_cli.alice_runner import run_alice
+        output = run_alice(
+            prompt,
+            model=model_override or route.get("model"),
+            fallback_model=model_override or route.get("model"),
+        )
+        if output:
+            if json_mode:
+                import json
+                print(json.dumps({
+                    "model": "alice-cognitive-core",
+                    "runner": "alice",
+                    "content": output,
+                }, indent=2))
+            else:
+                print(output)
+            return 0
     model_id = model_override or route["model"]
     if model_override:
         route_effort = effort

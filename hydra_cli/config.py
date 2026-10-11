@@ -36,6 +36,7 @@ IMMUTABLE_AGENT_INVARIANTS = os.environ.get(
         "2. Epistemology: Empirical verification over speculation. Exit code 0 is passing; unverified assertions carry zero truth value.\n"
         "3. Discipline: Direct predication, zero corporate filler, zero sycophancy, zero disclaimer theater.\n"
         "4. Security: Strict credential isolation, fail closed on ambiguous or destructive commands.\n"
+        "5. AI/ML Research Invariant: Query live documentation and search web first for any task involving AI tools, models, harnesses, or machine learning. Zero reliance on internal weights for AI/ML specifications. Treat information older than 3 months as obsolete.\n"
         "================================================"
     ),
 )
@@ -77,16 +78,23 @@ DEFAULT_CHEAPERINFERENCE_BASE = "https://api.cheaperinference.com/v1"
 DEFAULT_RUNPOD_BASE_TEMPLATE = "https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
 DEFAULT_HF_BASE = os.environ.get("HF_INFERENCE_BASE", "https://router.huggingface.co/v1").rstrip("/")
 DEFAULT_HF_MODEL = os.environ.get("HYDRA_HF_MODEL", CATALOG.get("default_hf_model", "meta-llama/Llama-3.1-8B-Instruct"))
+DEFAULT_MODEL = os.environ.get(
+    "HYDRA_DEFAULT_MODEL",
+    CATALOG.get("default_model", "mimo 2.6 pro"),
+)
 DEFAULT_ORCHESTRATOR_MODEL = os.environ.get(
     "HYDRA_ORCHESTRATOR_MODEL",
-    os.environ.get(
-        "HYDRA_DEFAULT_MODEL",
-        CATALOG.get("default_orchestrator_model", "glm 5.3 flash"),
-    ),
+    DEFAULT_MODEL,
 )
 DEFAULT_AGENT_MODEL = os.environ.get(
     "HYDRA_AGENT_MODEL",
-    CATALOG.get("default_agent_model", DEFAULT_ORCHESTRATOR_MODEL),
+    CATALOG.get("default_agent_model", DEFAULT_MODEL),
+)
+DEFAULT_FANOUT_SWARM_ALIASES: List[str] = list(
+    CATALOG.get(
+        "default_fanout_aliases",
+        ["glm 5.3 flash", "deepseek 4.1 flash", "mimo 2.6 flash"],
+    )
 )
 
 # Models that only some providers serve. Values are provider ids in preference order.
@@ -102,12 +110,13 @@ PROVIDER_KEY_NAMES: Dict[str, str] = {
     "runpod": "RUNPOD_API_KEY",
     "modal": "MODAL_ENDPOINT_URL",
     "huggingface": "HF_TOKEN",
+    "local": "LOCAL_AI_BASE or local runner",
 }
 
-DEFAULT_CONTEXT_WINDOW = 131072
+DEFAULT_CONTEXT_WINDOW = 1048576
 # recall: dynamic context threading. compact: normal mode, summarize at 80 percent. sliding: last turns.
 DEFAULT_CONTEXT_MODE = os.environ.get("HYDRA_CONTEXT_MODE", "recall")
-CONTEXT_PROFILES: Dict[str, int] = dict(CATALOG.get("context_profiles") or {"default": 131072, "128k": 131072})
+CONTEXT_PROFILES: Dict[str, int] = dict(CATALOG.get("context_profiles") or {"default": 1048576, "128k": 131072, "1m": 1048576})
 
 # JSON and source tokenize denser than prose. Three characters per token keeps the
 # live window inside the provider window after tool schemas are attached.
@@ -116,7 +125,7 @@ OUTPUT_RESERVE_TOKENS = 8192
 
 
 def get_context_window(model: Optional[str] = None) -> int:
-    """Return context window budget for a model id or summon alias, defaulting to 128k."""
+    """Return context window budget for a model id or summon alias, defaulting to 1M."""
     if not model:
         return DEFAULT_CONTEXT_WINDOW
     key = model.strip()
@@ -144,9 +153,11 @@ def input_char_budget(
     return max(4096, usable)
 
 
-SWARM_HEADS: Dict[str, Dict[str, str]] = {
+SWARM_HEADS: Dict[str, Dict[str, Any]] = {
     role: dict(spec) for role, spec in CATALOG["swarm"].items()
 }
+
+SWARM_COMBOS: Dict[str, Dict[str, Any]] = dict(CATALOG.get("swarm_combos") or {})
 
 
 _SENSITIVE_SUFFIXES = (
@@ -241,12 +252,13 @@ def resolve_route(alias: str) -> Dict[str, Any]:
     cleaned = alias.strip().lower()
     spec = CATALOG["aliases"].get(cleaned)
     if not spec:
-        return {"model": alias, "effort": None, "reasoning_mode": None, "runner": None, "providers": model_providers(alias)}
+        return {"model": alias, "effort": None, "reasoning_mode": None, "runner": None, "swarm": None, "providers": model_providers(alias)}
     return {
         "model": spec["model"],
         "effort": spec.get("effort"),
         "reasoning_mode": spec.get("reasoning_mode"),
         "runner": spec.get("runner"),
+        "swarm": spec.get("swarm"),
         "providers": model_providers(spec["model"]),
     }
 

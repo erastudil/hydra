@@ -267,6 +267,71 @@
     "alice": {
       "model": "glm-5.3-flash",
       "runner": "alice"
+    },
+    "deepseek 4.1 flash": {
+      "model": "deepseek-4.1-flash"
+    },
+    "deepseek-4.1-flash": {
+      "model": "deepseek-4.1-flash"
+    },
+    "mimo 2.6 flash": {
+      "model": "mimo-2.6-flash"
+    },
+    "mimo-2.6-flash": {
+      "model": "mimo-2.6-flash"
+    },
+    "open swarm": {
+      "model": "glm-5.3-flash",
+      "swarm": "open swarm"
+    },
+    "open-swarm": {
+      "model": "glm-5.3-flash",
+      "swarm": "open swarm"
+    },
+    "gemma-e4b": {
+      "title": "Gemma E4B Local Fine-Tune",
+      "model": "gemma-e4b",
+      "provider": "local"
+    },
+    "local-gemma": {
+      "title": "Local Gemma E4B",
+      "model": "gemma-e4b",
+      "provider": "local"
+    },
+    "gemma 4 e4b": {
+      "title": "Gemma 4 E4B",
+      "model": "gemma-e4b",
+      "provider": "local"
+    },
+    "mimo 2.6 pro": {
+      "model": "mimo-2.6-pro"
+    },
+    "mimo-2.6-pro": {
+      "model": "mimo-2.6-pro"
+    },
+    "mimo": {
+      "model": "mimo-2.6-pro"
+    },
+    "mimo 2.6": {
+      "model": "mimo-2.6-pro"
+    },
+    "mimo pro": {
+      "model": "mimo-2.6-pro"
+    },
+    "mimo-pro": {
+      "model": "mimo-2.6-pro"
+    },
+    "mimo flash": {
+      "model": "mimo-2.6-flash"
+    },
+    "mimo-flash": {
+      "model": "mimo-2.6-flash"
+    },
+    "daily driver": {
+      "model": "mimo-2.6-pro"
+    },
+    "driver": {
+      "model": "mimo-2.6-pro"
     }
   },
   "model_providers": {
@@ -304,6 +369,33 @@
     ],
     "meta-llama/Llama-3.1-8B-Instruct": [
       "huggingface"
+    ],
+    "deepseek-4.1-flash": [
+      "cheaperinference",
+      "openrouter"
+    ],
+    "deepseek 4.1 flash": [
+      "cheaperinference",
+      "openrouter"
+    ],
+    "mimo-2.6-flash": [
+      "cheaperinference",
+      "openrouter"
+    ],
+    "mimo 2.6 flash": [
+      "cheaperinference",
+      "openrouter"
+    ],
+    "gemma-e4b": [
+      "local"
+    ],
+    "mimo-2.6-pro": [
+      "cheaperinference",
+      "openrouter"
+    ],
+    "mimo 2.6 pro": [
+      "cheaperinference",
+      "openrouter"
     ]
   },
   "swarm": {
@@ -335,21 +427,127 @@
       "model": "glm-5.3-flash",
       "runner": "alice",
       "system": "You are Alice, sovereign cognitive reasoning agent. Enforce Progen syntax, Tractatus logic, and Kantian categories."
+    },
+    "open swarm": {
+      "title": "Open Swarm",
+      "heads": [
+        "architect",
+        "coder",
+        "auditor"
+      ],
+      "models": {
+        "architect": "glm 5.3 flash",
+        "coder": "deepseek 4.1 flash",
+        "auditor": "mimo 2.6 flash"
+      }
+    },
+    "open_architect": {
+      "title": "Open Swarm Architect",
+      "model": "glm-5.3-flash",
+      "provider": "cheaperinference",
+      "system": "You are the Open Swarm Lead Architect. Analyze the requirements, state invariants, data flows, and architectural failure modes. Produce a minimal, robust architecture design in Progen syntax."
+    },
+    "open_coder": {
+      "title": "Open Swarm Implementer",
+      "model": "deepseek-4.1-flash",
+      "provider": "cheaperinference",
+      "system": "You are the Open Swarm Principal Software Engineer. Provide complete, executable, clean implementation code adhering strictly to zero-dependency principles and production standards."
+    },
+    "open_auditor": {
+      "title": "Open Swarm Inspector",
+      "model": "mimo-2.6-flash",
+      "provider": "cheaperinference",
+      "system": "You are the Open Swarm Security & Performance Inspector. Audit the proposed design and code for edge cases, resource leaks, security vulnerabilities, and verification gates."
+    },
+    "mimo 2.6 flash": {
+      "title": "Mimo Auditor",
+      "model": "mimo-2.6-flash",
+      "provider": "cheaperinference",
+      "role": "auditor",
+      "system": "You are the Mimo Inspector. Audit the proposed design and code for edge cases, resource leaks, security vulnerabilities, and verification gates."
+    },
+    "deepseek 4.1 flash": {
+      "title": "DeepSeek Coder",
+      "model": "deepseek-4.1-flash",
+      "provider": "cheaperinference",
+      "role": "coder",
+      "system": "You are the DeepSeek Principal Software Engineer. Provide complete, executable, clean implementation code adhering strictly to zero-dependency principles and production standards."
+    },
+    "glm 5.3 flash": {
+      "title": "GLM Architect",
+      "model": "glm-5.3-flash",
+      "provider": "cheaperinference",
+      "role": "architect",
+      "system": "You are the GLM Lead Systems Architect. Analyze the requirements, state invariants, data flows, and architectural failure modes. Produce a minimal, robust architecture design in Progen syntax."
     }
   },
   "default_hf_model": "meta-llama/Llama-3.1-8B-Instruct",
   "context_profiles": {
-    "default": 131072,
+    "default": 1048576,
     "128k": 131072,
+    "1m": 1048576,
+    "2m": 2097152,
+    "mimo-2.6-pro": 1048576,
+    "mimo 2.6 pro": 1048576,
+    "mimo-2.6-flash": 1048576,
+    "mimo 2.6 flash": 1048576,
+    "glm-5.3-flash": 1048576,
+    "glm 5.3 flash": 1048576,
+    "deepseek-4.1-flash": 1048576,
+    "deepseek 4.1 flash": 1048576,
+    "deepseek/deepseek-chat": 1048576,
+    "google/gemini-3.8-flash": 1048576,
+    "google/gemini-2.5-pro": 2097152,
+    "anthropic/claude-opus-5.5": 1048576,
+    "anthropic/claude-sonnet-5.5": 1048576,
+    "anthropic/claude-haiku-4.5": 1048576,
+    "openai/gpt-6.1-sol": 1048576,
+    "meta-llama/llama-3.3-70b-instruct": 131072,
     "qwen2.5-coder:7b": 131072,
     "qwen2.5-coder:latest": 131072,
     "qwen/qwen-2.5-coder-32b-instruct": 131072,
-    "anthropic/claude-sonnet-5.5": 200000,
-    "anthropic/claude-opus-5.5": 200000,
-    "openai/gpt-6.1-sol": 131072,
-    "meta-llama/llama-3.3-70b-instruct": 131072,
-    "google/gemini-3.8-flash": 1000000
+    "gemma-e4b": 131072,
+    "google/gemma-4-26b-a4b-it": 131072
   },
-  "default_orchestrator_model": "glm 5.3 flash",
-  "default_agent_model": "glm 5.3 flash"
+  "default_orchestrator_model": "mimo 2.6 pro",
+  "default_agent_model": "mimo 2.6 pro",
+  "swarm_combos": {
+    "open swarm": {
+      "title": "Open Swarm",
+      "heads": [
+        "architect",
+        "coder",
+        "auditor"
+      ],
+      "models": {
+        "architect": "glm 5.3 flash",
+        "coder": "deepseek 4.1 flash",
+        "auditor": "mimo 2.6 flash"
+      }
+    },
+    "default": {
+      "title": "Default Swarm",
+      "heads": [
+        "architect",
+        "coder",
+        "auditor"
+      ],
+      "models": {
+        "architect": "glm 5.3 flash",
+        "coder": "deepseek 4.1 flash",
+        "auditor": "mimo 2.6 flash"
+      },
+      "aliases": [
+        "glm 5.3 flash",
+        "deepseek 4.1 flash",
+        "mimo 2.6 flash"
+      ]
+    }
+  },
+  "default_model": "mimo 2.6 pro",
+  "default_fanout_aliases": [
+    "glm 5.3 flash",
+    "deepseek 4.1 flash",
+    "mimo 2.6 flash"
+  ]
 }
