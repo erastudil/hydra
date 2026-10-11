@@ -10789,6 +10789,69 @@ def wave22_session_logger_and_mimo_routing():
 
 
 @check
+def gui_theme_and_motion_contracts():
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QEasingCurve
+    from PySide6.QtWidgets import QApplication, QWidget
+    from desktop.theme_manager import BUILTIN_PALETTES, calculate_contrast_ratio
+    from hydra_cli.gui import motion, theme
+
+    app = QApplication.instance() or QApplication([])
+
+    # tokens derive from the one palette source and the QSS builds from them
+    base = BUILTIN_PALETTES[theme.THEME_ID]
+    assert theme.PALETTE == theme.derive_palette(base)
+    qss = theme.build_qss()
+    for role in ("bg", "panel", "raised", "accent", "ring", "danger"):
+        assert theme.PALETTE[role] in qss, role
+    assert "{" in qss and "None" not in qss
+    theme.apply(app)
+    assert app.styleSheet() == qss
+
+    # contrast : text roles on every surface they sit on
+    P = theme.PALETTE
+    for fg, bgk, floor in (("text", "bg", 7.0), ("text", "panel", 7.0), ("text", "raised", 7.0),
+                           ("muted", "bg", 4.5), ("muted", "panel", 4.5), ("on_accent", "accent", 4.5),
+                           ("danger", "bg", 4.5), ("text", "add", 7.0), ("text", "del", 7.0), ("text", "select", 7.0)):
+        ratio = calculate_contrast_ratio(P[fg], P[bgk])
+        assert ratio >= floor, f"{fg} on {bgk} {ratio} < {floor}"
+
+    # motion tokens
+    assert set(theme.DURATION) == {"instant", "fast", "base", "slow"}
+    assert theme.DURATION["instant"] == 0 < theme.DURATION["fast"] < theme.DURATION["base"] < theme.DURATION["slow"]
+    assert all(isinstance(theme.easing(n), QEasingCurve) for n in theme.EASING)
+
+    # normal motion : animation runs for the token duration with the token curve
+    os.environ["HYDRA_NO_ANIM"] = "0"
+    assert theme.reduced_motion() is False
+    seen = []
+    host = QWidget()
+    anim = motion.glide(host, 0, 100, seen.append, name="base", curve="standard")
+    assert anim is not None and anim.duration() == theme.DURATION["base"]
+    assert anim.easingCurve().type() == theme.EASING["standard"]
+    anim.stop()
+    fade = motion.fade_in(host, "fast")
+    assert fade is not None and fade.duration() == theme.DURATION["fast"]
+    fade.stop()
+
+    # reduced motion : durations drop to zero, no animation object, end state applied at once
+    os.environ["HYDRA_NO_ANIM"] = "1"
+    try:
+        assert theme.reduced_motion() is True
+        assert all(theme.duration(n) == 0 for n in theme.DURATION)
+        landed = []
+        assert motion.glide(host, 0, 100, landed.append) is None
+        assert landed == [100]
+        assert motion.fade_in(host) is None and host.graphicsEffect() is None
+    finally:
+        os.environ["HYDRA_NO_ANIM"] = "1"
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
