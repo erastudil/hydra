@@ -8595,9 +8595,12 @@ def status_assert_contracts():
         assert "Playwright uninstalled" in action_res["error"]
 
     action_cat = dispatch_browser_action("classify_status", text="404")
-    assert action_cat["isError"] is False
-    assert action_cat["category"] == "client_error"
-    assert action_cat["status"] == 404
+    if PLAYWRIGHT_AVAILABLE:
+        assert action_cat["isError"] is False
+        assert action_cat["category"] == "client_error"
+        assert action_cat["status"] == 404
+    else:
+        assert action_cat["isError"] is True and "Playwright uninstalled" in action_cat["error"]
 
     # 8. Singleton lifecycle
     reset_status_assert()

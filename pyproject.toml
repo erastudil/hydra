@@ -34,6 +34,11 @@ dependencies = [
   "prompt_toolkit>=3.0.36",
 ]
 
+[project.optional-dependencies]
+desktop = ["PySide6>=6.6; python_version >= '3.9'", "psutil>=5.9"]
+browser = ["playwright>=1.40"]
+build = ["pyinstaller>=6.0"]
+
 [project.scripts]
 hydra = "hydra_cli.cli:main"
 
