@@ -10981,11 +10981,20 @@ def wave22_session_logger_and_mimo_routing():
 
 @check
 def gui_theme_and_motion_contracts():
+    """Runs in a child process: earlier checks may already hold a QCoreApplication, which blocks QApplication."""
+    import subprocess
+    import sys
     try:
         import PySide6  # noqa: F401
     except ImportError:
         raise Skip("PySide6 not installed")
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    code = "import sys; sys.path.insert(0, sys.argv[1]); import scripts.verify as v; v._gui_theme_and_motion_body()"
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    res = subprocess.run([sys.executable, "-c", code, REPO], capture_output=True, text=True, env=env, cwd=REPO)
+    assert res.returncode == 0, res.stdout[-800:] + res.stderr[-800:]
+
+
+def _gui_theme_and_motion_body():
     from PySide6.QtCore import QEasingCurve
     from PySide6.QtWidgets import QApplication, QWidget
     from desktop.theme_manager import BUILTIN_PALETTES, calculate_contrast_ratio
