@@ -2775,6 +2775,15 @@ def tool_result_text(result: Any) -> str:
         return json.dumps(str(result), ensure_ascii=False)
 
 
+def _memory_block(cwd: str) -> str:
+    """Turn-start memory gate: re-prove stored state facts against live git, never fail silent."""
+    from hydra_cli.memory import GateError, preturn_block
+    try:
+        return preturn_block(cwd)
+    except GateError as exc:
+        return f"MEMORY : gate could not run here ({exc}); treat every remembered claim as unverified"
+
+
 def run_agent_loop(*args: Any, **kwargs: Any) -> str:
     """Run one agent turn, then close the session ledger so the next turn reloads from disk."""
     ledger = kwargs.get("ledger")
@@ -2878,6 +2887,7 @@ def _run_agent_loop(
     register = dialect_instruction(dialect) if dialect else ""
     if register and register not in effective_sys:
         effective_sys = f"{effective_sys}\n\n{register}"
+    effective_sys = f"{effective_sys}\n\n{_memory_block(target_cwd)}"
 
     original_prompt = prompt
     sys_text = build_cached_system_prompt(effective_sys)
