@@ -10221,11 +10221,43 @@ def desktop_model_fallback_mesh_and_state_snapshotter_contracts():
 
 
 @check
+def desktop_playwright_codegen_and_secret_vault_contracts():
+    from desktop.playwright_codegen import (
+        PlaywrightActionRecorder,
+        ActionType,
+    )
+    from desktop.secret_vault import (
+        SecretVault,
+        derive_vault_key,
+        encrypt_payload,
+        decrypt_payload,
+    )
+
+    # Playwright codegen contracts
+    recorder = PlaywrightActionRecorder()
+    recorder.record_goto("https://hydra.local")
+    recorder.record_click("button#login")
+    assert recorder.total_actions == 2
+    py_code = recorder.export_to_python(is_async=False)
+    assert 'page.goto("https://hydra.local"' in py_code
+    assert 'page.locator("button#login").click()' in py_code
+
+    # Secret vault contracts
+    vault = SecretVault(master_passphrase="gate_check_passphrase")
+    vault.set_secret("test_key", "secret_value_123")
+    assert vault.has_secret("test_key") is True
+    assert vault.get_secret("test_key") == "secret_value_123"
+
+    vault.lock()
+    assert vault.is_unlocked is False
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

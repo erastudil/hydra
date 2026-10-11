@@ -115,6 +115,24 @@ from desktop.state_snapshotter import (
     reset_workspace_snapshotter,
 )
 
+from desktop.playwright_codegen import (
+    ActionType,
+    RecordedAction,
+    PlaywrightCodeGenerator,
+    PlaywrightActionRecorder,
+    get_action_recorder,
+    reset_action_recorder,
+)
+from desktop.secret_vault import (
+    EncryptedSecretRecord,
+    SecretVault,
+    derive_vault_key,
+    encrypt_payload,
+    decrypt_payload,
+    get_secret_vault,
+    reset_secret_vault,
+)
+
 __all__ = [
     "create_desktop_app",
     "DesktopServer",
@@ -194,4 +212,17 @@ __all__ = [
     "compute_file_sha256",
     "get_workspace_snapshotter",
     "reset_workspace_snapshotter",
+    "ActionType",
+    "RecordedAction",
+    "PlaywrightCodeGenerator",
+    "PlaywrightActionRecorder",
+    "get_action_recorder",
+    "reset_action_recorder",
+    "EncryptedSecretRecord",
+    "SecretVault",
+    "derive_vault_key",
+    "encrypt_payload",
+    "decrypt_payload",
+    "get_secret_vault",
+    "reset_secret_vault",
 ]
