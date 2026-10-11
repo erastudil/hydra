@@ -10468,11 +10468,65 @@ def desktop_ensemble_voter_and_token_rotator_contracts():
 
 
 @check
+def desktop_distillation_pipeline_and_sandbox_jail_contracts():
+    import tempfile
+    from desktop.model_distillation_pipeline import (
+        ModelDistillationPipeline,
+        PruningScheduler,
+    )
+    from desktop.sandbox_jail_enforcer import (
+        SandboxJailEnforcer,
+        SandboxViolationError,
+    )
+
+    # Distillation contracts
+    pipeline = ModelDistillationPipeline(default_temperature=2.5, default_alpha=0.6)
+    step = pipeline.train_step(
+        student_logits=[2.0, 1.0, 0.5],
+        teacher_logits=[2.5, 0.8, 0.2],
+        ground_truth_class=0,
+        step_index=0,
+    )
+    assert step.total_loss > 0.0
+    assert step.student_top_class == 0
+
+    weights = [[0.1, -0.9], [0.8, 0.05]]
+    pruned, sp = PruningScheduler.prune_matrix(weights, target_sparsity=0.5)
+    assert sp == 0.5
+
+    # Sandbox jail contracts
+    with tempfile.TemporaryDirectory() as tmp_root:
+        enforcer = SandboxJailEnforcer(jail_root=tmp_root, read_only_root=True)
+        # Permitted write to workspace subpath
+        written = enforcer.safe_write_text("workspace/test.txt", "sandboxed data")
+        assert written > 0
+        assert enforcer.safe_read_text("workspace/test.txt") == "sandboxed data"
+
+        # Blocked write outside permitted subpaths in read-only root
+        try:
+            enforcer.safe_write_text("unauthorized.txt", "payload")
+            assert False, "Expected SandboxViolationError"
+        except SandboxViolationError:
+            pass
+
+        # Blocked path escape attempt
+        try:
+            enforcer.safe_read_text("../outside.txt")
+            assert False, "Expected SandboxViolationError"
+        except SandboxViolationError:
+            pass
+
+        valid_log, violations = enforcer.verify_audit_log_integrity()
+        assert valid_log is True
+        assert len(violations) == 0
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py", "test_model_distillation_pipeline.py", "test_sandbox_jail_enforcer.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

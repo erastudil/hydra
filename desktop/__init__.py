@@ -238,7 +238,47 @@ from desktop.secure_token_rotator import (
     reset_token_rotator,
 )
 
+from desktop.model_distillation_pipeline import (
+    PruningScheduleType,
+    stable_softmax,
+    compute_cross_entropy,
+    compute_soft_cross_entropy,
+    compute_kl_divergence,
+    DistillationStepResult,
+    PruningScheduler,
+    ModelDistillationPipeline,
+    get_distillation_pipeline,
+    reset_distillation_pipeline,
+)
+from desktop.sandbox_jail_enforcer import (
+    SecurityViolationType,
+    SandboxViolationError,
+    SecurityAuditRecord,
+    compute_security_hash,
+    SandboxJailEnforcer,
+    get_sandbox_enforcer,
+    reset_sandbox_enforcer,
+)
+
 __all__ = [
+    "PruningScheduleType",
+    "stable_softmax",
+    "compute_cross_entropy",
+    "compute_soft_cross_entropy",
+    "compute_kl_divergence",
+    "DistillationStepResult",
+    "PruningScheduler",
+    "ModelDistillationPipeline",
+    "get_distillation_pipeline",
+    "reset_distillation_pipeline",
+    "SecurityViolationType",
+    "SandboxViolationError",
+    "SecurityAuditRecord",
+    "compute_security_hash",
+    "SandboxJailEnforcer",
+    "get_sandbox_enforcer",
+    "reset_sandbox_enforcer",
+
     "VotingMethod",
     "ModelVote",
     "ConsensusScore",
