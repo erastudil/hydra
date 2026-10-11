@@ -10329,11 +10329,57 @@ def desktop_context_compressor_and_vector_indexer_contracts():
 
 
 @check
+def desktop_model_router_balancer_and_audit_ledger_contracts():
+    from desktop.model_router_balancer import (
+        ModelRouterBalancer,
+        BackendEndpoint,
+        BalancingStrategy,
+    )
+    from desktop.audit_ledger_exporter import (
+        CryptographicAuditLedger,
+        compute_merkle_root,
+        verify_merkle_proof,
+    )
+
+    # Balancer contracts
+    balancer = ModelRouterBalancer()
+    ep = BackendEndpoint(
+        endpoint_id="b1",
+        model_name="gemma-4",
+        provider="ollama",
+        latency_ewma_ms=45.0,
+        max_concurrency=2,
+    )
+    balancer.register_endpoint(ep)
+    selected = balancer.select_endpoint(BalancingStrategy.WEIGHTED_LATENCY)
+    assert selected is not None
+    assert selected.endpoint_id == "b1"
+
+    with balancer.lease("b1") as leased:
+        assert leased.active_in_flight == 1
+    assert ep.active_in_flight == 0
+
+    # Audit ledger contracts
+    ledger = CryptographicAuditLedger(genesis_actor="verify_gate")
+    assert ledger.total_entries == 1
+    e1 = ledger.record_event("TEST_EVENT", "tester", {"status": "ok"})
+    assert e1.index == 1
+    assert ledger.total_entries == 2
+
+    valid, violations = ledger.verify_integrity()
+    assert valid is True
+
+    root = ledger.get_merkle_root()
+    proof = ledger.generate_proof(1)
+    assert verify_merkle_proof(e1.entry_hash, proof, root) is True
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

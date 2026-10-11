@@ -176,6 +176,25 @@ from desktop.local_vector_indexer import (
     reset_local_vector_indexer,
 )
 
+from desktop.model_router_balancer import (
+    BalancingStrategy,
+    EndpointHealthStatus,
+    BackendEndpoint,
+    ModelRouterBalancer,
+    get_router_balancer,
+    reset_router_balancer,
+)
+from desktop.audit_ledger_exporter import (
+    AuditLedgerEntry,
+    CryptographicAuditLedger,
+    compute_entry_hash,
+    compute_merkle_root,
+    generate_merkle_proof,
+    verify_merkle_proof,
+    get_audit_ledger,
+    reset_audit_ledger,
+)
+
 __all__ = [
     "create_desktop_app",
     "DesktopServer",
@@ -301,4 +320,18 @@ __all__ = [
     "generate_text_embedding",
     "get_local_vector_indexer",
     "reset_local_vector_indexer",
+    "BalancingStrategy",
+    "EndpointHealthStatus",
+    "BackendEndpoint",
+    "ModelRouterBalancer",
+    "get_router_balancer",
+    "reset_router_balancer",
+    "AuditLedgerEntry",
+    "CryptographicAuditLedger",
+    "compute_entry_hash",
+    "compute_merkle_root",
+    "generate_merkle_proof",
+    "verify_merkle_proof",
+    "get_audit_ledger",
+    "reset_audit_ledger",
 ]
