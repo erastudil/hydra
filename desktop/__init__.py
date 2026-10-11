@@ -279,7 +279,41 @@ from desktop.concurrency_throttle_queue import (
     reset_throttle_queue,
 )
 
+from desktop.model_rag_reranker import (
+    NormalizationMethod,
+    RerankCandidate,
+    compute_cross_encoder_score,
+    normalize_scores,
+    ModelRagReranker,
+    get_rag_reranker,
+    reset_rag_reranker,
+)
+from desktop.session_replay_debugger import (
+    BreakpointType,
+    Breakpoint,
+    ReplayFrame,
+    BreakpointHit,
+    SessionReplayDebugger,
+    get_replay_debugger,
+    reset_replay_debugger,
+)
+
 __all__ = [
+    "NormalizationMethod",
+    "RerankCandidate",
+    "compute_cross_encoder_score",
+    "normalize_scores",
+    "ModelRagReranker",
+    "get_rag_reranker",
+    "reset_rag_reranker",
+    "BreakpointType",
+    "Breakpoint",
+    "ReplayFrame",
+    "BreakpointHit",
+    "SessionReplayDebugger",
+    "get_replay_debugger",
+    "reset_replay_debugger",
+
     "AdapterStatus",
     "LoraLayerWeights",
     "LoraAdapterRecord",

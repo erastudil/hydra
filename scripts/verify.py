@@ -10559,11 +10559,55 @@ def desktop_lora_hotloader_and_throttle_queue_contracts():
 
 
 @check
+def desktop_rag_reranker_and_replay_debugger_contracts():
+    from desktop.model_rag_reranker import (
+        ModelRagReranker,
+        RerankCandidate,
+        NormalizationMethod,
+    )
+    from desktop.session_replay_debugger import (
+        SessionReplayDebugger,
+        ReplayFrame,
+    )
+
+    # RAG reranker contracts
+    reranker = ModelRagReranker(default_top_k=2)
+    candidates = [
+        RerankCandidate("c1", "distributed consensus consensus algorithm"),
+        RerankCandidate("c2", "unrelated poetry text"),
+    ]
+    results = reranker.rerank(
+        query="consensus algorithm",
+        candidates=candidates,
+        normalization=NormalizationMethod.MIN_MAX,
+    )
+    assert len(results) == 2
+    assert results[0].candidate_id == "c1"
+    assert results[0].rerank_score > results[1].rerank_score
+
+    # Replay debugger contracts
+    debugger = SessionReplayDebugger()
+    frames = [
+        ReplayFrame(0, 100.0, "START", {"status": "init"}),
+        ReplayFrame(1, 101.0, "RUN", {"status": "running", "val": 42}),
+    ]
+    debugger.load_frames(frames)
+    assert debugger.total_frames == 2
+    f1 = debugger.step_forward()
+    assert f1 is not None
+    assert f1.step_index == 1
+    assert debugger.get_variable("val") == 42
+    f0 = debugger.step_backward()
+    assert f0 is not None
+    assert f0.step_index == 0
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py", "test_model_distillation_pipeline.py", "test_sandbox_jail_enforcer.py", "test_model_lora_adapter_hotloader.py", "test_concurrency_throttle_queue.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py", "test_model_distillation_pipeline.py", "test_sandbox_jail_enforcer.py", "test_model_lora_adapter_hotloader.py", "test_concurrency_throttle_queue.py", "test_model_rag_reranker.py", "test_session_replay_debugger.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed
