@@ -154,6 +154,28 @@ from desktop.model_quantizer_bridge import (
     reset_quantizer_bridge,
 )
 
+from desktop.model_context_compressor import (
+    MessageRole,
+    ContextMessage,
+    CompressionStrategy,
+    CompressionResult,
+    ModelContextCompressor,
+    get_context_compressor,
+    reset_context_compressor,
+)
+from desktop.local_vector_indexer import (
+    VectorDocumentChunk,
+    SearchResult,
+    LocalVectorIndexer,
+    vector_dot,
+    vector_norm,
+    vector_normalize,
+    cosine_similarity,
+    generate_text_embedding,
+    get_local_vector_indexer,
+    reset_local_vector_indexer,
+)
+
 __all__ = [
     "create_desktop_app",
     "DesktopServer",
@@ -262,4 +284,21 @@ __all__ = [
     "calculate_kv_cache_bytes",
     "get_quantizer_bridge",
     "reset_quantizer_bridge",
+    "MessageRole",
+    "ContextMessage",
+    "CompressionStrategy",
+    "CompressionResult",
+    "ModelContextCompressor",
+    "get_context_compressor",
+    "reset_context_compressor",
+    "VectorDocumentChunk",
+    "SearchResult",
+    "LocalVectorIndexer",
+    "vector_dot",
+    "vector_norm",
+    "vector_normalize",
+    "cosine_similarity",
+    "generate_text_embedding",
+    "get_local_vector_indexer",
+    "reset_local_vector_indexer",
 ]

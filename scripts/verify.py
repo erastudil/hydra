@@ -10292,11 +10292,48 @@ def desktop_system_metrics_and_model_quantizer_contracts():
 
 
 @check
+def desktop_context_compressor_and_vector_indexer_contracts():
+    from desktop.model_context_compressor import (
+        ModelContextCompressor,
+        ContextMessage,
+        MessageRole,
+        CompressionStrategy,
+    )
+    from desktop.local_vector_indexer import (
+        LocalVectorIndexer,
+        vector_dot,
+        cosine_similarity,
+    )
+
+    # Context compressor contracts
+    compressor = ModelContextCompressor(default_token_budget=50, sink_messages=1, recent_messages=1)
+    msgs = [
+        ContextMessage(role=MessageRole.SYSTEM.value, content="System invariant"),
+        ContextMessage(role=MessageRole.USER.value, content="Turn to prune " * 10),
+        ContextMessage(role=MessageRole.ASSISTANT.value, content="Latest response"),
+    ]
+    res = compressor.compress_context(msgs, budget=30, strategy=CompressionStrategy.PRUNE_MIDDLE)
+    assert res.compressed_tokens <= 30
+    assert res.messages[0].content == "System invariant"
+
+    # Vector indexer contracts
+    v1 = [1.0, 0.0]
+    v2 = [0.0, 1.0]
+    assert cosine_similarity(v1, v2) == 0.0
+
+    indexer = LocalVectorIndexer(embedding_dim=16)
+    indexer.add_chunk("c1", "Hydra sovereign systems", metadata={"domain": "os"})
+    results = indexer.search("sovereign systems", top_k=1)
+    assert len(results) == 1
+    assert results[0].chunk_id == "c1"
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed
