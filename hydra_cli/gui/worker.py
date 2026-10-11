@@ -11,7 +11,10 @@ from PySide6.QtCore import QObject, Signal
 from hydra_cli.agent import run_agent_loop
 from hydra_cli.config import DEFAULT_ORCHESTRATOR_MODEL, get_context_window
 from hydra_cli.context import SessionContextLedger
-from hydra_cli.ui import set_approval_handler, set_diff_sink, set_tool_sink
+from hydra_cli.ui import (
+    TurnCancelled, check_cancel, clear_cancel, request_cancel,
+    set_approval_handler, set_diff_sink, set_tool_sink,
+)
 
 
 class AgentWorker(QObject):
@@ -37,10 +40,15 @@ class AgentWorker(QObject):
 
     def abort(self) -> None:
         self.aborted = True
+        request_cancel()
         self._decision = "q"
         self._gate.set()
 
     # runs in the worker thread
+    def _emit_token(self, text: str) -> None:
+        check_cancel()
+        self.token.emit(text)
+
     def _approve(self, tool: str, args_json: str) -> str:
         self._gate.clear()
         self.approval.emit(tool, args_json)
@@ -49,6 +57,7 @@ class AgentWorker(QObject):
 
     def run_turn(self, req: Dict[str, Any]) -> None:
         self.aborted = False
+        clear_cancel()
         sid = req["session_id"]
         ledger = self._ledgers.get(sid)
         if ledger is None:
@@ -67,10 +76,12 @@ class AgentWorker(QObject):
                 steer_mode=bool(req.get("approve")),
                 ledger=ledger,
                 strategy=req.get("mode", "recall"),
-                on_token=lambda t: self.token.emit(t),
+                on_token=self._emit_token,
                 max_context_chars=get_context_window(alias) * 4,
             )
             self.finished.emit(answer or "", True)
+        except TurnCancelled:
+            self.finished.emit("stopped", False)
         except Exception as exc:  # surfaced to the transcript, not swallowed
             self.finished.emit(f"{type(exc).__name__}: {exc}", False)
         finally:
