@@ -2003,7 +2003,7 @@ def _gui_thread(worker):
     class Starter(QObject):
         start = Signal(dict)
 
-    app = QApplication.instance() or QApplication(["verify"])
+    app = QApplication.instance() or QApplication([])
     thread = QThread()
     worker.moveToThread(thread)
     starter = Starter()
@@ -2105,6 +2105,309 @@ def gui_worker_cancel_mid_stream():
                 assert ok and text == "ok ", (text, ok)
     finally:
         httpd.shutdown()
+
+
+def _json_reply(handler, message):
+    data = json.dumps({"choices": [{"message": message, "finish_reason": "stop"}]}).encode()
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def _tool_call(name, **args):
+    return {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "call_1", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]}
+
+
+def _replying(replies, seen):
+    """Script for _scripted_model: records every request body, answers from replies in order.
+
+    A str reply streams as text; a dict reply is a whole assistant message (tool calls).
+    """
+    def script(handler, body):
+        seen.append(body)
+        reply = replies.pop(0)
+        if isinstance(reply, dict):
+            _json_reply(handler, reply)
+        else:
+            _sse(handler, [reply], 0.0, [])
+    return script
+
+
+@contextmanager
+def _gui_window(state_path):
+    """MainWindow over a Store at state_path, offscreen. Closing it joins the worker thread."""
+    from PySide6.QtWidgets import QApplication
+    from hydra_cli.gui.store import Store
+    from hydra_cli.gui.window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow(Store(state_path))
+    win.composer.model.setCurrentText("local")
+    try:
+        yield win
+    finally:
+        win.close()
+        assert win.thread.wait(5000), "worker thread did not stop"
+        app.processEvents()
+
+
+def _gui_wait(until, seconds=20):
+    from PySide6.QtWidgets import QApplication
+
+    deadline = time.time() + seconds
+    while not until():
+        assert time.time() < deadline, "timed out waiting for the window"
+        QApplication.instance().processEvents()
+        time.sleep(0.01)
+
+
+def _gui_send(win, text, while_busy=None):
+    """Submit through the window and wait for the turn to end. while_busy() runs on every poll."""
+    win.submit(text)
+    assert win.busy, "submit did not start a turn"
+    _gui_wait(lambda: (while_busy and while_busy(), not win.busy)[1])
+
+
+def _gui_mode(win, mode):
+    win.composer.mode.setCurrentIndex(win.composer.mode.findData(mode))
+
+
+@check
+def gui_restart_keeps_projects_threads_and_context():
+    """Projects, threads, history and the thread's ledger come back from the data dir in a fresh window."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    root = tempfile.mkdtemp(prefix="gui-restart-")
+    seen = []
+    httpd, base = _scripted_model(_replying(["noted zebrafish", "hello b", "your word was zebrafish"], seen))
+    try:
+        with isolated(home=root, env={"LOCAL_AI_BASE": base}):
+            state = os.path.join(root, "data", "state.json")
+            proj_a, proj_b = os.path.join(root, "alpha"), os.path.join(root, "beta")
+            os.makedirs(proj_a)
+            os.makedirs(proj_b)
+            with _gui_window(state) as win:
+                win.add_project(proj_a)
+                thread_a = win.create_thread()
+                _gui_send(win, "remember the word zebrafish")
+                win.add_project(proj_b)
+                thread_b = win.create_thread()
+                _gui_send(win, "greet beta, zebrafish stays in alpha")
+                win.select_thread(thread_a["id"])
+            with _gui_window(state) as win:
+                assert [p["name"] for p in win.store.projects()] == ["alpha", "beta"]
+                assert win.sidebar.projects.count() == 2
+                assert win.worker._ledgers == {}, "fresh window must not carry ledgers over"
+                saved = win.store.thread(thread_b["id"])
+                assert [m["role"] for m in saved["messages"]] == ["user", "assistant"], saved["messages"]
+                assert saved["messages"][1]["text"] == "hello b"
+                assert win.thread_id == thread_a["id"] and win.project_id == thread_a["project_id"]
+                assert "remember the word zebrafish" in win.transcript.toPlainText()
+                assert "noted zebrafish" in win.transcript.toPlainText()
+                assert win.sidebar.threads.count() == 1 and win.sidebar.threads.item(0).text() == "remember the word zebrafish"
+                win.select_project(thread_b["project_id"])
+                assert win.sidebar.threads.count() == 1 and win.sidebar.threads.item(0).text() == "greet beta, zebrafish stays in alpha"
+                win.select_thread(thread_b["id"])
+                assert "hello b" in win.transcript.toPlainText()
+                win.select_thread(thread_a["id"])
+                seen.clear()
+                _gui_send(win, "what was the word zebrafish")
+                context = seen[0]["messages"][1]["content"]
+                assert "remember the word zebrafish" in context and "noted zebrafish" in context, context
+                assert "greet beta, zebrafish stays in alpha" not in context and "hello b" not in context, context
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@check
+def gui_context_mode_selector_reaches_the_model():
+    """The mode box sets the strategy the worker runs: each mode sends its own context shape, and it survives a restart."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    root = tempfile.mkdtemp(prefix="gui-modes-")
+    seen = []
+    replies = []
+    for _ in range(3):
+        replies += ["answer pelican", "answer quokka", "answer raccoon", "answer sparrow"]
+    httpd, base = _scripted_model(_replying(replies, seen))
+    prompts = ["alpha apple talk", "bravo banana talk", "charlie cherry talk", "delta apple question"]
+
+    def last_context():
+        return seen[-1]["messages"][1]["content"]
+
+    try:
+        with isolated(home=root, env={"LOCAL_AI_BASE": base}):
+            state = os.path.join(root, "state.json")
+            proj = os.path.join(root, "proj")
+            os.makedirs(proj)
+            ids = {}
+            with _gui_window(state) as win:
+                assert [win.composer.mode.itemData(i) for i in range(win.composer.mode.count())] == ["recall", "compact", "sliding"]
+                win.add_project(proj)
+                for mode in ("recall", "compact", "sliding"):
+                    thread = win.create_thread()
+                    _gui_mode(win, mode)  # the box edits the active thread
+                    ids[mode] = thread["id"]
+                    assert win.store.thread(thread["id"])["mode"] == mode
+                    for text in prompts[:3]:
+                        _gui_send(win, text)
+                    _gui_send(win, prompts[3])
+                    context = last_context()
+                    if mode == "recall":
+                        assert context.startswith("[RETRIEVED CONTEXT]"), context
+                        assert "alpha apple talk" in context
+                        assert "bravo" not in context and "charlie" not in context, context
+                    elif mode == "compact":
+                        assert context.startswith("[CONVERSATION SO FAR]"), context
+                        assert all(word in context for word in ("alpha", "bravo", "charlie")), context
+                    else:
+                        assert context.startswith("[PRIOR TURNS]"), context
+                        assert "bravo" in context and "charlie" in context and "alpha" not in context, context
+                # switching the box on a live thread changes the very next request
+                win.select_thread(ids["recall"])
+                assert win.composer.mode.currentData() == "recall"
+                _gui_mode(win, "sliding")
+                assert win.store.thread(ids["recall"])["mode"] == "sliding"
+                replies.append("answer tern")
+                _gui_send(win, "echo question")
+                assert last_context().startswith("[PRIOR TURNS]"), last_context()
+            with _gui_window(state) as win:
+                for mode, tid in ids.items():
+                    win.select_thread(tid)
+                    assert win.composer.mode.currentData() == ("sliding" if mode == "recall" else mode), (mode, win.composer.mode.currentData())
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@check
+def gui_approval_flow_end_to_end():
+    """Allow runs the tool, Skip returns a denial the model sees, Abort and Stop release a pending approval."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    root = tempfile.mkdtemp(prefix="gui-approval-")
+    seen = []
+    replies = []
+    httpd, base = _scripted_model(_replying(replies, seen))
+    try:
+        with isolated(home=root, env={"LOCAL_AI_BASE": base}):
+            proj = os.path.join(root, "proj")
+            os.makedirs(proj)
+            with _gui_window(os.path.join(root, "state.json")) as win:
+                win.add_project(proj)
+                win.create_thread()
+                assert win.composer.approve.isChecked()
+                target = lambda name: os.path.join(proj, name)
+
+                def ask(name, press, text="write it"):
+                    """One turn where the model asks to write `name`; press(win) answers the pending approval."""
+                    seen.clear()
+                    replies[:] = [_tool_call("write_file", path=name, content=f"body of {name}"), f"finished {name}"]
+                    state = {"asked": False}
+
+                    def poll():
+                        if win.approval.allow.isEnabled() and not state["asked"]:
+                            state["asked"] = True
+                            assert win.tabs.currentWidget() is win.approval
+                            assert name in win.approval.body.toPlainText(), win.approval.body.toPlainText()
+                            assert win.approval.title.text() == "Approve tool : write_file"
+                            assert not os.path.exists(target(name)), "tool ran before it was approved"
+                            press()
+                    _gui_send(win, text, poll)
+                    assert state["asked"], "approval was never requested"
+                    assert not win.approval.allow.isEnabled()
+
+                ask("yes.txt", win.approval.allow.click)
+                assert open(target("yes.txt")).read() == "body of yes.txt"
+                assert len(seen) == 2 and "finished" not in json.dumps(seen[0])
+                assert win.store.thread(win.thread_id)["messages"][-1]["text"] == "finished yes.txt"
+
+                ask("no.txt", win.approval.deny.click)
+                assert not os.path.exists(target("no.txt"))
+                tool_msgs = [m for m in seen[1]["messages"] if m.get("role") == "tool"]
+                assert tool_msgs and tool_msgs[-1]["content"] == "[Tool execution skipped by developer]", tool_msgs
+                assert win.store.thread(win.thread_id)["messages"][-1]["text"] == "finished no.txt"
+
+                for name, button in (("abort.txt", win.approval.abort.click), ("stop.txt", win.composer.stop.click)):
+                    seen.clear()
+                    replies[:] = [_tool_call("write_file", path=name, content="never")]
+                    fired = []
+
+                    def poll():
+                        if win.approval.allow.isEnabled() and not fired:
+                            fired.append(1)
+                            button()
+                    _gui_send(win, "write it", poll)
+                    assert fired and not os.path.exists(target(name)), name
+                    assert len(seen) == 1, f"{name}: the model was called again after the abort"
+                    assert not win.busy
+                # the same window still takes a normal turn afterwards
+                replies[:] = ["still alive"]
+                _gui_send(win, "ping")
+                assert win.store.thread(win.thread_id)["messages"][-1]["text"] == "still alive"
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@check
+def gui_diff_pane_shows_real_edits():
+    """A turn that edits files sends the true unified diff to the pane and the store; both survive a restart."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    import difflib
+
+    root = tempfile.mkdtemp(prefix="gui-diff-")
+    seen = []
+    replies = [_tool_call("edit_file", path="app.py", old_text="beta = 2", new_text="beta = 22"), "edited"]
+    httpd, base = _scripted_model(_replying(replies, seen))
+    try:
+        with isolated(home=root, env={"LOCAL_AI_BASE": base}):
+            proj = os.path.join(root, "proj")
+            os.makedirs(proj)
+            path = os.path.join(proj, "app.py")
+            before = "alpha = 1\nbeta = 2\ngamma = 3\n"
+            with open(path, "w", newline="") as fh:
+                fh.write(before)
+            state = os.path.join(root, "state.json")
+            with _gui_window(state) as win:
+                win.add_project(proj)
+                win.create_thread()
+                win.composer.approve.setChecked(False)
+                _gui_send(win, "bump beta")
+                with open(path, newline="") as fh:
+                    after = fh.read()
+                assert after == "alpha = 1\nbeta = 22\ngamma = 3\n", after
+                expected = "".join(difflib.unified_diff(
+                    before.splitlines(keepends=True), after.splitlines(keepends=True), fromfile="a/app.py", tofile="b/app.py"))
+                saved = win.store.thread(win.thread_id)["diffs"]
+                assert saved == [{"path": "app.py", "text": expected}], saved
+                pane = win.diffs.toPlainText()
+                assert "-beta = 2" in pane and "+beta = 22" in pane and "app.py" in pane, pane
+                assert "-alpha" not in pane and "+alpha" not in pane
+                thread_id = win.thread_id
+            with _gui_window(state) as win:
+                assert win.thread_id == thread_id
+                assert "-beta = 2" in win.diffs.toPlainText() and "+beta = 22" in win.diffs.toPlainText()
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def alice_retrieval_stacks():
@@ -11111,11 +11414,20 @@ def gui_real_launch_window_and_frames():
 
 @check
 def gui_theme_and_motion_contracts():
+    """Runs in a child process: earlier checks may already hold a QCoreApplication, which blocks QApplication."""
+    import subprocess
+    import sys
     try:
         import PySide6  # noqa: F401
     except ImportError:
         raise Skip("PySide6 not installed")
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    code = "import sys; sys.path.insert(0, sys.argv[1]); import scripts.verify as v; v._gui_theme_and_motion_body()"
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    res = subprocess.run([sys.executable, "-c", code, REPO], capture_output=True, text=True, env=env, cwd=REPO)
+    assert res.returncode == 0, res.stdout[-800:] + res.stderr[-800:]
+
+
+def _gui_theme_and_motion_body():
     from PySide6.QtCore import QEasingCurve
     from PySide6.QtWidgets import QApplication, QWidget
     from desktop.theme_manager import BUILTIN_PALETTES, calculate_contrast_ratio
