@@ -11488,6 +11488,36 @@ def _gui_theme_and_motion_body():
 
 
 @check
+def gui_entry_runs_launch_sweep_and_memory_check():
+    """The packaged entry runs the scheduled sweep and a memory check at launch."""
+    import importlib.util
+    try:
+        import hydra_cli.memory  # noqa: F401
+    except ImportError:
+        raise Skip("hydra_cli.memory arrives with the atmem gate PR")
+    spec = importlib.util.spec_from_file_location("hydra_gui_entry", os.path.join(REPO, "scripts", "hydra_gui_entry.py"))
+    entry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(entry)
+    with tempfile.TemporaryDirectory() as tmp:
+        home = os.path.join(tmp, "hh")
+        repo = os.path.join(tmp, "r")
+        os.makedirs(repo)
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True, env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+        run("init", "-q", "-b", "main")
+        open(os.path.join(repo, "README.md"), "w").write("x\n")
+        run("add", "-A")
+        run("commit", "-q", "-m", "init")
+        open(os.path.join(repo, "Copy of a.txt"), "w").write("junk\n")
+        with isolated(env={"HYDRA_HOME": home}):
+            assert "sweep moved 1" in entry.gate_startup(repo)
+            assert not os.path.exists(os.path.join(repo, "Copy of a.txt"))
+            assert "sweep moved 0" in entry.gate_startup(repo), "second launch inside 20 hours must not sweep"
+            assert "startup skipped" in entry.gate_startup(tmp)
+        subjects = [json.loads(ln)["subject"] for ln in open(os.path.join(home, "memory", "ledger.jsonl"))]
+        assert "sweep_move" in subjects and subjects.count("preturn") == 2
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
