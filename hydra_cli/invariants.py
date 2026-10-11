@@ -162,16 +162,11 @@ def _hooks_installed(repo: str, names: Tuple[str, ...]) -> List[str]:
     return missing
 
 
-def _head(repo: str) -> str:
-    rc, out = memory.git(repo, "rev-parse", "--verify", "-q", "HEAD", env=memory._clean_env())
-    return out if rc == 0 else ""
-
-
 def probe_push_main_refused(repo: str) -> Tuple[bool, str]:
     missing = _hooks_installed(repo, ("pre-push",))
     if missing:
         return False, "pre-push hook not installed"
-    sha = _head(repo)
+    sha = memory.head_sha(repo)
     if not sha:
         return False, "repo has no commits to push"
     with _scratch_ledger():
@@ -183,7 +178,7 @@ def probe_push_main_refused(repo: str) -> Tuple[bool, str]:
 def probe_push_force_refused(repo: str) -> Tuple[bool, str]:
     if _hooks_installed(repo, ("pre-push",)):
         return False, "pre-push hook not installed"
-    sha = _head(repo)
+    sha = memory.head_sha(repo)
     if not sha:
         return False, "repo has no commits to push"
     env = {**memory._clean_env(), "GIT_AUTHOR_NAME": "gate", "GIT_AUTHOR_EMAIL": "gate@local",
@@ -216,10 +211,6 @@ def probe_progen_lint_enforced(repo: str) -> Tuple[bool, str]:
     return ok, "progen flags a bad doc and passes a clean one" if ok else "progen lint did not behave"
 
 
-def _tracked(repo: str) -> List[str]:
-    return memory._git_z(repo, "ls-files", "-z")
-
-
 def _read_text(repo: str, rel: str, limit: int = 400000) -> Optional[str]:
     try:
         with open(os.path.join(repo, rel), "rb") as handle:
@@ -232,7 +223,7 @@ def _read_text(repo: str, rel: str, limit: int = 400000) -> Optional[str]:
 
 
 def probe_no_todo_markers(repo: str) -> Tuple[bool, str]:
-    for rel in _tracked(repo):
+    for rel in memory.tracked_files(repo):
         if rel.lower().endswith(SOURCE_SUFFIXES) and not rel.startswith(("docs/", "tests/")) and rel not in MARKER_SKIP:
             text = _read_text(repo, rel)
             for number, line in enumerate((text or "").splitlines(), 1):
@@ -242,7 +233,7 @@ def probe_no_todo_markers(repo: str) -> Tuple[bool, str]:
 
 
 def probe_no_move_stubs(repo: str) -> Tuple[bool, str]:
-    for rel in _tracked(repo):
+    for rel in memory.tracked_files(repo):
         text = _read_text(repo, rel, limit=400)
         if text is not None and len(text.strip()) <= 300 and STUB_TEXT.search(text):
             return False, f"{rel} is a stub that points elsewhere"

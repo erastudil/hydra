@@ -108,6 +108,19 @@ def _git_z(repo: str, *args: str) -> List[str]:
     return _z(proc.stdout.decode("utf-8", "replace"))
 
 
+def tracked_files(repo: str) -> List[str]:
+    return _git_z(repo, "ls-files", "-z")
+
+
+def untracked_files(repo: str) -> List[str]:
+    return _git_z(repo, "ls-files", "-z", "--others", "--exclude-standard")
+
+
+def head_sha(repo: str) -> str:
+    rc, out = git(repo, "rev-parse", "--verify", "-q", "HEAD", env=_clean_env())
+    return out if rc == 0 else ""
+
+
 # -------------------------------------------------------------------- ledger
 
 def _canon(entry: Dict[str, Any]) -> str:
@@ -424,6 +437,8 @@ def check_commit(path: str) -> List[str]:
                   and time.time() - datetime.strptime(e["ts"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp() < RULES["test_delete_window_s"]]
         if not recent:
             problems.append(f"tests : {len(deleted)} test files deleted, limit {RULES['test_delete_max']}. fix: python scripts/gate.py decide test_delete \"<why>\" then commit again")
+    from hydra_cli import invariants  # lazy: invariants imports this module
+    problems += invariants.check_gate(repo)
     docs = [rel for status, rel in staged if status != "D" and rel.endswith(".md") and rel.split("/")[0] in RULES["doc_lint_dirs"] and "/" in rel]
     for rel in docs:
         with open(os.path.join(repo, rel), "r", encoding="utf-8", errors="replace") as handle:
@@ -491,7 +506,7 @@ def install(path: str, gate: str) -> List[str]:
             handle.write(_hook_text(name, gate))
         os.chmod(target, 0o755)
         done.append(name)
-    sha = git(repo, "rev-parse", "HEAD", env=_clean_env())[1] if _has_commits(repo) else ""
+    sha = head_sha(repo)
     append("event", "install", ",".join(done), repo=repo, head=sha)
     return done
 
@@ -590,7 +605,7 @@ def scan_commits(path: str, record: bool = True) -> Dict[str, Any]:
                 subj = git(repo, "log", "-1", "--format=%s", sha, env=_clean_env())[1]
                 append("event", "unverified_commit", f"{why}: {subj}", repo=repo, sha=sha)
         append("event", "bypass_scan", f"{len(unverified)} unverified, {len(rollback)} rollback", repo=repo,
-               head=git(repo, "rev-parse", "HEAD", env=_clean_env())[1])
+               head=head_sha(repo))
     return {"unverified": unverified, "rollback": rollback}
 
 
@@ -608,8 +623,8 @@ def _ahead_behind(repo: str, ref: str, base: str) -> Optional[Tuple[int, int]]:
 
 def sweep_scan(path: str, ignore_deleted_by: Optional[str] = None) -> List[Dict[str, str]]:
     repo = toplevel(path)
-    tracked = _git_z(repo, "ls-files", "-z")
-    untracked = _git_z(repo, "ls-files", "-z", "--others", "--exclude-standard")
+    tracked = tracked_files(repo)
+    untracked = untracked_files(repo)
     skip: set = set()
     if ignore_deleted_by:
         rc, out = git(repo, "diff", "--name-only", "--diff-filter=D", f"HEAD...{ignore_deleted_by}", env=_clean_env())
@@ -714,7 +729,7 @@ def sweep(path: str, apply: bool = False, ignore_deleted_by: Optional[str] = Non
     findings = sweep_scan(repo, ignore_deleted_by)
     moved: List[str] = []
     if apply:
-        tracked = set(_git_z(repo, "ls-files", "-z"))
+        tracked = set(tracked_files(repo))
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         for item in [f for f in findings if f["action"] == "move"]:
             rel = item["path"]
@@ -897,7 +912,10 @@ def cli(argv: List[str], gate_script: str) -> int:
                     print(f"{e['ts']} {e['id']} {e['kind']} {e['subject']} : {e['body'][:100]}")
             return 0
         if cmd == "verify":
+            from hydra_cli import invariants
             problems = chain_problems()
+            if _is_repo(here):
+                problems += invariants.check_gate(toplevel(here))
             scan = scan_commits(here, record=False) if _is_repo(here) else {"unverified": [], "rollback": []}
             problems += [f"commit : {sha[:10]} {why}" for sha, why in scan["unverified"] + scan["rollback"]]
             return report(problems, "gate : verify ok")

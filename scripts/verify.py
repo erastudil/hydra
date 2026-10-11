@@ -11202,6 +11202,53 @@ def atmem_strays_flagged_via_pr_api():
 
 
 @check
+def atmem_invariant_violations_block_commits_and_verify():
+    """Invariants are wired into check_commit and gate.py verify: a violated one refuses the commit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hh = os.path.join(tmp, "hh")
+        repo = _atmem_repo(tmp)
+        assert _gate(["install", "--repo", repo], repo, hh).returncode == 0
+        _git(repo, "switch", "-q", "-c", "feat/inv")
+        assert _gate(["verify"], repo, hh).returncode == 0, "clean repo must pass verify"
+        os.makedirs(os.path.join(repo, "src"))
+        open(os.path.join(repo, "src", "ok.py"), "w").write("VALUE = 1\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-q", "-m", "clean", hh=hh)
+        assert res.returncode == 0, res.stdout + res.stderr
+
+        marker = "# " + "TO" + "DO" + ": later\n"
+        open(os.path.join(repo, "src", "bad.py"), "w").write(marker)
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "marker", hh=hh)
+        assert res.returncode != 0 and "INV-CODE-001 : violated" in res.stdout + res.stderr, res.stdout + res.stderr
+        assert "INV-CODE-001 : violated" in _gate(["verify"], repo, hh).stdout, "verify must report the same violation"
+        _git(repo, "rm", "-q", "-f", "src/bad.py")
+
+        open(os.path.join(repo, "src", "old.py"), "w").write("moved to src/new.py\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "stub", hh=hh)
+        assert res.returncode != 0 and "INV-FS-001 : violated" in res.stdout + res.stderr
+        _git(repo, "rm", "-q", "-f", "src/old.py")
+
+        pre_push = os.path.join(repo, ".git", "hooks", "pre-push")
+        saved = open(pre_push).read()
+        os.unlink(pre_push)
+        open(os.path.join(repo, "src", "two.py"), "w").write("VALUE = 2\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "no pre-push", hh=hh)
+        assert res.returncode != 0 and "INV-GIT-001 : violated" in res.stdout + res.stderr, res.stdout + res.stderr
+        open(pre_push, "w").write(saved)
+        os.chmod(pre_push, 0o755)
+
+        res = _git(repo, "commit", "-q", "-m", "recovered", hh=hh)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert _gate(["verify"], repo, hh).returncode == 0
+    from hydra_cli import invariants
+    assert invariants.check_gate.__module__ == "hydra_cli.invariants"
+    assert not hasattr(_mem(), "probe_no_todo_markers"), "invariant logic must live only in invariants.py"
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):

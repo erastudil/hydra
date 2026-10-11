@@ -90,6 +90,6 @@ not yet probeable : tests are real and never mocked, only the narrow AST mock ba
 not yet probeable : purgatory is emptied only by Pat, needs a ledger event for every purge and a command that does not exist yet
 not yet probeable : invariant changes carry a Pat message id, needs a commit trailer check that is not built
 
-not wired yet : gate.py verify and the pre-commit hook do not call check_gate, so a violated invariant is shown every turn but does not yet block a commit
-not wired yet : fix is one call to hydra_cli.invariants.check_gate inside memory.check_commit and in the verify command of scripts/gate.py
-not wired yet : source refs user:atmem-design-approval-2026-10-11 are placeholders for Pat's real message ids, replace them in the first PR Pat approves
+wired : memory.check_commit and the verify command of scripts/gate.py call check_gate, so a violated invariant blocks the commit
+source ref : user:t117u is Pat's message t117u in the Grok Bot chat, 2026-10-11 12:56 PM CT, "approve, full gas today", approving the atmem design
+source scope : that approval covers the design in DESIGN.md; a new invariant needs its own Pat message id in source
