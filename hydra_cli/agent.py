@@ -10,7 +10,7 @@ from hydra_cli.context import (
     register_label,
     resolve_context_mode,
 )
-from hydra_cli.ui import StreamWrap, clean_pasted_text, drain_steering, prompt_input, render_prompt_box, wrap_text
+from hydra_cli.ui import StreamWrap, clean_pasted_text, approve_tool, diff_sink, drain_steering, prompt_input, tool_sink, render_prompt_box, wrap_text
 from hydra_cli._version import __version__
 
 from datetime import datetime, timezone
@@ -79,7 +79,18 @@ from hydra_cli.ui import (
 
 
 def print_unified_diff(path: str, old_content: str, new_content: str, raw_diff: bool = False) -> None:
-    """Print colorized unified diff of file mutations to stderr."""
+    """Print colorized unified diff of file mutations to stderr, or hand it to the GUI diff sink."""
+    sink = diff_sink()
+    if sink is not None:
+        if raw_diff:
+            text = new_content
+        else:
+            text = "".join(difflib.unified_diff(
+                old_content.splitlines(keepends=True), new_content.splitlines(keepends=True),
+                fromfile=f"a/{path}", tofile=f"b/{path}"))
+        if text:
+            sink(path, text)
+        return
     color_on = supports_color()
     RED = "\033[31m" if color_on else ""
     GREEN = "\033[32m" if color_on else ""
@@ -3216,8 +3227,7 @@ def _run_agent_loop(
 
             if steer_mode and not tool_skipped:
                 try:
-                    c_prompt = f"[HYDRA STEER] Tool: {fn_name}({args_str}). Execute? [y/n/s(teer)/q]: "
-                    steer_choice = prompt_input(c_prompt).strip()
+                    steer_choice = approve_tool(fn_name, args_str).strip()
                 except KeyboardInterrupt:
                     try:
                         steer_input = prompt_input(
@@ -3532,6 +3542,11 @@ def _run_agent_loop(
                             print_unified_diff(diff_path, orig_file_content or "", new_file_content)
                     except Exception:
                         pass
+
+            _tsink = tool_sink()
+            if _tsink is not None:
+                _tsink(fn_name, args_str, bool(is_error),
+                       result_content if isinstance(result_content, str) else json.dumps(result_content, default=str))
 
             if fn_name == "run_command":
                 exit_code = 0
