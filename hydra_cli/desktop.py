@@ -3150,6 +3150,19 @@ def run_desktop_app(
     return server
 
 
+def _ensure_stdio() -> None:
+    """pythonw.exe starts with sys.stdout and sys.stderr set to None; uvicorn log setup needs real streams."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    log_dir = os.path.join(os.path.expanduser("~"), ".hydra")
+    os.makedirs(log_dir, exist_ok=True)
+    stream = open(os.path.join(log_dir, "desktop.log"), "a", encoding="utf-8", buffering=1)
+    if sys.stdout is None:
+        sys.stdout = stream
+    if sys.stderr is None:
+        sys.stderr = stream
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Command line entrypoint for hydra desktop."""
     parser = argparse.ArgumentParser(description="Hydra Sovereign Desktop Application")
@@ -3159,6 +3172,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--headless", action="store_true", help="Run server in headless background mode")
     
     args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+    _ensure_stdio()
     open_browser = not (args.no_browser or args.headless)
     
     print(f"Hydra Desktop launching on http://{args.host}:{args.port}")

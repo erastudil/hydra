@@ -66,16 +66,16 @@ def create_tui_shortcut(
     shortcut_name: str = "Hydra TUI.lnk",
     repo_root: str | None = None,
 ) -> str:
-    """Create Windows shortcut pointing to Hydra TUI interactive terminal session."""
+    """Create Windows shortcut pointing to the Hydra Sovereign Terminal launcher (launch/bin/hydra-terminal.bat)."""
     if repo_root is None:
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     desktop_dir = get_desktop_dir()
     shortcut_path = os.path.join(desktop_dir, shortcut_name)
 
-    py_dir = os.path.dirname(sys.executable)
-    python_exe = os.path.join(py_dir, "python.exe")
-    target_exe = python_exe if os.path.isfile(python_exe) else sys.executable
+    launcher = os.path.join(repo_root, "launch", "bin", "hydra-terminal.bat")
+    if not os.path.isfile(launcher):
+        raise FileNotFoundError(f"Sovereign terminal launcher missing: {launcher}")
 
     icon_path = os.path.join(repo_root, "assets", "hydra_desktop.ico")
     if not os.path.isfile(icon_path):
@@ -84,11 +84,11 @@ def create_tui_shortcut(
     ps_script = (
         "$WshShell = New-Object -ComObject WScript.Shell\n"
         f'$Shortcut = $WshShell.CreateShortcut("{shortcut_path}")\n'
-        f'$Shortcut.TargetPath = "{target_exe}"\n'
-        '$Shortcut.Arguments = "-m hydra_cli.cli tui"\n'
-        f'$Shortcut.WorkingDirectory = "{repo_root}"\n'
+        f'$Shortcut.TargetPath = "{launcher}"\n'
+        '$Shortcut.Arguments = ""\n'
+        f'$Shortcut.WorkingDirectory = "{os.path.dirname(repo_root)}"\n'
         f'$Shortcut.IconLocation = "{icon_path},0"\n'
-        '$Shortcut.Description = "Hydra Sovereign Interactive TUI & AI Shell"\n'
+        '$Shortcut.Description = "Hydra Sovereign Terminal"\n'
         "$Shortcut.Save()\n"
     )
     cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script]
@@ -98,7 +98,7 @@ def create_tui_shortcut(
         raise RuntimeError(f"Failed to create TUI shortcut at {shortcut_path}")
 
     print(f"Created TUI shortcut: {shortcut_path}")
-    print(f"Target: {target_exe} -m hydra_cli.cli tui")
+    print(f"Target: {launcher}")
     print(f"Icon: {icon_path},0")
     return shortcut_path
 
@@ -133,7 +133,7 @@ def verify_shortcut(shortcut_path: str) -> bool:
     cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_inspect]
     res = subprocess.run(cmd, capture_output=True, text=True, check=True)
     print("Shortcut properties:\n" + res.stdout)
-    return ("hydra_cli.desktop" in res.stdout) or ("hydra_cli.cli" in res.stdout)
+    return ("hydra_cli.desktop" in res.stdout) or ("hydra-terminal.bat" in res.stdout)
 
 
 def create_all_shortcuts(repo_root: str | None = None) -> Tuple[str, str]:

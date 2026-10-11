@@ -1715,6 +1715,43 @@ def tui_composer():
 
 
 @check
+def desktop_app_pythonw_launch():
+    """Desktop shortcut runs pythonw.exe, which has no stdout; the server must still come up."""
+    if os.name != "nt":
+        raise Skip("pythonw.exe launch; this host is POSIX")
+    import socket
+
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    if not os.path.isfile(pythonw):
+        raise Skip("pythonw.exe not found beside the interpreter")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    home = tempfile.mkdtemp(prefix="hydra_pw_")
+    env = dict(os.environ, USERPROFILE=home, HOME=home)
+    proc = subprocess.Popen(
+        [pythonw, "-m", "hydra_cli.desktop", "--no-browser", "--port", str(port)],
+        cwd=REPO,
+        env=env,
+    )
+    try:
+        status = None
+        for _ in range(40):
+            if proc.poll() is not None:
+                break
+            try:
+                status = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=2).status
+                break
+            except (urllib.error.URLError, OSError):
+                time.sleep(0.5)
+        assert status == 200, f"desktop server did not answer under pythonw (exit {proc.poll()})"
+    finally:
+        proc.kill()
+        proc.wait()
+        shutil.rmtree(home, ignore_errors=True)
+
+
+@check
 def windows_console():
     if os.name != "nt":
         raise Skip("Windows console Ctrl+Space reader; this host is POSIX")
