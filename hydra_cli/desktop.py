@@ -1203,7 +1203,7 @@ function consumeSseBuffer(buf, onEvent, flush) {
   let rest = buf || '';
   const blocks = [];
   let idx;
-  while ((idx = rest.indexOf('\n\n')) !== -1) {
+  while ((idx = rest.indexOf('\\n\\n')) !== -1) {
     blocks.push(rest.slice(0, idx));
     rest = rest.slice(idx + 2);
   }
@@ -1214,14 +1214,14 @@ function consumeSseBuffer(buf, onEvent, flush) {
   blocks.forEach(block => {
     let event = 'message';
     const dataLines = [];
-    block.split('\n').forEach(line => {
+    block.split('\\n').forEach(line => {
       if (line.startsWith('event:')) event = line.slice(6).trim();
       else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim());
     });
     if (!dataLines.length) return;
     let payload = {};
-    try { payload = JSON.parse(dataLines.join('\n')); }
-    catch (e) { payload = { text: dataLines.join('\n') }; }
+    try { payload = JSON.parse(dataLines.join('\\n')); }
+    catch (e) { payload = { text: dataLines.join('\\n') }; }
     onEvent(event, payload);
   });
   return rest;
