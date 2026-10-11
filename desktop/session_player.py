@@ -295,36 +295,45 @@ class SessionTracePlayer:
   <title>Hydra Session Player: {session_id}</title>
   <style>
     :root {{
-      --bg: #090d16;
-      --card-bg: #111827;
-      --border: #1f2937;
-      --accent: #3b82f6;
-      --text: #f3f4f6;
+      --bg: #000000;
+      --card-bg: #080808;
+      --surface: #0d0d0d;
+      --border: #1a1a1a;
+      --accent: #00ff66;
+      --accent-secondary: #00ff88;
+      --accent-glow: 0 0 12px rgba(0, 255, 102, 0.35);
+      --text: #ffffff;
       --text-muted: #9ca3af;
-      --success: #10b981;
+      --success: #00ff66;
       --error: #ef4444;
+      --font-mono: 'Cascadia Code', 'Cascadia Mono', monospace;
+      --radius-sm: 8px;
+      --radius-md: 12px;
+      --radius-lg: 16px;
+      --radius-xl: 20px;
+      --transition-apple: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
     }}
-    * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; }}
-    body {{ background: var(--bg); color: var(--text); padding: 24px; }}
+    * {{ box-sizing: border-box; margin: 0; padding: 0; font-family: var(--font-mono); }}
+    body {{ background: var(--bg); color: var(--text); padding: 24px; font-family: var(--font-mono); -webkit-font-smoothing: antialiased; }}
     .header {{ margin-bottom: 24px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }}
-    .header h1 {{ font-size: 20px; font-weight: 600; color: #fff; }}
+    .header h1 {{ font-size: 20px; font-weight: 700; color: #ffffff; text-shadow: 0 0 10px rgba(0, 255, 102, 0.4); }}
     .header .meta {{ font-size: 13px; color: var(--text-muted); margin-top: 6px; }}
     .player-grid {{ display: grid; grid-template-columns: 320px 1fr; gap: 20px; }}
-    .timeline-card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; height: 680px; overflow-y: auto; }}
-    .timeline-item {{ padding: 10px 12px; margin-bottom: 8px; border-radius: 6px; border: 1px solid var(--border); cursor: pointer; transition: all 0.15s ease; font-size: 13px; }}
-    .timeline-item:hover {{ border-color: var(--accent); }}
-    .timeline-item.active {{ background: #1e3a8a; border-color: var(--accent); color: #fff; }}
-    .badge {{ display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 11px; text-transform: uppercase; }}
-    .badge-success {{ background: rgba(16, 185, 129, 0.2); color: var(--success); }}
-    .badge-error {{ background: rgba(239, 68, 68, 0.2); color: var(--error); }}
-    .inspector-card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 20px; display: flex; flex-direction: column; gap: 16px; }}
+    .timeline-card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; padding: 16px; height: 680px; overflow-y: auto; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6); }}
+    .timeline-item {{ padding: 12px 14px; margin-bottom: 8px; border-radius: 12px; border: 1px solid var(--border); cursor: pointer; transition: var(--transition-apple); font-size: 13px; background: var(--surface); color: var(--text); }}
+    .timeline-item:hover {{ border-color: rgba(0, 255, 102, 0.4); transform: translateY(-1px); }}
+    .timeline-item.active {{ background: rgba(0, 255, 102, 0.12); border-color: var(--accent); color: var(--accent); box-shadow: 0 0 10px rgba(0, 255, 102, 0.25); font-weight: 600; }}
+    .badge {{ display: inline-block; padding: 3px 8px; border-radius: 9999px; font-size: 11px; text-transform: uppercase; font-weight: 600; }}
+    .badge-success {{ background: rgba(0, 255, 102, 0.15); color: var(--success); border: 1px solid var(--success); }}
+    .badge-error {{ background: rgba(239, 68, 68, 0.15); color: var(--error); border: 1px solid var(--error); }}
+    .inspector-card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 16px; padding: 20px; display: flex; flex-direction: column; gap: 16px; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6); }}
     .controls {{ display: flex; align-items: center; gap: 12px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }}
-    .btn {{ background: #1f2937; border: 1px solid #374151; color: #fff; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; }}
-    .btn:hover {{ background: #374151; }}
-    .btn-primary {{ background: var(--accent); border-color: var(--accent); }}
-    .btn-primary:hover {{ background: #2563eb; }}
-    .scrubber {{ flex-grow: 1; }}
-    .detail-view {{ background: #0b0f19; border: 1px solid var(--border); border-radius: 6px; padding: 16px; flex-grow: 1; overflow: auto; font-family: monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }}
+    .btn {{ background: #0d0d0d; border: 1px solid var(--border); color: #ffffff; padding: 8px 16px; border-radius: 12px; cursor: pointer; font-size: 13px; transition: var(--transition-apple); font-weight: 500; font-family: var(--font-mono); }}
+    .btn:hover {{ background: #141414; border-color: rgba(0, 255, 102, 0.4); color: var(--accent); transform: translateY(-1px); }}
+    .btn-primary {{ background: var(--accent); border-color: var(--accent); color: #000000; font-weight: 700; box-shadow: var(--accent-glow); }}
+    .btn-primary:hover {{ background: var(--accent-secondary); box-shadow: 0 0 18px rgba(0, 255, 102, 0.55); transform: translateY(-2px); }}
+    .scrubber {{ flex-grow: 1; accent-color: var(--accent); cursor: pointer; }}
+    .detail-view {{ background: #000000; border: 1px solid var(--border); border-radius: 12px; padding: 16px; flex-grow: 1; overflow: auto; font-family: var(--font-mono); font-size: 12px; line-height: 1.6; white-space: pre-wrap; color: var(--text); }}
   </style>
 </head>
 <body>

@@ -50,41 +50,66 @@ def get_desktop_html() -> str:
 <title>Hydra Sovereign Desktop</title>
 <style>
 :root {
-  --bg-primary: #0b0f17;
-  --bg-secondary: #111827;
-  --bg-tertiary: #1f2937;
-  --border: #374151;
-  --accent: #10b981;
-  --accent-hover: #059669;
-  --accent-dim: rgba(16, 185, 129, 0.15);
-  --text-primary: #f3f4f6;
-  --text-secondary: #9ca3af;
-  --text-muted: #6b7280;
+  --bg-primary: #000000;
+  --bg-secondary: #080808;
+  --bg-tertiary: #0d0d0d;
+  --bg-elevated: #141414;
+  --bg-glass: rgba(8, 8, 8, 0.85);
+  --border: #1a1a1a;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-active: #00ff66;
+  --accent: #00ff66;
+  --accent-secondary: #00ff88;
+  --accent-hover: #00e65c;
+  --accent-dim: rgba(0, 255, 102, 0.12);
+  --accent-glow: 0 0 12px rgba(0, 255, 102, 0.35);
+  --accent-glow-strong: 0 0 20px rgba(0, 255, 102, 0.55);
+  --text-primary: #ffffff;
+  --text-secondary: #f3f4f6;
+  --text-muted: #9ca3af;
   --error: #ef4444;
-  --diff-add: #064e3b;
-  --diff-add-text: #a7f3d0;
-  --diff-del: #7f1d1d;
-  --diff-del-text: #fecaca;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --error-dim: rgba(239, 68, 68, 0.15);
+  --diff-add: #052e16;
+  --diff-add-text: #86efac;
+  --diff-del: #450a0a;
+  --diff-del-text: #fca5a5;
+  --font-mono: 'Cascadia Code', 'Cascadia Mono', Consolas, monospace;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+  --easing-apple: cubic-bezier(0.16, 1, 0.3, 1);
+  --transition-apple: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
-* { box-sizing: border-box; margin: 0; padding: 0; }
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-mono);
+}
 body {
   background-color: var(--bg-primary);
   color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: var(--font-mono);
   height: 100vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  letter-spacing: -0.2px;
+  -webkit-font-smoothing: antialiased;
 }
 header {
-  background: var(--bg-secondary);
+  background: var(--bg-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border-bottom: 1px solid var(--border);
-  padding: 10px 20px;
+  padding: 12px 24px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
+  position: relative;
+  z-index: 100;
 }
 .brand {
   display: flex;
@@ -93,89 +118,148 @@ header {
   font-family: var(--font-mono);
   font-weight: 700;
   color: var(--accent);
-  letter-spacing: 0.5px;
+  letter-spacing: 1px;
+  text-shadow: 0 0 10px rgba(0, 255, 102, 0.45);
 }
-.brand svg { width: 28px; height: 28px; fill: var(--accent); }
+.brand svg {
+  width: 28px;
+  height: 28px;
+  fill: var(--accent);
+  filter: drop-shadow(0 0 8px rgba(0, 255, 102, 0.5));
+}
 .badge {
   background: var(--accent-dim);
   color: var(--accent);
   font-size: 11px;
-  padding: 3px 8px;
+  padding: 3px 10px;
   border-radius: 9999px;
   border: 1px solid var(--accent);
+  box-shadow: 0 0 8px rgba(0, 255, 102, 0.25);
+  font-weight: 600;
 }
 .header-controls {
   display: flex;
   align-items: center;
   gap: 12px;
 }
-select, input, button {
+select, input, button, textarea {
+  font-family: var(--font-mono);
+}
+select, input {
   background: var(--bg-tertiary);
   color: var(--text-primary);
   border: 1px solid var(--border);
-  padding: 6px 12px;
-  border-radius: 6px;
+  padding: 8px 14px;
+  border-radius: 12px;
   font-size: 13px;
-  font-family: inherit;
   outline: none;
+  transition: var(--transition-apple);
 }
-select:focus, input:focus { border-color: var(--accent); }
+select:focus, input:focus, textarea:focus {
+  border-color: var(--accent);
+  box-shadow: var(--accent-glow);
+}
 button {
   background: var(--accent);
-  color: #000;
-  font-weight: 600;
+  color: #000000;
+  font-weight: 700;
   cursor: pointer;
   border: none;
-  transition: background 0.15s;
+  padding: 8px 16px;
+  border-radius: 12px;
+  font-size: 13px;
+  transition: var(--transition-apple);
+  box-shadow: var(--accent-glow);
 }
-button:hover { background: var(--accent-hover); }
+button:hover {
+  background: var(--accent-secondary);
+  transform: translateY(-2px);
+  box-shadow: var(--accent-glow-strong);
+}
+button:active {
+  transform: translateY(0);
+}
 button.secondary {
   background: var(--bg-tertiary);
   color: var(--text-primary);
   border: 1px solid var(--border);
+  box-shadow: none;
 }
-button.secondary:hover { background: var(--border); }
+button.secondary:hover {
+  background: var(--bg-elevated);
+  border-color: rgba(0, 255, 102, 0.4);
+  color: var(--accent);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+button.primary {
+  background: var(--accent);
+  color: #000000;
+  font-weight: 700;
+  box-shadow: var(--accent-glow);
+}
+button.primary:hover {
+  background: var(--accent-secondary);
+  box-shadow: var(--accent-glow-strong);
+  transform: translateY(-2px);
+}
 .status-pill {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   font-size: 12px;
   color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  padding: 6px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
 }
 .status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 8px var(--accent);
+  box-shadow: 0 0 10px var(--accent), 0 0 3px #00ff66;
+  animation: phosphorPulse 2s infinite ease-in-out;
+}
+@keyframes phosphorPulse {
+  0%, 100% { opacity: 1; transform: scale(1); box-shadow: 0 0 10px var(--accent); }
+  50% { opacity: 0.6; transform: scale(0.9); box-shadow: 0 0 4px var(--accent); }
 }
 .session-bar {
-  background: #0f172a;
+  background: #000000;
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
-  padding: 4px 16px;
-  gap: 6px;
+  padding: 6px 20px;
+  gap: 8px;
   overflow-x: auto;
 }
 .session-tab {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
-  border-radius: 4px;
+  padding: 6px 14px;
+  border-radius: 12px;
   font-size: 12px;
   font-family: var(--font-mono);
-  color: var(--text-secondary);
+  color: var(--text-muted);
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   cursor: pointer;
   white-space: nowrap;
+  transition: var(--transition-apple);
+}
+.session-tab:hover {
+  color: var(--text-primary);
+  border-color: rgba(0, 255, 102, 0.3);
+  transform: translateY(-1px);
 }
 .session-tab.active {
   background: var(--accent-dim);
   color: var(--accent);
   border-color: var(--accent);
+  box-shadow: 0 0 10px rgba(0, 255, 102, 0.25);
   font-weight: 600;
 }
 .session-close {
@@ -183,15 +267,27 @@ button.secondary:hover { background: var(--border); }
   font-size: 14px;
   cursor: pointer;
   line-height: 1;
+  transition: color 0.15s;
 }
-.session-close:hover { color: var(--error); }
+.session-close:hover {
+  color: var(--error);
+}
 .add-session-btn {
   background: transparent;
   color: var(--accent);
-  border: 1px dashed var(--accent);
-  padding: 4px 8px;
-  font-size: 11px;
-  border-radius: 4px;
+  border: 1px dashed rgba(0, 255, 102, 0.6);
+  padding: 6px 12px;
+  font-size: 12px;
+  border-radius: 12px;
+  box-shadow: none;
+  cursor: pointer;
+  transition: var(--transition-apple);
+}
+.add-session-btn:hover {
+  background: var(--accent-dim);
+  border-style: solid;
+  border-color: var(--accent);
+  transform: translateY(-1px);
 }
 .workspace {
   flex: 1;
@@ -199,34 +295,37 @@ button.secondary:hover { background: var(--border); }
   overflow: hidden;
 }
 .sidebar {
-  width: 200px;
+  width: 220px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  padding: 12px 8px;
-  gap: 4px;
+  padding: 16px 10px;
+  gap: 6px;
 }
 .nav-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
-  border-radius: 6px;
-  color: var(--text-secondary);
+  padding: 10px 14px;
+  border-radius: 12px;
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 13px;
   font-weight: 500;
-  transition: all 0.15s;
+  transition: var(--transition-apple);
 }
 .nav-item:hover {
   background: var(--bg-tertiary);
   color: var(--text-primary);
+  transform: translateX(3px);
 }
 .nav-item.active {
   background: var(--accent-dim);
   color: var(--accent);
   border-left: 3px solid var(--accent);
+  box-shadow: inset 0 0 12px rgba(0, 255, 102, 0.08);
+  font-weight: 600;
 }
 .main-stage {
   flex: 1;
@@ -238,88 +337,109 @@ button.secondary:hover { background: var(--border); }
 .chat-pane {
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
+  padding: 24px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 20px;
 }
 .message {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-width: 85%;
-  animation: fadeIn 0.2s ease-in-out;
+  gap: 8px;
+  max-width: 80%;
+  animation: fadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
-@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-.message.user { align-self: flex-end; }
-.message.assistant { align-self: flex-start; }
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.message.user {
+  align-self: flex-end;
+}
+.message.assistant {
+  align-self: flex-start;
+}
 .msg-header {
   font-size: 11px;
   font-family: var(--font-mono);
   color: var(--text-muted);
+  letter-spacing: 0.5px;
 }
 .msg-bubble {
-  padding: 12px 16px;
-  border-radius: 8px;
+  padding: 14px 18px;
+  border-radius: 16px;
   font-size: 14px;
-  line-height: 1.5;
+  line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+  transition: var(--transition-apple);
 }
 .message.user .msg-bubble {
-  background: #1e3a8a;
-  color: #eff6ff;
-  border-bottom-right-radius: 2px;
+  background: #0d1f12;
+  border: 1px solid rgba(0, 255, 102, 0.35);
+  color: #ffffff;
+  border-bottom-right-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7);
 }
 .message.assistant .msg-bubble {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
   color: var(--text-primary);
-  border-bottom-left-radius: 2px;
+  border-bottom-left-radius: 4px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7);
 }
 .tool-card {
-  background: #0f172a;
-  border: 1px solid #1e293b;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
-  padding: 10px 14px;
-  border-radius: 6px;
+  padding: 12px 16px;
+  border-radius: 12px;
   font-family: var(--font-mono);
   font-size: 12px;
   margin: 6px 0;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6);
 }
 .tool-title {
   color: var(--accent);
-  font-weight: 600;
-  margin-bottom: 4px;
+  font-weight: 700;
+  margin-bottom: 6px;
+  text-shadow: 0 0 8px rgba(0, 255, 102, 0.35);
 }
 .input-area {
-  padding: 14px 20px;
-  background: var(--bg-secondary);
+  padding: 16px 24px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 .input-box-row {
   display: flex;
-  gap: 10px;
+  gap: 12px;
+  align-items: flex-end;
 }
 textarea {
   flex: 1;
   background: var(--bg-tertiary);
   color: var(--text-primary);
   border: 1px solid var(--border);
-  padding: 10px 14px;
-  border-radius: 8px;
-  font-family: inherit;
+  padding: 12px 16px;
+  border-radius: 16px;
   font-size: 14px;
   resize: none;
-  height: 52px;
+  min-height: 56px;
   outline: none;
+  transition: var(--transition-apple);
+  caret-color: var(--accent);
 }
-textarea:focus { border-color: var(--accent); }
+textarea:focus {
+  border-color: var(--accent);
+  box-shadow: var(--accent-glow);
+}
 .side-drawer {
-  width: 480px;
+  width: 500px;
   background: var(--bg-secondary);
   border-left: 1px solid var(--border);
   display: flex;
@@ -327,50 +447,62 @@ textarea:focus { border-color: var(--accent); }
   overflow: hidden;
 }
 .drawer-header {
-  padding: 12px 16px;
+  padding: 14px 20px;
   border-bottom: 1px solid var(--border);
   font-family: var(--font-mono);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
 }
 .drawer-tabs {
   display: flex;
   border-bottom: 1px solid var(--border);
+  background: var(--bg-primary);
+  padding: 4px 8px;
+  gap: 4px;
 }
 .drawer-tab {
   flex: 1;
   text-align: center;
-  padding: 8px 4px;
+  padding: 8px 6px;
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--text-muted);
   cursor: pointer;
-  border-bottom: 2px solid transparent;
+  border-radius: 10px;
+  transition: var(--transition-apple);
+}
+.drawer-tab:hover {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
 }
 .drawer-tab.active {
   color: var(--accent);
-  border-bottom-color: var(--accent);
+  background: var(--accent-dim);
   font-weight: 600;
+  box-shadow: 0 0 8px rgba(0, 255, 102, 0.2);
 }
 .drawer-body {
   flex: 1;
-  padding: 14px;
+  padding: 16px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 .screen-container {
   position: relative;
   width: 100%;
   aspect-ratio: 16/9;
-  background: #000;
+  background: #000000;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 16px;
   overflow: hidden;
   cursor: crosshair;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
 }
 .screen-preview-img {
   width: 100%;
@@ -387,16 +519,19 @@ textarea:focus { border-color: var(--accent); }
   pointer-events: none;
 }
 .terminal-view {
-  background: #000;
-  color: #10b981;
+  background: #000000;
+  color: var(--accent);
   font-family: var(--font-mono);
   font-size: 12px;
-  padding: 12px;
-  border-radius: 6px;
+  padding: 16px;
+  border-radius: 16px;
   height: 100%;
   overflow-y: auto;
   white-space: pre-wrap;
-  border: 1px solid #1e293b;
+  border: 1px solid rgba(0, 255, 102, 0.25);
+  box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.95);
+  text-shadow: 0 0 4px rgba(0, 255, 102, 0.35);
+  line-height: 1.6;
 }
 .diff-container {
   display: flex;
@@ -406,31 +541,34 @@ textarea:focus { border-color: var(--accent); }
   font-size: 12px;
 }
 .diff-card {
-  background: #0f172a;
+  background: var(--bg-tertiary);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 16px;
   overflow: hidden;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+  transition: var(--transition-apple);
 }
 .diff-header {
-  background: #1e293b;
-  padding: 8px 12px;
+  background: var(--bg-elevated);
+  padding: 10px 16px;
   font-weight: 600;
   display: flex;
   justify-content: space-between;
   align-items: center;
   color: var(--accent);
+  border-bottom: 1px solid var(--border);
 }
 .diff-body {
-  padding: 8px 0;
+  padding: 10px 0;
   overflow-x: auto;
 }
 .diff-line {
-  padding: 2px 12px;
+  padding: 2px 14px;
   white-space: pre;
 }
 .diff-line.add { background: var(--diff-add); color: var(--diff-add-text); }
 .diff-line.del { background: var(--diff-del); color: var(--diff-del-text); }
-.diff-line.ctx { color: var(--text-secondary); }
+.diff-line.ctx { color: var(--text-muted); }
 .coord-readout {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -440,23 +578,40 @@ textarea:focus { border-color: var(--accent); }
   display: none;
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.75);
-  backdrop-filter: blur(4px);
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   z-index: 99999;
   justify-content: center;
   align-items: flex-start;
-  padding-top: 15vh;
+  padding-top: 12vh;
+  animation: fadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .palette-container {
-  background: #0f172a;
+  background: var(--bg-secondary);
   border: 1px solid var(--accent);
-  border-radius: 8px;
-  width: 620px;
+  border-radius: 20px;
+  width: 660px;
   max-width: 90vw;
-  box-shadow: 0 12px 35px rgba(0,0,0,0.85);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.95), var(--accent-glow);
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  transition: var(--transition-apple);
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-dim);
 }
 </style>
 </head>
@@ -468,7 +623,7 @@ textarea:focus { border-color: var(--accent); }
     <span class="badge">v""" + __version__ + """</span>
   </div>
   <div class="header-controls">
-    <div class="token-tally-widget" id="token-tally" title="Live token usage and cost accounting" style="display: flex; align-items: center; gap: 8px; font-size: 11px; background: rgba(31, 41, 55, 0.7); padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);">
+    <div class="token-tally-widget" id="token-tally" title="Live token usage and cost accounting" style="display: flex; align-items: center; gap: 8px; font-size: 11px; background: var(--bg-tertiary); padding: 6px 14px; border-radius: 12px; border: 1px solid var(--border);">
       <span style="color: var(--text-secondary);">Tokens: <strong id="tally-tokens" style="color: var(--text-primary); font-family: var(--font-mono);">0</strong></span>
       <span style="color: var(--border);">&bull;</span>
       <span style="color: var(--text-secondary);">Cost: <strong id="tally-cost" style="color: var(--accent); font-family: var(--font-mono);">$0.0000</strong></span>
@@ -478,6 +633,8 @@ textarea:focus { border-color: var(--accent); }
       Gateway : 7777
     </div>
     <select id="model-select">
+      <option value="mimo 2.6 pro" selected>Xiaomi MiMo 2.6 Pro (Daily Driver)</option>
+      <option value="mimo 2.6 flash">Xiaomi MiMo 2.6 Flash</option>
       <option value="sonnet 5.5">Claude Sonnet 5.5</option>
       <option value="claude-3-7-sonnet">Claude 3.7 Sonnet</option>
       <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
@@ -573,12 +730,12 @@ textarea:focus { border-color: var(--accent); }
       <div class="agent-panel" style="display: flex; flex-direction: column; gap: 8px;">
         <div style="display: flex; justify-content: space-between; align-items: center;">
           <span style="font-weight: 600; font-size: 13px;">AUTONOMOUS AGENT RUNNER</span>
-          <span id="agent-status-badge" class="badge" style="background: #374151;">IDLE</span>
+          <span id="agent-status-badge" class="badge" style="background: var(--bg-elevated); border-color: var(--border);">IDLE</span>
         </div>
-        <textarea id="agent-task-input" style="width: 100%; min-height: 60px; background: #0b0f17; border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); padding: 8px; font-family: inherit; font-size: 12px; resize: vertical;" placeholder="Enter autonomous task (e.g. 'Navigate to data:... and extract table')..."></textarea>
+        <textarea id="agent-task-input" style="width: 100%; min-height: 64px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 10px 12px; font-family: var(--font-mono); font-size: 12px; resize: vertical;" placeholder="Enter autonomous task (e.g. 'Navigate to data:... and extract table')..."></textarea>
         <div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
-          <input type="number" id="agent-max-steps" value="30" min="1" max="100" style="width: 50px; background: #0b0f17; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 4px 6px; font-size: 11px;" title="Max Steps" />
-          <select id="agent-tool-profile" style="background: #0b0f17; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 4px 6px; font-size: 11px;" title="Tool Preset Profile" onchange="updateAgentToolProfile(this.value)">
+          <input type="number" id="agent-max-steps" value="30" min="1" max="100" style="width: 58px; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 6px 8px; font-size: 12px;" title="Max Steps" />
+          <select id="agent-tool-profile" style="background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 6px 10px; font-size: 12px;" title="Tool Preset Profile" onchange="updateAgentToolProfile(this.value)">
             <option value="full_automation" selected>Full Automation</option>
             <option value="browser_only">Browser Only</option>
             <option value="workspace_only">Workspace Only</option>
@@ -593,7 +750,7 @@ textarea:focus { border-color: var(--accent); }
           <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="openTemplatesModal()" id="btn-agent-templates" title="Workflow Templates">📋 Templates</button>
           <button class="secondary" style="padding: 6px 8px; font-size: 12px;" onclick="openJobsModal()" id="btn-agent-jobs" title="Scheduled Agent Jobs">⏱ Jobs</button>
         </div>
-        <div style="background: #1f2937; border-radius: 4px; height: 6px; width: 100%; overflow: hidden; margin-top: 4px;">
+        <div style="background: var(--bg-tertiary); border-radius: 8px; height: 6px; width: 100%; overflow: hidden; margin-top: 4px; border: 1px solid var(--border);">
           <div id="agent-progress-bar" style="background: var(--accent); width: 0%; height: 100%; transition: width 0.3s;"></div>
         </div>
         <div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted);">
@@ -610,16 +767,16 @@ textarea:focus { border-color: var(--accent); }
 </div>
 <!-- Workflow Templates Modal -->
 <div id="workflow-templates-modal" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 99999; justify-content: center; align-items: flex-start; padding-top: 10vh;" onclick="handleTemplatesBackdropClick(event)">
-  <div class="palette-container" style="background: #0f172a; border: 1px solid var(--accent); border-radius: 8px; width: 700px; max-width: 90vw; box-shadow: 0 12px 35px rgba(0,0,0,0.85); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
-    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); background: #111827;">
+  <div class="palette-container" style="background: var(--bg-secondary); border: 1px solid var(--accent); border-radius: 20px; width: 720px; max-width: 90vw; box-shadow: 0 24px 60px rgba(0,0,0,0.95), var(--accent-glow); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-elevated);">
       <div style="display: flex; align-items: center; gap: 8px;">
         <span style="color: var(--accent); font-weight: 700; font-size: 15px;">📋</span>
         <span style="font-weight: 600; font-size: 14px;">WORKFLOW TEMPLATES CATALOG</span>
       </div>
       <button class="secondary" style="padding: 2px 8px; font-size: 11px;" onclick="closeTemplatesModal()">✕</button>
     </div>
-    <div style="padding: 10px 16px; border-bottom: 1px solid var(--border); background: #0b0f17;">
-      <input type="text" id="template-search-input" placeholder="Search workflow templates..." style="width: 100%; background: #1f2937; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 6px 10px; font-size: 12px;" oninput="filterTemplates()" />
+    <div style="padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--bg-tertiary);">
+      <input type="text" id="template-search-input" placeholder="Search workflow templates..." style="width: 100%; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 8px 12px; font-size: 13px;" oninput="filterTemplates()" />
     </div>
     <div id="templates-list" style="max-height: 420px; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px;">
     </div>
@@ -628,20 +785,20 @@ textarea:focus { border-color: var(--accent); }
 
 <!-- Scheduled Agent Jobs Modal -->
 <div id="scheduled-jobs-modal" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 99999; justify-content: center; align-items: flex-start; padding-top: 8vh;" onclick="handleJobsBackdropClick(event)">
-  <div class="palette-container" style="background: #0f172a; border: 1px solid var(--accent); border-radius: 8px; width: 750px; max-width: 92vw; box-shadow: 0 12px 35px rgba(0,0,0,0.85); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
-    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); background: #111827;">
+  <div class="palette-container" style="background: var(--bg-secondary); border: 1px solid var(--accent); border-radius: 20px; width: 780px; max-width: 92vw; box-shadow: 0 24px 60px rgba(0,0,0,0.95), var(--accent-glow); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
+    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-elevated);">
       <div style="display: flex; align-items: center; gap: 8px;">
         <span style="color: var(--accent); font-weight: 700; font-size: 15px;">⏱</span>
         <span style="font-weight: 600; font-size: 14px;">SCHEDULED AGENT JOBS</span>
       </div>
       <button class="secondary" style="padding: 2px 8px; font-size: 11px;" onclick="closeJobsModal()">✕</button>
     </div>
-    <div style="padding: 12px 16px; border-bottom: 1px solid var(--border); background: #0b0f17; display: flex; flex-direction: column; gap: 8px;">
+    <div style="padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--bg-tertiary); display: flex; flex-direction: column; gap: 8px;">
       <div style="font-weight: 600; font-size: 12px; color: var(--text-secondary);">CREATE NEW SCHEDULED JOB</div>
       <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-        <input type="text" id="job-name-input" placeholder="Job Name (e.g. Daily Invariant Audit)" style="flex: 1; min-width: 180px; background: #1f2937; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;" />
-        <input type="number" id="job-interval-input" value="60" min="5" placeholder="Interval (sec)" style="width: 100px; background: #1f2937; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;" title="Interval in seconds" />
-        <select id="job-profile-select" style="background: #1f2937; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;">
+        <input type="text" id="job-name-input" placeholder="Job Name (e.g. Daily Invariant Audit)" style="flex: 1; min-width: 180px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;" />
+        <input type="number" id="job-interval-input" value="60" min="5" placeholder="Interval (sec)" style="width: 100px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;" title="Interval in seconds" />
+        <select id="job-profile-select" style="background: var(--bg-primary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;">
           <option value="full_automation">Full Automation</option>
           <option value="browser_only">Browser Only</option>
           <option value="workspace_only">Workspace Only</option>
@@ -649,7 +806,7 @@ textarea:focus { border-color: var(--accent); }
         </select>
       </div>
       <div style="display: flex; gap: 8px;">
-        <input type="text" id="job-task-input" placeholder="Task description (e.g. Inspect workspace and generate report)..." style="flex: 1; background: #1f2937; border: 1px solid var(--border); border-radius: 4px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;" />
+        <input type="text" id="job-task-input" placeholder="Task description (e.g. Inspect workspace and generate report)..." style="flex: 1; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 12px; color: var(--text-primary); padding: 5px 8px; font-size: 12px;" />
         <button class="primary" style="padding: 5px 12px; font-size: 12px;" onclick="createScheduledJob()">Schedule</button>
       </div>
     </div>
@@ -664,15 +821,15 @@ textarea:focus { border-color: var(--accent); }
 
 <!-- Command Palette Modal -->
 <div id="command-palette-modal" class="modal-overlay" style="display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(4px); z-index: 99999; justify-content: center; align-items: flex-start; padding-top: 15vh;" onclick="handlePaletteBackdropClick(event)">
-  <div class="palette-container" style="background: #0f172a; border: 1px solid var(--accent); border-radius: 8px; width: 620px; max-width: 90vw; box-shadow: 0 12px 35px rgba(0,0,0,0.85); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
-    <div style="display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); gap: 10px; background: #111827;">
+  <div class="palette-container" style="background: var(--bg-secondary); border: 1px solid var(--accent); border-radius: 20px; width: 640px; max-width: 90vw; box-shadow: 0 24px 60px rgba(0,0,0,0.95), var(--accent-glow); overflow: hidden; display: flex; flex-direction: column;" onclick="event.stopPropagation()">
+    <div style="display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); gap: 10px; background: var(--bg-elevated);">
       <span style="color: var(--accent); font-weight: 700; font-size: 14px;">⌘</span>
       <input type="text" id="palette-input" placeholder="Type a command or search quick actions... (Esc to close)" style="flex: 1; background: transparent; border: none; outline: none; color: var(--text-primary); font-size: 13px; font-family: inherit;" oninput="filterPaletteActions()" onkeydown="handlePaletteKeydown(event)" />
       <span style="font-size: 11px; color: var(--text-muted); background: #1e293b; padding: 2px 6px; border-radius: 4px; font-family: var(--font-mono);">Esc</span>
     </div>
     <div id="palette-results" style="max-height: 380px; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px;">
     </div>
-    <div style="padding: 8px 16px; background: #0b0f17; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-muted); display: flex; justify-content: space-between;">
+    <div style="padding: 8px 16px; background: var(--bg-tertiary); border-top: 1px solid var(--border); font-size: 11px; color: var(--text-muted); display: flex; justify-content: space-between;">
       <span>Use <kbd style='background:#1e293b;padding:1px 4px;border-radius:3px;'>↑</kbd> <kbd style='background:#1e293b;padding:1px 4px;border-radius:3px;'>↓</kbd> to navigate, <kbd style='background:#1e293b;padding:1px 4px;border-radius:3px;'>Enter</kbd> to select</span>
       <span>Hydra Sovereign Command Palette</span>
     </div>
@@ -692,7 +849,7 @@ const sessions = {
     messages: [
       { role: 'assistant', header: 'HYDRA ORCHESTRATOR', text: 'Sovereign multi-headed desktop environment primed.' }
     ],
-    model: 'sonnet 5.5',
+    model: 'mimo 2.6 pro',
     nav: 'chat'
   }
 };
@@ -707,7 +864,7 @@ function switchSession(sid) {
   if (targetTab) targetTab.classList.add('active');
 
   const sess = sessions[sid];
-  document.getElementById('model-select').value = sess.model || 'sonnet 5.5';
+  document.getElementById('model-select').value = sess.model || 'mimo 2.6 pro';
   renderSessionMessages(sid);
 }
 
@@ -840,13 +997,13 @@ function renderOverlayHighlights(highlights) {
     const sw = Math.round(h.width * scaleX);
     const sh = Math.round(h.height * scaleY);
 
-    ctx.strokeStyle = '#ef4444';
+    ctx.strokeStyle = '#00ff66';
     ctx.lineWidth = 2;
     ctx.strokeRect(sx, sy, sw, sh);
-    ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
+    ctx.fillStyle = 'rgba(0, 255, 102, 0.2)';
     ctx.fillRect(sx, sy, sw, sh);
-    ctx.fillStyle = '#fca5a5';
-    ctx.font = '10px monospace';
+    ctx.fillStyle = '#86efac';
+    ctx.font = '10px var(--font-mono)';
     ctx.fillText(h.label || 'Target', sx + 2, Math.max(10, sy - 4));
   });
 }
@@ -873,7 +1030,7 @@ function handleScreenHover(e) {
 
     const curX = e.clientX - box.left;
     const curY = e.clientY - box.top;
-    ctx.strokeStyle = 'rgba(16, 185, 129, 0.5)';
+    ctx.strokeStyle = 'rgba(0, 255, 102, 0.6)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(curX, 0);
@@ -882,10 +1039,10 @@ function handleScreenHover(e) {
     ctx.lineTo(canvas.width, curY);
     ctx.stroke();
 
-    ctx.strokeStyle = '#10b981';
+    ctx.strokeStyle = '#00ff66';
     ctx.lineWidth = 2;
     ctx.strokeRect(4, 4, canvas.width - 8, canvas.height - 8);
-    ctx.fillStyle = 'rgba(16, 185, 129, 0.05)';
+    ctx.fillStyle = 'rgba(0, 255, 102, 0.05)';
     ctx.fillRect(4, 4, canvas.width - 8, canvas.height - 8);
   }
 }
@@ -1065,7 +1222,7 @@ async function startAgentTask() {
   const task = (taskInput && taskInput.value.trim()) || (promptInput && promptInput.value.trim()) || '';
   if (!task) return;
   const maxSteps = parseInt(document.getElementById('agent-max-steps').value || '30', 10);
-  const model = document.getElementById('model-select').value || 'sonnet 5.5';
+  const model = document.getElementById('model-select').value || 'mimo 2.6 pro';
   const profileSel = document.getElementById('agent-tool-profile');
   const toolProfile = profileSel ? profileSel.value : 'full_automation';
 
@@ -1172,8 +1329,8 @@ function renderAgentStatus(st) {
     traceLog.innerHTML = '';
     st.actions.forEach(a => {
       const card = document.createElement('div');
-      card.style.cssText = 'background: #111827; border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-family: var(--font-mono); font-size: 11px;';
-      const statusColor = a.status === 'success' ? '#10b981' : (a.status === 'error' ? '#ef4444' : '#9ca3af');
+      card.style.cssText = 'background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-family: var(--font-mono); font-size: 11px;';
+      const statusColor = a.status === 'success' ? 'var(--accent)' : (a.status === 'error' ? 'var(--error)' : 'var(--text-muted)');
       card.innerHTML = `
         <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
           <span style="font-weight: 600; color: var(--accent);">Step ${a.step}: ${escapeHtml(a.action)}</span>
@@ -1527,10 +1684,10 @@ function renderPaletteActions() {
     const bg = isSel ? 'var(--accent-dim)' : 'transparent';
     const border = isSel ? 'var(--accent)' : 'transparent';
     return `
-      <div class="palette-item" style="display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; border-radius: 6px; background: ${bg}; border: 1px solid ${border}; cursor: pointer; transition: background 0.1s;" onclick="executePaletteAction(${idx})" onmouseover="highlightPaletteItem(${idx})">
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <span style="font-size: 10px; font-weight: 600; text-transform: uppercase; background: #1e293b; color: var(--text-secondary); padding: 2px 6px; border-radius: 3px;">${a.category}</span>
-          <span style="font-size: 13px; color: ${isSel ? 'var(--accent)' : 'var(--text-primary)'}; font-weight: ${isSel ? '600' : '400'};">${a.title}</span>
+      <div class="palette-item" style="display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-radius: 12px; background: ${bg}; border: 1px solid ${border}; box-shadow: ${isSel ? 'var(--accent-glow)' : 'none'}; cursor: pointer; transition: var(--transition-apple);" onclick="executePaletteAction(${idx})" onmouseover="highlightPaletteItem(${idx})">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span style="font-size: 10px; font-weight: 700; text-transform: uppercase; background: var(--bg-elevated); color: var(--text-secondary); padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border);">${a.category}</span>
+          <span style="font-size: 13px; color: ${isSel ? 'var(--accent)' : 'var(--text-primary)'}; font-weight: ${isSel ? '700' : '400'};">${a.title}</span>
         </div>
         ${a.shortcut ? `<span style="font-size: 11px; color: var(--text-muted); font-family: var(--font-mono);">${a.shortcut}</span>` : ''}
       </div>
