@@ -22,6 +22,34 @@ except ImportError:
     psutil = None
 
 
+def _proc_meminfo() -> Tuple[int, int, int, float]:
+    """RAM totals from /proc/meminfo when psutil is not installed."""
+    total = free = available = 0
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as handle:
+            for line in handle:
+                key, _, rest = line.partition(":")
+                parts = rest.split()
+                if not parts:
+                    continue
+                try:
+                    kb = int(parts[0]) * 1024
+                except ValueError:
+                    continue
+                if key == "MemTotal":
+                    total = kb
+                elif key == "MemFree":
+                    free = kb
+                elif key == "MemAvailable":
+                    available = kb
+    except OSError:
+        return 0, 0, 0, 0.0
+    if total <= 0:
+        return 0, 0, 0, 0.0
+    used = max(0, total - (available or free))
+    return total, used, free, (used / total) * 100.0
+
+
 @dataclass
 class MetricSample:
     """Atomic snapshot of system hardware metrics."""
@@ -190,7 +218,11 @@ class SystemMetricsCollector:
             except Exception:
                 pass
 
-            dt = max(0.001, now - self._prev_timestamp)
+        if ram_total <= 0:
+            ram_total, ram_used, ram_free, ram_pct = _proc_meminfo()
+
+        dt = max(0.001, now - self._prev_timestamp)
+        if psutil:
             try:
                 dio = psutil.disk_io_counters()
                 if dio and self._prev_disk_read > 0:
