@@ -217,21 +217,56 @@ class SessionContextLedger:
         return dict(self._conn.execute("SELECT category, COUNT(*) FROM turns GROUP BY category").fetchall())
 
     def compact_session(self, max_history_turns: int = 5) -> Dict[str, Any]:
-        """Commit and unload. Turn text stays verbatim. Nothing is summarized away."""
-        del max_history_turns
-        count = self._conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+        """Commit and unload. Turn text stays verbatim. Prune unpinned history if bounded."""
+        conn = self._conn
+        total_on_disk = conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+
+        pruned_messages: List[Dict[str, Any]] = []
+        if max_history_turns > 0:
+            unpinned_rows = conn.execute(
+                "SELECT id, role, body FROM turns WHERE pinned = 0 ORDER BY id ASC"
+            ).fetchall()
+            if len(unpinned_rows) > max_history_turns:
+                excess_count = len(unpinned_rows) - max_history_turns
+                to_prune = unpinned_rows[:excess_count]
+                prune_ids = [r[0] for r in to_prune]
+                for row_id, role, body in to_prune:
+                    data = json.loads(body)
+                    snippet = str(data.get("content") or "")[:120].strip() or "[tool round]"
+                    pruned_messages.append({
+                        "turn_index": row_id,
+                        "role": role,
+                        "summary": snippet,
+                    })
+                placeholders = ",".join("?" * len(prune_ids))
+                conn.execute(f"DELETE FROM turns WHERE id IN ({placeholders})", tuple(prune_ids))
+                conn.execute(f"DELETE FROM kw WHERE rowid IN ({placeholders})", tuple(prune_ids))
+                conn.commit()
+
+        retained_count = conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
+        pruned_count = len(pruned_messages)
         cats = ", ".join(f"{name} {n}" for name, n in sorted(self.categories().items()))
         self.end_turn()
         summary = (
             "topic: session ledger\n"
             "state: verbatim on disk\n"
             f"path: {self.ledger_path}\n"
-            f"turns: {count}\n"
+            f"turns: {total_on_disk}\n"
+            f"turns_on_disk: {total_on_disk}\n"
+            f"turns_retained: {retained_count}\n"
+            f"turns_pruned: {pruned_count}\n"
             f"categories: {cats or 'none'}\n"
             "live: unloaded\n"
             "instructions: pinned outside the ledger"
         )
-        return {"summary": summary, "pruned_messages": [], "turns_on_disk": count, "ledger": str(self.ledger_path)}
+        return {
+            "summary": summary,
+            "pruned_messages": pruned_messages,
+            "turns_on_disk": total_on_disk,
+            "turns_retained": retained_count,
+            "turns_pruned": pruned_count,
+            "ledger": str(self.ledger_path),
+        }
 
     def retrieve_verbatim(self, keywords: List[str], max_turns: int = 4) -> List[Dict[str, Any]]:
         scores: Dict[int, int] = {}
