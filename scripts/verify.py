@@ -10057,11 +10057,54 @@ def desktop_audio_transcriber_and_notification_hub_contracts():
 
 
 @check
+def desktop_extension_system_and_theme_manager_contracts():
+    from desktop.extension_system import (
+        ExtensionManager,
+        BaseExtension,
+        ExtensionManifest,
+        ExtensionCapability,
+    )
+    from desktop.theme_manager import (
+        ThemeManager,
+        calculate_contrast_ratio,
+        check_wcag_compliance,
+        BUILTIN_PALETTES,
+    )
+
+    mgr = ExtensionManager()
+    manifest = ExtensionManifest(
+        extension_id="test.ext",
+        name="Test Extension",
+        capabilities=[ExtensionCapability.TOOL_INTERCEPT],
+    )
+    class CustomExt(BaseExtension):
+        def on_tool_call(self, tool_name, args):
+            mod = dict(args)
+            mod["intercepted"] = True
+            return mod
+
+    ext = mgr.register_extension(CustomExt(manifest))
+    assert ext.is_active
+    dispatched = mgr.dispatch_tool_call("test_tool", {"initial": 1})
+    assert dispatched.get("intercepted") is True
+
+    ratio = calculate_contrast_ratio("#000000", "#ffffff")
+    assert ratio == 21.0
+    comp = check_wcag_compliance("#ffffff", "#000000")
+    assert comp["aaa_normal_text"] is True
+
+    tm = ThemeManager()
+    assert tm.get_active_theme().theme_id == "dark_slate"
+    hc = BUILTIN_PALETTES["high_contrast_dark"]
+    assert hc.is_high_contrast is True
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

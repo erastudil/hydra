@@ -1,9 +1,9 @@
-"""
+﻿"""
 Hydra Sovereign Desktop Application package.
 Exposes FastAPI application, WebSocket streaming, sovereign Web Desk SPA,
 background DesktopServer runner, session playback engine, multi-workspace manager,
 browser storage persistence, model performance evaluator, command registry,
-audio transcriber, and notification hub.
+audio transcriber, notification hub, extension plugin system, and dynamic theme engine.
 """
 
 from hydra_cli.desktop import (
@@ -54,6 +54,25 @@ from desktop.notification_hub import (
     get_notification_hub,
     reset_notification_hub,
 )
+from desktop.extension_system import (
+    ExtensionManager,
+    BaseExtension,
+    ExtensionManifest,
+    ExtensionCapability,
+    ExtensionLifecycleState,
+    ExtensionContext,
+    get_extension_manager,
+    reset_extension_manager,
+)
+from desktop.theme_manager import (
+    ThemeManager,
+    ThemePalette,
+    BUILTIN_PALETTES,
+    calculate_contrast_ratio,
+    check_wcag_compliance,
+    get_theme_manager,
+    reset_theme_manager,
+)
 
 __all__ = [
     "create_desktop_app",
@@ -88,4 +107,19 @@ __all__ = [
     "NotificationType",
     "get_notification_hub",
     "reset_notification_hub",
+    "ExtensionManager",
+    "BaseExtension",
+    "ExtensionManifest",
+    "ExtensionCapability",
+    "ExtensionLifecycleState",
+    "ExtensionContext",
+    "get_extension_manager",
+    "reset_extension_manager",
+    "ThemeManager",
+    "ThemePalette",
+    "BUILTIN_PALETTES",
+    "calculate_contrast_ratio",
+    "check_wcag_compliance",
+    "get_theme_manager",
+    "reset_theme_manager",
 ]
