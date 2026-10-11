@@ -183,3 +183,67 @@ def test_desktop_cli_subcommand():
     assert "--host" in res.stdout
     assert "--port" in res.stdout
     assert "--headless" in res.stdout
+
+
+def test_desktop_icon_and_favicon(desktop_client):
+    """Verify desktop icon and favicon assets and HTTP endpoints."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    # Verify physical asset files exist
+    assert os.path.isfile(os.path.join(repo_root, "assets", "hydra_desktop.ico"))
+    assert os.path.isfile(os.path.join(repo_root, "assets", "hydra_desktop.png"))
+    assert os.path.isfile(os.path.join(repo_root, "desktop", "static", "favicon.ico"))
+    assert os.path.isfile(os.path.join(repo_root, "desktop", "static", "hydra_desktop.png"))
+
+    # Test /favicon.ico route
+    res_fav = desktop_client.get("/favicon.ico")
+    assert res_fav.status_code == 200
+    assert "image/x-icon" in res_fav.headers.get("content-type", "")
+    assert len(res_fav.content) > 0
+
+    # Test /assets/hydra_desktop.png route
+    res_png = desktop_client.get("/assets/hydra_desktop.png")
+    assert res_png.status_code == 200
+    assert "image/png" in res_png.headers.get("content-type", "")
+    assert res_png.content.startswith(PNG_MAGIC)
+
+    # Test /assets/hydra_desktop.ico route
+    res_ico = desktop_client.get("/assets/hydra_desktop.ico")
+    assert res_ico.status_code == 200
+    assert "image/x-icon" in res_ico.headers.get("content-type", "")
+    assert len(res_ico.content) > 0
+
+    # Test missing asset 404
+    res_missing = desktop_client.get("/assets/nonexistent_asset.png")
+    assert res_missing.status_code == 404
+
+
+def test_desktop_shortcut_properties():
+    """Verify Windows desktop shortcut creation and target configuration."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
+    from scripts.create_desktop_shortcut import get_desktop_dir, verify_shortcut, create_shortcut
+
+    desktop_dir = get_desktop_dir()
+    assert os.path.isdir(desktop_dir)
+
+    if sys.platform == "win32":
+        shortcut_path = os.path.join(desktop_dir, "Hydra Desktop.lnk")
+        if not os.path.isfile(shortcut_path):
+            create_shortcut(repo_root=repo_root)
+        assert os.path.isfile(shortcut_path)
+        assert verify_shortcut(shortcut_path) is True
+
+
+def test_hydra_icon_generator():
+    """Verify icon generator geometry and PIL rendering pipeline."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
+    from scripts.generate_icon import create_hydra_icon
+    icon_img = create_hydra_icon(size=64)
+    assert icon_img.size == (64, 64)
+    assert icon_img.mode == "RGBA"

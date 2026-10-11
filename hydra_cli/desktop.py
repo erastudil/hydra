@@ -48,6 +48,9 @@ def get_desktop_html() -> str:
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Hydra Sovereign Desktop</title>
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/assets/hydra_desktop.png">
+<link rel="apple-touch-icon" href="/assets/hydra_desktop.png">
 <style>
 :root {
   --bg-primary: #000000;
@@ -2350,6 +2353,34 @@ def create_desktop_app() -> Any:
     @app.get("/", response_class=HTMLResponse)
     async def index():
         return HTMLResponse(content=get_desktop_html())
+
+    @app.get("/favicon.ico")
+    async def favicon():
+        """Serve desktop application favicon icon."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for p in [
+            os.path.join(repo_root, "desktop", "static", "favicon.ico"),
+            os.path.join(repo_root, "assets", "hydra_desktop.ico"),
+        ]:
+            if os.path.isfile(p):
+                with open(p, "rb") as f:
+                    return Response(content=f.read(), media_type="image/x-icon")
+        return Response(status_code=404)
+
+    @app.get("/assets/{filename}")
+    async def get_asset(filename: str):
+        """Serve application asset files."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        safe_name = os.path.basename(filename)
+        for p in [
+            os.path.join(repo_root, "assets", safe_name),
+            os.path.join(repo_root, "desktop", "static", safe_name),
+        ]:
+            if os.path.isfile(p):
+                media = "image/png" if safe_name.endswith(".png") else ("image/x-icon" if safe_name.endswith(".ico") else "application/octet-stream")
+                with open(p, "rb") as f:
+                    return Response(content=f.read(), media_type=media)
+        return Response(status_code=404)
 
     @app.get("/api/status")
     async def get_status():
