@@ -6,14 +6,20 @@ import json
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QColor, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QColor, QFont, QTextBlockFormat, QTextCharFormat, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QPlainTextEdit,
     QPushButton, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from hydra_cli.context import CONTEXT_MODES
-from hydra_cli.gui import theme
+from hydra_cli.gui import motion, theme
+
+def _section(text: str) -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("section")
+    return label
+
 
 MODE_LABELS = {"recall": "Dynamic threading", "compact": "Compaction"}
 
@@ -29,22 +35,29 @@ class Sidebar(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self.setObjectName("sidebar")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setContentsMargins(theme.SPACE["md"], theme.SPACE["md"], theme.SPACE["md"], theme.SPACE["md"])
+        lay.setSpacing(theme.SPACE["xs"])
         self.projects = QListWidget()
         self.threads = QListWidget()
+        for lst in (self.projects, self.threads):
+            lst.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            lst.setTextElideMode(Qt.ElideRight)
         row = QHBoxLayout()
-        row.addWidget(QLabel("Projects"))
+        row.addWidget(_section("PROJECTS"))
         add = QPushButton("+")
-        add.setFixedWidth(32)
+        add.setObjectName("icon")
+        add.setToolTip("Add project")
         add.clicked.connect(self.add_project)
         row.addWidget(add)
         lay.addLayout(row)
         lay.addWidget(self.projects, 1)
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Threads"))
+        row2.addWidget(_section("THREADS"))
         new = QPushButton("+")
-        new.setFixedWidth(32)
+        new.setObjectName("icon")
+        new.setToolTip("New thread")
         new.clicked.connect(self.new_thread)
         row2.addWidget(new)
         lay.addLayout(row2)
@@ -88,13 +101,16 @@ class Composer(QWidget):
         super().__init__()
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(theme.SPACE["sm"])
         self.input = QPlainTextEdit()
         self.input.setPlaceholderText("Ask Hydra to work on this project. Enter sends, Shift+Enter adds a line.")
+        self.input.setObjectName("input")
         self.input.setFixedHeight(96)
         self.input.setFont(theme.mono())
         self.input.installEventFilter(self)
         lay.addWidget(self.input)
         row = QHBoxLayout()
+        row.setSpacing(theme.SPACE["sm"])
         self.model = QComboBox()
         self.model.setEditable(True)
         self.model.setMinimumWidth(180)
@@ -120,6 +136,8 @@ class Composer(QWidget):
         self.send.clicked.connect(self._submit)
         row.addWidget(self.send)
         lay.addLayout(row)
+        motion.HoverGlow(self.send, theme.PALETTE["ring"])
+        motion.HoverGlow(self.input, theme.PALETTE["ring"], 14)
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if obj is self.input and event.type() == QEvent.KeyPress:
@@ -148,26 +166,37 @@ class DiffPane(QPlainTextEdit):
 
     def __init__(self) -> None:
         super().__init__()
+        self.setObjectName("diff")
         self.setReadOnly(True)
         self.setFont(theme.mono())
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
 
     def add(self, path: str, text: str) -> None:
+        pal = theme.PALETTE
         cur = self.textCursor()
         cur.movePosition(QTextCursor.End)
         head = QTextCharFormat()
-        head.setForeground(QColor(theme.PALETTE["accent"]))
-        cur.insertText(f"--- {path}\n", head)
+        head.setForeground(QColor(pal["text"]))
+        head.setFontWeight(QFont.DemiBold)
+        head_block = QTextBlockFormat()
+        head_block.setBackground(QColor(pal["raised"]))
+        head_block.setTopMargin(theme.SPACE["md"])
+        cur.insertBlock(head_block) if not self.document().isEmpty() else cur.setBlockFormat(head_block)
+        cur.insertText(path, head)
         for ln in text.splitlines():
+            blk = QTextBlockFormat()
             fmt = QTextCharFormat()
             if ln.startswith("+") and not ln.startswith("+++"):
-                fmt.setBackground(QColor(theme.PALETTE["add"]))
+                blk.setBackground(QColor(pal["add"]))
             elif ln.startswith("-") and not ln.startswith("---"):
-                fmt.setBackground(QColor(theme.PALETTE["del"]))
+                blk.setBackground(QColor(pal["del"]))
             elif ln.startswith("@@"):
-                fmt.setForeground(QColor(theme.PALETTE["muted"]))
-            cur.insertText(ln + "\n", fmt)
-        cur.insertText("\n")
+                fmt.setForeground(QColor(pal["accent"]))
+                blk.setTopMargin(theme.SPACE["xs"])
+            elif ln.startswith(("---", "+++")):
+                fmt.setForeground(QColor(pal["muted"]))
+            cur.insertBlock(blk)
+            cur.insertText(ln, fmt)
 
 
 class ApprovalPane(QWidget):
@@ -177,15 +206,20 @@ class ApprovalPane(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self.setObjectName("approval")
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(theme.SPACE["lg"], theme.SPACE["md"], theme.SPACE["lg"], theme.SPACE["lg"])
+        lay.setSpacing(theme.SPACE["sm"])
         self.title = QLabel("No pending tool call")
         self.title.setObjectName("muted")
         self.body = QPlainTextEdit()
+        self.body.setObjectName("approvalBody")
         self.body.setReadOnly(True)
         self.body.setFont(theme.mono())
         lay.addWidget(self.title)
         lay.addWidget(self.body, 1)
         row = QHBoxLayout()
+        row.setSpacing(theme.SPACE["sm"])
         self.allow = QPushButton("Allow")
         self.allow.setObjectName("primary")
         self.deny = QPushButton("Skip")
@@ -206,12 +240,20 @@ class ApprovalPane(QWidget):
             pretty = json.dumps(json.loads(args_json), indent=2)
         except ValueError:
             pretty = args_json
+        self.title.setObjectName("title")
+        self.title.style().unpolish(self.title)
+        self.title.style().polish(self.title)
         self.title.setText(f"Approve tool : {tool}")
         self.body.setPlainText(pretty)
         self._set_enabled(True)
+        motion.fade_in(self.body)
+        motion.fade_in(self.title)
 
     def _decide(self, code: str) -> None:
         self._set_enabled(False)
+        self.title.setObjectName("muted")
+        self.title.style().unpolish(self.title)
+        self.title.style().polish(self.title)
         self.title.setText("No pending tool call")
         self.body.clear()
         self.decided.emit(code)
