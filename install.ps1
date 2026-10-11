@@ -43,6 +43,8 @@ $Files = @(
     'hydra_cli/gui/__init__.py',
     'hydra_cli/gui/__main__.py',
     'hydra_cli/gui/app.py',
+    'hydra_cli/gui/motion.py',
+    'hydra_cli/gui/probe.py',
     'hydra_cli/gui/panes.py',
     'hydra_cli/gui/store.py',
     'hydra_cli/gui/theme.py',

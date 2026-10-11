@@ -1912,6 +1912,197 @@ def context_modes_agent_loop():
             assert "SCRIPTED SUMMARY" in ask(normal, "compact", "next question", window)
     finally:
         httpd.shutdown()
+
+
+def _scripted_model(script):
+    """Local HTTP model endpoint. script(handler, body) writes the whole reply. Returns (httpd, base_url)."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Scripted(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            script(self, body)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", 0), Scripted)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+
+def _sse(handler, tokens, pause, sent):
+    """Stream tokens as server-sent events. Stops when the client hangs up."""
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.end_headers()
+    try:
+        for token in tokens:
+            chunk = {"choices": [{"delta": {"content": token}}]}
+            handler.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            handler.wfile.flush()
+            sent.append(token)
+            time.sleep(pause)
+        handler.wfile.write(b"data: [DONE]\n\n")
+        handler.wfile.flush()
+    except (BrokenPipeError, ConnectionResetError):
+        sent.append("<client closed>")
+
+
+@check
+def agent_loop_cancel_tool_round():
+    """A cancel set while the model asks for tools runs none of them and closes the ledger."""
+    from hydra_cli.agent import CANCELLED_TEXT, run_agent_loop
+    from hydra_cli.context import SessionContextLedger
+    from hydra_cli.hands import dispatch_native
+
+    cancel = threading.Event()
+    calls = [{"id": f"call_{n}", "type": "function",
+              "function": {"name": "memory_write", "arguments": json.dumps({"query": f"fact: cancelmarker{n}"})}}
+             for n in range(2)]
+
+    def script(handler, body):
+        message = {"role": "assistant", "content": "", "tool_calls": calls}
+        cancel.set()  # the user presses stop while this reply is in flight
+        data = json.dumps({"choices": [{"message": message, "finish_reason": "tool_calls"}]}).encode()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+
+    httpd, base = _scripted_model(script)
+    try:
+        with isolated(env={"LOCAL_AI_BASE": base}):
+            ledger = SessionContextLedger(session_id="gate_cancel_tools")
+            result = run_agent_loop("local", "keep two notes", session_id="gate_cancel_tools", ledger=ledger,
+                                    tier="local", cancel=cancel)
+            assert result == CANCELLED_TEXT, result
+            assert ledger._db is None
+            turns = SessionContextLedger(session_id="gate_cancel_tools").turns
+            assert [t["role"] for t in turns][-2:] == ["assistant", "tool"], [t["role"] for t in turns]
+            results = turns[-1]["tool_results"]
+            assert len(results) == 2 and all(r["result"] == "[Tool execution cancelled by user]" for r in results), results
+            assert "cancelmarker" not in dispatch_native("memory_search", {"query": "cancelmarker0"})
+    finally:
+        httpd.shutdown()
+
+
+@contextmanager
+def _gui_thread(worker):
+    """Park the worker on a real QThread. Yields turn(request, until) -> (tokens, (text, ok)).
+
+    until(tokens) runs on the main thread for every streamed token and may call worker.cancel().
+    """
+    from PySide6.QtCore import QCoreApplication, QEventLoop, QObject, QThread, QTimer, Signal
+
+    class Starter(QObject):
+        start = Signal(dict)
+
+    app = QCoreApplication.instance() or QCoreApplication([])
+    thread = QThread()
+    worker.moveToThread(thread)
+    starter = Starter()
+    starter.start.connect(worker.run_turn)
+    thread.start()
+
+    def turn(request, until):
+        tokens, done = [], []
+        loop = QEventLoop()
+
+        def on_token(text):
+            tokens.append(text)
+            until(tokens)
+
+        def on_finished(text, ok):
+            done.append((text, ok))
+            loop.quit()
+
+        worker.token.connect(on_token)
+        worker.finished.connect(on_finished)
+        try:
+            QTimer.singleShot(20000, loop.quit)
+            starter.start.emit(request)
+            loop.exec()
+        finally:
+            worker.token.disconnect(on_token)
+            worker.finished.disconnect(on_finished)
+        assert done, "turn never finished"
+        return tokens, done[0]
+
+    try:
+        yield turn
+    finally:
+        thread.quit()
+        thread.wait(5000)
+
+
+@check
+def gui_worker_live_turn():
+    """AgentWorker on a QThread streams tokens in order and delivers the answer."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        from hydra_cli.gui.worker import AgentWorker
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    words = [f"w{n} " for n in range(12)]
+    sent = []
+    httpd, base = _scripted_model(lambda handler, body: _sse(handler, words, 0.0, sent))
+    try:
+        with isolated(env={"LOCAL_AI_BASE": base}):
+            worker = AgentWorker()
+            with _gui_thread(worker) as turn:
+                tokens, (text, ok) = turn(
+                    {"session_id": "gate_gui_live", "prompt": "count", "cwd": tempfile.gettempdir(), "alias": "local"},
+                    lambda seen: None)
+            assert ok and tokens == words, (ok, tokens)
+            assert text == "".join(words), text
+            from hydra_cli.context import SessionContextLedger
+            assert worker._ledgers["gate_gui_live"]._db is None
+            assert SessionContextLedger(session_id="gate_gui_live").turns[-1]["content"] == "".join(words)
+    finally:
+        httpd.shutdown()
+
+
+@check
+def gui_worker_cancel_mid_stream():
+    """worker.cancel() during a slow stream stops the turn, hangs up on the model and leaves a reloadable ledger."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        from hydra_cli.gui.worker import AgentWorker
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    from hydra_cli.agent import CANCELLED_TEXT
+    from hydra_cli.context import SessionContextLedger
+
+    words = [f"w{n} " for n in range(200)]
+    sent = []
+    httpd, base = _scripted_model(lambda handler, body: _sse(handler, words, 0.05, sent))
+    try:
+        with isolated(env={"LOCAL_AI_BASE": base}):
+            worker = AgentWorker()
+            with _gui_thread(worker) as turn:
+                tokens, (text, ok) = turn(
+                    {"session_id": "gate_gui_cancel", "prompt": "count", "cwd": tempfile.gettempdir(), "alias": "local"},
+                    lambda seen: worker.cancel() if len(seen) == 3 else None)
+                assert (text, ok) == (CANCELLED_TEXT, False), (text, ok)
+                assert tokens[:3] == words[:3] and len(tokens) < 20, len(tokens)
+                deadline = time.time() + 5
+                while "<client closed>" not in sent and time.time() < deadline:
+                    time.sleep(0.05)
+                assert "<client closed>" in sent and len(sent) < 100, len(sent)
+                assert worker._ledgers["gate_gui_cancel"]._db is None
+                assert SessionContextLedger(session_id="gate_gui_cancel").turns is not None
+                # the same worker takes the next turn: the cancel flag does not stick
+                words[:] = ["ok "]
+                tokens, (text, ok) = turn(
+                    {"session_id": "gate_gui_cancel", "prompt": "again", "cwd": tempfile.gettempdir(), "alias": "local"},
+                    lambda seen: None)
+                assert ok and text == "ok ", (text, ok)
+    finally:
+        httpd.shutdown()
+
+
 def alice_retrieval_stacks():
     from hydra_cli import alice_retrieve as ar
     from hydra_cli.alice_gate import consult
@@ -10807,35 +10998,6 @@ def gui_window_agent_turn_diff_approval_cancel():
 
 
 @check
-def gui_cancel_hook_stops_streaming_turn():
-    """TurnCancelled raised from the token callback ends a real streamed turn and is not swallowed by provider fallback."""
-    from hydra_cli.agent import run_agent_loop
-    from hydra_cli.context import SessionContextLedger
-    from hydra_cli.ui import TurnCancelled, clear_cancel, request_cancel, check_cancel
-
-    httpd, base = _gui_model_server([{"role": "assistant", "content": "streamed words"}])
-    try:
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp, isolated(home=tmp, env={"LOCAL_AI_BASE": base, **_cleared_secrets()}):
-            clear_cancel()
-
-            def on_token(text):
-                request_cancel()
-                check_cancel()
-
-            try:
-                run_agent_loop("local", "hi", tier="local", enable_native_tools=False, on_token=on_token, session_id="gate_cancel",
-                               ledger=SessionContextLedger(session_id="gate_cancel"))
-            except TurnCancelled:
-                pass
-            else:
-                raise AssertionError("cancel did not interrupt the turn")
-            finally:
-                clear_cancel()
-    finally:
-        _gui_stop(httpd)
-
-
-@check
 def gui_no_browser_app_remains():
     assert not os.path.exists(os.path.join(REPO, "hydra_cli", "desktop.py"))
     assert not os.path.exists(os.path.join(REPO, "scripts", "package_desktop.py"))
@@ -10940,6 +11102,69 @@ def gui_real_launch_window_and_frames():
     assert stats["chars"] > 50000 and stats["doc_chars"] >= stats["chars"], stats
     assert stats["p95_ms"] < 40 and stats["max_ms"] < 250, f"UI thread stalls while streaming: {stats}"
     shutil.rmtree(home, ignore_errors=True)
+
+
+@check
+def gui_theme_and_motion_contracts():
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QEasingCurve
+    from PySide6.QtWidgets import QApplication, QWidget
+    from desktop.theme_manager import BUILTIN_PALETTES, calculate_contrast_ratio
+    from hydra_cli.gui import motion, theme
+
+    app = QApplication.instance() or QApplication([])
+
+    # tokens derive from the one palette source and the QSS builds from them
+    base = BUILTIN_PALETTES[theme.THEME_ID]
+    assert theme.PALETTE == theme.derive_palette(base)
+    qss = theme.build_qss()
+    for role in ("bg", "panel", "raised", "accent", "ring", "danger"):
+        assert theme.PALETTE[role] in qss, role
+    assert "{" in qss and "None" not in qss
+    theme.apply(app)
+    assert app.styleSheet() == qss
+
+    # contrast : text roles on every surface they sit on
+    P = theme.PALETTE
+    for fg, bgk, floor in (("text", "bg", 7.0), ("text", "panel", 7.0), ("text", "raised", 7.0),
+                           ("muted", "bg", 4.5), ("muted", "panel", 4.5), ("on_accent", "accent", 4.5),
+                           ("danger", "bg", 4.5), ("text", "add", 7.0), ("text", "del", 7.0), ("text", "select", 7.0)):
+        ratio = calculate_contrast_ratio(P[fg], P[bgk])
+        assert ratio >= floor, f"{fg} on {bgk} {ratio} < {floor}"
+
+    # motion tokens
+    assert set(theme.DURATION) == {"instant", "fast", "base", "slow"}
+    assert theme.DURATION["instant"] == 0 < theme.DURATION["fast"] < theme.DURATION["base"] < theme.DURATION["slow"]
+    assert all(isinstance(theme.easing(n), QEasingCurve) for n in theme.EASING)
+
+    # normal motion : animation runs for the token duration with the token curve
+    os.environ["HYDRA_NO_ANIM"] = "0"
+    assert theme.reduced_motion() is False
+    seen = []
+    host = QWidget()
+    anim = motion.glide(host, 0, 100, seen.append, name="base", curve="standard")
+    assert anim is not None and anim.duration() == theme.DURATION["base"]
+    assert anim.easingCurve().type() == theme.EASING["standard"]
+    anim.stop()
+    fade = motion.fade_in(host, "fast")
+    assert fade is not None and fade.duration() == theme.DURATION["fast"]
+    fade.stop()
+
+    # reduced motion : durations drop to zero, no animation object, end state applied at once
+    os.environ["HYDRA_NO_ANIM"] = "1"
+    try:
+        assert theme.reduced_motion() is True
+        assert all(theme.duration(n) == 0 for n in theme.DURATION)
+        landed = []
+        assert motion.glide(host, 0, 100, landed.append) is None
+        assert landed == [100]
+        assert motion.fade_in(host) is None and host.graphicsEffect() is None
+    finally:
+        os.environ["HYDRA_NO_ANIM"] = "1"
 
 
 @check

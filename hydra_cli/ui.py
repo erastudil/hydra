@@ -631,26 +631,6 @@ def set_prompt_handler(handler: Optional[Callable[[str], str]]) -> None:
     _PROMPT_HANDLER = handler
 
 
-class TurnCancelled(BaseException):
-    """Raised inside an agent turn when the user pressed Stop. BaseException so provider fallbacks cannot swallow it."""
-
-
-_CANCEL = threading.Event()
-
-
-def request_cancel() -> None:
-    _CANCEL.set()
-
-
-def clear_cancel() -> None:
-    _CANCEL.clear()
-
-
-def check_cancel() -> None:
-    if _CANCEL.is_set():
-        raise TurnCancelled()
-
-
 _APPROVAL_HANDLER: Optional[Callable[[str, str], str]] = None
 _DIFF_SINK: Optional[Callable[[str, str], None]] = None
 _TOOL_SINK: Optional[Callable[[str, str, bool, str], None]] = None

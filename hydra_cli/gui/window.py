@@ -6,11 +6,13 @@ import os
 from typing import Any, Dict, Optional
 
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QFileDialog, QMainWindow, QSplitter, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from hydra_cli.config import DEFAULT_ORCHESTRATOR_MODEL
+from hydra_cli.gui import motion
 from hydra_cli.gui.panes import ApprovalPane, Composer, DiffPane, Sidebar
 from hydra_cli.gui.store import Store
 from hydra_cli.gui.transcript import TranscriptView
@@ -41,7 +43,8 @@ class MainWindow(QMainWindow):
 
         center = QWidget()
         cl = QVBoxLayout(center)
-        cl.setContentsMargins(8, 8, 8, 8)
+        cl.setContentsMargins(16, 0, 16, 16)
+        cl.setSpacing(12)
         cl.addWidget(self.transcript, 1)
         cl.addWidget(self.composer)
 
@@ -50,8 +53,15 @@ class MainWindow(QMainWindow):
         split.addWidget(center)
         split.addWidget(self.tabs)
         split.setSizes([260, 720, 380])
+        self.sidebar.setMinimumWidth(200)
+        self.tabs.setMinimumWidth(280)
+        split.setStretchFactor(1, 1)
         split.setChildrenCollapsible(False)
         self.setCentralWidget(split)
+        self.split = split
+        self._side_width = 260
+        QShortcut(QKeySequence("Ctrl+B"), self, activated=self.toggle_sidebar)
+        self.tabs.currentChanged.connect(lambda _i: motion.fade_in(self.tabs.currentWidget()))
 
         self.composer.model.addItem(DEFAULT_ORCHESTRATOR_MODEL)
         self.composer.model.setCurrentText(self.store.data["settings"].get("model", DEFAULT_ORCHESTRATOR_MODEL))
@@ -72,11 +82,31 @@ class MainWindow(QMainWindow):
         self.sidebar.project_selected.connect(self.select_project)
         self.sidebar.thread_selected.connect(self.select_thread)
         self.composer.submitted.connect(self.submit)
-        self.composer.stop_requested.connect(self.worker.abort, Qt.DirectConnection)
+        self.composer.stop_requested.connect(self.worker.cancel, Qt.DirectConnection)
         self.approval.decided.connect(self.worker.answer_approval, Qt.DirectConnection)
         self.composer.mode.currentIndexChanged.connect(self._mode_changed)
 
         self._restore()
+
+    def toggle_sidebar(self) -> None:
+        """Collapse or restore the sidebar with an eased width glide."""
+        sizes = self.split.sizes()
+        now = sizes[0]
+        open_ = now > 0
+        if open_:
+            self._side_width = now
+        end = 0 if open_ else self._side_width
+        self.sidebar.setMinimumWidth(0)
+
+        def apply(width: int) -> None:
+            cur = self.split.sizes()
+            self.split.setSizes([width, cur[1] + cur[0] - width, cur[2]])
+
+        def done() -> None:
+            if end:
+                self.sidebar.setMinimumWidth(200)
+
+        motion.glide(self.split, now, end, apply, name="slow", done=done)
 
     # state
     def _restore(self) -> None:
@@ -198,7 +228,7 @@ class MainWindow(QMainWindow):
         self._set_busy(False)
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self.worker.abort()
+        self.worker.cancel()
         self.thread.quit()
         self.thread.wait(3000)
         self.store.save()
