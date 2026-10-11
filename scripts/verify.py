@@ -10142,11 +10142,90 @@ def desktop_clipboard_manager_and_telemetry_gate_contracts():
 
 
 @check
+def desktop_model_fallback_mesh_and_state_snapshotter_contracts():
+    from desktop.model_fallback_mesh import (
+        ModelFallbackMesh,
+        ModelTier,
+        ErrorCategory,
+        CircuitBreaker,
+        MeshNode,
+        categorize_error,
+    )
+    from desktop.state_snapshotter import (
+        WorkspaceSnapshotter,
+        compute_bytes_sha256,
+    )
+
+    # Mesh contracts
+    assert categorize_error("HTTP 429 Too Many Requests") == ErrorCategory.RATE_LIMIT
+    assert categorize_error("503 Service Unavailable") == ErrorCategory.SERVICE_UNAVAILABLE
+
+    mesh = ModelFallbackMesh(auto_populate_defaults=False)
+    mesh.register_node(
+        MeshNode(
+            node_id="local_test",
+            tier=ModelTier.LOCAL,
+            model_name="gemma-4",
+            provider="ollama",
+            priority=10,
+        )
+    )
+    mesh.register_node(
+        MeshNode(
+            node_id="cloud_test",
+            tier=ModelTier.FREE_CLOUD,
+            model_name="deepseek-chat:free",
+            provider="openrouter",
+            priority=20,
+        )
+    )
+
+    def dispatch(node):
+        if node.node_id == "local_test":
+            raise RuntimeError("Connection refused")
+        return "result:" + node.node_id
+
+    res = mesh.execute_with_fallback(dispatch)
+    assert res.success is True
+    assert res.node_id == "cloud_test"
+    assert res.response == "result:cloud_test"
+
+    # Snapshotter contracts
+    digest = compute_bytes_sha256(b"hydra sovereign checkpoint")
+    assert len(digest) == 64
+
+    with tempfile.TemporaryDirectory() as td:
+        fpath = os.path.join(td, "test.txt")
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write("test content")
+
+        ws = WorkspaceSnapshotter(root_dir=td)
+        s1 = ws.capture_snapshot("snap1")
+        assert s1.total_files == 1
+        assert "test.txt" in s1.files
+
+        # Mutate
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write("modified content")
+
+        s2 = ws.capture_snapshot("snap2")
+        diff = ws.compute_diff(s1.snapshot_id, s2.snapshot_id)
+        assert diff.has_changes is True
+        assert diff.modified_files == ["test.txt"]
+
+        # Rollback
+        rollback_res = ws.rollback(s1.snapshot_id)
+        assert rollback_res["status"] == "COMPLETED"
+        with open(fpath, "r", encoding="utf-8") as f:
+            assert f.read() == "test content"
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py"}
+    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed

@@ -92,6 +92,29 @@ from desktop.telemetry_gate import (
     reset_telemetry_gate,
 )
 
+from desktop.model_fallback_mesh import (
+    ModelTier,
+    ErrorCategory,
+    CircuitState,
+    CircuitBreaker,
+    MeshNode,
+    FallbackExecutionResult,
+    ModelFallbackMesh,
+    categorize_error,
+    get_model_fallback_mesh,
+    reset_model_fallback_mesh,
+)
+from desktop.state_snapshotter import (
+    FileSnapshot,
+    WorkspaceSnapshot,
+    SnapshotDiff,
+    WorkspaceSnapshotter,
+    compute_bytes_sha256,
+    compute_file_sha256,
+    get_workspace_snapshotter,
+    reset_workspace_snapshotter,
+)
+
 __all__ = [
     "create_desktop_app",
     "DesktopServer",
@@ -153,4 +176,22 @@ __all__ = [
     "is_telemetry_endpoint",
     "get_telemetry_gate",
     "reset_telemetry_gate",
+    "ModelTier",
+    "ErrorCategory",
+    "CircuitState",
+    "CircuitBreaker",
+    "MeshNode",
+    "FallbackExecutionResult",
+    "ModelFallbackMesh",
+    "categorize_error",
+    "get_model_fallback_mesh",
+    "reset_model_fallback_mesh",
+    "FileSnapshot",
+    "WorkspaceSnapshot",
+    "SnapshotDiff",
+    "WorkspaceSnapshotter",
+    "compute_bytes_sha256",
+    "compute_file_sha256",
+    "get_workspace_snapshotter",
+    "reset_workspace_snapshotter",
 ]
