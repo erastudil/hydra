@@ -734,7 +734,10 @@ def execute_summon(
                         reasoning=reasoning,
                     )
                 )
-                return 0
+                if emitted:
+                    return 0
+                last_error = ProviderError(f"{provider['name']} returned an empty stream")
+                continue
             resp = fetch_chat_completion(
                 url=provider["url"],
                 headers=provider["headers"],
@@ -795,7 +798,9 @@ def execute_summon(
                             max_tokens=max_tokens,
                         )
                     )
-                    return 0
+                    if emitted:
+                        return 0
+                    raise ProviderError("Cloudflare returned an empty stream")
                 resp = fetch_chat_completion(
                     url=cf["url"],
                     headers=cf["headers"],
@@ -839,7 +844,10 @@ def execute_summon(
                                 max_tokens=max_tokens,
                             )
                         )
-                        return 0
+                        if emitted:
+                            return 0
+                        cascade_errors.append(f"OpenRouter ({fm}): empty stream")
+                        continue
                     resp = fetch_chat_completion(
                         url=or_free["url"],
                         headers=or_free["headers"],
@@ -881,7 +889,9 @@ def execute_summon(
                             max_tokens=max_tokens,
                         )
                     )
-                    return 0
+                    if emitted:
+                        return 0
+                    raise ProviderError(f"{local_name} returned an empty stream")
                 resp = fetch_chat_completion(
                     url=local_url,
                     headers={"Content-Type": "application/json"},

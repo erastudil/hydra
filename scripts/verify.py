@@ -505,6 +505,10 @@ def providers():
             health_aware=False,
         )
         assert [item["id"] for item in limited] == ["vercel"]
+        general = providers_for_model("anthropic/claude-sonnet-5.5", health_aware=False)
+        assert [item["id"] for item in general] == ["cheaperinference", "vercel", "openrouter"]
+        pinned = providers_for_model("meta-llama/Llama-3.1-8B-Instruct", health_aware=False)
+        assert [item["id"] for item in pinned] == ["huggingface"]
 
     try:
         list(
@@ -866,7 +870,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and "browser_fill_form" in names and "computer_find_window" in names and len(names) == 45
+        assert "read_file" in names and "summon" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and "browser_fill_form" in names and "computer_find_window" in names and len(names) == 46
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -1006,6 +1010,7 @@ def tools_sandbox_and_memory():
                 assert compact["turns_on_disk"] == 1
 
     assert "read_file" in DEFAULT_AGENT_SYSTEM_PROMPT and "Inspect" in DEFAULT_AGENT_SYSTEM_PROMPT
+    assert "summon" in DEFAULT_AGENT_SYSTEM_PROMPT and "opus 5.5" in DEFAULT_AGENT_SYSTEM_PROMPT
     assert resolve_model_choice("1") == "alice"
     assert resolve_model_choice("alise") == "alice"
     assert resolve_model_choice("nope") is None
@@ -1370,6 +1375,11 @@ assert.equal(hydra.consumeAlias(['glm', '5.3', 'prime', 'write']).alias, 'glm 5.
 const cheaper = 'https://api.cheaperinference.com/v1/chat/completions';
 assert.equal(hydra.adaptModelForUrl(cheaper, 'z-ai/glm-5.3'), 'glm-5.3');
 assert.equal(hydra.adaptModelForUrl(cheaper, 'glm-5.3'), 'glm-5.3');
+assert.equal(hydra.adaptModelForUrl(cheaper, 'mimo-2.6-pro'), 'mimo-v2.6-pro');
+assert.equal(hydra.adaptModelForUrl(cheaper, 'deepseek-4.1-flash'), 'deepseek-v4.1-flash');
+assert.equal(hydra.adaptModelForUrl('https://openrouter.ai/api/v1/chat/completions', 'mimo-2.6-pro'), 'xiaomi/mimo-v2.6-pro');
+assert.equal(hydra.adaptModelForUrl(url, 'glm-5.3-flash'), 'zai/glm-5.3-flash');
+assert.equal(hydra.adaptModelForUrl(url, 'mimo-2.6-flash'), 'xiaomi/mimo-v2.6-flash');
 
 function withEnv(vars, fn) {
   const saved = {};
@@ -2010,25 +2020,30 @@ def open_swarm_and_catalog():
     assert route_os["swarm"] == "open swarm"
     assert "cheaperinference" in route_os["providers"]
 
-    assert model_providers("glm 5.3 flash") == ["cheaperinference", "openrouter"]
-    assert model_providers("deepseek 4.1 flash") == ["cheaperinference", "openrouter"]
-    assert model_providers("mimo 2.6 flash") == ["cheaperinference", "openrouter"]
-    assert model_providers("mimo 2.6 pro") == ["cheaperinference", "openrouter"]
+    assert model_providers("glm 5.3 flash") == ["cheaperinference", "vercel", "openrouter"]
+    assert model_providers("deepseek 4.1 flash") == ["cheaperinference", "vercel", "openrouter"]
+    assert model_providers("mimo 2.6 flash") == ["cheaperinference", "vercel", "openrouter"]
+    assert model_providers("mimo 2.6 pro") == ["cheaperinference", "vercel", "openrouter"]
+    assert resolve_route("orchestrator")["model"] == "mimo-2.6-pro"
 
     ci_url = "https://api.cheaperinference.com/v1/chat/completions"
     or_url = "https://openrouter.ai/api/v1/chat/completions"
+    vercel_url = "https://ai-gateway.vercel.sh/v1/chat/completions"
 
     assert adapt_model_for_url(ci_url, "glm-5.3-flash") == "glm-5.3-flash"
-    assert adapt_model_for_url(ci_url, "deepseek-4.1-flash") == "deepseek-4.1-flash"
-    assert adapt_model_for_url(ci_url, "mimo-2.6-flash") == "mimo-2.6-flash"
-    assert adapt_model_for_url(ci_url, "mimo-2.6-pro") == "mimo-2.6-pro"
+    assert adapt_model_for_url(ci_url, "deepseek-4.1-flash") == "deepseek-v4.1-flash"
+    assert adapt_model_for_url(ci_url, "mimo-2.6-flash") == "mimo-v2.6-flash"
+    assert adapt_model_for_url(ci_url, "mimo-2.6-pro") == "mimo-v2.6-pro"
     assert adapt_model_for_url(ci_url, "z-ai/glm-5.3-flash") == "glm-5.3-flash"
-    assert adapt_model_for_url(ci_url, "deepseek/deepseek-4.1-flash") == "deepseek-4.1-flash"
+    assert adapt_model_for_url(ci_url, "deepseek/deepseek-4.1-flash") == "deepseek-v4.1-flash"
 
     assert adapt_model_for_url(or_url, "glm-5.3-flash") == "z-ai/glm-5.3-flash"
-    assert adapt_model_for_url(or_url, "deepseek-4.1-flash") == "deepseek/deepseek-4.1-flash"
-    assert adapt_model_for_url(or_url, "mimo-2.6-flash") == "xiaomi/mimo-2.6-flash"
-    assert adapt_model_for_url(or_url, "mimo-2.6-pro") == "xiaomi/mimo-2.6-pro"
+    assert adapt_model_for_url(or_url, "deepseek-4.1-flash") == "deepseek/deepseek-v4.1-flash"
+    assert adapt_model_for_url(or_url, "mimo-2.6-flash") == "xiaomi/mimo-v2.6-flash"
+    assert adapt_model_for_url(or_url, "mimo-2.6-pro") == "xiaomi/mimo-v2.6-pro"
+    assert adapt_model_for_url(vercel_url, "glm-5.3-flash") == "zai/glm-5.3-flash"
+    assert adapt_model_for_url(vercel_url, "mimo-2.6-pro") == "xiaomi/mimo-v2.6-pro"
+    assert adapt_model_for_url(vercel_url, "x-ai/grok-4.7") == "spacexai/grok-4.7"
 
     assert "open swarm" in SWARM_COMBOS
     combo = SWARM_COMBOS["open swarm"]

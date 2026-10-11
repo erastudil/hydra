@@ -227,7 +227,19 @@ function readStdin() {
   });
 }
 
+const CANONICAL_MODEL_IDS = {
+  'mimo-2.6-pro': 'xiaomi/mimo-v2.6-pro',
+  'mimo-2.6-flash': 'xiaomi/mimo-v2.6-flash',
+  'xiaomi/mimo-2.6-pro': 'xiaomi/mimo-v2.6-pro',
+  'xiaomi/mimo-2.6-flash': 'xiaomi/mimo-v2.6-flash',
+  'deepseek-4.1-flash': 'deepseek/deepseek-v4.1-flash',
+  'deepseek/deepseek-4.1-flash': 'deepseek/deepseek-v4.1-flash',
+};
+
+const GENERAL_PROVIDER_IDS = new Set(['cheaperinference', 'vercel', 'openrouter']);
+
 function adaptModelForUrl(endpointUrl, model) {
+  model = CANONICAL_MODEL_IDS[model] || model;
   let host = '';
   try {
     host = new URL(endpointUrl).hostname.toLowerCase();
@@ -242,14 +254,20 @@ function adaptModelForUrl(endpointUrl, model) {
       return rewritten;
     }
     if (model.startsWith('qwen/')) return `alibaba/${model.slice('qwen/'.length)}`;
+    if (model.startsWith('glm-') || model.startsWith('z-ai/') || model.startsWith('zai/')) {
+      const bare = model.includes('/') ? model.slice(model.indexOf('/') + 1) : model;
+      return `zai/${bare}`;
+    }
   } else if (host === 'openrouter.ai' || host.endsWith('.openrouter.ai')) {
     if (model.startsWith('spacexai/')) return `x-ai/${model.slice('spacexai/'.length)}`;
     if (model.startsWith('alibaba/')) return `qwen/${model.slice('alibaba/'.length)}`;
     if (model.startsWith('meta/') && !model.startsWith('meta-llama/')) {
       return `meta-llama/${model.slice('meta/'.length)}`;
     }
+    if (model.startsWith('zai/')) return `z-ai/${model.slice('zai/'.length)}`;
     if (model.startsWith('glm-')) return `z-ai/${model}`;
     if (model.startsWith('deepseek-')) return `deepseek/${model}`;
+    if (model.startsWith('mimo-')) return `xiaomi/${model}`;
   } else if (host.includes('cheaperinference.com') || host.includes('cheaperinference')) {
     if (model.includes('/')) {
       return model.slice(model.indexOf('/') + 1);
@@ -508,10 +526,42 @@ function getModalProvider() {
   };
 }
 
+function getHuggingFaceProvider() {
+  const token = cleanSecret(process.env.HF_TOKEN)
+    || cleanSecret(process.env.HUGGINGFACE_API_KEY)
+    || cleanSecret(process.env.HUGGING_FACE_HUB_TOKEN);
+  const endpointUrl = (process.env.HF_ENDPOINT_URL || process.env.HUGGINGFACE_ENDPOINT_URL || '').trim();
+  const baseUrl = (process.env.HF_INFERENCE_BASE || 'https://router.huggingface.co/v1').replace(/\/+$/, '');
+  let targetUrl = '';
+  if (endpointUrl) targetUrl = chatUrl(endpointUrl);
+  else if (token || baseUrl !== 'https://router.huggingface.co/v1') targetUrl = chatUrl(baseUrl);
+  else return null;
+  const headers = {
+    'Content-Type': 'application/json',
+    'HTTP-Referer': 'https://github.com/erastudil/hydra',
+    'X-Title': 'Hydra Multi-Headed AI Summoning CLI',
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return { id: 'huggingface', name: 'Hugging Face Inference', url: targetUrl, headers };
+}
+
 function getFrontierProviders() {
   const providers = [];
-  const openRouterKey = cleanSecret(process.env.OPENROUTER_API_KEY);
+  const hf = getHuggingFaceProvider();
+  if (hf) providers.push(hf);
+  const cheaper = getCheaperInferenceProvider();
+  if (cheaper) providers.push(cheaper);
   const vercelKey = gatewayKey();
+  if (vercelKey) {
+    const base = (process.env.AI_GATEWAY_API_BASE || 'https://ai-gateway.vercel.sh/v1').replace(/\/+$/, '');
+    providers.push({
+      id: 'vercel',
+      name: 'Vercel AI Gateway',
+      url: `${base}/chat/completions`,
+      headers: { Authorization: `Bearer ${vercelKey}`, 'Content-Type': 'application/json' },
+    });
+  }
+  const openRouterKey = cleanSecret(process.env.OPENROUTER_API_KEY);
   if (openRouterKey) {
     providers.push({
       id: 'openrouter',
@@ -519,26 +569,16 @@ function getFrontierProviders() {
       url: 'https://openrouter.ai/api/v1/chat/completions',
       headers: {
         Authorization: `Bearer ${openRouterKey}`,
+        'Content-Type': 'application/json',
         'HTTP-Referer': 'https://github.com/erastudil/hydra',
         'X-Title': 'Hydra Shell Utility',
       },
     });
   }
-  if (vercelKey) {
-    const base = (process.env.AI_GATEWAY_API_BASE || 'https://ai-gateway.vercel.sh/v1').replace(/\/+$/, '');
-    providers.push({
-      id: 'vercel',
-      name: 'Vercel AI Gateway',
-      url: `${base}/chat/completions`,
-      headers: { Authorization: `Bearer ${vercelKey}` },
-    });
-  }
-  const cheaper = getCheaperInferenceProvider();
-  if (cheaper) providers.push(cheaper);
-  const runpod = getRunPodProvider();
-  if (runpod) providers.push(runpod);
   const modal = getModalProvider();
   if (modal) providers.push(modal);
+  const runpod = getRunPodProvider();
+  if (runpod) providers.push(runpod);
   return providers;
 }
 
@@ -548,13 +588,24 @@ const PROVIDER_KEY_NAMES = {
   cheaperinference: 'CHEAPERINFERENCE_API_KEY',
   runpod: 'RUNPOD_API_KEY',
   modal: 'MODAL_ENDPOINT_URL',
+  huggingface: 'HF_TOKEN',
+  local: 'LOCAL_AI_BASE or local runner',
 };
 
-// Models that only some providers serve (catalog model_providers). Others may use any provider.
+// Unrestricted models use general gateways. Specialized hosts only when the catalog names them.
 function providersForModel(model, providers) {
   const configured = providers || getFrontierProviders();
   const allowed = (CATALOG.model_providers || {})[model];
-  if (!allowed || !allowed.length) return configured;
+  if (!allowed || !allowed.length) {
+    const usable = configured.filter((p) => GENERAL_PROVIDER_IDS.has(p.id));
+    if (configured.length && !usable.length) {
+      throw new Error(
+        'No general gateway is configured. Set CHEAPERINFERENCE_API_KEY, AI_GATEWAY_API_KEY, or OPENROUTER_API_KEY. '
+        + 'Hugging Face, RunPod, and Modal only serve models assigned to them.'
+      );
+    }
+    return usable;
+  }
   const usable = configured
     .filter((p) => allowed.includes(p.id))
     .sort((a, b) => allowed.indexOf(a.id) - allowed.indexOf(b.id));
@@ -589,11 +640,18 @@ function getFreeCandidates(modelOverride) {
   const cfToken = cleanSecret(process.env.CLOUDFLARE_API_TOKEN);
   const cfAccount = cleanSecret(process.env.CLOUDFLARE_ACCOUNT_ID);
   const openRouterKey = cleanSecret(process.env.OPENROUTER_API_KEY);
+  const vercelKey = gatewayKey();
   const cloudflare = cfToken && cfAccount ? {
     id: 'cloudflare',
     name: 'Cloudflare Workers AI',
     url: `https://api.cloudflare.com/client/v4/accounts/${cfAccount}/ai/v1/chat/completions`,
     headers: { Authorization: `Bearer ${cfToken}` },
+  } : null;
+  const vercel = vercelKey ? {
+    id: 'vercel-free',
+    name: 'Vercel AI Gateway Free',
+    url: `${(process.env.AI_GATEWAY_API_BASE || 'https://ai-gateway.vercel.sh/v1').replace(/\/+$/, '')}/chat/completions`,
+    headers: { Authorization: `Bearer ${vercelKey}`, 'Content-Type': 'application/json' },
   } : null;
   const openrouter = openRouterKey ? {
     id: 'openrouter-free',
@@ -605,10 +663,11 @@ function getFreeCandidates(modelOverride) {
       'X-Title': 'Hydra Free Forge',
     },
   } : null;
-  if (!cloudflare && !openrouter) {
+  if (!cloudflare && !vercel && !openrouter) {
     throw new Error(
       'Free Forge requires either:\n' +
       '  - CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID, or\n' +
+      '  - AI_GATEWAY_API_KEY, or\n' +
       '  - OPENROUTER_API_KEY\n' +
       'For local execution with no cloud key: hydra local "<prompt>"'
     );
@@ -617,11 +676,18 @@ function getFreeCandidates(modelOverride) {
     if (!cloudflare) throw new Error(`${modelOverride} is a Cloudflare model. Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.`);
     return [{ provider: cloudflare, model: modelOverride }];
   }
-  if (modelOverride) return [{ provider: openrouter || cloudflare, model: modelOverride }];
+  if (modelOverride) {
+    const out = [];
+    if (vercel) out.push({ provider: vercel, model: modelOverride });
+    if (openrouter) out.push({ provider: openrouter, model: modelOverride });
+    else if (cloudflare) out.push({ provider: cloudflare, model: modelOverride });
+    return out;
+  }
   const out = [];
   if (cloudflare) {
     out.push({ provider: cloudflare, model: process.env.HYDRA_CLOUDFLARE_MODEL || CATALOG.default_cloudflare_model });
   }
+  if (vercel) out.push({ provider: vercel, model: 'alibaba/qwen3.8-27b' });
   if (openrouter) {
     const models = [process.env.HYDRA_FREE_MODEL || CATALOG.default_free_model, ...(CATALOG.free_models || [])];
     for (const model of [...new Set(models.filter(Boolean))]) out.push({ provider: openrouter, model });

@@ -2279,6 +2279,7 @@ class NativeToolRegistry:
             "search_files": self.find_files,
             "run_command": self.run_command,
             "invoke_subagent": self.invoke_subagent,
+            "summon": self.summon,
             "swarm_fanout": self.swarm_fanout,
             "compact_context": self.compact_context,
             "retrieve_context": self.retrieve_context,
@@ -2862,6 +2863,35 @@ class NativeToolRegistry:
             )
         except Exception as exc:
             return {"isError": True, "error": f"Subagent execution failed: {exc}"}
+
+    def summon(
+        self,
+        alias: str,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Any:
+        """One completion on a catalog alias. The router picks the gateway and the live model id."""
+        from hydra_cli.config import MODEL_MAP, resolve_route
+        from hydra_cli.providers import complete
+
+        cleaned = " ".join((alias or "").strip().lower().split())
+        if cleaned not in MODEL_MAP:
+            return {
+                "isError": True,
+                "error": f"Unknown alias '{alias}'. Pass a catalog alias such as 'opus 5.5' or 'sonnet 5.5'.",
+            }
+        route = resolve_route(cleaned)
+        try:
+            text = complete(
+                cleaned,
+                prompt,
+                system_prompt=system_prompt,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            return {"isError": True, "error": f"Summon failed: {exc}", "alias": cleaned, "model": route.get("model")}
+        return {"alias": cleaned, "model": route.get("model"), "content": text}
 
     def swarm_fanout(
         self,
@@ -4595,6 +4625,28 @@ class NativeToolRegistry:
                             "timeout": {"type": "number", "description": "Timeout limit in seconds (default 30.0)."},
                         },
                         "required": ["command"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "summon",
+                    "description": (
+                        "Summon one catalog alias for a single completion. "
+                        "Use a registered alias such as 'opus 5.5', 'sonnet 5.5', 'sol 6.1', "
+                        "'gemini 3.8', 'grok 4.7', 'glm 5.3 flash', 'deepseek 4.1 flash', "
+                        "'mimo 2.6 pro', or 'mimo 2.6 flash'. Do not pass a raw provider model id."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "alias": {"type": "string", "description": "Catalog alias to summon."},
+                            "prompt": {"type": "string", "description": "Instruction for that head."},
+                            "system_prompt": {"type": "string", "description": "Optional system prompt override."},
+                            "max_tokens": {"type": "integer", "description": "Optional generation cap."},
+                        },
+                        "required": ["alias", "prompt"],
                     },
                 },
             },
