@@ -2777,9 +2777,10 @@ def tool_result_text(result: Any) -> str:
 
 def _memory_block(cwd: str) -> str:
     """Turn-start memory gate: re-prove stored state facts against live git, never fail silent."""
-    from hydra_cli.memory import GateError, preturn_block
+    from hydra_cli.invariants import build_context
+    from hydra_cli.memory import GateError
     try:
-        return preturn_block(cwd)
+        return build_context(cwd)
     except GateError as exc:
         return f"MEMORY : gate could not run here ({exc}); treat every remembered claim as unverified"
 

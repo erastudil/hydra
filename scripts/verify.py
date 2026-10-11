@@ -11214,6 +11214,167 @@ def no_pytest_tree():
     assert not names, "fold these into scripts/verify.py: " + ", ".join(sorted(names))
 
 
+@check
+def atmem_invariants_gate_context_and_episodes():
+    """Invariants: schema, real probes against fixtures, missing invariant fails, episodes lose to invariants, token caps, loaded every turn."""
+    inv = __import__("hydra_cli.invariants", fromlist=["x"])
+    m = _mem()
+    from hydra_cli.agent import _memory_block
+    marker = "TO" + "DO"
+    gate = os.path.join(REPO, "scripts", "gate.py")
+    real = json.load(open(inv.INVARIANT_FILE, encoding="utf-8"))
+    assert inv.validate(real) == [], inv.validate(real)
+    assert {i["id"] for i in real["invariants"]} >= set(inv.REQUIRED_IDS)
+    assert set(i["probe"] for i in real["invariants"]) == set(inv.PROBES), "every probe is used and every invariant has one"
+
+    # 1. schema: every malformed variant is rejected with a reason
+    def variant(mutate):
+        copy = json.loads(json.dumps(real))
+        mutate(copy)
+        return inv.validate(copy)
+    first = lambda d: d["invariants"][0]
+    for label, mutate in (
+        ("bad id", lambda d: first(d).update(id="INV-GIT-1")),
+        ("unknown area", lambda d: first(d).update(id="INV-NET-001")),
+        ("duplicate id", lambda d: d["invariants"][1].update(id=first(d)["id"])),
+        ("unknown probe", lambda d: first(d).update(probe="rm_rf")),
+        ("reason outside the closed set", lambda d: first(d).update(contradiction_reason="because")),
+        ("dangling supersedes", lambda d: first(d).update(supersedes="INV-GIT-099")),
+        ("bad source", lambda d: first(d).update(source="agent:me")),
+        ("bad regex", lambda d: first(d).update(forbids=["("])),
+        ("missing field", lambda d: first(d).pop("rule")),
+        ("extra field", lambda d: first(d).update(note="x")),
+        ("empty list", lambda d: d.update(invariants=[])),
+        ("cap over worst case", lambda d: d["token_cap"].update(invariants=20)),
+        ("reused retired id", lambda d: d.update(retired=[{"id": first(d)["id"], "rule": "old", "retired_by": "user:x"}])),
+    ):
+        assert variant(mutate), f"schema accepted: {label}"
+    assert not variant(lambda d: (d.update(retired=[{"id": "INV-GIT-050", "rule": "old", "retired_by": "user:x"}]), first(d).update(supersedes="INV-GIT-050"))), "valid supersedes link rejected"
+
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": os.path.join(tmp, "hh")}):
+        def fixture(name):
+            repo = _atmem_repo(tmp, name)
+            _git(repo, "switch", "-q", "-c", "feat/probe")
+            os.makedirs(os.path.join(repo, "hydra_cli"))
+            open(os.path.join(repo, "hydra_cli", "ok.py"), "w").write("def ok():\n    return 1\n")
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "-q", "-m", "code")
+            m.install(repo, gate)
+            return repo
+
+        def stage_file(repo, rel, text):
+            os.makedirs(os.path.dirname(os.path.join(repo, rel)) or repo, exist_ok=True)
+            open(os.path.join(repo, rel), "w").write(text)
+            _git(repo, "add", rel)
+
+        def uninstall(repo):
+            m.uninstall(repo)
+
+        def claim(repo):
+            m.append("fact", os.path.basename(repo), "this repo has no github remote", **{"class": "note"}, source="agent:x")
+
+        breakers = {
+            "push_main_refused": (uninstall, None),
+            "push_force_refused": (uninstall, None),
+            "remote_claims_probed": (claim, None),
+            "progen_lint_enforced": (lambda repo: None, {"HYDRA_PROGEN": os.path.join(tmp, "no-such-progen")}),
+            "no_todo_markers": (lambda repo: stage_file(repo, "hydra_cli/x.py", f"# {marker} finish this\n"), None),
+            "no_move_stubs": (lambda repo: stage_file(repo, "hydra_cli/old.py", "# moved to hydra_cli/new.py\n"), None),
+        }
+        assert set(breakers) == set(inv.PROBES), "every probe needs a negative fixture"
+        try:
+            m.progen_path()
+            progen_here = True
+        except m.GateError:
+            progen_here = False
+
+        # 2. each probe passes on a clean fixture and fails on its own breaker
+        for index, name in enumerate(inv.PROBES):
+            clean = fixture(f"clean{index}")
+            ok, detail = inv.run_probe(name, clean)
+            if name == "progen_lint_enforced" and not progen_here:
+                assert not ok, "missing progen must fail closed"
+            else:
+                assert ok, f"{name} failed on a clean fixture: {detail}"
+            broken = fixture(f"broken{index}")
+            fix, env = breakers[name]
+            with isolated(env=env):
+                fix(broken)
+                ok, detail = inv.run_probe(name, broken)
+            assert not ok, f"{name} passed on a violating fixture"
+        clean = fixture("whole")
+        expected = [] if progen_here else [p for p in inv.check_gate(clean) if p.startswith("INV-DOC-001")]
+        assert (inv.check_gate(clean) == expected), inv.check_gate(clean)
+        assert any("INV-CODE-001" in p for p in (stage_file(clean, "hydra_cli/y.py", f"x = 1  # {marker}\n"), inv.check_gate(clean))[1])
+
+        # 3. a missing invariant fails the gate, so do an unreadable and a broken file
+        trimmed = json.loads(json.dumps(real))
+        trimmed["invariants"] = [i for i in trimmed["invariants"] if i["id"] != "INV-GIT-001"]
+        for label, body in (("trimmed", json.dumps(trimmed)), ("empty", ""), ("not json", "{")):
+            path = os.path.join(tmp, f"{label}.json")
+            open(path, "w").write(body)
+            problems = inv.check_gate(clean, path=path)
+            assert problems, f"{label} file passed the gate"
+        assert any("INV-GIT-001 : required invariant is missing" in p for p in inv.check_gate(clean, path=os.path.join(tmp, "trimmed.json")))
+        assert inv.check_gate(clean, path=os.path.join(tmp, "absent.json"))
+        assert "BROKEN" in inv.build_context(clean, path=os.path.join(tmp, "empty.json")), "a broken invariant file must be loud in the context"
+
+        # 4. episodes lose to invariants and to live probes, and nothing is edited, only superseded
+        repo = fixture("episodes")
+        name = os.path.basename(repo)
+        remote = m._probe_git_remote(repo)[0]
+        assert remote
+        stale = m.append("fact", name, "no github remote", **{"class": "state"}, source="agent:old", probe={"name": "git_remote", "repo": repo, "expect": "empty"})
+        forbidden = m.append("fact", "global", "pushing directly to main is fine", **{"class": "preference"}, source="user:t1")
+        unprobed = m.append("fact", name, "no github remote here", **{"class": "note"}, source="agent:old")
+        retired = m.append("fact", name, "retired build note zzz", **{"class": "note"}, source="agent:old")
+        m.append("supersede", name, "replaced", target=retired["id"], reason="superseded")
+        kept = m.append("fact", name, "build uses setup.py", **{"class": "note"}, source="agent:old")
+        before = len(m.read_ledger())
+        block = inv.build_context(repo)
+        for fact in (stale, forbidden, unprobed, retired):
+            assert f"state : {fact['body']}" not in block and f"note : {fact['body']}" not in block and f"preference : {fact['body']}" not in block, f"{fact['id']} injected as current"
+        assert "zzz" not in block and "pushing directly to main is fine" not in block
+        assert f"memory said no github remote; live check says {remote}" in block, "live observation must be shown"
+        assert f"note : {kept['body']}" in block and "UNVERIFIED" in block
+        entries = m.read_ledger()
+        assert len(entries) > before and m.chain_problems(entries) == []
+        reasons = {e["target"]: e["reason"] for e in entries if e["kind"] == "supersede"}
+        assert reasons[stale["id"]] == "stale_probe_failed" and reasons[forbidden["id"]] == "contradicted_by_user" and reasons[unprobed["id"]] == "contradicted_by_user"
+        assert set(reasons.values()) <= set(m.REASONS)
+        assert [e for e in entries if e["id"] == stale["id"]][0]["body"] == "no github remote", "history must stay readable"
+        assert stale["id"] not in {f["id"] for f in m.live_facts()}
+
+        # 5. token caps: a flood of notes cannot crowd out the invariants
+        caps = real["token_cap"]
+        for n in range(300):
+            m.append("fact", name, f"flood note {n} " + "lorem ipsum dolor " * 20, **{"class": "note"}, source="agent:flood")
+        episodes_raw = m.preturn_block(repo)
+        assert inv.estimate_tokens(episodes_raw) > caps["episodes"], "the flood must be big enough to matter"
+        flooded = inv.build_context(repo)
+        head, _, tail = flooded.partition("\n\n")
+        assert inv.estimate_tokens(head) <= caps["invariants"], inv.estimate_tokens(head)
+        assert inv.estimate_tokens(tail) <= caps["episodes"], inv.estimate_tokens(tail)
+        assert "episodes : older lines archived" in tail and "scripts/gate.py log" in tail
+        assert tail.splitlines()[0].startswith("MEMORY (verified at turn start"), "episode header and repo status must survive trimming"
+        assert all(i["id"] in head for i in real["invariants"]), "invariants are never trimmed"
+
+        # 6. the invariant set is in the block the agent loop builds, on every turn, even after the ledger grows
+        for turn in range(3):
+            built = _memory_block(repo)
+            assert all(f"{i['id']} : {i['rule']}" in built for i in real["invariants"]), f"turn {turn} lost an invariant"
+            assert built.index("INVARIANTS") < built.index("MEMORY (verified")
+            m.append("fact", name, f"turn {turn} note", **{"class": "note"}, source="agent:loop")
+        broken = fixture("violating")
+        m.uninstall(broken)
+        shown = inv.build_context(broken)
+        assert "INV-GIT-001 : never push to main" in shown and "push_main_refused VIOLATED" in shown, "a violated invariant stays loaded and is flagged"
+        out = subprocess.run([sys.executable, "-m", "hydra_cli.invariants", "check", broken], cwd=REPO, capture_output=True, text=True, env={**os.environ, "HYDRA_HOME": os.path.join(tmp, "hh")})
+        assert out.returncode == 1 and "INV-GIT-001 : violated" in out.stdout, out.stdout + out.stderr
+        out = subprocess.run([sys.executable, "-m", "hydra_cli.invariants", "check", fixture("final")], cwd=REPO, capture_output=True, text=True, env={**os.environ, "HYDRA_HOME": os.path.join(tmp, "hh")})
+        assert out.returncode == (0 if progen_here else 1), out.stdout + out.stderr
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")

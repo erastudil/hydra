@@ -43,6 +43,8 @@ $Files = @(
     'hydra_cli/dictation.py',
     'hydra_cli/display.py',
     'hydra_cli/hands.py',
+    'hydra_cli/invariants.json',
+    'hydra_cli/invariants.py',
     'hydra_cli/mcp.py',
     'hydra_cli/mcp_registry.py',
     'hydra_cli/mcp_servers.default.json',

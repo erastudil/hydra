@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "token_cap": {"invariants": 900, "episodes": 1500},
+  "invariants": [
+    {
+      "id": "INV-GIT-001",
+      "scope": "global",
+      "rule": "never push to main or master, work lands on a branch and goes through a PR",
+      "source": "user:atmem-design-approval-2026-10-11",
+      "supersedes": null,
+      "probe": "push_main_refused",
+      "contradiction_reason": "contradicted_by_user",
+      "forbids": ["(?i)\\bpush(ing)? (directly )?to (main|master)\\b.{0,30}\\b(ok|okay|fine|allowed|safe)\\b"]
+    },
+    {
+      "id": "INV-GIT-002",
+      "scope": "global",
+      "rule": "never force push, rebase or fast-forward pull only",
+      "source": "user:atmem-design-approval-2026-10-11",
+      "supersedes": null,
+      "probe": "push_force_refused",
+      "contradiction_reason": "contradicted_by_user",
+      "forbids": ["(?i)\\bforce[- ]push(ing)?\\b.{0,30}\\b(ok|okay|fine|allowed|safe)\\b"]
+    },
+    {
+      "id": "INV-GIT-003",
+      "scope": "global",
+      "rule": "run git remote get-url origin before any claim that a repo has no remote",
+      "source": "user:atmem-design-approval-2026-10-11",
+      "supersedes": null,
+      "probe": "remote_claims_probed",
+      "contradiction_reason": "contradicted_by_user",
+      "forbids": ["(?i)\\bno (git(hub)? )?remote\\b"]
+    },
+    {
+      "id": "INV-DOC-001",
+      "scope": "global",
+      "rule": "progen lint runs on staged docs and the commit is refused when it fails",
+      "source": "user:atmem-design-approval-2026-10-11",
+      "supersedes": null,
+      "probe": "progen_lint_enforced",
+      "contradiction_reason": "contradicted_by_user",
+      "forbids": []
+    },
+    {
+      "id": "INV-CODE-001",
+      "scope": "repo",
+      "rule": "no stubs, placeholders or work markers in tracked source",
+      "source": "doc:AGENTS.md#verification-and-ponytail-doctrine",
+      "supersedes": null,
+      "probe": "no_todo_markers",
+      "contradiction_reason": "contradicted_by_user",
+      "forbids": []
+    },
+    {
+      "id": "INV-FS-001",
+      "scope": "repo",
+      "rule": "a move leaves no stub, redirect file or shim at the old path",
+      "source": "user:atmem-design-approval-2026-10-11",
+      "supersedes": null,
+      "probe": "no_move_stubs",
+      "contradiction_reason": "contradicted_by_user",
+      "forbids": []
+    }
+  ],
+  "retired": []
+}
