@@ -12,6 +12,9 @@ fn last_user(body: &Value) -> String {
     body["messages"].as_array().into_iter().flatten().rev().find(|m| m["role"] == "user").map(|m| m["content"].as_str().unwrap_or("").to_string()).unwrap_or_default()
 }
 
+static SYSTEMS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static FLAKY_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn handle(mut s: TcpStream) {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
@@ -38,6 +41,13 @@ fn handle(mut s: TcpStream) {
     let prompt = last_user(&body);
     let stream = body["stream"].as_bool().unwrap_or(false);
     let has_tool = body["messages"].as_array().into_iter().flatten().any(|m| m["role"] == "tool");
+    if let Some(sys) = body["messages"].get(0).filter(|m| m["role"] == "system") {
+        SYSTEMS.lock().unwrap().push(sys["content"].to_string());
+    }
+    if prompt.contains("FLAKY") && !FLAKY_SEEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let _ = write!(s, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbusy");
+        return;
+    }
     let usage = json!({"prompt_tokens": 10, "completion_tokens": 3});
     if !stream {
         let data = json!({"choices": [{"message": {"role": "assistant", "content": "alpha beta gamma"}, "finish_reason": "stop"}], "usage": usage}).to_string();
@@ -54,7 +64,10 @@ fn handle(mut s: TcpStream) {
         let _ = send(&mut s, json!({"choices": [{"delta": {"content": "partial "}}]}));
         return; // closes without [DONE] or a finish reason
     }
-    if prompt.contains("WRITE") && !has_tool {
+    if prompt.contains("BGTASK") && !has_tool {
+        let args = json!({"command": "sleep 60"}).to_string();
+        let _ = send(&mut s, json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_bg", "type": "function", "function": {"name": "start_background_task", "arguments": args}}]}}]}));
+    } else if prompt.contains("WRITE") && !has_tool {
         let args = json!({"path": "hello.txt", "content": "hi\n"}).to_string();
         let _ = send(&mut s, json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": ""}}]}}]}));
         let _ = send(&mut s, json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]}));
@@ -99,6 +112,7 @@ fn rig(name: &str) -> Option<Rig> {
         ("LOCAL_AI_BASE".to_string(), format!("http://127.0.0.1:{port}")),
         ("HOME".to_string(), dir.display().to_string()),
         ("USERPROFILE".to_string(), dir.display().to_string()),
+        ("HYDRA_BACKOFF_BASE".to_string(), "0.1".to_string()),
     ];
     let be = Backend::spawn_with(&envs, || {}).expect("spawn adapter");
     let mut m = Model::new(None, proj.display().to_string());
@@ -317,4 +331,90 @@ fn a_pinned_drawer_tab_is_not_switched_by_an_incoming_diff() {
         assert_eq!(r.m.drawer_tab, if pinned { "rules" } else { "diff" });
         let _ = std::fs::remove_dir_all(&r.dir);
     }
+}
+
+#[test]
+fn skills_are_listed_picked_and_reach_the_model() {
+    let mut r = rig("skills").expect("rig");
+    r.m.pending_skills(&mut r.be);
+    pump(&mut r, 20, |m| !m.skills.is_empty());
+    assert!(r.m.skills.iter().any(|s| s["id"] == "code" && s["title"].as_str().map(|t| !t.is_empty()).unwrap_or(false)), "{:?}", r.m.skills);
+    r.m.toggle_skill("code");
+    assert!(r.m.submit(&mut r.be, "hello skills"));
+    done(&mut r);
+    let last = r.m.sessions[0].messages.last().unwrap().clone();
+    assert!(last.actions.iter().any(|a| a == "skills: code"), "context notice in the stream: {:?}", last.actions);
+    assert!(SYSTEMS.lock().unwrap().iter().any(|s| s.contains("[SKILL: code]")), "skill body reached the provider");
+    r.m.toggle_skill("code");
+    assert!(r.m.submit(&mut r.be, "hello again"));
+    done(&mut r);
+    assert!(!r.m.sessions[0].messages.last().unwrap().actions.iter().any(|a| a.starts_with("skills:")));
+    let _ = std::fs::remove_dir_all(&r.dir);
+}
+
+#[test]
+fn mcp_status_shows_good_and_broken_servers() {
+    let mut r = rig("mcp").expect("rig");
+    let cwd = r.m.cwd.clone();
+    r.m.pending_mcp(&mut r.be, &cwd, false);
+    pump(&mut r, 20, |m| m.mcp.is_some());
+    assert_eq!(r.m.mcp.as_ref().unwrap().1.len(), 0, "no config, no servers");
+    let hydra = std::path::Path::new(&cwd).join(".hydra");
+    std::fs::create_dir_all(&hydra).unwrap();
+    let server = format!("{}/tests/tiny_mcp.py", env!("CARGO_MANIFEST_DIR"));
+    let py = std::env::var("HYDRA_PYTHON").unwrap();
+    let cfg = json!({"mcpServers": {"demo": {"command": py, "args": [server, r.dir.join("calls.log").display().to_string()]}, "broken": {"command": r.dir.join("no-such-binary").display().to_string()}}});
+    std::fs::write(hydra.join("mcp_servers.json"), cfg.to_string()).unwrap();
+    r.m.mcp = None;
+    r.m.pending_mcp(&mut r.be, &cwd, true);
+    pump(&mut r, 30, |m| m.mcp.is_some());
+    let (config, servers) = r.m.mcp.clone().unwrap();
+    assert!(config.unwrap().ends_with("mcp_servers.json"));
+    let by = |n: &str| servers.iter().find(|s| s["name"] == n).cloned().unwrap();
+    assert_eq!(by("demo")["ok"], true);
+    assert_eq!(by("demo")["tools"], json!(["demo__echo"]));
+    assert_eq!(by("broken")["ok"], false);
+    assert!(by("broken")["error"].as_str().map(|e| !e.is_empty()).unwrap_or(false));
+    assert!(r.m.submit(&mut r.be, "hello mcp"));
+    done(&mut r);
+    let acts = r.m.sessions[0].messages.last().unwrap().actions.clone();
+    assert!(acts.iter().any(|a| a == "mcp: 1 tools") && acts.iter().any(|a| a.starts_with("× mcp broken")), "{acts:?}");
+    let _ = std::fs::remove_dir_all(&r.dir);
+}
+
+#[test]
+fn a_background_task_outlives_its_turn_and_stops_from_the_app() {
+    let mut r = rig("tasks").expect("rig");
+    r.m.sessions[0].permission = "bypass".into();
+    assert!(r.m.submit(&mut r.be, "BGTASK start a server"));
+    done(&mut r);
+    pump(&mut r, 10, |m| m.running_tasks() == 1);
+    assert_eq!(r.m.running_tasks(), 1, "task_update after the turn: {:?}", r.m.tasks);
+    let (id, t) = r.m.tasks.iter().next().map(|(k, v)| (k.clone(), v.clone())).unwrap();
+    let pid = t["pid"].as_i64().unwrap();
+    assert!(std::path::Path::new(&format!("/proc/{pid}")).exists(), "process alive after the turn ended");
+    assert!(!r.m.any_busy());
+    r.m.tasks.clear();
+    r.m.pending_tasks(&mut r.be);
+    pump(&mut r, 10, |m| !m.tasks.is_empty());
+    assert_eq!(r.m.running_tasks(), 1, "task_list lists it");
+    r.m.stop_task(&mut r.be, &id);
+    pump(&mut r, 15, |m| m.running_tasks() == 0);
+    assert_eq!(r.m.tasks[&id]["state"], "stopped");
+    std::thread::sleep(Duration::from_millis(300));
+    let alive = std::fs::read_to_string(format!("/proc/{pid}/stat")).map(|s| !s.contains(") Z ")).unwrap_or(false);
+    assert!(!alive, "process gone after stop");
+    let _ = std::fs::remove_dir_all(&r.dir);
+}
+
+#[test]
+fn a_503_before_the_first_token_shows_a_retry_notice_then_answers() {
+    let mut r = rig("retry").expect("rig");
+    assert!(r.m.submit(&mut r.be, "FLAKY hello"));
+    let evs = pump(&mut r, 30, |m| !m.any_busy());
+    assert!(evs.iter().any(|e| matches!(e, Ev::Retry { attempt: 1, reason, .. } if reason == "HTTP 503")), "{evs:?}");
+    let last = r.m.sessions[0].messages.last().unwrap();
+    assert!(last.actions.iter().any(|a| a.starts_with("↻ retry 1/") && a.contains("HTTP 503")), "{:?}", last.actions);
+    assert_eq!(last.text, "alpha beta gamma");
+    let _ = std::fs::remove_dir_all(&r.dir);
 }

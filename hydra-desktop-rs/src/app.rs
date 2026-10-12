@@ -5,7 +5,7 @@ use crate::motion;
 use crate::theme::*;
 use crate::widgets::{self, Kind, Part};
 use eframe::egui::{self, vec2, Align, Color32, CornerRadius, Key, Layout, Margin, Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind};
-use crate::backend::Backend;
+use crate::backend::{Backend, Ev};
 use crate::health::{self, Check};
 use crate::secrets;
 use crate::model::Status;
@@ -190,6 +190,11 @@ pub struct HydraApp {
     mention_sel: usize,
     was_busy: bool,
     probe: Option<Probe>,
+    child_died: bool,
+    deaths: Vec<f64>,
+    skills_asked: bool,
+    mcp_asked: bool,
+    tasks_asked: bool,
 }
 
 /// Frame-time probe for the motion check: HYDRA_PROBE=<file> runs a scripted toggle/arrival/palette sequence and writes one CSV row per frame.
@@ -246,7 +251,7 @@ impl HydraApp {
             m.set_nav(&n);
         }
         if let Ok(t) = std::env::var("HYDRA_TAB") {
-            if let Some(k) = DRAWER_TABS.iter().chain([("files", ""), ("git", ""), ("approvals", ""), ("rules", "")].iter()).find(|d| d.0 == t) {
+            if let Some(k) = DRAWER_TABS.iter().chain([("files", ""), ("git", ""), ("approvals", ""), ("rules", ""), ("skills", ""), ("mcp", ""), ("tasks", "")].iter()).find(|d| d.0 == t) {
                 m.drawer_tab = k.0;
                 m.tab_pinned = true;
             }
@@ -296,6 +301,11 @@ impl HydraApp {
             last_overlay: None,
             births: HashMap::new(),
             births_seen: false,
+            child_died: false,
+            deaths: vec![],
+            skills_asked: false,
+            mcp_asked: false,
+            tasks_asked: false,
             probe: std::env::var("HYDRA_PROBE").ok().map(|path| Probe { path, rows: vec![], last: 0.0, stage: 0, scroll: None }),
             open_folder: if std::env::var("HYDRA_OPEN").as_deref() == Ok("folder") { Some((std::env::var("HYDRA_CWD").unwrap_or_default(), String::new())) } else { None },
             rename: None,
@@ -460,6 +470,9 @@ impl HydraApp {
             }
         }
         for e in evs {
+            if matches!(e, Ev::Exited(_)) {
+                self.child_died = true;
+            }
             self.m.apply(e);
         }
         if !self.m.notice.is_empty() && self.m.notice != "jobs-changed" {
@@ -925,10 +938,8 @@ impl HydraApp {
                             for a in &m.actions {
                                 action_row(ui, a, content_w);
                             }
-                            if m.user && !busy && self.m.checkpoint_for(mi).is_some() {
-                                if ui.add(egui::Label::new(rt("‹ Rewind files to before this message", 11.0, MUTED)).sense(Sense::click())).on_hover_text("Restore the project to how it was before this message").clicked() {
-                                    rewind_pick = self.m.checkpoint_for(mi);
-                                }
+                            if m.user && !busy && self.m.checkpoint_for(mi).is_some() && ui.add(egui::Label::new(rt("‹ Rewind files to before this message", 11.0, MUTED)).sense(Sense::click())).on_hover_text("Restore the project to how it was before this message").clicked() {
+                                rewind_pick = self.m.checkpoint_for(mi);
                             }
                         });
                     });
@@ -1073,10 +1084,8 @@ impl HydraApp {
             } else {
                 ui.add(egui::Label::new(rt("@ attaches a file   Ctrl+P finds files   Ctrl+O opens a folder", 11.0, MUTED)).truncate());
             }
-            if self.m.sessions[self.m.active].pre_rewind.is_some() && !self.m.active_busy() {
-                if widgets::button(ui, "Undo rewind", Kind::Secondary, 11.0, (10.0, 3.0), None).clicked() {
-                    undo = true;
-                }
+            if self.m.sessions[self.m.active].pre_rewind.is_some() && !self.m.active_busy() && widgets::button(ui, "Undo rewind", Kind::Secondary, 11.0, (10.0, 3.0), None).clicked() {
+                undo = true;
             }
         });
         if cycle {
@@ -1133,11 +1142,7 @@ impl HydraApp {
 
     fn files_tab(&mut self, ui: &mut egui::Ui) {
         let (mut save, mut close, mut find) = (false, false, false);
-        if self.work.open.is_some() {
-            let (dirty, rel, error) = {
-                let f = self.work.open.as_ref().unwrap();
-                (f.dirty(), f.rel.clone(), f.error.clone())
-            };
+        if let Some((dirty, rel, error)) = self.work.open.as_ref().map(|f| (f.dirty(), f.rel.clone(), f.error.clone())) {
             ui.horizontal(|ui| {
                 if widgets::button(ui, "‹ Files", Kind::Secondary, 12.0, (10.0, 5.0), None).clicked() {
                     close = true;
@@ -1218,7 +1223,7 @@ impl HydraApp {
             }
         });
         let (mut sel, mut stage, mut unstage) = (None, None, None);
-        let mut section = |ui: &mut egui::Ui, title: &str, staged: bool, sel: &mut Option<(String, bool)>, act: &mut Option<String>| {
+        let section = |ui: &mut egui::Ui, title: &str, staged: bool, sel: &mut Option<(String, bool)>, act: &mut Option<String>| {
             let rows: Vec<_> = st.changes.iter().filter(|c| if staged { c.x != '.' && c.x != '?' } else { c.y != '.' || c.x == '?' }).collect();
             if rows.is_empty() {
                 return;
@@ -1458,12 +1463,20 @@ impl HydraApp {
         egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(8, 2)).show(ui, |ui| {
             ui.set_width(width - 17.0);
             ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+            for row in [&[("files", "Files"), ("git", "Changes"), ("approvals", "Approvals"), ("rules", "Rules")][..], &[("skills", "Skills"), ("mcp", "MCP"), ("tasks", "Tasks")][..]] {
+            let n = row.len() as f32;
             ui.horizontal(|ui| {
-                for (key, label) in [("files", "Files"), ("git", "Changes"), ("approvals", "Approvals"), ("rules", "Rules")] {
+                for &(key, label) in row {
                     let active = self.m.drawer_tab == key;
                     let mut text = label.to_string();
                     if key == "approvals" && !self.m.approvals.is_empty() {
                         text = format!("Approvals ({})", self.m.approvals.len());
+                    }
+                    if key == "tasks" && self.m.running_tasks() > 0 {
+                        text = format!("Tasks ({})", self.m.running_tasks());
+                    }
+                    if key == "skills" && !self.m.picked_skills.is_empty() {
+                        text = format!("Skills ({})", self.m.picked_skills.len());
                     }
                     if key == "git" {
                         if let Some(st) = &self.work.status {
@@ -1472,7 +1485,7 @@ impl HydraApp {
                             }
                         }
                     }
-                    let (rect, resp) = ui.allocate_exact_size(vec2((width - 17.0 - 12.0) / 4.0 - 4.0, 26.0), Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(vec2((width - 17.0 - 12.0) / n - 4.0, 26.0), Sense::click());
                     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, text.clone()));
                     if active {
                         ui.painter().rect_filled(rect, cr(10), ACCENT_DIM);
@@ -1486,6 +1499,7 @@ impl HydraApp {
                     }
                 }
             });
+            }
         });
         let y = ui.cursor().top();
         ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, BORDER));
@@ -1501,6 +1515,9 @@ impl HydraApp {
                     "git" => self.git_tab(ui),
                     "approvals" => self.approvals_tab(ui),
                     "rules" => self.rules_tab(ui),
+                    "skills" => self.skills_tab(ui),
+                    "mcp" => self.mcp_tab(ui),
+                    "tasks" => self.tasks_tab(ui),
                     _ => self.agent_tab(ui, width - 33.0),
                 }
             });
@@ -1585,6 +1602,115 @@ impl HydraApp {
     }
 
     /// Saved "always allow" rules for this thread (and its project), plus this thread's checkpoints with Rewind.
+    fn skills_tab(&mut self, ui: &mut egui::Ui) {
+        if !self.skills_asked {
+            self.skills_asked = true;
+            if let Some(be) = &mut self.be {
+                self.m.pending_skills(be);
+            }
+        }
+        ui.horizontal(|ui| {
+            ui.label(rtb("SKILLS", 11.0, TEXT2));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::button(ui, "Reload", Kind::Secondary, 11.0, (8.0, 2.0), None).clicked() {
+                    if let Some(be) = &mut self.be {
+                        self.m.pending_skills(be);
+                    }
+                }
+            });
+        });
+        if self.m.skills.is_empty() {
+            ui.label(rt("No skills found. Picked skills add their instructions to each turn you send until you untick them.", 11.0, MUTED));
+        }
+        let mut toggle = None;
+        for sk in &self.m.skills {
+            let id = sk["id"].as_str().unwrap_or("").to_string();
+            let mut on = self.m.picked_skills.contains(&id);
+            ui.horizontal(|ui| {
+                if ui.checkbox(&mut on, rt(&id, 12.0, TEXT)).changed() {
+                    toggle = Some(id.clone());
+                }
+                ui.label(rt(sk["title"].as_str().unwrap_or(""), 11.0, MUTED));
+            });
+        }
+        if let Some(id) = toggle {
+            self.m.toggle_skill(&id);
+        }
+    }
+
+    fn mcp_tab(&mut self, ui: &mut egui::Ui) {
+        let mut refresh = None;
+        if !self.mcp_asked {
+            self.mcp_asked = true;
+            refresh = Some(false);
+        }
+        ui.horizontal(|ui| {
+            ui.label(rtb("MCP SERVERS", 11.0, TEXT2));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::button(ui, "Refresh", Kind::Secondary, 11.0, (8.0, 2.0), None).clicked() {
+                    refresh = Some(true);
+                }
+            });
+        });
+        if let (Some(r), Some(be)) = (refresh, &mut self.be) {
+            let cwd = self.m.cwd.clone();
+            self.m.pending_mcp(be, &cwd, r);
+        }
+        match &self.m.mcp {
+            None => {
+                ui.label(rt("Asking the agent…", 11.0, MUTED));
+            }
+            Some((config, servers)) => {
+                ui.label(rt(format!("config: {}", config.as_deref().unwrap_or("none (.hydra/mcp_servers.json or ~/.hydra/mcp_servers.json)")), 11.0, MUTED));
+                for sv in servers {
+                    let ok = sv["ok"].as_bool().unwrap_or(false);
+                    ui.horizontal(|ui| {
+                        ui.label(rt(if ok { "●" } else { "×" }, 12.0, if ok { ACCENT } else { ERROR }));
+                        ui.label(rtb(sv["name"].as_str().unwrap_or("?"), 12.0, TEXT));
+                        let tools = sv["tools"].as_array().map(|a| a.len()).unwrap_or(0);
+                        ui.label(rt(if ok { format!("{tools} tools") } else { sv["error"].as_str().unwrap_or("failed").to_string() }, 11.0, MUTED));
+                    });
+                }
+            }
+        }
+    }
+
+    fn tasks_tab(&mut self, ui: &mut egui::Ui) {
+        if !self.tasks_asked {
+            self.tasks_asked = true;
+            if let Some(be) = &mut self.be {
+                self.m.pending_tasks(be);
+            }
+        }
+        ui.label(rtb("BACKGROUND TASKS", 11.0, TEXT2));
+        if self.m.tasks.is_empty() {
+            ui.label(rt("No background tasks. Tasks the agent starts keep running after the turn and show up here.", 11.0, MUTED));
+        }
+        let mut stop = None;
+        for (id, t) in self.m.tasks.iter().rev() {
+            let state = t["state"].as_str().unwrap_or("?");
+            ui.horizontal(|ui| {
+                ui.label(rt(if state == "running" { "●" } else { "○" }, 12.0, if state == "running" { ACCENT } else { MUTED }));
+                ui.label(egui::RichText::new(t["command"].as_str().unwrap_or("")).monospace().size(12.0).color(TEXT));
+                let tail = match t["exit_code"].as_i64() {
+                    Some(c) => format!("{state} ({c})"),
+                    None => state.to_string(),
+                };
+                ui.label(rt(tail, 11.0, MUTED));
+                if state == "running" {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if widgets::button(ui, "Stop", Kind::Danger, 11.0, (8.0, 2.0), None).clicked() {
+                            stop = Some(id.clone());
+                        }
+                    });
+                }
+            });
+        }
+        if let (Some(id), Some(be)) = (stop, &mut self.be) {
+            self.m.stop_task(be, &id);
+        }
+    }
+
     fn rules_tab(&mut self, ui: &mut egui::Ui) {
         let thread = self.m.sessions[self.m.active].thread.clone();
         if self.m.rules.0 != thread {
@@ -2539,6 +2665,19 @@ impl HydraApp {
         let ctx = &ctx;
         let time = ctx.input(|i| i.time);
         self.drain();
+        if std::mem::take(&mut self.child_died) {
+            // protocol "respawn": start a new child at once; three deaths inside a minute stop the loop and show the panel
+            self.deaths.retain(|t| time - *t < 60.0);
+            self.deaths.push(time);
+            if self.deaths.len() <= 3 {
+                self.retry_backend(ctx);
+                self.toast = Some(("Agent restarted after it stopped. The running turn was lost.".into(), f64::NAN));
+            } else {
+                self.be = None;
+                self.start_error = Some("The agent stopped three times in a minute. Press Retry to start it again.".into());
+                self.panel_dismissed = false;
+            }
+        }
         if let Ok(c) = self.health_rx.try_recv() {
             self.checks = c;
             // first run without any key: take the user straight to the place where one is entered

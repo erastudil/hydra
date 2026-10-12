@@ -163,6 +163,7 @@ pub enum Pending {
     Rewind(u32, String),
     UndoRewind(u32),
     Rules,
+    Query,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -204,6 +205,15 @@ pub struct Model {
     pub sent: HashMap<String, [String; 4]>,
     /// Approval rules of the thread last listed: (thread, rules).
     pub rules: (String, Vec<Value>),
+    /// Skills the agent offers (skill_list) and the ids picked for the next turns.
+    pub skills: Vec<Value>,
+    pub picked_skills: Vec<String>,
+    /// Background tasks by task id, from task_update and task_list. They outlive turns.
+    pub tasks: std::collections::BTreeMap<String, Value>,
+    /// Last mcp_status: (config path, servers).
+    pub mcp: Option<(Option<String>, Vec<Value>)>,
+    pub caps: Vec<String>,
+    state_was_bad: bool,
     pub notice: String,
     pub turn_counter: u64,
     pub cwd: String,
@@ -220,17 +230,18 @@ pub struct Model {
 }
 
 /// Write a file so a crash at any point leaves either the old or the new content: temp file, fsync, keep `.bak`, rename.
-pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) {
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> bool {
     use std::io::Write;
     let tmp = path.with_extension("tmp");
     let ok = std::fs::File::create(&tmp).and_then(|mut f| f.write_all(bytes).and_then(|_| f.sync_all())).is_ok();
     if !ok {
-        return;
+        return false;
     }
-    if path.is_file() {
+    // only a state that parses becomes the backup, so a torn state.json never overwrites a good .bak
+    if path.is_file() && std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()).is_some() {
         let _ = std::fs::copy(path, path.with_extension("bak"));
     }
-    let _ = std::fs::rename(&tmp, path);
+    std::fs::rename(&tmp, path).is_ok()
 }
 
 pub fn state_dir() -> PathBuf {
@@ -282,6 +293,12 @@ impl Model {
             approvals: vec![],
             agent_ready: false,
             agent_checkpoints: false,
+            skills: vec![],
+            picked_skills: vec![],
+            tasks: Default::default(),
+            mcp: None,
+            caps: vec![],
+            state_was_bad: false,
             cp_pending: HashMap::new(),
             sent: HashMap::new(),
             rules: (String::new(), vec![]),
@@ -301,7 +318,9 @@ impl Model {
         };
         if let Some(p) = &m.state_path {
             let try_load = |path: &std::path::Path| std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Saved>(&t).ok());
-            let loaded = try_load(p).or_else(|| try_load(&p.with_extension("bak")));
+            let main = try_load(p);
+            m.state_was_bad = main.is_none() && p.is_file();
+            let loaded = main.or_else(|| try_load(&p.with_extension("bak")));
             if let Some(saved) = loaded {
                 if !saved.sessions.is_empty() {
                     m.projects = saved.projects;
@@ -332,8 +351,48 @@ impl Model {
         if m.sessions.is_empty() {
             m.new_session();
         }
+        let mut dirty = m.state_was_bad;
+        // a reply that was streaming when the app died cannot resume: say so instead of "Thinking…" forever
+        for sess in &mut m.sessions {
+            if let Some(last) = sess.messages.last_mut().filter(|x| !x.user && x.actions.iter().any(|a| a == "Thinking…")) {
+                last.actions.retain(|a| a != "Thinking…");
+                last.actions.push("× interrupted: the app closed during this turn".into());
+                dirty = true;
+            }
+        }
+        dirty |= m.replay_journal();
+        if dirty {
+            m.save();
+        }
         m.focus_project_thread();
         m
+    }
+
+    /// Streamed tokens go to an append-only journal beside state.json, so a kill -9 mid-turn keeps the streamed text.
+    /// A full save truncates it; loading replays it onto each thread's last reply.
+    fn journal(&self, sid: u32, text: &str) {
+        let Some(p) = &self.state_path else { return };
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p.with_extension("journal")) {
+            let _ = f.write_all(format!("{}\n", json!({"s": sid, "t": text})).as_bytes());
+        }
+    }
+
+    fn replay_journal(&mut self) -> bool {
+        let Some(p) = self.state_path.clone() else { return false };
+        let Ok(text) = std::fs::read_to_string(p.with_extension("journal")) else { return false };
+        let mut any = false;
+        for line in text.lines() {
+            // a torn last line from the kill is skipped: at most that token is lost
+            let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+            let (Some(sid), Some(t)) = (v["s"].as_u64(), v["t"].as_str()) else { continue };
+            if let Some(m) = self.last_assistant(sid as u32) {
+                m.actions.retain(|a| a != "Thinking…");
+                m.text.push_str(t);
+                any = true;
+            }
+        }
+        any
     }
 
     pub fn save(&self) {
@@ -353,7 +412,9 @@ impl Model {
             let _ = std::fs::create_dir_all(dir);
         }
         if let Ok(t) = serde_json::to_string_pretty(&saved) {
-            write_atomic(p, t.as_bytes());
+            if write_atomic(p, t.as_bytes()) {
+                let _ = std::fs::remove_file(p.with_extension("journal"));
+            }
         }
     }
 
@@ -666,6 +727,38 @@ impl Model {
         self.save();
     }
 
+    pub fn pending_skills(&mut self, be: &mut Backend) {
+        let id = be.skills();
+        self.act(Pending::Query, id);
+    }
+
+    pub fn pending_mcp(&mut self, be: &mut Backend, cwd: &str, refresh: bool) {
+        let id = be.mcp(cwd, refresh);
+        self.act(Pending::Query, id);
+    }
+
+    pub fn pending_tasks(&mut self, be: &mut Backend) {
+        let id = be.tasks();
+        self.act(Pending::Query, id);
+    }
+
+    pub fn stop_task(&mut self, be: &mut Backend, task: &str) {
+        let id = be.task_stop(task);
+        self.act(Pending::Query, id);
+    }
+
+    pub fn toggle_skill(&mut self, id: &str) {
+        if let Some(i) = self.picked_skills.iter().position(|p| p == id) {
+            self.picked_skills.remove(i);
+        } else {
+            self.picked_skills.push(id.to_string());
+        }
+    }
+
+    pub fn running_tasks(&self) -> usize {
+        self.tasks.values().filter(|t| t.get("state").and_then(|x| x.as_str()) == Some("running")).count()
+    }
+
     pub fn set_nav(&mut self, key: &str) {
         self.nav = nav_key(key);
         match self.nav {
@@ -736,7 +829,7 @@ impl Model {
                 let now_meta = [cwd.clone(), model.to_string(), permission.clone(), context.clone()];
                 let last = self.sent.get(&thread).cloned();
                 let pick = |i: usize| -> Option<&str> { if last.as_ref().map(|l| l[i] == now_meta[i]).unwrap_or(false) { None } else { Some(now_meta[i].as_str()) } };
-                be.turn(&turn, &prompt, &thread, pick(0), pick(1), pick(2), pick(3));
+                be.turn(&turn, &prompt, &thread, pick(0), pick(1), pick(2), pick(3), &self.picked_skills);
                 self.sent.insert(thread.clone(), now_meta.clone());
                 self.runs.insert(turn, sid);
             }
@@ -899,6 +992,8 @@ impl Model {
                 self.agent_ready = true;
                 self.sent.clear(); // a new agent process: send every field again on each thread's next turn
                 self.agent_checkpoints = caps.iter().any(|c| c == "checkpoint");
+                self.tasks.clear(); // a respawned agent does not know the old tasks
+                self.caps = caps;
             }
             Ev::Checkpoint { turn, ok, id, reason } => {
                 if let Some((sid, at, label)) = self.cp_pending.remove(&turn) {
@@ -928,6 +1023,56 @@ impl Model {
                 }
                 _ => {}
             },
+            Ev::Context { turn, rules, skills, mcp_tools, mcp_errors } => {
+                if let Some(sid) = self.run_session(&turn) {
+                    if let Some(m) = self.last_assistant(sid) {
+                        if let Some(r) = &rules {
+                            m.actions.push(format!("rules: {r}"));
+                        }
+                        if !skills.is_empty() {
+                            m.actions.push(format!("skills: {}", skills.join(", ")));
+                        }
+                        if !mcp_tools.is_empty() {
+                            m.actions.push(format!("mcp: {} tools", mcp_tools.len()));
+                        }
+                        if let Some(o) = mcp_errors.as_object() {
+                            for (k, v) in o {
+                                m.actions.push(format!("× mcp {k}: {}", v.as_str().unwrap_or("failed")));
+                            }
+                        }
+                    }
+                }
+            }
+            Ev::Retry { turn, attempt, of, wait, reason } => {
+                if let Some(sid) = self.run_session(&turn) {
+                    if let Some(m) = self.last_assistant(sid) {
+                        m.actions.retain(|a| !a.starts_with("↻ retry"));
+                        m.actions.push(format!("↻ retry {attempt}/{of} in {wait:.1}s: {reason}"));
+                    }
+                }
+                self.log(&format!("\n[retry {attempt}/{of}] {reason}"));
+            }
+            Ev::TaskUpdate { task } => {
+                if let Some(id) = task.get("task").and_then(|x| x.as_str()).map(String::from) {
+                    let state = task.get("state").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    let cmd = task.get("command").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    self.log(&format!("\n[task {id}] {state} {cmd}"));
+                    self.tasks.insert(id, task);
+                }
+            }
+            Ev::SkillList { id, skills } => {
+                self.pending.remove(&id);
+                self.picked_skills.retain(|p| skills.iter().any(|s| s.get("id").and_then(|x| x.as_str()) == Some(p)));
+                self.skills = skills;
+            }
+            Ev::TaskList { id, tasks } => {
+                self.pending.remove(&id);
+                self.tasks = tasks.into_iter().filter_map(|t| Some((t.get("task")?.as_str()?.to_string(), t))).collect();
+            }
+            Ev::McpStatus { id, config, servers } => {
+                self.pending.remove(&id);
+                self.mcp = Some((config, servers));
+            }
             Ev::RulesResult { id, thread, rules } => {
                 self.pending.remove(&id);
                 self.rules = (thread, rules);
@@ -947,6 +1092,7 @@ impl Model {
                         m.actions.retain(|a| a != "Thinking…");
                         m.text.push_str(&text);
                     }
+                    self.journal(sid, &text);
                     self.touch(sid, false);
                 }
             }
@@ -1040,6 +1186,7 @@ impl Model {
                 self.finish_sid(sid);
             }
             Pending::Rewind(_, _) | Pending::UndoRewind(_) => self.notice = format!("Rewind failed: {message}"),
+            Pending::Query => self.notice = format!("Agent request failed: {message}"),
             _ => self.log(&format!("\n[error] {message}")),
         }
     }
@@ -1048,7 +1195,7 @@ impl Model {
         let is_err = r.get("isError").and_then(|x| x.as_bool()).unwrap_or(false);
         let err_text = r.get("error").and_then(|x| x.as_str()).unwrap_or("action failed").to_string();
         match kind {
-            Pending::Rewind(_, _) | Pending::UndoRewind(_) | Pending::Rules => {}
+            Pending::Rewind(_, _) | Pending::UndoRewind(_) | Pending::Rules | Pending::Query => {}
             Pending::Terminal(sid) => {
                 if is_err {
                     return self.action_failed(Pending::Terminal(sid), &err_text);
@@ -1229,6 +1376,40 @@ mod tests {
         m.apply(Ev::Done { turn: "t1".into(), text: "abcd!".into(), ok: true, cancelled: false });
         assert!(!m.any_busy());
         assert_eq!(m.sessions[0].messages.last().unwrap().text, "abcd!");
+    }
+
+    #[test]
+    fn streamed_text_survives_a_kill_through_the_journal_and_the_reply_is_marked_interrupted() {
+        let dir = std::env::temp_dir().join(format!("hydra-journal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("state.json");
+        let mut m = Model::new(Some(path.clone()), "/tmp".into());
+        running_thread(&mut m, 0, "t1");
+        m.save();
+        for t in ["al", "pha ", "beta"] {
+            m.apply(Ev::Token { turn: "t1".into(), text: t.into() });
+        }
+        // the kill: no save after the tokens, and a torn half line at the end of the journal
+        let j = path.with_extension("journal");
+        let mut torn = std::fs::read_to_string(&j).unwrap();
+        torn.push_str("{\"s\": 1, \"t\": \"gam");
+        std::fs::write(&j, torn).unwrap();
+        drop(m);
+        let back = Model::new(Some(path.clone()), "/tmp".into());
+        let last = back.sessions[0].messages.last().unwrap();
+        assert_eq!(last.text, "alpha beta");
+        assert!(last.actions.iter().any(|a| a.contains("interrupted")) && !last.actions.iter().any(|a| a == "Thinking…"), "{:?}", last.actions);
+        assert!(!j.exists(), "replayed journal folded into state.json");
+        let again = Model::new(Some(path.clone()), "/tmp".into());
+        assert_eq!(again.sessions[0].messages.last().unwrap().text, "alpha beta", "not replayed twice");
+        // a torn state.json comes back from .bak and is rewritten whole
+        let good = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(path.with_extension("bak"), &good).unwrap();
+        std::fs::write(&path, &good[..good.len() / 2]).unwrap();
+        let rec = Model::new(Some(path.clone()), "/tmp".into());
+        assert_eq!(rec.sessions[0].messages.last().unwrap().text, "alpha beta");
+        assert!(serde_json::from_str::<Value>(&std::fs::read_to_string(&path).unwrap()).is_ok(), "state.json rewritten after recovery");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn running_thread(m: &mut Model, idx: usize, turn: &str) {

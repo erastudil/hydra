@@ -12617,6 +12617,25 @@ def stdio_two_hundred_runs_of_four_parallel_turns():
 
 
 @check
+def stdio_turn_runs_on_a_machine_without_git():
+    """Pat's PC may have no git: the checkpoint reports ok false and the turn still answers (found by the clean-machine bundle run)."""
+    seen = []
+    httpd, base = _stdio_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home, env={"PATH": os.path.join(home, "empty-bin")})
+            assert child.next()["type"] == "hello"
+            replies = child.run_turn("g1", "hello", thread="nogit", model="local")
+            cp = [m for m in replies if m["type"] == "checkpoint"]
+            assert cp and cp[0]["ok"] is False and "git" in cp[0]["reason"], cp
+            done = [m for m in replies if m["type"] == "done"][-1]
+            assert done["ok"] is True and done["text"], replies
+            assert child.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
 def stdio_rules_and_skills_reach_the_model():
     """The project's AGENTS.md and the skills the app picks go into the system prompt, and the context message says which."""
     with _stdio_session() as (child, seen):

@@ -13,6 +13,12 @@ pub enum Ev {
     RewindResult { id: String, backup: String, restored: Vec<String>, removed: Vec<String> },
     RulesResult { id: String, thread: String, rules: Vec<Value> },
     Token { turn: String, text: String },
+    Context { turn: String, rules: Option<String>, skills: Vec<String>, mcp_tools: Vec<String>, mcp_errors: Value },
+    Retry { turn: String, attempt: u64, of: u64, wait: f64, reason: String },
+    TaskUpdate { task: Value },
+    SkillList { id: String, skills: Vec<Value> },
+    TaskList { id: String, tasks: Vec<Value> },
+    McpStatus { id: String, config: Option<String>, servers: Vec<Value> },
     ToolStart { turn: String, call: u64, tool: String, args: Value },
     ToolResult { turn: String, tool: String, is_error: bool, output: String },
     Diff { turn: String, path: String, diff: String },
@@ -23,6 +29,14 @@ pub enum Ev {
     Error { code: String, message: String, turn: Option<String>, id: Option<String> },
     ActionResult { id: String, action: String, result: Value },
     Exited(String),
+}
+
+fn strs(v: &Value, k: &str) -> Vec<String> {
+    v.get(k).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
+}
+
+fn arr(v: &Value, k: &str) -> Vec<Value> {
+    v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default()
 }
 
 pub fn parse_line(line: &str) -> Option<Ev> {
@@ -39,6 +53,18 @@ pub fn parse_line(line: &str) -> Option<Ev> {
         }
         "rules_result" => Ev::RulesResult { id: s("id"), thread: s("thread"), rules: v.get("rules").and_then(|x| x.as_array()).cloned().unwrap_or_default() },
         "token" => Ev::Token { turn: s("turn"), text: s("text") },
+        "context" => Ev::Context {
+            turn: s("turn"),
+            rules: v.get("rules").and_then(|x| x.as_str()).map(String::from),
+            skills: strs(&v, "skills"),
+            mcp_tools: strs(&v, "mcp_tools"),
+            mcp_errors: v.get("mcp_errors").cloned().unwrap_or(Value::Null),
+        },
+        "retry" => Ev::Retry { turn: s("turn"), attempt: n("attempt"), of: n("of"), wait: v.get("wait").and_then(|x| x.as_f64()).unwrap_or(0.0), reason: s("reason") },
+        "task_update" => Ev::TaskUpdate { task: v.clone() },
+        "skill_list" => Ev::SkillList { id: s("id"), skills: arr(&v, "skills") },
+        "task_list" => Ev::TaskList { id: s("id"), tasks: arr(&v, "tasks") },
+        "mcp_status" => Ev::McpStatus { id: s("id"), config: v.get("config").and_then(|x| x.as_str()).map(String::from), servers: arr(&v, "servers") },
         "tool_start" => Ev::ToolStart { turn: s("turn"), call: n("call"), tool: s("tool"), args: v.get("arguments").cloned().unwrap_or(Value::Null) },
         "tool_result" => Ev::ToolResult { turn: s("turn"), tool: s("tool"), is_error: b("is_error"), output: s("output") },
         "diff" => Ev::Diff { turn: s("turn"), path: s("path"), diff: s("diff") },
@@ -206,8 +232,12 @@ impl Backend {
 
     /// Start a turn. Optional fields are omitted when None: the agent keeps each thread's last cwd, model, permission
     /// and mode, so the app only sends what changed (and everything for a thread this agent process has not seen).
-    pub fn turn(&mut self, turn: &str, prompt: &str, thread: &str, cwd: Option<&str>, model: Option<&str>, permission: Option<&str>, context: Option<&str>) {
+    #[allow(clippy::too_many_arguments)] // one optional per protocol field; a struct would just restate the protocol
+    pub fn turn(&mut self, turn: &str, prompt: &str, thread: &str, cwd: Option<&str>, model: Option<&str>, permission: Option<&str>, context: Option<&str>, skills: &[String]) {
         let mut m = json!({"type": "turn", "turn": turn, "prompt": prompt, "thread": thread});
+        if !skills.is_empty() {
+            m["skills"] = json!(skills);
+        }
         for (k, v) in [("cwd", cwd), ("model", model), ("permission", permission), ("mode", context)] {
             if let Some(v) = v {
                 m[k] = json!(v);
@@ -249,6 +279,34 @@ impl Backend {
             m["rule"] = json!(r);
         }
         self.send(m);
+        id
+    }
+
+    /// Reply: Ev::SkillList.
+    pub fn skills(&mut self) -> String {
+        let id = self.req();
+        self.send(json!({"type": "skills", "id": id}));
+        id
+    }
+
+    /// Reply: Ev::McpStatus.
+    pub fn mcp(&mut self, cwd: &str, refresh: bool) -> String {
+        let id = self.req();
+        self.send(json!({"type": "mcp", "id": id, "cwd": cwd, "refresh": refresh}));
+        id
+    }
+
+    /// Reply: Ev::TaskList.
+    pub fn tasks(&mut self) -> String {
+        let id = self.req();
+        self.send(json!({"type": "tasks", "id": id}));
+        id
+    }
+
+    /// Stop a background task and its processes. Reply: Ev::TaskList.
+    pub fn task_stop(&mut self, task: &str) -> String {
+        let id = self.req();
+        self.send(json!({"type": "task_stop", "id": id, "task": task}));
         id
     }
 

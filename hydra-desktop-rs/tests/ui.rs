@@ -28,7 +28,7 @@ fn first_frame_draws_and_has_one_thread_in_one_project() {
     assert_eq!(a.model().visible().len(), 1);
 }
 
-use egui_kittest::kittest::{NodeT, Queryable};
+use egui_kittest::kittest::Queryable;
 
 fn settle(h: &mut Harness<'static, HydraApp>) {
     h.run_steps(30);
@@ -170,4 +170,37 @@ fn diff_rows_carry_line_numbers_and_files_collapse() {
     let rows = hydra_desktop::app::parse_diff("--- a/x\n+++ b/x\n@@ -3,2 +3,3 @@\n keep\n-old\n+new\n+added\n");
     let shape: Vec<(u8, Option<u32>, Option<u32>)> = rows.iter().map(|r| (r.kind, r.old, r.new)).collect();
     assert_eq!(shape, vec![(b'@', None, None), (b' ', Some(3), Some(3)), (b'-', Some(4), None), (b'+', None, Some(4)), (b'+', None, Some(5))]);
+}
+
+fn click_label(h: &mut Harness<'static, HydraApp>, label: &str) {
+    h.get_by_label(label).click();
+    h.run_steps(3);
+}
+
+#[test]
+fn tasks_panel_lists_a_task_that_outlives_its_turn_and_stops_it() {
+    let mut h = harness("tasks");
+    settle(&mut h);
+    say(&mut h, "BGJOB start the dev server");
+    assert!(wait(&mut h, 10, |a| !a.model().any_busy() && a.model().running_tasks() == 1), "the turn ends and the task keeps running");
+    click_label(&mut h, "Tasks (1)");
+    assert_eq!(app(&mut h).model().drawer_tab, "tasks");
+    h.get_by_label("npm run dev");
+    click_label(&mut h, "Stop");
+    assert!(wait(&mut h, 10, |a| a.model().running_tasks() == 0), "Stop reaches the agent");
+    assert_eq!(app(&mut h).model().tasks["task1"]["state"], "stopped");
+}
+
+#[test]
+fn skills_picker_ticks_a_skill_and_the_next_turn_carries_it() {
+    let mut h = harness("skills");
+    settle(&mut h);
+    click_label(&mut h, "Skills");
+    assert!(wait(&mut h, 10, |a| !a.model().skills.is_empty()), "skill_list arrives");
+    h.run_steps(3);
+    click_label(&mut h, "code");
+    assert_eq!(app(&mut h).model().picked_skills, vec!["code".to_string()]);
+    h.get_by_label("Skills (1)");
+    say(&mut h, "hello");
+    assert!(wait(&mut h, 10, |a| a.model().sessions[0].messages.last().map(|m| m.actions.iter().any(|x| x == "skills: code")).unwrap_or(false)), "turn carried the skill");
 }

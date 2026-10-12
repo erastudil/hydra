@@ -78,8 +78,11 @@ def _now() -> str:
 
 
 def git(repo: str, *args: str, env: Optional[Dict[str, str]] = None, stdin: Optional[str] = None) -> Tuple[int, str]:
-    proc = subprocess.run(["git", "-C", repo, *args], input=stdin, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", env=env)
+    try:
+        proc = subprocess.run(["git", "-C", repo, *args], input=stdin, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", env=env)
+    except OSError as exc:  # no git on this machine: callers see a failed command, a turn must not die of it
+        return 127, f"git unavailable: {exc}"
     return proc.returncode, proc.stdout.strip("\n") if proc.stdout else ""
 
 

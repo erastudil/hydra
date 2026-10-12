@@ -14,6 +14,8 @@ state = threading.Lock()
 counter = [0]
 thread_cwd = {}
 fields_seen = []
+# background tasks: a BGJOB prompt starts one that outlives its turn (task_update after done)
+tasks = {}
 
 
 def emit(m):
@@ -38,6 +40,12 @@ def turn(msg):
     if "FIELDS" in prompt:
         emit({"type": "token", "turn": t, "text": json.dumps(fields_seen[-1])})
     stop = cancel[t]
+    if msg.get("skills"):
+        emit({"type": "context", "turn": t, "rules": None, "skills": msg["skills"], "mcp_tools": [], "mcp_errors": {}})
+    if "BGJOB" in prompt:
+        tid = f"task{len(tasks) + 1}"
+        tasks[tid] = {"task": tid, "thread": thread, "turn": t, "command": "npm run dev", "cwd": cwd, "pid": 4242, "state": "running", "exit_code": None, "started": time.time(), "ended": None}
+        threading.Timer(0.3, lambda: emit({"type": "task_update", **tasks[tid]})).start()  # arrives after done, between turns
     emit({"type": "token", "turn": t, "text": f"[{thread}@{cwd}] "})
     if "ASK" in prompt:
         with state:
@@ -79,7 +87,7 @@ def turn(msg):
 
 
 def main():
-    emit({"type": "hello", "protocol": 1, "agent": "fake", "capabilities": ["turn", "cancel", "approval", "permission", "action"], "context_modes": ["recall"]})
+    emit({"type": "hello", "protocol": 1, "agent": "fake", "capabilities": ["turn", "cancel", "approval", "permission", "action", "skills", "tasks"], "context_modes": ["recall"]})
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -100,6 +108,18 @@ def main():
             if w:
                 w["decision"] = msg.get("decision")
                 w["event"].set()
+        elif k == "skills":
+            emit({"type": "skill_list", "id": msg.get("id"), "skills": [{"id": "code", "keys": ["code"], "title": "Read before you edit."}]})
+        elif k == "tasks":
+            emit({"type": "task_list", "id": msg.get("id"), "tasks": list(tasks.values())})
+        elif k == "task_stop":
+            t = tasks.get(msg.get("task"))
+            if t is None:
+                emit({"type": "error", "code": "bad_request", "message": "unknown task", "id": msg.get("id")})
+                continue
+            t.update(state="stopped", exit_code=-15, ended=time.time())
+            emit({"type": "task_update", **t})
+            emit({"type": "task_list", "id": msg.get("id"), "tasks": list(tasks.values())})
         elif k == "shutdown":
             break
 

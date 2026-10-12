@@ -24,6 +24,11 @@ MUTATIONS = [
     ("long messages never collapse", "src/app.rs", "    if expanded {\n        return (text, 0);\n    }", "    if true || expanded {\n        return (text, 0);\n    }", ["--test", "ui"]),
     ("cut stream kept silently", "../hydra_cli/agent.py", "    if not saw_done and not state.get(\"finished\"):", "    if False:", ["--test", "stdio_integration"]),
     ("env file accepts newlines", "src/secrets.rs", "if value.contains('\\n') || value.contains('\\r') {", "if false {", ["--lib"]),
+    ("picked skills not sent", "src/backend.rs", "        if !skills.is_empty() {\n            m[\"skills\"] = json!(skills);", "        if false {\n            m[\"skills\"] = json!(skills);", ["--test", "stdio_integration", "skills_"]),
+    ("retry notice dropped", M, "m.actions.push(format!(\"↻ retry {attempt}/{of} in {wait:.1}s: {reason}\"));", "let _ = (attempt, of, wait, &reason);", ["--test", "stdio_integration", "retry"]),
+    ("task_update ignored", M, "                    self.tasks.insert(id, task);", "                    let _ = (id, task);", ["--test", "stdio_integration", "background_task"]),
+    ("diff yanks a pinned tab", M, "if self.sessions[self.active].id == sid && !self.tab_pinned {", "if self.sessions[self.active].id == sid {", ["--test", "stdio_integration", "pinned"]),
+    ("unchanged fields resent", M, "if last.as_ref().map(|l| l[i] == now_meta[i]).unwrap_or(false) { None }", "if false { None }", ["--test", "concurrency"]),
 ]
 
 
