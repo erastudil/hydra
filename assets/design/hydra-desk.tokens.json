@@ -1,0 +1,1097 @@
+{
+ "meta": {
+  "name": "Hydra Sovereign Desktop v1.2.2 web desk",
+  "version": "1.2.2",
+  "source": {
+   "repo": "erastudil/hydra",
+   "commit": "1058435a229b60f85449924bbb3321d2c89dfa4b",
+   "file": "hydra_cli/desktop.py",
+   "function": "get_desktop_html",
+   "palette_origin": "f8b8da5 (wave-23)"
+  },
+  "units": "px at 1.0 device scale; colors are hex with optional alpha (0..1); refs look like $colors.accent",
+  "extracted": "CSS text of the old page plus Chromium computed styles; measured boxes live in shots/portcmp/old/manifest.json"
+ },
+ "colors": {
+  "bg_primary": {
+   "hex": "#000000",
+   "role": "app background, session bar, drawer tab strip, terminal and screen wells"
+  },
+  "bg_secondary": {
+   "hex": "#080808",
+   "role": "sidebar, assistant bubble, tool card, side drawer, session tab idle, palette"
+  },
+  "bg_tertiary": {
+   "hex": "#0d0d0d",
+   "role": "inputs, selects, secondary buttons, chips, diff card body, progress track"
+  },
+  "bg_elevated": {
+   "hex": "#141414",
+   "role": "secondary button hover, diff card header, idle badge"
+  },
+  "bg_glass": {
+   "hex": "#080808",
+   "role": "header and composer bar background (blurred in browser)",
+   "alpha": 0.85
+  },
+  "border": {
+   "hex": "#1a1a1a",
+   "role": "default 1px border and divider"
+  },
+  "border_subtle": {
+   "hex": "#ffffff",
+   "role": "faint hairline",
+   "alpha": 0.08
+  },
+  "border_active": {
+   "hex": "#00ff66",
+   "role": "active border"
+  },
+  "accent": {
+   "hex": "#00ff66",
+   "role": "brand phosphor green, primary fill, active text"
+  },
+  "accent_secondary": {
+   "hex": "#00ff88",
+   "role": "primary button hover fill"
+  },
+  "accent_hover": {
+   "hex": "#00e65c",
+   "role": "declared hover accent (unused by v1.2.2 rules)"
+  },
+  "accent_dim": {
+   "hex": "#00ff66",
+   "role": "active tab, nav, badge fill",
+   "alpha": 0.12
+  },
+  "text_primary": {
+   "hex": "#ffffff",
+   "role": "body text"
+  },
+  "text_secondary": {
+   "hex": "#f3f4f6",
+   "role": "chip text, drawer header, labels"
+  },
+  "text_muted": {
+   "hex": "#9ca3af",
+   "role": "idle nav, idle tabs, message header, context diff lines"
+  },
+  "error": {
+   "hex": "#ef4444",
+   "role": "close hover, abort"
+  },
+  "error_dim": {
+   "hex": "#ef4444",
+   "role": "error tint",
+   "alpha": 0.15
+  },
+  "diff_add_bg": {
+   "hex": "#052e16",
+   "role": "added line background"
+  },
+  "diff_add_text": {
+   "hex": "#86efac",
+   "role": "added line text"
+  },
+  "diff_del_bg": {
+   "hex": "#450a0a",
+   "role": "removed line background"
+  },
+  "diff_del_text": {
+   "hex": "#fca5a5",
+   "role": "removed line text"
+  },
+  "user_bubble_bg": {
+   "hex": "#0d1f12",
+   "role": "user message bubble fill"
+  },
+  "user_bubble_border": {
+   "hex": "#00ff66",
+   "role": "user message bubble border",
+   "alpha": 0.35
+  },
+  "accent_border_hover": {
+   "hex": "#00ff66",
+   "role": "hover border on idle tabs and secondary buttons",
+   "alpha": 0.3
+  },
+  "accent_border_secondary_hover": {
+   "hex": "#00ff66",
+   "role": "secondary button hover border",
+   "alpha": 0.4
+  },
+  "accent_border_dashed": {
+   "hex": "#00ff66",
+   "role": "new session dashed border",
+   "alpha": 0.6
+  },
+  "terminal_border": {
+   "hex": "#00ff66",
+   "role": "terminal well border",
+   "alpha": 0.25
+  },
+  "overlay": {
+   "hex": "#000000",
+   "role": "modal overlay",
+   "alpha": 0.85
+  },
+  "shadow_black": {
+   "hex": "#000000",
+   "role": "base for drop shadows"
+  }
+ },
+ "typography": {
+  "font_mono": [
+   "Cascadia Code",
+   "Cascadia Mono",
+   "Consolas",
+   "monospace"
+  ],
+  "font_ui": [
+   "Cascadia Code",
+   "Cascadia Mono",
+   "Consolas",
+   "monospace"
+  ],
+  "note": "The old page used one monospace stack for every element. No proportional font anywhere.",
+  "letter_spacing_body": -0.2,
+  "scale": {
+   "msg_header": {
+    "size": 11,
+    "weight": 400,
+    "letter_spacing": 0.5
+   },
+   "badge": {
+    "size": 11,
+    "weight": 600
+   },
+   "coord_readout": {
+    "size": 11,
+    "weight": 400
+   },
+   "token_tally": {
+    "size": 11,
+    "weight": 400
+   },
+   "status_pill": {
+    "size": 12,
+    "weight": 400
+   },
+   "session_tab": {
+    "size": 12,
+    "weight": 400,
+    "weight_active": 600
+   },
+   "drawer_header": {
+    "size": 12,
+    "weight": 700,
+    "letter_spacing": 0.5
+   },
+   "drawer_tab": {
+    "size": 12,
+    "weight": 400,
+    "weight_active": 600
+   },
+   "tool_card": {
+    "size": 12,
+    "weight": 400
+   },
+   "tool_title": {
+    "size": 12,
+    "weight": 700
+   },
+   "terminal": {
+    "size": 12,
+    "weight": 400,
+    "line_height": 1.6
+   },
+   "diff": {
+    "size": 12,
+    "weight": 400,
+    "weight_header": 600
+   },
+   "nav_item": {
+    "size": 13,
+    "weight": 500,
+    "weight_active": 600
+   },
+   "input": {
+    "size": 13,
+    "weight": 400
+   },
+   "button": {
+    "size": 13,
+    "weight": 700
+   },
+   "message_body": {
+    "size": 14,
+    "weight": 400,
+    "line_height": 1.6
+   },
+   "textarea": {
+    "size": 14,
+    "weight": 400
+   },
+   "brand": {
+    "size": 16,
+    "weight": 700,
+    "letter_spacing": 1.0,
+    "note": "inherits browser default 16px"
+   }
+  }
+ },
+ "spacing": {
+  "scale": [
+   2,
+   3,
+   4,
+   6,
+   8,
+   10,
+   12,
+   14,
+   16,
+   18,
+   20,
+   24
+  ],
+  "note": "values observed in padding and gap; no named scale in the old CSS"
+ },
+ "radii": {
+  "sm": 8,
+  "md": 12,
+  "lg": 16,
+  "xl": 20,
+  "pill": 9999,
+  "drawer_tab": 10,
+  "bubble_tail": 4,
+  "dot": "50%"
+ },
+ "borders": {
+  "width": 1,
+  "accent_bar": 3,
+  "dashed": "1px dashed"
+ },
+ "shadows": {
+  "glow": [
+   {
+    "color": "#00ff66",
+    "alpha": 0.35,
+    "x": 0,
+    "y": 0,
+    "blur": 12,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "glow_strong": [
+   {
+    "color": "#00ff66",
+    "alpha": 0.55,
+    "x": 0,
+    "y": 0,
+    "blur": 20,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "chip_glow": [
+   {
+    "color": "#00ff66",
+    "alpha": 0.25,
+    "x": 0,
+    "y": 0,
+    "blur": 8,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "tab_active_glow": [
+   {
+    "color": "#00ff66",
+    "alpha": 0.25,
+    "x": 0,
+    "y": 0,
+    "blur": 10,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "drawer_tab_glow": [
+   {
+    "color": "#00ff66",
+    "alpha": 0.2,
+    "x": 0,
+    "y": 0,
+    "blur": 8,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "nav_active_inset": [
+   {
+    "color": "#00ff66",
+    "alpha": 0.08,
+    "x": 0,
+    "y": 0,
+    "blur": 12,
+    "spread": 0,
+    "inset": true
+   }
+  ],
+  "card": [
+   {
+    "color": "#000000",
+    "alpha": 0.7,
+    "x": 0,
+    "y": 4,
+    "blur": 16,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "tool_card": [
+   {
+    "color": "#000000",
+    "alpha": 0.6,
+    "x": 0,
+    "y": 4,
+    "blur": 14,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "diff_card": [
+   {
+    "color": "#000000",
+    "alpha": 0.6,
+    "x": 0,
+    "y": 4,
+    "blur": 16,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "screen": [
+   {
+    "color": "#000000",
+    "alpha": 0.8,
+    "x": 0,
+    "y": 8,
+    "blur": 24,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "button_secondary_hover": [
+   {
+    "color": "#000000",
+    "alpha": 0.5,
+    "x": 0,
+    "y": 4,
+    "blur": 12,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "terminal_inset": [
+   {
+    "color": "#000000",
+    "alpha": 0.95,
+    "x": 0,
+    "y": 0,
+    "blur": 20,
+    "spread": 0,
+    "inset": true
+   }
+  ],
+  "palette": [
+   {
+    "color": "#000000",
+    "alpha": 0.95,
+    "x": 0,
+    "y": 24,
+    "blur": 60,
+    "spread": 0,
+    "inset": false
+   },
+   {
+    "color": "#00ff66",
+    "alpha": 0.35,
+    "x": 0,
+    "y": 0,
+    "blur": 12,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "status_dot": [
+   {
+    "color": "#00ff66",
+    "alpha": 1.0,
+    "x": 0,
+    "y": 0,
+    "blur": 10,
+    "spread": 0,
+    "inset": false
+   },
+   {
+    "color": "#00ff66",
+    "alpha": 1.0,
+    "x": 0,
+    "y": 0,
+    "blur": 3,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "status_dot_dim": [
+   {
+    "color": "#00ff66",
+    "alpha": 1.0,
+    "x": 0,
+    "y": 0,
+    "blur": 4,
+    "spread": 0,
+    "inset": false
+   }
+  ],
+  "brand_icon_dropshadow": [
+   {
+    "color": "#00ff66",
+    "alpha": 0.5,
+    "x": 0,
+    "y": 0,
+    "blur": 8,
+    "spread": 0,
+    "inset": false
+   }
+  ]
+ },
+ "text_shadows": {
+  "brand": {
+   "color": "#00ff66",
+   "alpha": 0.45,
+   "x": 0,
+   "y": 0,
+   "blur": 10,
+   "spread": 0,
+   "inset": false
+  },
+  "tool_title": {
+   "color": "#00ff66",
+   "alpha": 0.35,
+   "x": 0,
+   "y": 0,
+   "blur": 8,
+   "spread": 0,
+   "inset": false
+  },
+  "terminal": {
+   "color": "#00ff66",
+   "alpha": 0.35,
+   "x": 0,
+   "y": 0,
+   "blur": 4,
+   "spread": 0,
+   "inset": false
+  }
+ },
+ "motion": {
+  "easing": {
+   "apple": [
+    0.16,
+    1,
+    0.3,
+    1
+   ]
+  },
+  "durations_ms": {
+   "transition": 250,
+   "fade_in": 250,
+   "modal_fade": 200,
+   "color_quick": 150,
+   "progress_width": 300,
+   "status_pulse": 2000
+  },
+  "transition_all": {
+   "property": "all",
+   "duration_ms": 250,
+   "easing": "apple"
+  },
+  "keyframes": {
+   "fadeIn": {
+    "from": {
+     "opacity": 0,
+     "translate_y": 8
+    },
+    "to": {
+     "opacity": 1,
+     "translate_y": 0
+    }
+   },
+   "phosphorPulse": {
+    "loop": true,
+    "easing": "ease-in-out",
+    "duration_ms": 2000,
+    "0%,100%": {
+     "opacity": 1,
+     "scale": 1,
+     "glow_blur": 10
+    },
+    "50%": {
+     "opacity": 0.6,
+     "scale": 0.9,
+     "glow_blur": 4
+    }
+   }
+  },
+  "hover_transforms": {
+   "button_primary": {
+    "translate_y": -2
+   },
+   "button_secondary": {
+    "translate_y": -1
+   },
+   "session_tab": {
+    "translate_y": -1
+   },
+   "add_session": {
+    "translate_y": -1
+   },
+   "nav_item": {
+    "translate_x": 3
+   },
+   "button_active": {
+    "translate_y": 0
+   }
+  },
+  "reduced_motion": "skip keyframes and transforms; keep color changes instant"
+ },
+ "layout": {
+  "header": {
+   "padding": [
+    12,
+    24
+   ],
+   "gap": 16,
+   "height_measured": 60,
+   "border_bottom": "$colors.border",
+   "bg": "$colors.bg_glass",
+   "blur_px": 16
+  },
+  "session_bar": {
+   "padding": [
+    6,
+    20
+   ],
+   "gap": 8,
+   "height_measured": 41,
+   "bg": "$colors.bg_primary",
+   "border_bottom": "$colors.border"
+  },
+  "sidebar": {
+   "width": 220,
+   "padding": [
+    16,
+    10
+   ],
+   "gap": 6,
+   "bg": "$colors.bg_secondary",
+   "border_right": "$colors.border"
+  },
+  "chat_pane": {
+   "padding": 24,
+   "gap": 20,
+   "bg": "$colors.bg_primary"
+  },
+  "message": {
+   "max_width_pct": 80,
+   "gap": 8,
+   "user_align": "end",
+   "assistant_align": "start"
+  },
+  "input_area": {
+   "padding": [
+    16,
+    24
+   ],
+   "gap": 12,
+   "bg": "$colors.bg_glass",
+   "blur_px": 16,
+   "border_top": "$colors.border",
+   "row_gap": 12,
+   "row_align": "end"
+  },
+  "side_drawer": {
+   "width": 500,
+   "bg": "$colors.bg_secondary",
+   "border_left": "$colors.border"
+  },
+  "drawer_header": {
+   "padding": [
+    14,
+    20
+   ],
+   "border_bottom": "$colors.border"
+  },
+  "drawer_tabs": {
+   "padding": [
+    4,
+    8
+   ],
+   "gap": 4,
+   "bg": "$colors.bg_primary",
+   "border_bottom": "$colors.border"
+  },
+  "drawer_body": {
+   "padding": 16,
+   "gap": 14
+  },
+  "screen_container": {
+   "aspect": "16/9",
+   "bg": "$colors.bg_primary",
+   "border": "$colors.border",
+   "radius": 16,
+   "shadow": "screen"
+  },
+  "narrow_note": "At 900px wide the transcript column shrinks to 180px because sidebar 220 and drawer 500 stay fixed; the old header wraps to 73px."
+ },
+ "components": {
+  "brand": {
+   "gap": 12,
+   "color": "$colors.accent",
+   "weight": 700,
+   "letter_spacing": 1,
+   "text_shadow": "brand",
+   "icon": {
+    "size": 28,
+    "fill": "$colors.accent",
+    "viewbox": "0 0 24 24",
+    "path": "M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5",
+    "drop_shadow": "brand_icon_dropshadow"
+   },
+   "text": "HYDRA DESKTOP"
+  },
+  "badge": {
+   "bg": "$colors.accent_dim",
+   "color": "$colors.accent",
+   "size": 11,
+   "weight": 600,
+   "padding": [
+    3,
+    10
+   ],
+   "radius": "pill",
+   "border": "1px solid $colors.accent",
+   "shadow": "chip_glow"
+  },
+  "token_tally": {
+   "bg": "$colors.bg_tertiary",
+   "padding": [
+    6,
+    14
+   ],
+   "radius": 12,
+   "border": "1px solid $colors.border",
+   "gap": 8,
+   "size": 11,
+   "label_color": "$colors.text_secondary",
+   "value_color": "$colors.text_primary",
+   "cost_color": "$colors.accent",
+   "separator": "•",
+   "separator_color": "$colors.border"
+  },
+  "status_pill": {
+   "gap": 8,
+   "size": 12,
+   "color": "$colors.text_secondary",
+   "bg": "$colors.bg_tertiary",
+   "padding": [
+    6,
+    12
+   ],
+   "radius": 12,
+   "border": "1px solid $colors.border",
+   "dot": {
+    "size": 8,
+    "radius": "50%",
+    "bg": "$colors.accent",
+    "shadow": "status_dot",
+    "animation": "phosphorPulse"
+   }
+  },
+  "select": {
+   "bg": "$colors.bg_tertiary",
+   "color": "$colors.text_primary",
+   "border": "1px solid $colors.border",
+   "padding": [
+    8,
+    14
+   ],
+   "radius": 12,
+   "size": 13,
+   "focus": {
+    "border": "$colors.accent",
+    "shadow": "glow"
+   }
+  },
+  "input": {
+   "same_as": "select"
+  },
+  "button_primary": {
+   "bg": "$colors.accent",
+   "color": "#000000",
+   "weight": 700,
+   "size": 13,
+   "padding": [
+    8,
+    16
+   ],
+   "radius": 12,
+   "border": "none",
+   "shadow": "glow",
+   "hover": {
+    "bg": "$colors.accent_secondary",
+    "shadow": "glow_strong",
+    "translate_y": -2
+   },
+   "active": {
+    "translate_y": 0
+   }
+  },
+  "button_secondary": {
+   "bg": "$colors.bg_tertiary",
+   "color": "$colors.text_primary",
+   "border": "1px solid $colors.border",
+   "shadow": "none",
+   "size": 13,
+   "weight": 700,
+   "padding": [
+    8,
+    16
+   ],
+   "radius": 12,
+   "hover": {
+    "bg": "$colors.bg_elevated",
+    "border": "$colors.accent_border_secondary_hover",
+    "color": "$colors.accent",
+    "translate_y": -1,
+    "shadow": "button_secondary_hover"
+   }
+  },
+  "button_compact": {
+   "size": 12,
+   "padding": [
+    6,
+    8
+   ],
+   "note": "agent panel buttons use inline 12px / 6px 8px"
+  },
+  "session_tab": {
+   "gap": 8,
+   "padding": [
+    6,
+    14
+   ],
+   "radius": 12,
+   "size": 12,
+   "color": "$colors.text_muted",
+   "bg": "$colors.bg_secondary",
+   "border": "1px solid $colors.border",
+   "hover": {
+    "color": "$colors.text_primary",
+    "border": "$colors.accent_border_hover",
+    "translate_y": -1
+   },
+   "active": {
+    "bg": "$colors.accent_dim",
+    "color": "$colors.accent",
+    "border": "$colors.accent",
+    "shadow": "tab_active_glow",
+    "weight": 600
+   },
+   "close": {
+    "size": 14,
+    "color": "$colors.text_muted",
+    "hover_color": "$colors.error",
+    "glyph": "×"
+   }
+  },
+  "add_session": {
+   "bg": "transparent",
+   "color": "$colors.accent",
+   "border": "1px dashed $colors.accent_border_dashed",
+   "padding": [
+    6,
+    12
+   ],
+   "size": 12,
+   "radius": 12,
+   "label": "+ New Session",
+   "hover": {
+    "bg": "$colors.accent_dim",
+    "border": "1px solid $colors.accent",
+    "translate_y": -1
+   }
+  },
+  "nav_item": {
+   "gap": 10,
+   "padding": [
+    10,
+    14
+   ],
+   "radius": 12,
+   "color": "$colors.text_muted",
+   "size": 13,
+   "weight": 500,
+   "hover": {
+    "bg": "$colors.bg_tertiary",
+    "color": "$colors.text_primary",
+    "translate_x": 3
+   },
+   "active": {
+    "bg": "$colors.accent_dim",
+    "color": "$colors.accent",
+    "border_left": "3px solid $colors.accent",
+    "shadow": "nav_active_inset",
+    "weight": 600
+   },
+   "labels": [
+    "Chat Mode",
+    "Agent ReAct Loop",
+    "3-Headed Swarm",
+    "Computer Use",
+    "Terminal Sandbox"
+   ]
+  },
+  "msg_header": {
+   "size": 11,
+   "color": "$colors.text_muted",
+   "letter_spacing": 0.5,
+   "assistant_label": "HYDRA ORCHESTRATOR",
+   "user_label": "YOU"
+  },
+  "msg_bubble": {
+   "padding": [
+    14,
+    18
+   ],
+   "radius": 16,
+   "size": 14,
+   "line_height": 1.6,
+   "wrap": "pre-wrap"
+  },
+  "msg_user": {
+   "bg": "$colors.user_bubble_bg",
+   "border": "1px solid $colors.user_bubble_border",
+   "color": "$colors.text_primary",
+   "corner_radius": [
+    16,
+    16,
+    4,
+    16
+   ],
+   "corner_order": "tl,tr,br,bl",
+   "shadow": "card"
+  },
+  "msg_assistant": {
+   "bg": "$colors.bg_secondary",
+   "border": "1px solid $colors.border",
+   "color": "$colors.text_primary",
+   "corner_radius": [
+    16,
+    16,
+    16,
+    4
+   ],
+   "corner_order": "tl,tr,br,bl",
+   "shadow": "card"
+  },
+  "tool_card": {
+   "bg": "$colors.bg_secondary",
+   "border": "1px solid $colors.border",
+   "border_left": "3px solid $colors.accent",
+   "padding": [
+    12,
+    16
+   ],
+   "radius": 12,
+   "size": 12,
+   "margin": [
+    6,
+    0
+   ],
+   "shadow": "tool_card",
+   "title": {
+    "color": "$colors.accent",
+    "weight": 700,
+    "margin_bottom": 6,
+    "text_shadow": "tool_title"
+   }
+  },
+  "composer": {
+   "textarea": {
+    "bg": "$colors.bg_tertiary",
+    "color": "$colors.text_primary",
+    "border": "1px solid $colors.border",
+    "padding": [
+     12,
+     16
+    ],
+    "radius": 16,
+    "size": 14,
+    "min_height": 56,
+    "caret": "$colors.accent",
+    "placeholder": "Summon frontier model, instruct agent, or issue bash command...",
+    "focus": {
+     "border": "$colors.accent",
+     "shadow": "glow"
+    }
+   },
+   "send": "button_primary",
+   "send_label": "Send"
+  },
+  "drawer_header": {
+   "title": "INSPECTION & AUTOMATION",
+   "size": 12,
+   "weight": 700,
+   "color": "$colors.text_secondary",
+   "letter_spacing": 0.5,
+   "readout": {
+    "size": 11,
+    "color": "$colors.text_muted",
+    "default": "X: - | Y: -"
+   }
+  },
+  "drawer_tab": {
+   "flex": 1,
+   "align": "center",
+   "padding": [
+    8,
+    6
+   ],
+   "size": 12,
+   "color": "$colors.text_muted",
+   "radius": 10,
+   "hover": {
+    "color": "$colors.text_primary",
+    "bg": "$colors.bg_tertiary"
+   },
+   "active": {
+    "color": "$colors.accent",
+    "bg": "$colors.accent_dim",
+    "weight": 600,
+    "shadow": "drawer_tab_glow"
+   },
+   "labels": [
+    "Live Screen",
+    "Terminal Logs",
+    "Diffs & Code",
+    "Agent Runner"
+   ]
+  },
+  "terminal_view": {
+   "bg": "#000000",
+   "color": "$colors.accent",
+   "size": 12,
+   "padding": 16,
+   "radius": 16,
+   "border": "1px solid $colors.terminal_border",
+   "shadow": "terminal_inset",
+   "text_shadow": "terminal",
+   "line_height": 1.6
+  },
+  "diff_card": {
+   "bg": "$colors.bg_tertiary",
+   "border": "1px solid $colors.border",
+   "radius": 16,
+   "shadow": "diff_card",
+   "header": {
+    "bg": "$colors.bg_elevated",
+    "padding": [
+     10,
+     16
+    ],
+    "weight": 600,
+    "color": "$colors.accent",
+    "border_bottom": "$colors.border"
+   },
+   "body": {
+    "padding": [
+     10,
+     0
+    ]
+   },
+   "line": {
+    "padding": [
+     2,
+     14
+    ],
+    "add": {
+     "bg": "$colors.diff_add_bg",
+     "color": "$colors.diff_add_text"
+    },
+    "del": {
+     "bg": "$colors.diff_del_bg",
+     "color": "$colors.diff_del_text"
+    },
+    "ctx": {
+     "color": "$colors.text_muted"
+    }
+   }
+  },
+  "agent_panel": {
+   "title": "AUTONOMOUS AGENT RUNNER",
+   "title_size": 13,
+   "title_weight": 600,
+   "badge_idle": {
+    "bg": "$colors.bg_elevated",
+    "border": "$colors.border"
+   },
+   "progress": {
+    "track_bg": "$colors.bg_tertiary",
+    "track_height": 6,
+    "track_radius": 8,
+    "track_border": "1px solid $colors.border",
+    "fill": "$colors.accent",
+    "fill_transition_ms": 300
+   },
+   "textarea": {
+    "min_height": 64,
+    "radius": 12,
+    "size": 12,
+    "padding": [
+     10,
+     12
+    ]
+   },
+   "max_steps_input": {
+    "width": 58,
+    "radius": 12,
+    "size": 12,
+    "padding": [
+     6,
+     8
+    ]
+   }
+  },
+  "scrollbar": {
+   "width": 8,
+   "height": 8,
+   "track": "$colors.bg_primary",
+   "thumb": "$colors.border",
+   "thumb_radius": 8,
+   "thumb_hover": "$colors.accent_dim"
+  },
+  "palette": {
+   "bg": "$colors.bg_secondary",
+   "border": "1px solid $colors.accent",
+   "radius": 20,
+   "width": 660,
+   "shadow": "palette",
+   "overlay": "$colors.overlay",
+   "overlay_blur_px": 16
+  }
+ }
+}

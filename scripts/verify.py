@@ -12142,6 +12142,82 @@ def knowledge_semver():
 
 
 @check
+def design_tokens_contracts():
+    import re
+    from desktop.theme_manager import BUILTIN_PALETTES, calculate_contrast_ratio
+
+    path = os.path.join(REPO, "assets", "design", "hydra-desk.tokens.json")
+    with open(path, "r", encoding="utf-8") as fh:
+        tok = json.load(fh)
+    for group in ("meta", "colors", "typography", "spacing", "radii", "borders", "shadows",
+                  "text_shadows", "motion", "layout", "components"):
+        assert tok.get(group), f"missing group {group}"
+
+    hex_re = re.compile(r"^#[0-9a-f]{6}$")
+    for name, c in tok["colors"].items():
+        assert hex_re.match(c["hex"]), f"bad hex {name}"
+        assert c["role"], f"missing role {name}"
+        assert 0.0 <= c.get("alpha", 1.0) <= 1.0, f"bad alpha {name}"
+    for name, layers in tok["shadows"].items():
+        for lay in layers:
+            assert hex_re.match(lay["color"]) and 0 <= lay["alpha"] <= 1 and lay["blur"] >= 0, name
+    for name, lay in tok["text_shadows"].items():
+        assert hex_re.match(lay["color"]) and lay["blur"] >= 0, name
+
+    # every $colors.x reference and every shadow name must resolve
+    def walk(node):
+        if isinstance(node, dict):
+            for v in node.values():
+                yield from walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from walk(v)
+        else:
+            yield node
+
+    for value in walk(tok["components"]):
+        if isinstance(value, str):
+            for ref in re.findall(r"\$colors\.([a-z_]+)", value):
+                assert ref in tok["colors"], f"dangling color ref {ref}"
+    for key in ("shadow", "text_shadow"):
+        pool = tok["shadows"] if key == "shadow" else tok["text_shadows"]
+        def find(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if k == key and isinstance(v, str) and v != "none":
+                        assert v in pool, f"dangling {key} {v}"
+                    find(v)
+        find(tok["components"])
+
+    # motion
+    bez = tok["motion"]["easing"]["apple"]
+    assert len(bez) == 4 and 0 <= bez[0] <= 1 and 0 <= bez[2] <= 1
+    assert tok["motion"]["durations_ms"]["transition"] == 250
+
+    # one palette source : theme_manager dark_slate carries the same base values
+    pal = BUILTIN_PALETTES["dark_slate"]
+    col = lambda n: tok["colors"][n]["hex"]
+    assert (pal.background, pal.surface, pal.foreground, pal.primary, pal.secondary, pal.border) == (
+        col("bg_primary"), col("bg_secondary"), col("text_primary"), col("accent"),
+        col("accent_secondary"), col("border"))
+
+    # contrast where the old CSS used these pairs (WCAG ratios, text over its own fill)
+    pairs = (
+        ("text_primary", "bg_primary", 7.0), ("text_primary", "bg_secondary", 7.0),
+        ("text_primary", "bg_tertiary", 7.0), ("text_secondary", "bg_secondary", 7.0),
+        ("text_muted", "bg_primary", 4.5), ("text_muted", "bg_secondary", 4.5),
+        ("text_muted", "bg_tertiary", 4.5), ("accent", "bg_primary", 7.0),
+        ("accent", "bg_secondary", 7.0), ("accent", "bg_tertiary", 7.0),
+        ("text_primary", "user_bubble_bg", 7.0), ("diff_add_text", "diff_add_bg", 7.0),
+        ("diff_del_text", "diff_del_bg", 7.0), ("error", "bg_primary", 4.5),
+    )
+    for fg, bg, floor in pairs:
+        ratio = calculate_contrast_ratio(col(fg), col(bg))
+        assert ratio >= floor, f"{fg} on {bg} {ratio} < {floor}"
+    assert calculate_contrast_ratio("#000000", col("accent")) >= 7.0  # primary button label on fill
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
