@@ -59,7 +59,17 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// True once the bold family is bound. Fonts set during a pass only take effect on the next one.
+pub fn fonts_ready(ctx: &egui::Context) -> bool {
+    ctx.fonts_mut(|f| f.families().contains(&FontFamily::Name(BOLD.into())))
+}
+
 pub fn apply(ctx: &egui::Context) {
+    let done = egui::Id::new("hydra-theme-applied");
+    if ctx.data(|d| d.get_temp::<bool>(done)).unwrap_or(false) {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(done, true));
     install_fonts(ctx);
     ctx.set_pixels_per_point(ctx.pixels_per_point());
     let mut v = egui::Visuals::dark();

@@ -3,13 +3,13 @@
 use crate::theme::*;
 use crate::widgets::{self, Kind, Part};
 use eframe::egui::{self, vec2, Align, Color32, CornerRadius, Key, Layout, Margin, Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind};
-use hydra_desktop::backend::Backend;
-use hydra_desktop::health::{self, Check};
-use hydra_desktop::model::Status;
-use hydra_desktop::workspace::Work;
+use crate::backend::Backend;
+use crate::health::{self, Check};
+use crate::model::Status;
+use crate::workspace::Work;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use hydra_desktop::model::*;
+use crate::model::*;
 
 const DRAWER_TABS: &[(&str, &str)] = &[("screen", "Live Screen"), ("term", "Terminal Logs"), ("diff", "Diffs & Code"), ("agent", "Agent Runner")];
 
@@ -93,17 +93,22 @@ struct ShotPlan {
 
 impl HydraApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        apply(&cc.egui_ctx);
-        let shot = std::env::var("HYDRA_SHOT").ok().map(|path| ShotPlan { path, frames: 0, requested: false });
         let cwd = std::env::var("HYDRA_CWD").unwrap_or_else(|_| std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into()));
         let state = if std::env::var("HYDRA_NO_STATE").is_ok() { None } else { Some(state_dir().join("state.json")) };
+        Self::build(&cc.egui_ctx, state, cwd, std::env::var("HYDRA_NO_BACKEND").is_err())
+    }
+
+    /// Build the app on any egui context. Tests use this with a temp state file and `spawn_backend` as needed.
+    pub fn build(ctx0: &egui::Context, state: Option<PathBuf>, cwd: String, spawn_backend: bool) -> Self {
+        apply(ctx0);
+        let shot = std::env::var("HYDRA_SHOT").ok().map(|path| ShotPlan { path, frames: 0, requested: false });
         let mut m = Model::new(state, cwd);
-        let wake_ctx = cc.egui_ctx.clone();
+        let wake_ctx = ctx0.clone();
         let mut work = Work::new(PathBuf::from(m.work_path()), move || wake_ctx.request_repaint());
-        let ctx = cc.egui_ctx.clone();
-        let (be, start_error) = match std::env::var("HYDRA_NO_BACKEND") {
-            Ok(_) => (None, Some("backend disabled".to_string())),
-            Err(_) => match Backend::spawn(move || ctx.request_repaint()) {
+        let ctx = ctx0.clone();
+        let (be, start_error) = match !spawn_backend {
+            true => (None, None),
+            false => match Backend::spawn(move || ctx.request_repaint()) {
                 Ok(b) => (Some(b), None),
                 Err(e) => (None, Some(e)),
             },
@@ -144,7 +149,7 @@ impl HydraApp {
             composer_rect: egui::Rect::NOTHING,
             health_rx: { let (tx, rx) = std::sync::mpsc::channel(); std::thread::spawn(move || { let _ = tx.send(health::run()); }); rx },
             checks: vec![],
-            crash_note: hydra_desktop::crash::take_last_crash().map(|c| c.1),
+            crash_note: crate::crash::take_last_crash().map(|c| c.1),
             panel_dismissed: false,
             started: -1.0,
             start_error,
@@ -576,7 +581,8 @@ impl HydraApp {
             let width = ui.available_width() - send_w - 12.0;
             let id = egui::Id::new("prompt");
             let focused = ui.memory(|m| m.has_focus(id));
-            if focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+            // Enter sends; Shift+Enter (and Alt+Enter) fall through to the text box as a newline
+            if focused && ui.input_mut(|i| !i.modifiers.shift && !i.modifiers.alt && i.consume_key(Modifiers::NONE, Key::Enter)) {
                 do_send = true;
             }
             if focused && self.composer_rect.is_positive() {
@@ -758,7 +764,7 @@ impl HydraApp {
         if !self.work.is_repo {
             ui.label(rt("This folder is not a git repository. Checkpoints, rewind and change review need git.", 12.0, MUTED));
             if widgets::button(ui, "Initialize git here", Kind::Primary, 12.0, (12.0, 6.0), None).clicked() {
-                self.work.note = match hydra_desktop::git::init(&self.work.root) {
+                self.work.note = match crate::git::init(&self.work.root) {
                     Ok(_) => "initialized".into(),
                     Err(e) => format!("error: {e}"),
                 };
@@ -917,8 +923,8 @@ impl HydraApp {
 
     /// Popup above the composer while an `@file` word is being typed. Up/Down pick, Tab or Enter inserts.
     fn mention_popup(&mut self, ui: &mut egui::Ui) {
-        let Some(prefix) = hydra_desktop::fsx::mention_prefix(&self.input).map(|p| p.to_string()) else { return };
-        let hits: Vec<String> = hydra_desktop::fsx::fuzzy(&prefix, &self.work.index, 6).into_iter().map(String::from).collect();
+        let Some(prefix) = crate::fsx::mention_prefix(&self.input).map(|p| p.to_string()) else { return };
+        let hits: Vec<String> = crate::fsx::fuzzy(&prefix, &self.work.index, 6).into_iter().map(String::from).collect();
         if hits.is_empty() {
             return;
         }
@@ -1270,7 +1276,7 @@ impl HydraApp {
                     });
                 });
             }
-            ui.add(egui::Label::new(rt(format!("Logs: {}", hydra_desktop::crash::log_dir().display()), 11.0, MUTED)).wrap());
+            ui.add(egui::Label::new(rt(format!("Logs: {}", crate::crash::log_dir().display()), 11.0, MUTED)).wrap());
             ui.horizontal(|ui| {
                 if widgets::button(ui, "Retry", Kind::Primary, 13.0, (16.0, 8.0), None).clicked() {
                     retry = true;
@@ -1356,7 +1362,7 @@ impl HydraApp {
         }
         if let Some((q, sel)) = self.finder.clone() {
             let (mut q, mut sel) = (q, sel);
-            let hits: Vec<String> = hydra_desktop::fsx::fuzzy(&q, &self.work.index, 12).into_iter().map(String::from).collect();
+            let hits: Vec<String> = crate::fsx::fuzzy(&q, &self.work.index, 12).into_iter().map(String::from).collect();
             if ctx.input(|i| i.key_pressed(Key::ArrowDown)) {
                 sel = (sel + 1).min(hits.len().saturating_sub(1));
             }
@@ -1708,10 +1714,32 @@ fn paint_logo(ui: &egui::Ui, rect: egui::Rect) {
 
 impl eframe::App for HydraApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.draw(root);
+    }
+}
+
+impl HydraApp {
+    pub fn model(&self) -> &Model {
+        &self.m
+    }
+
+    pub fn model_mut(&mut self) -> &mut Model {
+        &mut self.m
+    }
+
+    pub fn input_text(&self) -> &str {
+        &self.input
+    }
+
+    /// One frame of the whole window. Separate from `eframe::App::ui` so tests can drive it.
+    pub fn draw(&mut self, root: &mut egui::Ui) {
+        if !fonts_ready(root.ctx()) {
+            root.ctx().request_repaint();
+            return;
+        }
         let ctx = root.ctx().clone();
         let ctx = &ctx;
         let time = ctx.input(|i| i.time);
-        ctx.request_repaint_after(std::time::Duration::from_millis(100));
         self.drain();
         if let Ok(c) = self.health_rx.try_recv() {
             self.checks = c;
@@ -1719,6 +1747,9 @@ impl eframe::App for HydraApp {
         if self.started < 0.0 {
             self.started = time;
         }
+        // Idle means idle: backend events, input and the workspace watcher wake us. Only animate while something runs.
+        let animating = self.m.any_busy() || self.checks.is_empty() || time - self.started < 2.0;
+        ctx.request_repaint_after(std::time::Duration::from_millis(if animating { 50 } else { 2000 }));
         if self.m.agent_ready && !self.m.any_busy() {
             if let Ok(p) = std::env::var("HYDRA_DEMO_PROMPT") {
                 std::env::remove_var("HYDRA_DEMO_PROMPT");
