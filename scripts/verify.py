@@ -1985,7 +1985,7 @@ def context_modes_agent_loop():
 
 def _scripted_model(script):
     """Local HTTP model endpoint. script(handler, body) writes the whole reply. Returns (httpd, base_url)."""
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class Scripted(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -1995,7 +1995,7 @@ def _scripted_model(script):
         def log_message(self, *args):
             pass
 
-    httpd = HTTPServer(("127.0.0.1", 0), Scripted)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Scripted)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
 
@@ -11700,14 +11700,14 @@ def _stdio_model(seen, tool=None, tokens=("alpha ", "beta ", "gamma"), pause=Non
 class _StdioChild:
     """The real adapter as a child process, driven over pipes the way the native app will."""
 
-    def __init__(self, base, home):
+    def __init__(self, base, home, env=None):
         import queue
 
         self.home = home
         self.project = os.path.join(home, "proj")
         os.makedirs(self.project, exist_ok=True)
         env = {**os.environ, "LOCAL_AI_BASE": base, "HOME": home, "USERPROFILE": home, "PYTHONPATH": REPO,
-               "PYTHONIOENCODING": "utf-8"}
+               "PYTHONIOENCODING": "utf-8", **(env or {})}
         self.stderr = tempfile.TemporaryFile()
         self.proc = subprocess.Popen([sys.executable, "-m", "hydra_cli", "stdio"], cwd=home, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=self.stderr, env=env)
@@ -11715,7 +11715,9 @@ class _StdioChild:
         self.log = []
         self.unparsed = []
         self._empty = queue.Empty
-        threading.Thread(target=self._pump, daemon=True).start()
+        self.hang_up = False
+        self.pump = threading.Thread(target=self._pump, daemon=True)
+        self.pump.start()
 
     def _pump(self):
         for raw in self.proc.stdout:
@@ -11727,6 +11729,9 @@ class _StdioChild:
                 continue
             self.log.append(msg)
             self.queue.put(msg)
+            if self.hang_up:
+                break
+        self.proc.stdout.close()
         self.queue.put(None)
 
     def send(self, **msg):
@@ -11754,7 +11759,8 @@ class _StdioChild:
                 return seen
 
     def turn(self, turn, prompt, thread="t1", **extra):
-        self.send(type="turn", turn=turn, prompt=prompt, thread=thread, cwd=self.project, **extra)
+        extra.setdefault("cwd", self.project)
+        self.send(type="turn", turn=turn, prompt=prompt, thread=thread, **extra)
 
     def run_turn(self, turn, prompt, thread="t1", **extra):
         self.turn(turn, prompt, thread, **extra)
@@ -12090,6 +12096,8 @@ def stdio_permission_modes():
         auto = [m for m in replies if m["type"] == "auto_decision"]
         assert auto and auto[0]["decision"] == "allow" and "approval_request" not in kinds(replies) and os.path.exists(target), replies
         os.remove(target)
+        replies = child.run_turn("m2p", "write", thread="p4", permission="plan", model="local")  # plan mode ignores the saved rule
+        assert [m["decision"] for m in replies if m["type"] == "auto_decision"] == ["skip"] and not os.path.exists(target), replies
         child.turn("m3", "write", thread="p5", permission="manual", model="local")  # another thread still asks
         req = child.until("approval_request")[-1]
         child.send(type="approval", id=req["id"], decision="skip")
@@ -12119,6 +12127,484 @@ def stdio_permission_modes():
         replies = child.run_turn("read2", "read it", thread="p9", permission="accept_edits", model="local")
         assert "approval_request" not in kinds(replies) and any(m["type"] == "auto_decision" and m["decision"] == "allow" for m in replies), replies
         assert child.close() == 0
+
+
+def _marker_model(seen):
+    """Scripted model that acts on a marker in the last user message. SLOW streams for a while, WRITE_<name> writes that file, anything else answers with the marker."""
+    def script(handler, body):
+        seen.append(body)
+        users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        prompt = users[-1] if users else ""
+        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "RUN_", "PLAIN"))] or ["PLAIN"])[-1]
+        if word.startswith("SLOW"):
+            return _sse(handler, [f"{word}-{n} " for n in range(200)], 0.05, [])
+        if word.startswith(("WRITE_", "EDIT_", "RUN_")) and not any(m.get("role") == "tool" for m in body["messages"]):
+            name = word.split("_", 1)[1]
+            commands = {"status": "echo hello", "chain": "echo hello && echo bye", "other": "echo other", "near": "echo hellothere", "delete": "rm keep.txt"}
+            if word.startswith("RUN_"):
+                tool_name, args = "run_command", json.dumps({"command": commands[name]})
+            else:
+                tool_name, args = "write_file", json.dumps({"path": name + ".txt", "content": f"content of {name}\n"})
+            chunks = [
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": tool_name, "arguments": ""}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]},
+            ]
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.end_headers()
+            for chunk in chunks:
+                handler.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            handler.wfile.write(b"data: [DONE]\n\n")
+            handler.wfile.flush()
+            return
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.end_headers()
+        handler.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': 'reply-to-' + word}}]})}\n\n".encode())
+        handler.wfile.flush()
+        time.sleep(0.4)  # keep parallel turns overlapping until their usage arrives
+        usage = {"choices": [], "usage": {"prompt_tokens": 100 + len(word), "completion_tokens": len(word)}}
+        handler.wfile.write(f"data: {json.dumps(usage)}\n\ndata: [DONE]\n\n".encode())
+        handler.wfile.flush()
+
+    return _scripted_model(script)
+
+
+@contextmanager
+def _marker_session():
+    seen = []
+    httpd, base = _marker_model(seen)
+    with tempfile.TemporaryDirectory() as home:
+        child = _StdioChild(base, home)
+        try:
+            assert child.next()["type"] == "hello"
+            yield child, seen
+        finally:
+            if child.proc.poll() is None:
+                child.proc.kill()
+            httpd.shutdown()
+
+
+def _project(child, name):
+    path = os.path.join(child.home, name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+@check
+def stdio_parallel_turns_share_nothing():
+    """Turns on different threads run at once. Approvals, diffs, usage, tokens and cancel each stay with their own turn."""
+    with _marker_session() as (child, seen):
+        pa, pb, pc, pe = (_project(child, n) for n in ("pa", "pb", "pc", "pe"))
+        child.turn("A", "SLOW please", thread="ta", cwd=pa, model="local")
+        child.turn("B", "WRITE_b now", thread="tb", cwd=pb, permission="manual", model="local")
+        child.turn("C", "WRITE_c now", thread="tc", cwd=pc, permission="manual", model="local")
+        child.turn("E", "WRITE_e now", thread="te", cwd=pe, permission="manual", model="local")
+        child.turn("A2", "PLAIN", thread="ta", cwd=pa, model="local")
+        assert child.until("error")[-1]["code"] == "busy"  # same thread
+        child.turn("A", "PLAIN", thread="tz", cwd=pa, model="local")
+        assert child.until("error")[-1]["code"] == "busy"  # same turn id
+        by_turn = {name: [] for name in "ABCEDPQ"}
+        arrived = []
+        while len(arrived) < 3:
+            msg = child.next()
+            if msg.get("turn") in by_turn:
+                by_turn[msg["turn"]].append(msg)
+            if msg["type"] == "approval_request":
+                arrived.append(msg)
+        assert {m["turn"] for m in arrived} == {"B", "C", "E"} and len({m["id"] for m in arrived}) == 3
+        for m in arrived:
+            assert m["arguments"]["path"] == m["turn"].lower() + ".txt", m
+        decisions = {"B": "allow", "C": "skip", "E": "allow"}
+        for m in reversed(arrived):  # answer in the opposite order from arrival
+            child.send(type="approval", id=m["id"], decision=decisions[m["turn"]])
+        done = set()
+        while done != {"B", "C", "E"}:
+            msg = child.next()
+            if msg.get("turn") in by_turn:
+                by_turn[msg["turn"]].append(msg)
+            if msg["type"] == "done":
+                done.add(msg["turn"])
+        for name, folder in (("b", pb), ("e", pe)):
+            assert open(os.path.join(folder, name + ".txt"), encoding="utf-8").read() == f"content of {name}\n"
+        assert not os.path.exists(os.path.join(pc, "c.txt")) and not os.path.exists(os.path.join(pa, "b.txt"))
+        assert [m["path"] for m in by_turn["B"] if m["type"] == "diff"] == ["b.txt"]
+        assert [m["path"] for m in by_turn["E"] if m["type"] == "diff"] == ["e.txt"]
+        assert not [m for m in by_turn["C"] if m["type"] == "diff"]
+        assert all(m["type"] in ("checkpoint", "token", "usage") for m in by_turn["A"]), by_turn["A"]
+        # usage numbers come from each turn's own provider reply
+        child.turn("P", "PLAIN1", thread="tp", cwd=pa, model="local")
+        child.turn("Q", "PLAIN22222", thread="tq", cwd=pa, model="local")
+        done = set()
+        while done != {"P", "Q"}:
+            msg = child.next()
+            if msg.get("turn") in by_turn:
+                by_turn[msg["turn"]].append(msg)
+            if msg["type"] == "done":
+                done.add(msg["turn"])
+        for name, word in (("P", "PLAIN1"), ("Q", "PLAIN22222")):
+            usage = [m for m in by_turn[name] if m["type"] == "usage"]
+            assert len(usage) == 1 and usage[0]["prompt_tokens"] == 100 + len(word) and usage[0]["completion_tokens"] == len(word), (name, usage)
+        # cancel reaches only the turn it names
+        child.turn("D", "SLOW again", thread="td", cwd=pa, model="local")
+        child.until("token", turn="D")
+        child.send(type="cancel", turn="D")
+        while True:
+            msg = child.next()
+            if msg["type"] == "done" and msg["turn"] == "D":
+                assert msg["cancelled"] is True
+                break
+            assert not (msg["type"] == "done" and msg["turn"] == "A"), "cancel of D stopped A"
+        child.send(type="cancel", turn="A")
+        replies = child.until("done", turn="A")
+        assert replies[-1]["cancelled"] is True
+        assert not [m for m in replies if m["type"] == "token" and m["turn"] == "A" and not m["text"].startswith("SLOW")]
+        assert child.close() == 0
+
+
+@check
+def stdio_turn_limit_and_internal_errors():
+    """The ninth parallel turn is refused, a broken ledger is an error not a crash, and a closed stdout exits 70."""
+    with _marker_session() as (child, seen):
+        for n in range(8):
+            child.turn(f"s{n}", "SLOW", thread=f"lim{n}", model="local")
+        child.turn("nine", "PLAIN", thread="lim9", model="local")
+        err = child.until("error")[-1]
+        assert err["code"] == "busy" and err["turn"] == "nine", err
+        for n in range(8):
+            child.send(type="cancel", turn=f"s{n}")
+        left = {f"s{n}" for n in range(8)}
+        while left:
+            msg = child.next()
+            if msg["type"] == "done":
+                left.discard(msg["turn"])
+        bad = os.path.join(child.home, ".hydra", "sessions", "broken")
+        os.makedirs(bad, exist_ok=True)
+        with open(os.path.join(bad, "ledger.db"), "wb") as handle:
+            handle.write(b"this is not a sqlite file" * 40)
+        child.send(type="history", id="hb", thread="broken")
+        err = child.until("error")[-1]
+        assert err["code"] == "internal" and err["id"] == "hb", err
+        child.send(type="sessions", id="alive")
+        assert child.until("session_list")[-1]["id"] == "alive"
+        child.hang_up = True  # the app stops reading and closes its end of stdout
+        child.send(type="sessions", id="last")
+        child.pump.join(timeout=20)
+        assert not child.pump.is_alive()
+        child.send(type="sessions", id="gone")
+        assert child.proc.wait(timeout=20) == 70
+        child.stderr.seek(0)
+        assert b"stdout closed by the app" in child.stderr.read()
+
+
+@check
+def stdio_tool_result_is_cut_at_4000_characters():
+    """A long tool output arrives cut to 4000 characters with truncated true, a short one whole with truncated false."""
+    with _stdio_session(tool={"name": "read_file", "arguments": {"path": "big.txt"}}) as (child, seen):
+        with open(os.path.join(child.project, "big.txt"), "w", encoding="utf-8") as handle:
+            handle.write("0123456789" * 900)
+        result = [m for m in child.run_turn("big", "read it", model="local") if m["type"] == "tool_result"][0]
+        assert result["truncated"] is True and len(result["output"]) == 4000, (result["truncated"], len(result["output"]))
+        assert child.close() == 0
+    with _stdio_session(tool={"name": "read_file", "arguments": {"path": "small.txt"}}) as (child, seen):
+        with open(os.path.join(child.project, "small.txt"), "w", encoding="utf-8") as handle:
+            handle.write("tiny\n")
+        result = [m for m in child.run_turn("small", "read it", model="local") if m["type"] == "tool_result"][0]
+        assert result["truncated"] is False and "tiny" in result["output"], result
+        assert child.close() == 0
+
+
+@check
+def stdio_thread_resumes_after_restart():
+    """A thread keeps its project, mode, model and context across a restart, and a new thread without a cwd is refused."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            first = _StdioChild(base, home)
+            first.next()
+            project = _project(first, "resumed")
+            done = first.run_turn("r1", "PLAIN remember zebra", thread="keep", cwd=project, mode="sliding", model="local", permission="bypass")[-1]
+            assert done["ok"] is True
+            assert first.close() == 0
+
+            second = _StdioChild(base, home)
+            second.next()
+            second.send(type="sessions", id="s")
+            entry = [x for x in second.until("session_list")[-1]["sessions"] if x["thread"] == "keep"][0]
+            assert entry["cwd"] == project and entry["mode"] == "sliding" and entry["model"] == "local", entry
+            assert entry["permission"] == "bypass" and entry["title"] == "PLAIN remember zebra", entry
+            second.send(type="history", id="h", thread="keep")
+            assert second.until("history_result")[-1]["meta"]["cwd"] == project
+            second.send(type="turn", turn="r2", prompt="WRITE_resumed now", thread="keep")
+            replies = second.until("done", turn="r2")
+            assert replies[-1]["ok"] is True, replies
+            assert open(os.path.join(project, "resumed.txt"), encoding="utf-8").read() == "content of resumed\n"
+            assert "zebra" in json.dumps(seen[-1]["messages"]) or any("zebra" in json.dumps(b["messages"]) for b in seen[-2:]), "context was not resumed"
+            second.send(type="turn", turn="r3", prompt="PLAIN", thread="brand-new")
+            err = second.until("error")[-1]
+            assert err["code"] == "bad_request" and "cwd" in err["message"], err
+            assert second.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_approval_rules_with_command_prefixes():
+    """allow_always can name a command prefix and a scope, chained commands never match, rules list and remove, and they survive a restart."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home)
+            child.next()
+            proj, other = _project(child, "rp"), _project(child, "rq")
+            counter = [0]
+
+            def run(thread, key, answer=None, cwd=proj, **fields):
+                """Run one RUN_<key> turn. Returns (asked, auto_decisions, tool_output) and answers a request with `answer`."""
+                counter[0] += 1
+                name = f"u{counter[0]}"
+                child.turn(name, f"RUN_{key} now", thread=thread, cwd=cwd, permission="manual", model="local")
+                asked, auto, errors = None, [], []
+                while True:
+                    msg = child.next()
+                    if msg["type"] == "approval_request":
+                        asked = msg
+                        child.send(type="approval", id=msg["id"], decision=answer or "skip", **fields)
+                    elif msg["type"] == "auto_decision":
+                        auto.append(msg)
+                    elif msg["type"] == "error":
+                        errors.append(msg)
+                    elif msg["type"] == "done" and msg["turn"] == name:
+                        return asked, auto, errors
+
+            asked, auto, errors = run("t1", "status", "allow_always", prefix="echo hello")
+            assert asked["tool"] == "run_command" and not auto and not errors
+            asked, auto, errors = run("t1", "status")
+            assert asked is None and len(auto) == 1 and auto[0]["decision"] == "allow" and auto[0]["rule"], (asked, auto)
+            rule_id = auto[0]["rule"]
+            asked, auto, errors = run("t1", "chain")
+            assert asked is not None and not auto, "a chained command matched a prefix rule"
+            asked, auto, errors = run("t1", "other")
+            assert asked is not None and not auto, "an unrelated command matched"
+            asked, auto, errors = run("t1", "near")
+            assert asked is not None and not auto, "a prefix matched in the middle of a word"
+            asked, auto, errors = run("t2", "status")
+            assert asked is not None and not auto, "a thread rule leaked to another thread"
+            asked, auto, errors = run("t1", "other", "allow_always", prefix="rm")
+            assert len(errors) == 1 and errors[0]["code"] == "bad_request", errors
+            child.send(type="rules", id="r1", thread="t1")
+            rules = child.until("rules_result")[-1]["rules"]
+            assert [(r["id"], r["tool"], r["prefix"], r["scope"]) for r in rules] == [(rule_id, "run_command", "echo hello", "thread")], rules
+
+            asked, auto, errors = run("t1", "other", "allow_always", scope="project", prefix="echo other")
+            assert not errors
+            asked, auto, errors = run("t3", "other")  # same project, other thread
+            assert asked is None and auto and auto[0]["decision"] == "allow", (asked, auto)
+            asked, auto, errors = run("t4", "other", cwd=other)  # other project asks
+            assert asked is not None
+            child.send(type="rules", id="r2", thread="t3")
+            rules = child.until("rules_result")[-1]["rules"]
+            assert [(r["prefix"], r["scope"]) for r in rules] == [("echo other", "project")], rules
+            assert child.close() == 0
+
+            again = _StdioChild(base, home)
+            again.next()
+            again.send(type="turn", turn="z1", prompt="RUN_other now", thread="t3", permission="manual", model="local")
+            kinds = [m["type"] for m in again.until("done", turn="z1")]
+            assert "auto_decision" in kinds and "approval_request" not in kinds, kinds
+            again.send(type="rules", id="r3", thread="t1", op="remove", rule=rule_id)
+            assert [r["scope"] for r in again.until("rules_result")[-1]["rules"]] == ["project"]
+            again.send(type="turn", turn="z2", prompt="RUN_status now", thread="t1", permission="manual", model="local")
+            req = again.until("approval_request")[-1]  # the removed rule no longer lets it through
+            again.send(type="approval", id=req["id"], decision="skip")
+            again.until("done", turn="z2")
+            assert again.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_checkpoint_and_rewind():
+    """Each turn is snapshotted in a shadow repository. Rewind restores edits, recreates deletions, removes new files, leaves ignored files and the project's own git alone, and can be undone."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home)
+            child.next()
+            proj = _project(child, "cp")
+
+            def put(name, text):
+                with open(os.path.join(proj, name), "w", encoding="utf-8", newline="") as handle:
+                    handle.write(text)
+
+            def get(name):
+                with open(os.path.join(proj, name), encoding="utf-8", newline="") as handle:
+                    return handle.read()
+
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=proj, capture_output=True, text=True, check=True).stdout
+
+            put("keep.txt", "keep\n")
+            put("edit.txt", "v1\n")
+            put(".gitignore", "ignored.log\n")
+            put("ignored.log", "log one\n")
+            git("init", "--quiet")
+            git("-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+            git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "seed")
+            own_head = git("rev-parse", "HEAD")
+
+            ids = []
+            for turn, prompt in (("k1", "WRITE_edit"), ("k2", "WRITE_new"), ("k3", "RUN_delete")):
+                replies = child.run_turn(turn, prompt + " now", thread="cp", cwd=proj, permission="bypass", model="local")
+                cps = [m for m in replies if m["type"] == "checkpoint"]
+                assert len(cps) == 1 and cps[0]["ok"] is True and cps[0]["turn"] == turn and cps[0]["id"], replies
+                assert replies.index(cps[0]) < [m["type"] for m in replies].index("done")
+                ids.append(cps[0]["id"])
+            assert len(set(ids)) == 3
+            assert get("edit.txt") == "content of edit\n" and get("new.txt") == "content of new\n" and not os.path.exists(os.path.join(proj, "keep.txt"))
+            put("ignored.log", "log two\n")
+
+            child.run_turn("o1", "PLAIN", thread="cp-other", cwd=proj, permission="bypass", model="local")  # same project, other thread
+            child.send(type="checkpoints", id="c1", thread="cp")
+            listed = child.until("checkpoint_list")[-1]["checkpoints"]
+            assert sorted(c["turn"] for c in listed) == ["k1", "k2", "k3"] and {c["id"] for c in listed} == set(ids), listed
+
+            child.send(type="rewind", id="w1", thread="cp", checkpoint=ids[0])
+            res = child.until("rewind_result")[-1]
+            assert res["id"] == "w1" and res["checkpoint"] == ids[0] and res["backup"], res
+            assert get("edit.txt") == "v1\n" and get("keep.txt") == "keep\n" and not os.path.exists(os.path.join(proj, "new.txt"))
+            assert get("ignored.log") == "log two\n", "an ignored file was touched"
+            assert sorted(res["restored"]) == ["edit.txt", "keep.txt"] and res["removed"] == ["new.txt"], res
+
+            child.send(type="rewind", id="w2", thread="cp", checkpoint=res["backup"])  # undo the rewind
+            again = child.until("rewind_result")[-1]
+            assert get("edit.txt") == "content of edit\n" and get("new.txt") == "content of new\n" and not os.path.exists(os.path.join(proj, "keep.txt")), again
+
+            child.turn("k5", "SLOW", thread="cp", permission="bypass", model="local")
+            child.until("token", turn="k5")
+            child.send(type="rewind", id="wb", thread="cp", checkpoint=ids[0])
+            assert child.until("error")[-1]["code"] == "busy"
+            child.send(type="cancel", turn="k5")
+            child.until("done", turn="k5")
+
+            child.send(type="rewind", id="w3", thread="cp", checkpoint="0" * 40)
+            assert child.until("error")[-1]["code"] == "bad_request"
+            child.send(type="rewind", id="w4", thread="nobody", checkpoint=ids[0])
+            assert child.until("error")[-1]["code"] == "bad_request"
+
+            assert git("stash", "list") == "", "a stash appeared in the project"
+            assert git("rev-parse", "HEAD") == own_head, "the project's own repository moved"
+            assert os.path.isdir(os.path.join(home, ".hydra", "shadow"))
+            assert not os.path.exists(os.path.join(proj, ".hydra"))
+
+            replies = child.run_turn("k4", "PLAIN", thread="cp", permission="bypass", model="local", checkpoint=False)
+            assert "checkpoint" not in [m["type"] for m in replies]
+            assert child.close() == 0
+
+            with tempfile.TemporaryDirectory() as broken_home:  # the shadow store cannot be created
+                os.makedirs(os.path.join(broken_home, ".hydra"))
+                with open(os.path.join(broken_home, ".hydra", "shadow"), "w", encoding="utf-8") as handle:
+                    handle.write("a file where the store should be")
+                nogit = _StdioChild(base, broken_home)
+                nogit.next()
+                replies = nogit.run_turn("g1", "PLAIN", thread="cp2", cwd=proj, permission="bypass", model="local")
+                cp = [m for m in replies if m["type"] == "checkpoint"][0]
+                assert cp["ok"] is False and cp["id"] is None and cp["reason"], cp
+                assert replies[-1]["type"] == "done" and replies[-1]["ok"] is True, replies
+                assert nogit.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_two_hundred_runs_of_four_parallel_turns():
+    """200 runs of four overlapping turns each: plain, approved write, skipped write, bypass write with diff. No message strays, every file, diff, usage number and approval lands with its own turn."""
+    import random
+
+    seen = []
+
+    def script(handler, body):
+        seen.append(1)
+        users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        word = [w for w in users[-1].replace("\n", " ").split() if w.startswith("T")][-1]
+        run, slot, kind = word[1:].split("_")
+        usage = {"choices": [], "usage": {"prompt_tokens": int(run) * 4 + int(slot) + 1, "completion_tokens": int(slot) + 1}}
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.end_headers()
+        if kind in ("write", "skip", "bypass") and not any(m.get("role") == "tool" for m in body["messages"]):
+            args = json.dumps({"path": word + ".txt", "content": word + "\n"})
+            chunks = [
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": ""}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]},
+                usage,
+            ]
+        else:
+            chunks = [{"choices": [{"delta": {"content": "ok-"}}]}, {"choices": [{"delta": {"content": word}}]}, usage]
+        for chunk in chunks:
+            handler.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        handler.wfile.write(b"data: [DONE]\n\n")
+        handler.wfile.flush()
+
+    httpd, base = _scripted_model(script)
+    rng = random.Random(20261011)
+    kinds = ("plain", "write", "skip", "bypass")
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home)
+            child.next()
+            for run in range(200):
+                names = {}
+                for slot, kind in enumerate(kinds):
+                    word = f"T{run}_{slot}_{kind}"
+                    folder = _project(child, f"r{run}s{slot}")
+                    names[f"x{run}_{slot}"] = (word, kind, folder, slot)
+                    child.turn(f"x{run}_{slot}", word, thread=f"th{run}_{slot}", cwd=folder, model="local", checkpoint=False,
+                               permission="manual" if kind in ("write", "skip") else "bypass")
+                got = {turn: [] for turn in names}
+                waiting = []
+                done = 0
+                deadline = time.time() + 60
+                while done < 4:
+                    assert time.time() < deadline, (run, got)
+                    msg = child.next(30)
+                    turn = msg.get("turn")
+                    assert turn in names, (run, "message for no turn of this run", msg)
+                    got[turn].append(msg)
+                    if msg["type"] == "approval_request":
+                        waiting.append(msg)
+                        if len(waiting) == 2:
+                            rng.shuffle(waiting)
+                            for req in waiting:
+                                kind = names[req["turn"]][1]
+                                child.send(type="approval", id=req["id"], decision="allow" if kind == "write" else "skip")
+                    if msg["type"] == "done":
+                        done += 1
+                assert len({m["id"] for m in waiting}) == 2
+                for turn, (word, kind, folder, slot) in names.items():
+                    msgs = got[turn]
+                    types = [m["type"] for m in msgs]
+                    assert types.count("done") == 1 and types[-1] == "done" and msgs[-1]["ok"] is True, (run, turn, msgs)
+                    assert "".join(m["text"] for m in msgs if m["type"] == "token") .endswith("ok-" + word), (run, turn, msgs)
+                    use = [m for m in msgs if m["type"] == "usage"]
+                    assert [(u["prompt_tokens"], u["completion_tokens"]) for u in use] == [(run * 4 + slot + 1, slot + 1)] * len(use) and use, (run, turn, use)
+                    target = os.path.join(folder, word + ".txt")
+                    wrote = kind in ("write", "bypass")
+                    assert os.path.exists(target) == wrote, (run, turn, kind)
+                    if wrote:
+                        assert open(target, encoding="utf-8").read() == word + "\n"
+                    assert [m["path"] for m in msgs if m["type"] == "diff"] == ([word + ".txt"] if wrote else []), (run, turn)
+                    assert ("approval_request" in types) == (kind in ("write", "skip")), (run, turn)
+                    starts = [m["arguments"]["path"] for m in msgs if m["type"] == "tool_start"]
+                    results = [m["output"] for m in msgs if m["type"] == "tool_result"]
+                    assert starts == ([word + ".txt"] if wrote else []), (run, turn, starts)
+                    assert len(results) == len(starts) and all(word in r for r in results), (run, turn, results)
+            assert child.close() == 0
+    finally:
+        httpd.shutdown()
 
 
 def main() -> int:
