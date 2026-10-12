@@ -202,10 +202,10 @@ fn swarm_returns_heads_and_synthesis() {
     let msgs = &r.m.sessions[0].messages;
     let last = msgs.last().unwrap();
     assert_eq!(last.header, "SWARM SYNTHESIS");
-    assert!(msgs.len() >= 4, "heads then synthesis, got {}", msgs.len());
+    assert!(msgs.len() >= 5, "heads then synthesis, got {}", msgs.len());
     // heads route to their own provider and need gateway keys; with none the real error must be shown, never faked
     assert!(last.text.contains("alpha") || last.text.starts_with("Error:"), "{}", last.text);
-    assert!(msgs[1..msgs.len() - 1].iter().all(|m| m.text.contains("alpha") || m.text.starts_with("Error:")));
+    assert!(msgs[2..msgs.len() - 1].iter().all(|m| m.text.contains("alpha") || m.text.starts_with("Error:")));
     let _ = std::fs::remove_dir_all(&r.dir);
 }
 
