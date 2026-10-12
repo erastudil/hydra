@@ -266,6 +266,10 @@ lifetime : a task keeps running after its turn ends. shutdown or EOF stops every
 
 adoption : right after `hello` a new agent reads every record still marked running. a task whose process is alive is adopted. it shows in `task_list`, sends `task_update` with adopted true, and `task_stop` and shutdown reach it. a task whose process is gone is marked exited, with the exit code from its .exit file or null, and sends `task_update`. records already ended are not loaded again.
 
+owner : a record names the agent process that owns the task by pid and start time. an agent adopts only tasks whose owner is dead, and it claims them under an exclusive lock on ~/.hydra/tasks/.lock. that is fcntl.flock on POSIX and msvcrt.locking on Windows. the OS drops the lock when its holder dies, so a crashed agent never blocks the next one. two agents on one home therefore never share a task. `task_stop` for a task this agent does not own gets `error` code bad_request. a task whose owner dies is adopted by the next agent that starts.
+
+pruning : at startup, under the same lock, an agent deletes the record, log and exit file of every ended task that ended more than HYDRA_TASK_KEEP_DAYS ago, default 7. it then deletes the oldest ended ones beyond HYDRA_TASK_KEEP, default 200. running tasks, tasks this agent tracks and tasks a live agent owns are never pruned.
+
 identity : a record holds pid, pgid and the process start time, from /proc on Linux, from `ps` on other POSIX hosts and from GetProcessTimes on Windows. a pid that now names a process with another start time counts as gone, so a reused pid is never adopted or killed.
 
 posix stop : SIGTERM to the process group, then SIGKILL after 3 seconds.
