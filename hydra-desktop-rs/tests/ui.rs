@@ -327,3 +327,43 @@ fn the_stall_timer_counts_from_the_latest_spawn_not_from_app_start() {
     assert!(agent_stalled(false, 100.0, 0.0, 121.0), "respawned 21 s ago, still no hello");
     assert!(!agent_stalled(true, 100.0, 0.0, 500.0));
 }
+
+fn on_screen(r: egui::Rect, w: f32, h: f32) -> bool {
+    r.min.x >= 0.0 && r.min.y >= 0.0 && r.max.x <= w + 0.5 && r.max.y <= h + 0.5
+}
+
+#[test]
+fn a_huge_write_approval_keeps_its_buttons_on_screen() {
+    // D23: a 5,000-line write_file used to push Allow/Skip/Abort below the window
+    for (w, hgt) in [(1280.0, 800.0), (900.0, 700.0)] {
+        let mut h = harness_sized(&format!("bigapproval{w}"), w, hgt);
+        settle(&mut h);
+        let content: String = (0..5000).map(|i| format!("line {i} of a very large generated file\n")).collect();
+        let a = app(&mut h);
+        let sid = a.model().sessions[a.model().active].id;
+        a.model_mut().approvals.push(Approval { sid, turn: "t1".into(), id: "ap1".into(), tool: "write_file".into(), args: serde_json::json!({"path": "big.txt", "content": content}) });
+        h.run_steps(10);
+        for label in ["Allow", "Skip", "Abort Turn"] {
+            let r = h.get_by_label(label).rect();
+            assert!(on_screen(r, w, hgt), "{label} at {r:?} is off a {w}x{hgt} window");
+        }
+    }
+}
+
+#[test]
+fn undo_rewind_is_fully_visible_at_desk_and_narrow_widths() {
+    // D26: the button was clipped to "U…" at the right edge of the composer meta row
+    for (w, hgt) in [(1280.0, 800.0), (900.0, 700.0), (820.0, 560.0)] {
+        let mut h = harness_sized(&format!("undo{w}"), w, hgt);
+        settle(&mut h);
+        let a = app(&mut h);
+        let i = a.model().active;
+        a.model_mut().sessions[i].pre_rewind = Some("0000000000000000000000000000000000000000".into());
+        h.run_steps(5);
+        let r = h.get_by_label("Undo rewind").rect();
+        // the composer column ends where the inspection drawer starts
+        let column_right = w - hydra_desktop::layout::frame(w).drawer_width;
+        assert!(on_screen(r, w, hgt) && r.max.x <= column_right, "Undo rewind at {r:?} runs past the composer column (right edge {column_right})");
+    }
+}
+
