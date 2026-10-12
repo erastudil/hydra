@@ -630,7 +630,7 @@ impl HydraApp {
         let (mut cycle, mut undo) = (false, false);
         ui.horizontal(|ui| {
             let perm = self.m.sessions[self.m.active].permission.clone();
-            let label = PERMISSIONS.iter().find(|p| p.0 == perm).map(|p| p.1).unwrap_or("Accept edits");
+            let label = PERMISSIONS.iter().find(|p| p.0 == perm).map(|p| p.1).unwrap_or("Ask every time");
             if widgets::button(ui, &format!("Permissions: {label}"), Kind::Secondary, 11.0, (10.0, 3.0), None).on_hover_text("Click to change what the agent may do without asking").clicked() {
                 cycle = true;
             }

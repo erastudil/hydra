@@ -88,7 +88,8 @@ pub const PERMISSIONS: &[(&str, &str)] = &[
 ];
 
 fn default_permission() -> String {
-    "accept_edits".into()
+    // a new thread asks before anything that changes files or runs a command; the chip next to the prompt changes it
+    "manual".into()
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
