@@ -34,6 +34,13 @@ enum Cmd {
     EditInstructions,
 }
 
+/// True when the current agent child has not said hello 20 s after it was spawned. Counts from the latest spawn,
+/// so a respawn after a crash is never reported as "not answered after 20 seconds".
+pub fn agent_stalled(ready: bool, be_started: f64, app_started: f64, now: f64) -> bool {
+    let since = if be_started >= 0.0 { be_started } else { app_started };
+    !ready && since >= 0.0 && now - since > 20.0
+}
+
 /// Heartbeat repaint while nothing happens.
 pub const IDLE_REPAINT_MS: u64 = 30_000;
 
@@ -2200,8 +2207,7 @@ impl HydraApp {
     // ---------------------------------------------------------------- modals
     fn startup_panel(&mut self, ctx: &egui::Context) -> bool {
         let fatal = health::fatal_problems(&self.checks).len();
-        let since = if self.be_started >= 0.0 { self.be_started } else { self.started };
-        let stalled = self.be.is_some() && !self.m.agent_ready && since >= 0.0 && ctx.input(|i| i.time) - since > 20.0;
+        let stalled = self.be.is_some() && agent_stalled(self.m.agent_ready, self.be_started, self.started, ctx.input(|i| i.time));
         let down = self.be.is_none() && self.start_error.as_deref().is_some_and(|e| e != "backend disabled");
         let show = (fatal > 0 || stalled || down || self.crash_note.is_some()) && !self.panel_dismissed;
         if !show {

@@ -318,3 +318,12 @@ fn d16_narrow_drawer_uses_short_tab_names_that_fit() {
     }
     assert!(h.query_by_label("Approvals").is_none(), "the long name is not squeezed in");
 }
+
+#[test]
+fn the_stall_timer_counts_from_the_latest_spawn_not_from_app_start() {
+    use hydra_desktop::app::agent_stalled;
+    assert!(agent_stalled(false, -1.0, 0.0, 21.0), "first start, 21 s, no hello");
+    assert!(!agent_stalled(false, 100.0, 0.0, 101.0), "respawned 1 s ago: not stalled");
+    assert!(agent_stalled(false, 100.0, 0.0, 121.0), "respawned 21 s ago, still no hello");
+    assert!(!agent_stalled(true, 100.0, 0.0, 500.0));
+}

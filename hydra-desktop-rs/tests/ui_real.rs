@@ -147,6 +147,7 @@ fn respawn_kill_9_drops_the_handle_restarts_with_backoff_and_shows_adopted_tasks
     h.state_mut().model_mut().sessions[0].permission = "bypass".into();
     say(&mut h, "BGTASK start a server");
     assert!(wait(&mut h, 20, |a| !a.model().any_busy() && a.model().running_tasks() == 1), "background task runs");
+    h.run_steps(1500); // more than 20 s of app time since start, so a stall timer counted from app start would fire
     let old = h.state_mut().backend_pid().expect("agent up");
     unsafe { libc_kill(old as i32, 9) };
     // 1: the dead handle is dropped, so the app knows the agent is down (not only after the 20 s stall timer)
@@ -159,6 +160,8 @@ fn respawn_kill_9_drops_the_handle_restarts_with_backoff_and_shows_adopted_tasks
     let died = std::time::Instant::now();
     assert!(wait(&mut h, 10, |a| a.backend_pid().is_some_and(|p| p != old)), "respawned");
     assert!(died.elapsed() >= std::time::Duration::from_millis(400), "respawn waited for the backoff: {:?}", died.elapsed());
+    h.run_steps(1);
+    assert!(h.query_by_label_contains("has not answered").is_none(), "a fresh child is not reported as stalled");
     assert!(wait(&mut h, 20, |a| a.model().agent_ready), "new agent says hello");
     // 4: after hello the app asks again, so the adopted task shows in Tasks
     assert!(wait(&mut h, 20, |a| a.model().running_tasks() == 1 && a.model().tasks.values().any(|t| t["adopted"].as_bool() == Some(true))), "adopted task listed");

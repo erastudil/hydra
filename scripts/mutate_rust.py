@@ -21,7 +21,7 @@ MUTATIONS = [
     ("idle window keeps repainting", "src/app.rs", "pub const IDLE_REPAINT_MS: u64 = 30_000;", "pub const IDLE_REPAINT_MS: u64 = 50;", ["--test", "ui"]),
     ("respawn keeps dead handle", "src/app.rs", "            self.be = None;\n            self.deaths.retain", "            self.deaths.retain", ["--test", "ui_real"]),
     ("respawn without backoff", "src/app.rs", "pub const RESPAWN_BACKOFF: &[f64] = &[0.5, 2.0, 5.0];", "pub const RESPAWN_BACKOFF: &[f64] = &[0.0, 0.0, 0.0];", ["--test", "ui_real"]),
-    ("stall timer counts from app start", "src/app.rs", "let since = if self.be_started >= 0.0 { self.be_started } else { self.started };", "let since = self.started;", ["--test", "ui_real"]),
+    ("stall timer counts from app start", "src/app.rs", "let since = if be_started >= 0.0 { be_started } else { app_started };", "let since = app_started;", ["--test", "ui"]),
     ("no re-request after respawn", "src/app.rs", "                self.m.list_sessions(be);\n", "", ["--test", "ui_real"]),
     ("cut reply not reloaded", "src/app.rs", "                self.m.reload_cut_threads(be);\n", "", ["--test", "ui_real"]),
     ("cut reply not marked unsaved", M, "self.fail_bubble(sid, &format!(\"{UNSAVED} ({})\", self.notice));", "self.fail_bubble(sid, \"agent process ended\");", ["--test", "ui_real"]),
