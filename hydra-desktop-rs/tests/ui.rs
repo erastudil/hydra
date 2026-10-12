@@ -63,7 +63,7 @@ fn shift_enter_inserts_a_newline_and_enter_sends() {
     assert_eq!(user_messages(app(&mut h)), 0, "Shift+Enter must not send (D04)");
     assert_eq!(app(&mut h).input_text(), "first\nsecond");
     h.key_press(egui::Key::Enter);
-    h.run();
+    h.run_steps(4); // a running turn animates, so step a fixed count instead of waiting for quiet
     assert_eq!(user_messages(app(&mut h)), 1, "Enter sends");
 }
 
