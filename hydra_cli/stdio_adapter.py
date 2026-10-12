@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import time
+import subprocess
 from typing import Any, Dict, List, Optional
 
 PROTOCOL_VERSION = 1
@@ -23,7 +24,7 @@ DECISIONS = {"allow": "y", "allow_always": "y", "skip": "n", "abort": "q"}
 PERMISSIONS = ("manual", "accept_edits", "plan", "bypass")
 READ_ONLY_TOOLS = frozenset({"read_file", "list_dir", "grep_search", "find_files", "search_files", "compact_context", "retrieve_context"})
 EDIT_TOOLS = frozenset({"write_file", "edit_file"})
-CAPABILITIES = ["turn", "cancel", "approval", "permission", "rules", "sessions", "history", "action"]
+CAPABILITIES = ["turn", "cancel", "approval", "permission", "rules", "checkpoint", "sessions", "history", "action"]
 EXIT_OK = 0
 EXIT_VERSION = 2
 EXIT_FATAL = 70
@@ -60,6 +61,7 @@ class Adapter:
         self._requests: Dict[str, _Turn] = {}  # approval id -> the turn waiting on it
         self._approvals = 0
         self._rules_lock = threading.Lock()
+        self._shadow_lock = threading.RLock()  # one shadow git operation at a time: init and index locks do not mix
         self._calls = 0
         self._ledgers: Dict[str, Any] = {}
         self.exit_code = EXIT_OK
@@ -150,6 +152,7 @@ class Adapter:
             "hello": self._on_hello, "turn": self._on_turn, "cancel": self._on_cancel,
             "approval": self._on_approval, "shutdown": lambda m: False, "sessions": self._on_sessions,
             "history": self._on_history, "action": self._on_action, "rules": self._on_rules,
+            "checkpoints": self._on_checkpoints, "rewind": self._on_rewind,
         }.get(kind)
         if handler is None:
             self.error(f"unknown message type {kind!r}", "unknown_type", req=_text(msg.get("id")))
@@ -241,6 +244,96 @@ class Adapter:
                 if problem:
                     self.error(problem, "bad_request", turn=t.id, req=req)
             t.release(decision)
+
+    # checkpoints: a shadow git repository outside the project, so the project's own repository is never touched
+
+    def _git(self, cwd: str, *args: str, stdin: Optional[bytes] = None) -> "subprocess.CompletedProcess[bytes]":
+        import hashlib
+        import subprocess
+        from pathlib import Path
+
+        digest = hashlib.sha1(os.path.realpath(cwd).encode("utf-8")).hexdigest()[:16]
+        gitdir = Path.home() / ".hydra" / "shadow" / f"{digest}.git"
+        if not gitdir.exists():
+            gitdir.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["git", "init", "--bare", "--quiet", str(gitdir)], check=True, capture_output=True)
+            (gitdir / "info").mkdir(exist_ok=True)
+            (gitdir / "info" / "exclude").write_text(".git/\n.hydra/\n", encoding="utf-8")
+        cmd = ["git", "-c", "user.name=hydra", "-c", "user.email=hydra@localhost", "-c", "core.autocrlf=false",
+               "-c", "gc.auto=0", "-c", "core.quotepath=off", f"--git-dir={gitdir}", f"--work-tree={cwd}", *args]
+        return subprocess.run(cmd, input=stdin, capture_output=True, cwd=cwd)
+
+    def _snapshot(self, cwd: str, label: str, thread: str) -> Dict[str, Any]:
+        """Commit the whole project state to the shadow repository. Returns checkpoint fields for the app."""
+        try:
+            with self._shadow_lock:
+                added = self._git(cwd, "add", "-A")
+                if added.returncode:
+                    return {"ok": False, "id": None, "reason": added.stderr.decode("utf-8", "replace").strip()[:300]}
+                made = self._git(cwd, "commit", "--quiet", "--allow-empty", "-m", f"hydra checkpoint thread={thread} {label}")
+                if made.returncode:
+                    return {"ok": False, "id": None, "reason": made.stderr.decode("utf-8", "replace").strip()[:300]}
+                return {"ok": True, "id": self._git(cwd, "rev-parse", "HEAD").stdout.decode().strip(), "reason": None}
+        except Exception as exc:  # git missing or unusable: the turn still runs, the app is told
+            return {"ok": False, "id": None, "reason": f"{type(exc).__name__}: {exc}"[:300]}
+
+    def _on_checkpoints(self, msg: Dict[str, Any]) -> None:
+        req = _text(msg.get("id"))
+        thread = "".join(c for c in str(msg.get("thread") or "") if c.isalnum() or c in "-_.")
+        cwd = _load_meta(thread).get("cwd") if thread else None
+        if not cwd or not os.path.isdir(cwd):
+            return self.error("thread must be a known thread with a project", "bad_request", req=req)
+        out = self._git(cwd, "log", "--format=%H%x00%ct%x00%s", f"--grep=hydra checkpoint thread={thread} ")
+        found = []
+        for line in out.stdout.decode("utf-8", "replace").splitlines():
+            sha, when, subject = (line.split("\x00") + ["", "", ""])[:3]
+            if not sha or "turn=" not in subject:
+                continue
+            found.append({"id": sha, "turn": subject.split("turn=", 1)[1], "time": int(when or 0)})
+        self.emit({"type": "checkpoint_list", "id": req, "thread": thread, "checkpoints": found})
+
+    def _on_rewind(self, msg: Dict[str, Any]) -> None:
+        req = _text(msg.get("id"))
+        thread = "".join(c for c in str(msg.get("thread") or "") if c.isalnum() or c in "-_.")
+        target = _text(msg.get("checkpoint"))
+        cwd = _load_meta(thread).get("cwd") if thread else None
+        if not cwd or not os.path.isdir(cwd) or not target:
+            return self.error("rewind needs a known thread with a project and a checkpoint id", "bad_request", req=req)
+        with self._state:
+            if thread in self._busy_threads:
+                return self.error(f"thread {thread} is running a turn", "busy", req=req)
+            self._busy_threads[thread] = f"rewind {req}"
+        try:
+            with self._shadow_lock:
+                self._rewind_locked(req, thread, cwd, target)
+        finally:
+            with self._state:
+                self._busy_threads.pop(thread, None)
+
+    def _rewind_locked(self, req: Optional[str], thread: str, cwd: str, target: str) -> None:
+        known = self._git(cwd, "log", "--format=%H", f"--grep=hydra checkpoint thread={thread} ").stdout.decode().split()
+        if target not in known:
+            return self.error(f"{target!r} is not a checkpoint of thread {thread}", "bad_request", req=req)
+        backup = self._snapshot(cwd, "turn=rewind-backup", thread)
+        if not backup["ok"]:
+            return self.error(f"could not save the current state first: {backup['reason']}", "internal", req=req)
+        diff = self._git(cwd, "diff", "--name-status", "--no-renames", "-z", backup["id"], target)
+        changes = diff.stdout.decode("utf-8", "replace").split("\x00")
+        restore, remove = [], []
+        for status, path in zip(changes[0::2], changes[1::2]):
+            (remove if status == "D" else restore).append(path)
+        root = os.path.realpath(cwd)
+        for path in remove:
+            full = os.path.realpath(os.path.join(cwd, path))
+            if full.startswith(root + os.sep) and os.path.isfile(full):
+                os.remove(full)
+        if restore:
+            done = self._git(cwd, "restore", f"--source={target}", "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul",
+                             stdin=("\x00".join(restore) + "\x00").encode("utf-8"))
+            if done.returncode:
+                return self.error(f"restore failed: {done.stderr.decode('utf-8', 'replace').strip()[:300]}", "internal", req=req)
+        self.emit({"type": "rewind_result", "id": req, "thread": thread, "checkpoint": target, "backup": backup["id"],
+                   "restored": sorted(restore), "removed": sorted(remove)})
 
     # approval rules
 
@@ -453,6 +546,8 @@ class Adapter:
         set_tool_sink(result)
         final: Dict[str, Any]
         try:
+            if msg.get("checkpoint", True):
+                self.emit({"type": "checkpoint", "turn": turn, "thread": thread, **self._snapshot(msg["cwd"], f"turn={turn}", thread)})
             answer = run_agent_loop(
                 alias=alias, prompt=msg["prompt"], session_id=thread, resume_session=True, cwd=msg["cwd"],
                 steer_mode=permission != "bypass", ledger=ledger, strategy=msg.get("mode", "recall"),

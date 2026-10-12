@@ -11700,14 +11700,14 @@ def _stdio_model(seen, tool=None, tokens=("alpha ", "beta ", "gamma"), pause=Non
 class _StdioChild:
     """The real adapter as a child process, driven over pipes the way the native app will."""
 
-    def __init__(self, base, home):
+    def __init__(self, base, home, env=None):
         import queue
 
         self.home = home
         self.project = os.path.join(home, "proj")
         os.makedirs(self.project, exist_ok=True)
         env = {**os.environ, "LOCAL_AI_BASE": base, "HOME": home, "USERPROFILE": home, "PYTHONPATH": REPO,
-               "PYTHONIOENCODING": "utf-8"}
+               "PYTHONIOENCODING": "utf-8", **(env or {})}
         self.stderr = tempfile.TemporaryFile()
         self.proc = subprocess.Popen([sys.executable, "-m", "hydra_cli", "stdio"], cwd=home, stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=self.stderr, env=env)
@@ -12140,7 +12140,7 @@ def _marker_model(seen):
             return _sse(handler, [f"{word}-{n} " for n in range(200)], 0.05, [])
         if word.startswith(("WRITE_", "EDIT_", "RUN_")) and not any(m.get("role") == "tool" for m in body["messages"]):
             name = word.split("_", 1)[1]
-            commands = {"status": "echo hello", "chain": "echo hello && echo bye", "other": "echo other", "near": "echo hellothere"}
+            commands = {"status": "echo hello", "chain": "echo hello && echo bye", "other": "echo other", "near": "echo hellothere", "delete": "rm keep.txt"}
             if word.startswith("RUN_"):
                 tool_name, args = "run_command", json.dumps({"command": commands[name]})
             else:
@@ -12231,7 +12231,7 @@ def stdio_parallel_turns_share_nothing():
         assert [m["path"] for m in by_turn["B"] if m["type"] == "diff"] == ["b.txt"]
         assert [m["path"] for m in by_turn["E"] if m["type"] == "diff"] == ["e.txt"]
         assert not [m for m in by_turn["C"] if m["type"] == "diff"]
-        assert all(m["type"] in ("token", "usage") for m in by_turn["A"]), by_turn["A"]
+        assert all(m["type"] in ("checkpoint", "token", "usage") for m in by_turn["A"]), by_turn["A"]
         # usage numbers come from each turn's own provider reply
         child.turn("P", "PLAIN1", thread="tp", cwd=pa, model="local")
         child.turn("Q", "PLAIN22222", thread="tq", cwd=pa, model="local")
@@ -12421,6 +12421,100 @@ def stdio_approval_rules_with_command_prefixes():
             again.send(type="approval", id=req["id"], decision="skip")
             again.until("done", turn="z2")
             assert again.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_checkpoint_and_rewind():
+    """Each turn is snapshotted in a shadow repository. Rewind restores edits, recreates deletions, removes new files, leaves ignored files and the project's own git alone, and can be undone."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home)
+            child.next()
+            proj = _project(child, "cp")
+
+            def put(name, text):
+                with open(os.path.join(proj, name), "w", encoding="utf-8", newline="") as handle:
+                    handle.write(text)
+
+            def get(name):
+                with open(os.path.join(proj, name), encoding="utf-8", newline="") as handle:
+                    return handle.read()
+
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=proj, capture_output=True, text=True, check=True).stdout
+
+            put("keep.txt", "keep\n")
+            put("edit.txt", "v1\n")
+            put(".gitignore", "ignored.log\n")
+            put("ignored.log", "log one\n")
+            git("init", "--quiet")
+            git("-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+            git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "seed")
+            own_head = git("rev-parse", "HEAD")
+
+            ids = []
+            for turn, prompt in (("k1", "WRITE_edit"), ("k2", "WRITE_new"), ("k3", "RUN_delete")):
+                replies = child.run_turn(turn, prompt + " now", thread="cp", cwd=proj, permission="bypass", model="local")
+                cps = [m for m in replies if m["type"] == "checkpoint"]
+                assert len(cps) == 1 and cps[0]["ok"] is True and cps[0]["turn"] == turn and cps[0]["id"], replies
+                assert replies.index(cps[0]) < [m["type"] for m in replies].index("done")
+                ids.append(cps[0]["id"])
+            assert len(set(ids)) == 3
+            assert get("edit.txt") == "content of edit\n" and get("new.txt") == "content of new\n" and not os.path.exists(os.path.join(proj, "keep.txt"))
+            put("ignored.log", "log two\n")
+
+            child.run_turn("o1", "PLAIN", thread="cp-other", cwd=proj, permission="bypass", model="local")  # same project, other thread
+            child.send(type="checkpoints", id="c1", thread="cp")
+            listed = child.until("checkpoint_list")[-1]["checkpoints"]
+            assert sorted(c["turn"] for c in listed) == ["k1", "k2", "k3"] and {c["id"] for c in listed} == set(ids), listed
+
+            child.send(type="rewind", id="w1", thread="cp", checkpoint=ids[0])
+            res = child.until("rewind_result")[-1]
+            assert res["id"] == "w1" and res["checkpoint"] == ids[0] and res["backup"], res
+            assert get("edit.txt") == "v1\n" and get("keep.txt") == "keep\n" and not os.path.exists(os.path.join(proj, "new.txt"))
+            assert get("ignored.log") == "log two\n", "an ignored file was touched"
+            assert sorted(res["restored"]) == ["edit.txt", "keep.txt"] and res["removed"] == ["new.txt"], res
+
+            child.send(type="rewind", id="w2", thread="cp", checkpoint=res["backup"])  # undo the rewind
+            again = child.until("rewind_result")[-1]
+            assert get("edit.txt") == "content of edit\n" and get("new.txt") == "content of new\n" and not os.path.exists(os.path.join(proj, "keep.txt")), again
+
+            child.turn("k5", "SLOW", thread="cp", permission="bypass", model="local")
+            child.until("token", turn="k5")
+            child.send(type="rewind", id="wb", thread="cp", checkpoint=ids[0])
+            assert child.until("error")[-1]["code"] == "busy"
+            child.send(type="cancel", turn="k5")
+            child.until("done", turn="k5")
+
+            child.send(type="rewind", id="w3", thread="cp", checkpoint="0" * 40)
+            assert child.until("error")[-1]["code"] == "bad_request"
+            child.send(type="rewind", id="w4", thread="nobody", checkpoint=ids[0])
+            assert child.until("error")[-1]["code"] == "bad_request"
+
+            assert git("stash", "list") == "", "a stash appeared in the project"
+            assert git("rev-parse", "HEAD") == own_head, "the project's own repository moved"
+            assert os.path.isdir(os.path.join(home, ".hydra", "shadow"))
+            assert not os.path.exists(os.path.join(proj, ".hydra"))
+
+            replies = child.run_turn("k4", "PLAIN", thread="cp", permission="bypass", model="local", checkpoint=False)
+            assert "checkpoint" not in [m["type"] for m in replies]
+            assert child.close() == 0
+
+            with tempfile.TemporaryDirectory() as broken_home:  # the shadow store cannot be created
+                os.makedirs(os.path.join(broken_home, ".hydra"))
+                with open(os.path.join(broken_home, ".hydra", "shadow"), "w", encoding="utf-8") as handle:
+                    handle.write("a file where the store should be")
+                nogit = _StdioChild(base, broken_home)
+                nogit.next()
+                replies = nogit.run_turn("g1", "PLAIN", thread="cp2", cwd=proj, permission="bypass", model="local")
+                cp = [m for m in replies if m["type"] == "checkpoint"][0]
+                assert cp["ok"] is False and cp["id"] is None and cp["reason"], cp
+                assert replies[-1]["type"] == "done" and replies[-1]["ok"] is True, replies
+                assert nogit.close() == 0
     finally:
         httpd.shutdown()
 
