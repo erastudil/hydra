@@ -70,6 +70,8 @@ from hydra_cli.providers import (
     reasoning_fields,
     redact,
     stream_chat_completion,
+    retry_wait,
+    transient_reason,
 )
 from hydra_cli.ui import (
     GREEN_BOLD,
@@ -2833,24 +2835,11 @@ def set_usage_sink(sink: Optional[Callable[[Dict[str, Any]], None]]) -> None:
 
 
 _RETRY_SINK: "contextvars.ContextVar[Optional[Callable[[Dict[str, Any]], None]]]" = contextvars.ContextVar("hydra_retry", default=None)
-TRANSIENT_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
 
 
 def set_retry_sink(sink: Optional[Callable[[Dict[str, Any]], None]]) -> None:
     """Receive attempt, wait and reason each time the calling thread retries a provider request."""
     _RETRY_SINK.set(sink)
-
-
-def _transient_reason(exc: BaseException) -> Optional[str]:
-    """Why a failed provider request is worth sending again, or None when it is not."""
-    import http.client
-
-    if isinstance(exc, HTTPError):
-        return f"HTTP {exc.code}" if exc.code in TRANSIENT_HTTP_CODES else None
-    reason = exc.reason if isinstance(exc, URLError) else exc
-    if isinstance(reason, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, http.client.RemoteDisconnected)):
-        return f"connection lost: {type(reason).__name__}"
-    return None
 
 
 def _report_usage(usage: Any) -> None:
@@ -3024,11 +3013,11 @@ def _fetch_streaming_completion(
         try:
             return _fetch_streaming_once(req, timeout, where, on_token, on_action, on_reasoning, cancel)
         except (HTTPError, URLError, OSError) as e:
-            reason = _transient_reason(e)
+            reason = transient_reason(e)
             # a retry after the first token would show the user the start of the reply twice
             if reason is None or attempt >= retries or emitted.is_set():
                 _raise_stream_error(e, where)
-            wait = min(4.0, base_wait * (2 ** attempt))
+            wait = retry_wait(e, attempt, base_wait, cap=4.0)
             attempt += 1
             sink = _RETRY_SINK.get()
             if sink is not None:

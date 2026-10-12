@@ -2338,6 +2338,89 @@ class BackgroundTasks:
         with self._lock:
             self._listeners.append(listener)
 
+    def me(self) -> Dict[str, Any]:
+        """This agent process as a task owner."""
+        return {"pid": os.getpid(), "identity": process_identity(os.getpid(), self.platform)}
+
+    def _owner_alive_elsewhere(self, info: Dict[str, Any]) -> bool:
+        owner = info.get("owner") or {}
+        if not owner.get("pid") or owner.get("pid") == os.getpid():
+            return False
+        return bool(owner.get("identity")) and process_identity(owner["pid"], self.platform) == owner["identity"]
+
+    def _folder_lock(self) -> Any:
+        """An exclusive lock on ~/.hydra/tasks/.lock across agent processes. The OS drops it when its holder dies."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def held() -> Any:
+            handle = open(os.path.join(self.folder(), ".lock"), "a+b")
+            try:
+                if os.name == "nt":
+                    import msvcrt
+                    import time as _time
+
+                    handle.seek(0)
+                    while True:
+                        try:
+                            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                            break
+                        except OSError:
+                            _time.sleep(0.05)
+                    try:
+                        yield
+                    finally:
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                    try:
+                        yield
+                    finally:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            finally:
+                handle.close()
+        return held()
+
+    def _read_record(self, task: str) -> Optional[Dict[str, Any]]:
+        try:
+            with open(os.path.join(self.folder(), task + ".json"), "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return None
+
+    def prune(self, now: Optional[float] = None) -> List[str]:
+        """Delete ended task records, logs and exit files older than HYDRA_TASK_KEEP_DAYS, default 7, then the oldest
+        beyond HYDRA_TASK_KEEP, default 200. Running tasks, tasks this agent tracks and tasks a live agent owns stay.
+        The caller holds the folder lock."""
+        import glob
+        import time as _time
+
+        now = _time.time() if now is None else now
+        keep_days = float(os.environ.get("HYDRA_TASK_KEEP_DAYS", "7"))
+        keep = max(0, int(os.environ.get("HYDRA_TASK_KEEP", "200")))
+        ended = []
+        for path in glob.glob(os.path.join(self.folder(), "*.json")):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    info = json.load(handle)
+            except (OSError, ValueError):
+                continue
+            if info.get("state") == "running" or info.get("task") in self._tasks or self._owner_alive_elsewhere(info):
+                continue
+            ended.append(info)
+        ended.sort(key=lambda x: x.get("ended") or 0, reverse=True)
+        doomed = [x for i, x in enumerate(ended) if i >= keep or (x.get("ended") or 0) < now - keep_days * 86400]
+        for info in doomed:
+            for suffix in (".json", ".log", ".exit"):
+                try:
+                    os.remove(os.path.join(self.folder(), info["task"] + suffix))
+                except OSError:
+                    pass
+        return [x["task"] for x in doomed]
+
     def _tell(self, info: Dict[str, Any]) -> None:
         for listener in list(self._listeners):
             try:
@@ -2381,7 +2464,7 @@ class BackgroundTasks:
         info = {"task": task, "command": command, "cwd": cwd, "pid": proc.pid, "pgid": proc.pid,
                 "identity": process_identity(proc.pid, self.platform), "state": "running", "exit_code": None,
                 "started": _time.time(), "ended": None, "thread": owner.get("thread"), "turn": owner.get("turn"),
-                "adopted": False, "log": log, "exit_file": exit_file}
+                "adopted": False, "log": log, "exit_file": exit_file, "owner": self.me()}
         with self._lock:
             self._tasks[task] = info
             self._procs[task] = proc
@@ -2392,35 +2475,42 @@ class BackgroundTasks:
         return {"isError": False, "task": task, "state": "running", "pid": proc.pid}
 
     def adopt(self) -> List[Dict[str, Any]]:
-        """Take over the running tasks a dead agent left on disk. Tasks whose process is gone are marked ended."""
+        """Take over the running tasks a dead agent left on disk, then prune old records. Tasks whose process is gone
+        are marked ended. A task whose owner is another live agent is left to it. The folder lock makes every claim
+        atomic across agents on one home."""
         import glob
         import threading
         import time as _time
 
-        found = []
-        for path in sorted(glob.glob(os.path.join(self.folder(), "*.json"))):
-            try:
-                with open(path, "r", encoding="utf-8") as handle:
-                    info = json.load(handle)
-            except (OSError, ValueError):
-                continue
-            with self._lock:
-                if info.get("state") != "running" or info.get("task") in self._tasks:
+        found, live = [], []
+        me = self.me()
+        with self._folder_lock():
+            for path in sorted(glob.glob(os.path.join(self.folder(), "*.json"))):
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        info = json.load(handle)
+                except (OSError, ValueError):
                     continue
-                info["adopted"] = True
-                alive = info.get("identity") and process_identity(info["pid"], self.platform) == info["identity"]
-                if not alive:
-                    info["state"], info["exit_code"], info["ended"] = "exited", self._exit_code(info), _time.time()
-                self._tasks[info["task"]] = info
-                self._ended[info["task"]] = threading.Event()
-                if not alive:
-                    self._ended[info["task"]].set()
-                self._save(info)
-            found.append(dict(info))
+                with self._lock:
+                    if info.get("state") != "running" or info.get("task") in self._tasks or self._owner_alive_elsewhere(info):
+                        continue
+                    info["adopted"], info["owner"] = True, me
+                    alive = info.get("identity") and process_identity(info["pid"], self.platform) == info["identity"]
+                    if not alive:
+                        info["state"], info["exit_code"], info["ended"] = "exited", self._exit_code(info), _time.time()
+                    self._tasks[info["task"]] = info
+                    self._ended[info["task"]] = threading.Event()
+                    if not alive:
+                        self._ended[info["task"]].set()
+                    self._save(info)
+                found.append(dict(info))
+                if alive:
+                    live.append(info["task"])
+            self.prune()
+        for info in found:
             self._tell(info)
-            if alive:
-                threading.Thread(target=self._poll, args=(info["task"],), daemon=True,
-                                 name=f"hydra-task-{info['task']}").start()
+        for task in live:
+            threading.Thread(target=self._poll, args=(task,), daemon=True, name=f"hydra-task-{task}").start()
         return found
 
     def _finish(self, task: str, code: Optional[int]) -> None:
@@ -2466,6 +2556,10 @@ class BackgroundTasks:
     def stop(self, task: str, grace: float = 3.0) -> Dict[str, Any]:
         import signal
 
+        with self._folder_lock():
+            record = self._read_record(task)
+            if record is not None and self._owner_alive_elsewhere(record):
+                return {"isError": True, "error": f"task {task!r} belongs to agent pid {record['owner']['pid']}"}
         with self._lock:
             info = self._tasks.get(task)
             if info is None:

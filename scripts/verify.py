@@ -13163,6 +13163,237 @@ def stdio_mcp_servers_toggle_per_project():
         httpd.shutdown()
 
 
+@check
+def provider_paths_share_the_transient_retry():
+    """stream_chat_completion and fetch_chat_completion retry 429, 500, 502, 503, 504 and lost connections before the first token, through the same helper as the agent loop."""
+    import socket
+    import struct
+
+    from hydra_cli import agent, providers
+
+    assert agent.transient_reason is providers.transient_reason and agent.retry_wait is providers.retry_wait
+    assert not hasattr(agent, "_transient_reason"), "the loop keeps its own copy"
+    calls = {}
+
+    def script(handler, body):
+        plan = handler.path.strip("/").split("/")[0].split("-")
+        n = calls[handler.path] = calls.get(handler.path, 0) + 1
+        step = plan[min(n, len(plan)) - 1]
+        if step.isdigit():
+            handler.send_response(int(step))
+            handler.send_header("Content-Length", "0")
+            if step == "429":
+                handler.send_header("Retry-After", "0.01")
+            handler.end_headers()
+            return
+        if step == "reset":
+            handler.close_connection = True
+            return
+        if body.get("stream"):
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.end_headers()
+            handler.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': 'ok'}}]})}\n\n".encode())
+            handler.wfile.flush()
+            if step == "cut":
+                handler.wfile.write(b": pad\n" * 2000)  # past the 4096 byte read, so the token is parsed and yielded first
+                handler.wfile.flush()
+                time.sleep(0.3)
+                handler.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                handler.connection.close()
+                return
+            handler.wfile.write(b"data: [DONE]\n\n")
+        else:
+            data = json.dumps({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}).encode()
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+        handler.close_connection = True
+
+    httpd, base = _scripted_model(script)
+    msgs = [{"role": "user", "content": "hi"}]
+    stream = lambda path: "".join(providers.stream_chat_completion(f"{base}/{path}", {}, "m", msgs, max_retries=3, backoff_base=0.01))
+    fetch = lambda path: providers.fetch_chat_completion(f"{base}/{path}", {}, "m", msgs, max_retries=3, backoff_base=0.01)
+    try:
+        for name, call in (("s", stream), ("f", fetch)):
+            for plan in ("503-reset-ok", "500-502-504-ok", "429-ok"):
+                path = f"{plan}/{name}"
+                assert call(path) == "ok", (name, plan)
+                assert calls["/" + path] == len(plan.split("-")), (name, plan, calls)
+            for plan, count in (("400-ok", 1), ("404-ok", 1), ("503-503-503-503-503-ok", 4)):
+                path = f"{plan}/{name}"
+                try:
+                    call(path)
+                    raise AssertionError(f"{name} {plan} did not fail")
+                except providers.ProviderError:
+                    pass
+                assert calls["/" + path] == count, (name, plan, calls)
+        got = []
+        try:  # a reset after a token may read as an early end, which the stream path accepts; it is never sent again
+            for token in providers.stream_chat_completion(f"{base}/cut-ok/s", {}, "m", msgs, max_retries=3, backoff_base=0.01):
+                got.append(token)
+        except providers.ProviderError:
+            pass
+        assert got == ["ok"] and calls["/cut-ok/s"] == 1, (got, calls)
+    finally:
+        httpd.shutdown()
+
+    from urllib.error import HTTPError
+
+    def http_error(code, retry_after=None):
+        headers = {"Retry-After": retry_after} if retry_after is not None else {}
+        return HTTPError("http://x", code, "x", headers, None)
+
+    assert providers.retry_wait(http_error(429, "3"), 0, 0.5) == 3.0
+    assert providers.retry_wait(http_error(429, "99"), 0, 0.5) == 10.0
+    assert providers.retry_wait(http_error(429, "soon"), 1, 0.5) == 1.0
+    assert providers.retry_wait(http_error(503, "3"), 5, 0.5) == 8.0 and providers.retry_wait(http_error(503), 5, 0.5, cap=4.0) == 4.0
+    assert [providers.transient_reason(http_error(c)) for c in (429, 500, 501, 502, 503, 504, 400)] == ["HTTP 429", "HTTP 500", None, "HTTP 502", "HTTP 503", "HTTP 504", None]
+    assert providers.transient_reason(ConnectionRefusedError()) is None and providers.transient_reason(ConnectionResetError()).startswith("connection lost")
+
+
+@check
+def stdio_two_agents_never_share_a_task():
+    """Two agents start on one home at once after a kill. Each orphaned task gets exactly one owner, the other agent cannot stop it, a lock held by a dead process does not block, and a dead owner's tasks are adopted again."""
+    if os.name == "nt":
+        raise Skip("background task check uses POSIX process groups and flock")
+    seen = []
+    httpd, base = _marker_model(seen)
+    spawned = []
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            first = _StdioChild(base, home)
+            first.next()
+            tasks = {}
+            for n in range(4):
+                out = [m for m in first.run_turn(f"o{n}", "TASK_start", thread=f"o{n}", model="local", permission="bypass")
+                       if m["type"] == "tool_result"][0]["output"]
+                made = json.loads(out)
+                tasks[made["task"]] = made["pid"]
+            spawned.extend(tasks.values())
+            first.proc.kill()
+            first.proc.wait(timeout=10)
+            folder = os.path.join(home, ".hydra", "tasks")
+
+            holder = subprocess.Popen([sys.executable, "-c", "import fcntl, sys, time; f = open(sys.argv[1], 'a+b'); "
+                                       "fcntl.flock(f.fileno(), fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)",
+                                       os.path.join(folder, ".lock")], stdout=subprocess.PIPE)
+            assert holder.stdout.readline().strip() == b"held"
+            a, b = _StdioChild(base, home), _StdioChild(base, home)
+            assert a.next()["type"] == "hello" and b.next()["type"] == "hello"
+            time.sleep(0.5)
+            assert not [m for m in a.log + b.log if m["type"] == "task_update"], "adoption ran while another process held the lock"
+            holder.kill()
+            holder.wait()
+
+            owners = {}
+            for child in (a, b):
+                child.send(type="tasks", id="l")
+                for x in child.until("task_list")[-1]["tasks"]:
+                    if x["state"] == "running":
+                        owners.setdefault(x["task"], []).append(child)
+            assert sorted(owners) == sorted(tasks) and all(len(v) == 1 for v in owners.values()), owners
+            for task, (owner,) in owners.items():
+                with open(os.path.join(folder, task + ".json"), encoding="utf-8") as handle:
+                    assert json.load(handle)["owner"]["pid"] == owner.proc.pid
+            task, (owner,) = next(iter(owners.items()))
+            other = b if owner is a else a
+            other.send(type="task_stop", id="x", task=task)
+            assert other.until("error")[-1]["code"] == "bad_request"
+            assert _group_alive(tasks[task]), "an agent stopped a task it does not own"
+
+            a.proc.kill()
+            b.proc.kill()
+            a.proc.wait(timeout=10)
+            b.proc.wait(timeout=10)
+            assert all(_group_alive(pid) for pid in tasks.values())
+            third = _StdioChild(base, home)
+            third.next()
+            third.send(type="tasks", id="l3")
+            listed = {x["task"]: x for x in third.until("task_list")[-1]["tasks"]}
+            assert all(listed[t]["state"] == "running" and listed[t]["adopted"] for t in tasks), listed
+            assert third.close() == 0
+            deadline = time.time() + 5
+            while any(_group_alive(pid) for pid in tasks.values()) and time.time() < deadline:
+                time.sleep(0.05)
+            assert not any(_group_alive(pid) for pid in tasks.values()), "a re-adopted task survived shutdown"
+    finally:
+        httpd.shutdown()
+        for pid in spawned:
+            try:
+                os.killpg(pid, 9)
+            except OSError:
+                pass
+
+
+@check
+def background_task_records_are_pruned_at_startup():
+    """Ended records older than the bound, and the oldest beyond the cap, are deleted with their log and exit files. Running, tracked and live-owned records stay."""
+    from hydra_cli.native_tools import BackgroundTasks, process_identity
+
+    with tempfile.TemporaryDirectory() as tmp, _env(HOME=tmp, USERPROFILE=tmp, HYDRA_TASK_KEEP="3", HYDRA_TASK_KEEP_DAYS="7"):
+        folder = BackgroundTasks.folder()
+        now = time.time()
+        live_agent = subprocess.Popen(["sleep", "60"])
+        try:
+            dead = {"pid": 999999, "identity": "linux:1"}
+            alive = {"pid": live_agent.pid, "identity": process_identity(live_agent.pid)}
+
+            def record(task, state, age_days, owner=dead):
+                info = {"task": task, "state": state, "pid": 999999, "pgid": 999999, "identity": "linux:1", "exit_code": 0,
+                        "started": now - age_days * 86400 - 5, "ended": None if state == "running" else now - age_days * 86400,
+                        "owner": owner, "log": os.path.join(folder, task + ".log"), "exit_file": os.path.join(folder, task + ".exit")}
+                for suffix, body in ((".json", json.dumps(info)), (".log", "x"), (".exit", "0")):
+                    with open(os.path.join(folder, task + suffix), "w", encoding="utf-8") as handle:
+                        handle.write(body)
+
+            record("old", "exited", 10)
+            for n in range(5):
+                record(f"new{n}", "exited", n * 0.1)
+            record("theirs", "exited", 30, owner=alive)
+            record("tracked", "stopped", 30)
+            tasks = BackgroundTasks()
+            tasks._tasks["tracked"] = {"task": "tracked"}
+            record("running", "running", 30, owner=dead)
+            with tasks._folder_lock():
+                gone = tasks.prune(now)
+            assert sorted(gone) == ["new3", "new4", "old"], gone
+            left = sorted(f for f in os.listdir(folder) if not f.startswith("."))
+            expect = sorted(f"{t}{x}" for t in ("new0", "new1", "new2", "theirs", "tracked", "running") for x in (".json", ".log", ".exit"))
+            assert left == expect, left
+
+            record("running", "running", 30, owner=alive)
+            fresh = BackgroundTasks()
+            record("ancient", "exited", 9)
+            fresh.adopt()
+            assert not os.path.exists(os.path.join(folder, "ancient.json")), "adopt did not prune"
+            assert os.path.exists(os.path.join(folder, "running.json")) and fresh.list() == [], fresh.list()
+
+            with _env(HYDRA_TASK_KEEP="100"):
+                record("eight", "exited", 8)
+                record("six", "exited", 6)
+                with fresh._folder_lock():
+                    assert "eight" in fresh.prune(now) and os.path.exists(os.path.join(folder, "six.json"))
+
+            victim = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            try:
+                record("foreign", "running", 0, owner=alive)
+                fresh._tasks["foreign"] = dict(json.load(open(os.path.join(folder, "foreign.json"))), pid=victim.pid, pgid=victim.pid)
+                fresh._ended["foreign"] = threading.Event()
+                refused = fresh.stop("foreign", grace=0.2)
+                assert refused["isError"] and str(live_agent.pid) in refused["error"], refused
+                time.sleep(0.2)
+                assert victim.poll() is None, "an agent stopped a task another live agent owns"
+            finally:
+                victim.kill()
+                victim.wait()
+        finally:
+            live_agent.kill()
+            live_agent.wait()
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")

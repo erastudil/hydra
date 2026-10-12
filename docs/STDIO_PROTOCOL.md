@@ -124,7 +124,7 @@ context : fields turn, rules, skills. sent once per turn after `checkpoint` and 
 
 task_update : fields task, thread, turn, command, cwd, pid, state, exit_code, started, ended, adopted. sent when a task starts, when a new agent adopts it after `hello`, and once more when it ends. adopted is true for a task an earlier agent process started. thread and turn name the turn that started it. state is running, exited or stopped. exit_code and ended are null while it runs. times are epoch seconds. it can arrive between turns.
 
-retry : fields turn, attempt, of, wait, reason. the provider request of this turn failed before its first token and is sent again after wait seconds. attempt counts from 1 up to of. reason is `HTTP <code>` for 429, 500, 502, 503 and 504, or `connection lost: <kind>` for a reset or dropped connection. any other failure, or any failure after a token, is not retried and ends the turn with `error` code turn_failed. HYDRA_PROVIDER_RETRIES sets of, default 2. HYDRA_BACKOFF_BASE sets the first wait, default 0.5, which doubles on each attempt up to 4 seconds. cancel during a wait ends the turn at once.
+retry : fields turn, attempt, of, wait, reason. the provider request of this turn failed before its first token and is sent again after wait seconds. attempt counts from 1 up to of. reason is `HTTP <code>` for 429, 500, 502, 503 and 504, or `connection lost: <kind>` for a reset or dropped connection. any other failure, or any failure after a token, is not retried and ends the turn with `error` code turn_failed. HYDRA_PROVIDER_RETRIES sets of, default 2. HYDRA_BACKOFF_BASE sets the first wait, default 0.5, which doubles on each attempt up to 4 seconds. a 429 with Retry-After waits that many seconds instead, up to 10. the compact summary and the plain chat paths use the same rule through providers.retry_wait and providers.transient_reason, with HYDRA_MAX_RETRIES, default 3, and a cap of 8 seconds. cancel during a wait ends the turn at once.
 
 tool_start : fields turn, call, tool, arguments. arguments is the parsed object, or the raw string if it was not JSON. sent after approval, just before the tool runs. skipped tools never produce it.
 
@@ -265,6 +265,10 @@ output : each task writes stdout and stderr to ~/.hydra/tasks/<task>.log. its re
 lifetime : a task keeps running after its turn ends. shutdown or EOF stops every task. a killed agent leaves its tasks running.
 
 adoption : right after `hello` a new agent reads every record still marked running. a task whose process is alive is adopted. it shows in `task_list`, sends `task_update` with adopted true, and `task_stop` and shutdown reach it. a task whose process is gone is marked exited, with the exit code from its .exit file or null, and sends `task_update`. records already ended are not loaded again.
+
+owner : a record names the agent process that owns the task by pid and start time. an agent adopts only tasks whose owner is dead, and it claims them under an exclusive lock on ~/.hydra/tasks/.lock. that is fcntl.flock on POSIX and msvcrt.locking on Windows. the OS drops the lock when its holder dies, so a crashed agent never blocks the next one. two agents on one home therefore never share a task. `task_stop` for a task this agent does not own gets `error` code bad_request. a task whose owner dies is adopted by the next agent that starts.
+
+pruning : at startup, under the same lock, an agent deletes the record, log and exit file of every ended task that ended more than HYDRA_TASK_KEEP_DAYS ago, default 7. it then deletes the oldest ended ones beyond HYDRA_TASK_KEEP, default 200. running tasks, tasks this agent tracks and tasks a live agent owns are never pruned.
 
 identity : a record holds pid, pgid and the process start time, from /proc on Linux, from `ps` on other POSIX hosts and from GetProcessTimes on Windows. a pid that now names a process with another start time counts as gone, so a reused pid is never adopted or killed.
 
