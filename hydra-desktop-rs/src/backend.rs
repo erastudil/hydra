@@ -170,10 +170,15 @@ impl Backend {
 
     /// Same as `spawn` with extra environment for the child.
     pub fn spawn_with(envs: &[(String, String)], repaint: impl Fn() + Send + 'static) -> Result<Backend, String> {
+        Self::spawn_using(python_candidates(), envs, repaint)
+    }
+
+    /// Spawn with an explicit interpreter list, as (program, leading args), tried in order.
+    pub fn spawn_using(candidates: Vec<(String, Vec<String>)>, envs: &[(String, String)], repaint: impl Fn() + Send + 'static) -> Result<Backend, String> {
         let repo = repo_dir();
         let mut spawned: Option<Child> = None;
         let mut last_err = String::from("no python interpreter found");
-        for (py, lead) in python_candidates() {
+        for (py, lead) in candidates {
             let mut cmd = crate::proc::command(&py);
             cmd.args(&lead).args(["-m", "hydra_cli", "stdio"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
             if let Some(r) = &repo {
@@ -321,6 +326,15 @@ impl Backend {
         id
     }
 
+    /// Why the agent child ended, or None while it runs. Polls without blocking.
+    pub fn exited(&mut self) -> Option<String> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(exit_reason(status)),
+            Ok(None) => None,
+            Err(e) => Some(format!("the agent process could not be checked: {e}")),
+        }
+    }
+
     /// Process id of the agent child (tests kill it to check respawn and task adoption).
     pub fn pid(&self) -> u32 {
         self.child.id()
@@ -364,6 +378,22 @@ impl Backend {
     }
 }
 
+/// Plain words for how the agent process ended.
+pub fn exit_reason(status: std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return format!("killed by signal {sig}");
+        }
+    }
+    match status.code() {
+        Some(0) => "exited".into(),
+        Some(c) => format!("exited with code {c}"),
+        None => "agent process ended".into(),
+    }
+}
+
 impl Drop for Backend {
     fn drop(&mut self) {
         if !matches!(self.child.try_wait(), Ok(Some(_))) {
@@ -386,6 +416,22 @@ mod tests {
         std::fs::write(rt.join(name), b"").unwrap();
         assert_eq!(bundled_python(&dir).unwrap(), rt.join(name));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dead_child_is_seen_while_a_process_it_started_holds_stdout() {
+        // the child starts a sleeper that inherits its stdout, then exits: end of file cannot come, the poll must
+        let held = vec![("sh".to_string(), vec!["-c".to_string(), "sleep 4 & exit 3".to_string()])];
+        let mut be = Backend::spawn_using(held, &[], || {}).expect("spawn sh");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut why = None;
+        while why.is_none() && std::time::Instant::now() < end {
+            why = be.exited();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(why.as_deref(), Some("exited with code 3"));
+        assert!(!matches!(be.rx.try_recv(), Ok(Ev::Exited(_))), "end of file came anyway, so this test proves nothing");
     }
 
     #[test]

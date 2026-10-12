@@ -154,7 +154,7 @@ fn respawn_kill_9_drops_the_handle_restarts_with_backoff_and_shows_adopted_tasks
     assert!(wait(&mut h, 5, |a| a.backend_pid().is_none()), "dead backend handle dropped");
     // 2: the notice names the crash and the restart, never "has not answered after 20 seconds"
     let t = h.state_mut().toast_text().unwrap_or_default().to_string();
-    assert!(t.contains("The agent stopped") && t.contains("Restarting in 0.5 s"), "{t}");
+    assert!(t.contains("The agent stopped (killed by signal 9)") && t.contains("Restarting in 0.5 s"), "{t}");
     assert!(h.query_by_label_contains("has not answered").is_none());
     // 3: automatic restart after the backoff, not at once
     let died = std::time::Instant::now();
@@ -186,6 +186,8 @@ fn bug5_a_reply_cut_by_kill_9_is_marked_unsaved_and_the_thread_reloads_from_the_
     assert!(wait(&mut h, 30, |a| a.model().sessions[0].messages.iter().any(|m| m.text.contains("Reloaded from the agent"))), "thread reloaded after respawn");
     let msgs = h.state_mut().model().sessions[0].messages.clone();
     assert!(!msgs.iter().any(|m| m.text.contains("tick")), "the unsaved partial reply is gone, as in the agent: {msgs:?}");
+    let cut = msgs.iter().position(|m| m.user && m.text.contains("tell me more")).expect("cut prompt kept");
+    assert_eq!(msgs.get(cut + 1).map(|m| (m.user, m.text.as_str())), Some((false, "[Turn interrupted before a reply]")), "the agent's marker answers the cut prompt: {msgs:?}");
     assert!(msgs.iter().any(|m| m.user && m.text.contains("marker-one")) && msgs.iter().any(|m| !m.user && m.text.contains("alpha")), "stored turn one kept: {msgs:?}");
 }
 

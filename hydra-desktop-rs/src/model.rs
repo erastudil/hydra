@@ -1353,7 +1353,7 @@ impl Model {
                     }
                     if code == "busy" && message.contains("agent") {
                         // one turn per thread across agents: another Hydra window holds this thread
-                        {}
+                        self.notice = format!("{HELD_ELSEWHERE} {message}");
                     }
                 }
             }

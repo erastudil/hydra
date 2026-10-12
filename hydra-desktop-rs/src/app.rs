@@ -625,9 +625,28 @@ impl HydraApp {
 
     fn drain(&mut self) {
         let mut evs = vec![];
-        if let Some(be) = &self.be {
+        let mut status = None;
+        if let Some(be) = &mut self.be {
             while let Ok(e) = be.rx.try_recv() {
                 evs.push(e);
+            }
+            // poll the child too: its death shows even while a process it started holds its stdout open, and the
+            // exit status names the cause. After end of file, give the kernel a moment to report that status.
+            let eof = evs.iter().any(|e| matches!(e, Ev::Exited(_)));
+            for _ in 0..if eof { 20 } else { 1 } {
+                if let Some(why) = be.exited() {
+                    status = Some(why);
+                    break;
+                }
+                if eof {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+        if let Some(why) = status {
+            match evs.iter_mut().find(|e| matches!(e, Ev::Exited(_))) {
+                Some(e) => *e = Ev::Exited(why),
+                None => evs.push(Ev::Exited(why)),
             }
         }
         self.had_events |= !evs.is_empty();
