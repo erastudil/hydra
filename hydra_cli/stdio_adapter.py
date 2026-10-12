@@ -115,6 +115,7 @@ class Adapter:
     def serve(self) -> int:
         self.emit({"type": "hello", "protocol": PROTOCOL_VERSION, "agent": "hydra", "capabilities": CAPABILITIES,
                    "context_modes": list(CONTEXT_MODES)})
+        self._tasks.adopt()
         try:
             while True:
                 try:
@@ -734,7 +735,7 @@ def _command_has_prefix(command: str, prefix: str) -> bool:
 
 
 def _task_view(info: Dict[str, Any]) -> Dict[str, Any]:
-    keys = ("task", "thread", "turn", "command", "cwd", "pid", "state", "exit_code", "started", "ended")
+    keys = ("task", "thread", "turn", "command", "cwd", "pid", "state", "exit_code", "started", "ended", "adopted")
     return {key: info.get(key) for key in keys}
 
 
