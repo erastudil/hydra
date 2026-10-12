@@ -13094,6 +13094,56 @@ def background_task_platform_paths():
         assert sent == task_kill_commands(4321)[:1], "a stop that ended the tree still sent /F"
 
 
+@check
+def stdio_mcp_servers_toggle_per_project():
+    """The app turns an MCP server off for one project. Its tools leave that project's turns only, and the choice survives a restart."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            server, log = os.path.join(home, "tiny_mcp.py"), os.path.join(home, "calls.log")
+            with open(server, "w", encoding="utf-8") as handle:
+                handle.write(_TINY_MCP_SERVER)
+            os.makedirs(os.path.join(home, ".hydra"), exist_ok=True)
+            with open(os.path.join(home, ".hydra", "mcp_servers.json"), "w", encoding="utf-8") as handle:
+                json.dump({"mcpServers": {"demo": {"command": sys.executable, "args": [server, log]}}}, handle)
+            calls = lambda: open(log, encoding="utf-8").read().split() if os.path.exists(log) else []
+
+            child = _StdioChild(base, home)
+            child.next()
+            pa, pb = _project(child, "pa"), _project(child, "pb")
+            child.send(type="mcp_toggle", id="x1", cwd=pa, server="demo", enabled=False)
+            status = child.until("mcp_status")[-1]
+            assert status["id"] == "x1" and status["servers"] == [{"name": "demo", "enabled": False, "ok": False, "error": None, "tools": []}], status
+            replies = child.run_turn("p1", "MCP_echo", thread="pa", cwd=pa, model="local", permission="bypass")
+            assert [m["mcp_tools"] for m in replies if m["type"] == "context"] == [[]], replies
+            assert not any(t["function"]["name"] == "demo__echo" for t in seen[0].get("tools", [])), "a disabled server's tool reached the model"
+            assert calls() == [], "a disabled server ran a tool"
+            replies = child.run_turn("p2", "MCP_echo", thread="pb", cwd=pb, model="local", permission="bypass")
+            assert [m["mcp_tools"] for m in replies if m["type"] == "context"] == [["demo__echo"]], replies
+            assert calls() == ["ping"]
+            child.send(type="mcp", id="x2", cwd=pb)
+            assert child.until("mcp_status")[-1]["servers"][0]["enabled"] is True
+            child.send(type="mcp_toggle", id="x3", cwd=pa, server="nope", enabled=False)
+            assert child.until("error")[-1]["code"] == "bad_request"
+            child.send(type="mcp_toggle", id="x4", cwd=pa, server="demo", enabled="no")
+            assert child.until("error")[-1]["code"] == "bad_request"
+            assert child.close() == 0
+
+            again = _StdioChild(base, home)
+            again.next()
+            again.send(type="mcp", id="y1", cwd=pa)
+            assert again.until("mcp_status")[-1]["servers"][0]["enabled"] is False, "the choice did not survive a restart"
+            again.send(type="mcp_toggle", id="y2", cwd=pa, server="demo", enabled=True)
+            status = again.until("mcp_status")[-1]
+            assert status["servers"] == [{"name": "demo", "enabled": True, "ok": True, "error": None, "tools": ["demo__echo"]}], status
+            again.run_turn("p3", "MCP_echo", thread="pa", model="local", permission="bypass")
+            assert calls() == ["ping", "ping"]
+            assert again.close() == 0
+    finally:
+        httpd.shutdown()
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")

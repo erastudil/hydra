@@ -103,6 +103,8 @@ skills : list the skills a turn may pick. field id. reply `skill_list`.
 
 mcp : show the MCP servers a project gets. fields id, cwd, refresh. refresh true asks every server for its tools again. reply `mcp_status`.
 
+mcp_toggle : turn one MCP server on or off for one project. fields id, cwd, server, enabled. enabled is true or false. the choice is saved per project and survives a restart. a server missing from the project's config, or enabled that is not a boolean, gets `error` code bad_request. reply `mcp_status`.
+
 rules : list or remove the approval rules that apply to a thread. fields id, thread, op, rule. op is list, the default, or remove, which also needs rule, the rule id. reply `rules_result`.
 
 sessions : list threads on disk. fields id, optional. reply `session_list`.
@@ -150,7 +152,7 @@ skill_list : fields id, skills. each skill has id, keys, the words it is about, 
 
 task_list : fields id, tasks. each task has the fields of `task_update`.
 
-mcp_status : fields id, config, servers. config is the config file in use or null. each server has name, ok, error and tools. error is null when ok is true. tools lists the tool names the model sees.
+mcp_status : fields id, config, servers. config is the config file in use or null. each server has name, enabled, ok, error and tools. a server turned off with `mcp_toggle` has enabled false, ok false, error null and no tools, and it is not started. error is null when ok is true. tools lists the tool names the model sees.
 
 rules_result : fields id, thread, rules. each rule has id, tool, prefix or null, and scope.
 
@@ -234,6 +236,8 @@ transport : each server is a child process that speaks newline JSON-RPC 2.0 on i
 names : a tool `echo` of server `demo` reaches the model as `demo__echo`.
 
 permission : MCP tools are never read only. manual asks for each call, accept_edits asks too, plan skips them, and bypass runs them. approval rules apply to them like to any other tool.
+
+off : `mcp_toggle` writes ~/.hydra/projects/<id>/mcp.json, where id is the first 16 hex digits of the sha1 of the project's real path. a server turned off there gives that project no tools and no `mcp_errors` entry. other projects that share the same config keep it.
 
 failure : a server that fails to start leaves its tools out and shows in `mcp_errors`. the turn runs with the rest.
 

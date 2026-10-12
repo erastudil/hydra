@@ -163,7 +163,7 @@ class Adapter:
         handler = {
             "hello": self._on_hello, "turn": self._on_turn, "cancel": self._on_cancel,
             "approval": self._on_approval, "shutdown": lambda m: False, "sessions": self._on_sessions,
-            "history": self._on_history, "action": self._on_action, "rules": self._on_rules, "skills": self._on_skills, "mcp": self._on_mcp, "tasks": self._on_tasks, "task_stop": self._on_task_stop,
+            "history": self._on_history, "action": self._on_action, "rules": self._on_rules, "skills": self._on_skills, "mcp": self._on_mcp, "mcp_toggle": self._on_mcp_toggle, "tasks": self._on_tasks, "task_stop": self._on_task_stop,
             "checkpoints": self._on_checkpoints, "rewind": self._on_rewind,
         }.get(kind)
         if handler is None:
@@ -447,8 +447,10 @@ class Adapter:
             return None
         config = os.path.realpath(config)
         stamp = os.stat(config).st_mtime_ns
+        disabled = tuple(sorted(_mcp_disabled(cwd)))
+        key = (config, disabled)
         with self._mcp_lock:
-            cached = self._mcp.get(config)
+            cached = self._mcp.get(key)
             if cached is not None and cached[0] == stamp:
                 return cached[1]
             if cached is not None:
@@ -459,9 +461,35 @@ class Adapter:
                 registry = McpRegistry(auto_load=False)
                 registry.config_path = config
                 registry.errors["config"] = f"{type(exc).__name__}: {exc}"
+            registry.all_servers = sorted(registry._server_configs)
+            registry.disabled = set(disabled)
+            for name in disabled:
+                registry._server_configs.pop(name, None)
             registry.get_tools()
-            self._mcp[config] = (stamp, registry)
+            self._mcp[key] = (stamp, registry)
             return registry
+
+    def _on_mcp_toggle(self, msg: Dict[str, Any]) -> None:
+        req = _text(msg.get("id"))
+        cwd, server, enabled = msg.get("cwd"), msg.get("server"), msg.get("enabled")
+        if not isinstance(cwd, str) or not os.path.isdir(cwd) or not isinstance(server, str) or not isinstance(enabled, bool):
+            return self.error("mcp_toggle needs cwd, server and enabled true or false", "bad_request", req=req)
+        registry = self._mcp_registry(cwd)
+        if registry is None or server not in registry.all_servers:
+            return self.error(f"no MCP server {server!r} in the config of this project", "bad_request", req=req)
+        disabled = _mcp_disabled(cwd)
+        old = (os.path.realpath(registry.config_path), tuple(sorted(disabled)))
+        disabled = (disabled - {server}) if enabled else (disabled | {server})
+        path = _mcp_settings_path(cwd)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path + ".tmp", "w", encoding="utf-8") as handle:
+            json.dump({"disabled": sorted(disabled)}, handle)
+        os.replace(path + ".tmp", path)
+        with self._mcp_lock:
+            stale = self._mcp.pop(old, None) if old[1] != tuple(sorted(disabled)) else None
+        if stale is not None:
+            stale[1].shutdown()
+        self._on_mcp({"id": req, "cwd": cwd})
 
     def _on_mcp(self, msg: Dict[str, Any]) -> None:
         req = _text(msg.get("id"))
@@ -475,9 +503,11 @@ class Adapter:
                 if msg.get("refresh"):
                     registry.get_tools(refresh=True)
                 tools = registry.get_tools()
-                names = sorted(set(registry._server_configs) | set(registry.errors))
+                names = sorted(set(registry.all_servers) | set(registry.errors))
                 for name in names:
-                    servers.append({"name": name, "ok": name not in registry.errors, "error": registry.errors.get(name),
+                    on = name not in registry.disabled
+                    servers.append({"name": name, "enabled": on, "ok": on and name not in registry.errors,
+                                    "error": registry.errors.get(name),
                                     "tools": [t["name"] for t in tools if t.get("_server") == name]})
         self.emit({"type": "mcp_status", "id": req, "config": registry.config_path if registry else None,
                    "servers": servers})
@@ -732,6 +762,24 @@ def _command_has_prefix(command: str, prefix: str) -> bool:
     if not prefix or any(token in command for token in _SHELL_CONTROL):
         return False
     return command == prefix or command.startswith(prefix + " ")
+
+
+def _mcp_settings_path(cwd: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha1(os.path.realpath(cwd).encode("utf-8")).hexdigest()[:16]
+    return os.path.join(os.path.expanduser("~"), ".hydra", "projects", digest, "mcp.json")
+
+
+def _mcp_disabled(cwd: str) -> set:
+    """Names of the MCP servers the app turned off for this project."""
+    try:
+        with open(_mcp_settings_path(cwd), "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return set()
+    names = data.get("disabled") if isinstance(data, dict) else None
+    return {n for n in names if isinstance(n, str)} if isinstance(names, list) else set()
 
 
 def _task_view(info: Dict[str, Any]) -> Dict[str, Any]:
