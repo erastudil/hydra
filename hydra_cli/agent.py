@@ -2933,7 +2933,7 @@ def _consume_completion_body(
         raise ProviderError(f"Stream from {where} ended before data: [DONE]")
     if not saw_done and not state.get("finished"):
         # the connection closed mid-reply: never present half an answer as a finished one
-        raise ProviderError(f"Reply from {where} was cut off before it finished (connection closed after {len(state['content'])} characters)")
+        raise ProviderError(f"Reply from {where} was cut off before it finished (connection closed after {len(''.join(state['content']))} characters)")
     finish = "tool_calls" if state["tools"] else "stop"
     _report_usage(state.get("usage"))
     return {"choices": [{"message": _message_from_stream_state(state), "finish_reason": finish}]}

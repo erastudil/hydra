@@ -6,13 +6,17 @@ use hydra_desktop::app::HydraApp;
 use hydra_desktop::model::*;
 
 fn harness(name: &str) -> Harness<'static, HydraApp> {
+    harness_sized(name, 1280.0, 800.0)
+}
+
+fn harness_sized(name: &str, w: f32, hgt: f32) -> Harness<'static, HydraApp> {
     let dir = std::env::temp_dir().join(format!("hydra-ui-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let cwd = dir.display().to_string();
     // the fake agent speaks the real stdio protocol; a missing python fails these tests loudly
     std::env::set_var("LOCAL_AI_BASE", "http://127.0.0.1:9"); // counts as a configured model, so first-run Settings stays closed
     std::env::set_var("HYDRA_REPO", format!("{}/tests/fake_agent", env!("CARGO_MANIFEST_DIR")));
-    Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_eframe(move |cc| HydraApp::build(&cc.egui_ctx, None, cwd, true))
+    Harness::builder().with_size(egui::vec2(w, hgt)).build_eframe(move |cc| HydraApp::build(&cc.egui_ctx, None, cwd, true))
 }
 
 fn app<'a>(h: &'a mut Harness<'static, HydraApp>) -> &'a mut HydraApp {
@@ -300,4 +304,17 @@ fn slash_agents_creates_and_opens_the_instruction_file() {
     assert!(std::path::Path::new(&root).join("AGENTS.md").is_file());
     assert_eq!(app(&mut h).model().drawer_tab, "files");
     h.get_by_label_contains("AGENTS.md");
+}
+
+#[test]
+fn d16_narrow_drawer_uses_short_tab_names_that_fit() {
+    let mut h = harness_sized("narrow", 820.0, 560.0);
+    settle(&mut h);
+    app(&mut h).model_mut().drawer_tab = "files";
+    h.run_steps(5);
+    for label in ["Git", "Asks"] {
+        let r = h.get_by_label(label).rect();
+        assert!(r.width() >= 30.0, "{label} cell has room: {r:?}");
+    }
+    assert!(h.query_by_label("Approvals").is_none(), "the long name is not squeezed in");
 }

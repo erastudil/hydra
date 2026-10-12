@@ -191,6 +191,30 @@ fn floor_boundary(s: &str, mut i: usize) -> usize {
     i
 }
 
+/// Approval text for a tool call: a one-line summary and a bounded preview body (D23: never the whole 5,000-line payload).
+pub fn approval_preview(args: &serde_json::Value) -> (String, String) {
+    const LINES: usize = 60;
+    const BYTES: usize = 6000;
+    let clip = |t: &str| -> (String, usize) {
+        let total = t.lines().count();
+        let mut out: String = t.lines().take(LINES).collect::<Vec<_>>().join("\n");
+        if out.len() > BYTES {
+            out.truncate(floor_boundary(&out, BYTES));
+        }
+        (out, total)
+    };
+    if let Some(content) = args.get("content").and_then(|c| c.as_str()) {
+        let path = args.get("path").and_then(|p| p.as_str()).unwrap_or("?");
+        let (body, total) = clip(content);
+        let more = if total > LINES { format!("\n… {} more lines not shown", total - LINES) } else { String::new() };
+        return (format!("{path}: {total} lines, {} bytes", content.len()), body + &more);
+    }
+    let pretty = serde_json::to_string_pretty(args).unwrap_or_default();
+    let (body, total) = clip(&pretty);
+    let more = if total > LINES || pretty.len() > body.len() + 1 { "\n… (cut, full arguments in Terminal Logs)".to_string() } else { String::new() };
+    (String::new(), body + &more)
+}
+
 fn palette_entries() -> Vec<(&'static str, &'static str, Cmd)> {
     vec![
         ("Switch to Chat Mode", "Alt+1", Cmd::Nav("chat")),
@@ -272,6 +296,7 @@ pub struct HydraApp {
     child_died: bool,
     deaths: Vec<f64>,
     help_open: bool,
+    had_events: bool,
     search: Option<String>,
     skills_asked: bool,
     mcp_asked: bool,
@@ -384,6 +409,7 @@ impl HydraApp {
             births_seen: false,
             child_died: false,
             deaths: vec![],
+            had_events: false,
             help_open: std::env::var("HYDRA_OPEN").as_deref() == Ok("help"),
             search: if std::env::var("HYDRA_OPEN").as_deref() == Ok("search") { Some(std::env::var("HYDRA_SEARCH").unwrap_or_default()) } else { None },
             skills_asked: false,
@@ -509,6 +535,17 @@ impl HydraApp {
         let Some(st) = &mut self.settings else { return };
         let path = secrets::env_path();
         let mut saved = 0;
+        // D22: check every filled field first, so a bad value saves nothing and is reported where it was typed
+        for (i, (name, label, _)) in secrets::PROVIDERS.iter().enumerate() {
+            let v = st.inputs[i].trim();
+            if !v.is_empty() {
+                if let Err(e) = secrets::validate(name, v) {
+                    st.message = format!("{label}: {e}. Nothing was saved.");
+                    st.ok = false;
+                    return;
+                }
+            }
+        }
         for (i, (name, label, _)) in secrets::PROVIDERS.iter().enumerate() {
             let v = st.inputs[i].trim().to_string();
             if v.is_empty() {
@@ -569,6 +606,7 @@ impl HydraApp {
                 evs.push(e);
             }
         }
+        self.had_events |= !evs.is_empty();
         for e in evs {
             if matches!(e, Ev::Exited(_)) {
                 self.child_died = true;
@@ -912,7 +950,7 @@ impl HydraApp {
                         let st = &self.m.agent_status;
                         let state = st["status"].as_str().unwrap_or("IDLE").to_uppercase();
                         let step = st["current_step"].as_u64().unwrap_or(0);
-                        let max = st["max_steps"].as_u64().unwrap_or(self.agent_steps as u64);
+                        let max = if state == "IDLE" { self.agent_steps as u64 } else { st["max_steps"].as_u64().unwrap_or(self.agent_steps as u64) };
                         ui.label(rt(format!("{state}  step {step}/{max}"), 11.0, if state == "RUNNING" { ACCENT } else { MUTED }));
                     }
                     "computer" => {
@@ -1184,6 +1222,10 @@ impl HydraApp {
                 let k = self.m.last_prompt as f64 / 1000.0;
                 ui.label(rt(format!("ctx {k:.1}k"), 11.0, if self.m.last_prompt > 100_000 { WARN } else { MUTED })).on_hover_text("Tokens the model read on the last request of this app (prompt plus carried context)");
             }
+            // D26: Undo rewind comes before the hint text, which truncates, so the button is never cut off
+            if self.m.sessions[self.m.active].pre_rewind.is_some() && !self.m.active_busy() && widgets::button(ui, "Undo rewind", Kind::Secondary, 11.0, (10.0, 3.0), None).clicked() {
+                undo = true;
+            }
             let q = self.queue.get(&self.m.sessions[self.m.active].id).map(|q| q.len()).unwrap_or(0);
             if q > 0 {
                 ui.add(egui::Label::new(rt(format!("{q} queued, sends when this turn ends"), 11.0, ACCENT)).truncate());
@@ -1191,9 +1233,6 @@ impl HydraApp {
                 ui.label(rt("Enter queues a follow-up", 11.0, MUTED));
             } else {
                 ui.add(egui::Label::new(rt("@ attaches a file   Ctrl+P finds files   Ctrl+O opens a folder", 11.0, MUTED)).truncate());
-            }
-            if self.m.sessions[self.m.active].pre_rewind.is_some() && !self.m.active_busy() && widgets::button(ui, "Undo rewind", Kind::Secondary, 11.0, (10.0, 3.0), None).clicked() {
-                undo = true;
             }
         });
         if cycle {
@@ -1622,11 +1661,14 @@ impl HydraApp {
             for row in [&[("files", "Files"), ("git", "Changes"), ("approvals", "Approvals"), ("rules", "Rules")][..], &[("skills", "Skills"), ("mcp", "MCP"), ("tasks", "Tasks")][..]] {
             let n = row.len() as f32;
             ui.horizontal(|ui| {
+                // D16: on a narrow drawer the long names ran together; use short ones when a cell is too small
+                let tight = (width - 17.0 - 12.0) / n - 4.0 < 96.0;
                 for &(key, label) in row {
                     let active = self.m.drawer_tab == key;
+                    let label = if tight { match key { "git" => "Git", "approvals" => "Asks", _ => label } } else { label };
                     let mut text = label.to_string();
                     if key == "approvals" && !self.m.approvals.is_empty() {
-                        text = format!("Approvals ({})", self.m.approvals.len());
+                        text = format!("{label} ({})", self.m.approvals.len());
                     }
                     if key == "tasks" && self.m.running_tasks() > 0 {
                         text = format!("Tasks ({})", self.m.running_tasks());
@@ -1637,7 +1679,7 @@ impl HydraApp {
                     if key == "git" {
                         if let Some(st) = &self.work.status {
                             if !st.changes.is_empty() {
-                                text = format!("Changes ({})", st.changes.len());
+                                text = format!("{label} ({})", st.changes.len());
                             }
                         }
                     }
@@ -2074,10 +2116,11 @@ impl HydraApp {
             };
             ui.label(rtb(&state, TYPE_BADGE, c));
             let step = st["current_step"].as_u64().unwrap_or(0);
-            let max = st["max_steps"].as_u64().unwrap_or(self.agent_steps as u64).max(1);
+            // D14: before a run the runner reports its own default; show the limit the next run will use
+            let max = if state == "IDLE" { self.agent_steps as u64 } else { st["max_steps"].as_u64().unwrap_or(self.agent_steps as u64) }.max(1);
             ui.label(rt(format!("step {step}/{max}  {:.1}s", st["elapsed_sec"].as_f64().unwrap_or(0.0)), 11.0, MUTED));
         });
-        let frac = st["current_step"].as_f64().unwrap_or(0.0) / st["max_steps"].as_f64().unwrap_or(self.agent_steps as f64).max(1.0);
+        let frac = if state == "IDLE" { 0.0 } else { st["current_step"].as_f64().unwrap_or(0.0) / st["max_steps"].as_f64().unwrap_or(self.agent_steps as f64).max(1.0) };
         let (bar, _) = ui.allocate_exact_size(vec2(w, 6.0), Sense::hover());
         ui.painter().rect_filled(bar, cr(3), BG3);
         ui.painter().rect_filled(egui::Rect::from_min_size(bar.min, vec2(bar.width() * frac.clamp(0.0, 1.0) as f32, 6.0)), cr(3), ACCENT);
@@ -2199,10 +2242,19 @@ impl HydraApp {
             modal_frame(ctx, "approval", 560.0, |ui| {
                 ui.label(rtb("APPROVAL REQUIRED", 13.0, ACCENT));
                 ui.label(rtb(&a.tool, 14.0, TEXT));
+                // D23: a big write must never push the buttons off screen. Summary line, then a capped, scrollable preview.
+                let (summary, body) = approval_preview(&a.args);
+                if !summary.is_empty() {
+                    ui.label(rt(summary, 12.0, TEXT));
+                }
+                let cap = (ui.ctx().content_rect().height() * 0.35).clamp(120.0, 320.0);
                 egui::Frame::new().fill(BG).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(12)).inner_margin(Margin::same(12)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    ui.add(egui::Label::new(RichText::new(serde_json::to_string_pretty(&a.args).unwrap_or_default()).size(12.0).color(TEXT2)).wrap());
+                    ScrollArea::vertical().id_salt("approval_args").max_height(cap).auto_shrink([false, true]).show(ui, |ui| {
+                        ui.add(egui::Label::new(RichText::new(body).size(12.0).family(egui::FontFamily::Monospace).color(TEXT2)).wrap());
+                    });
                 });
+                ui.label(rt("Enter allows · Esc skips", 10.0, MUTED));
                 if is_cmd {
                     ui.horizontal(|ui| {
                         ui.label(rt("\"Always\" covers commands starting with", 11.0, MUTED));
@@ -2228,8 +2280,14 @@ impl HydraApp {
                     }
                 });
             });
-            if is_cmd {
-                // shown under the buttons by the next frame; kept here so the field and the buttons share state
+            ctx.memory_mut(|m| m.surrender_focus(egui::Id::new("prompt")));
+            let prefix_focused = ctx.memory(|m| m.focused()).is_some();
+            if decision.is_none() && !prefix_focused {
+                if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+                    decision = Some("allow");
+                } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+                    decision = Some("skip");
+                }
             }
             if let (Some(d), Some(be)) = (decision, &mut self.be) {
                 let p = if is_cmd { Some(self.always_prefix.1.clone()) } else { None };
@@ -2248,6 +2306,7 @@ impl HydraApp {
         if self.settings.is_some() {
             let file = secrets::env_path();
             let (mut save, mut close) = (false, ctx.input(|i| i.key_pressed(Key::Escape)));
+            let mut clear: Option<usize> = None;
             let stored = secrets::read_from(&file);
             if let Some(st) = &mut self.settings {
                 modal_frame(ctx, "settings", 560.0, |ui| {
@@ -2260,7 +2319,14 @@ impl HydraApp {
                             Some(h) => format!("saved: {h}"),
                             None => "not set".into(),
                         };
-                        ui.add(egui::TextEdit::singleline(&mut st.inputs[i]).password(*secret).hint_text(rt(hint, 12.0, MUTED)).desired_width(f32::INFINITY));
+                        ui.horizontal(|ui| {
+                            let w = if have.is_some() { ui.available_width() - 70.0 } else { ui.available_width() };
+                            ui.add(egui::TextEdit::singleline(&mut st.inputs[i]).password(*secret).hint_text(rt(hint, 12.0, MUTED)).desired_width(w));
+                            // D24: a stored value can be removed, not only replaced
+                            if have.is_some() && widgets::button(ui, "Clear", Kind::Danger, 11.0, (8.0, 3.0), None).on_hover_text("Remove the stored value").clicked() {
+                                clear = Some(i);
+                            }
+                        });
                     }
                     if !st.message.is_empty() {
                         ui.add(egui::Label::new(rt(&st.message, 11.0, if st.ok { ACCENT } else { ERROR })).wrap());
@@ -2277,6 +2343,22 @@ impl HydraApp {
             }
             if save {
                 self.save_settings(ctx);
+            }
+            if let (Some(i), Some(st)) = (clear, &mut self.settings) {
+                let (name, label, _) = secrets::PROVIDERS[i];
+                match secrets::set_in(&file, name, "") {
+                    Ok(()) => {
+                        st.ok = true;
+                        st.message = format!("{label} removed. Agent restarted.");
+                        if !self.m.any_busy() {
+                            self.retry_backend(ctx);
+                        }
+                    }
+                    Err(e) => {
+                        st.ok = false;
+                        st.message = format!("{label}: {e}");
+                    }
+                }
             }
             if close {
                 self.settings = None;
@@ -2794,6 +2876,14 @@ impl eframe::App for HydraApp {
         if fonts_ready(root.ctx()) {
             timing_mark("first_frame");
         }
+        // HYDRA_FRAMES=<file>: running frame count and repaint causes, for the idle-repaint measurement (release bar 4)
+        if let Ok(path) = std::env::var("HYDRA_FRAMES") {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static N: AtomicU64 = AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed) + 1;
+            let causes = root.ctx().repaint_causes().iter().map(|c| c.to_string()).collect::<Vec<_>>().join(";");
+            let _ = std::fs::write(path, format!("{n}\n{causes}\n"));
+        }
         let ms = started.elapsed().as_secs_f64() * 1000.0;
         let ctx = root.ctx().clone();
         let t = ctx.input(|i| i.time);
@@ -2925,7 +3015,10 @@ impl HydraApp {
         }
         // Idle means idle: backend events, input and the workspace watcher wake us. Only animate while something runs.
         let animating = self.m.any_busy() || self.checks.is_empty() || time - self.started < 2.0;
-        ctx.request_repaint_after(std::time::Duration::from_millis(if animating { 50 } else { 2000 }));
+        // D21: a frame caused by input or an agent event is followed by one more, so a swap chain that lags a frame
+        // (software GL on Xvfb) still presents the current state without waiting for the next pointer move
+        let woke = ctx.input(|i| !i.events.is_empty()) || std::mem::take(&mut self.had_events);
+        ctx.request_repaint_after(std::time::Duration::from_millis(if animating { 50 } else if woke { 120 } else { 30_000 }));
         if self.m.agent_ready && !self.m.any_busy() {
             if let Ok(p) = std::env::var("HYDRA_DEMO_PROMPT") {
                 std::env::remove_var("HYDRA_DEMO_PROMPT");

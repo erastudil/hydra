@@ -148,6 +148,25 @@ def memory():
     row("memory: app + backend", f"{tree/1024:.0f} MB", "< 350 MB", tree / 1024 < 350)
 
 
+def idle():
+    """D06 / release bar 4: after start-up settles, an idle window draws no frames and uses next to no CPU."""
+    with Xvfb() as x:
+        h = home()
+        f = os.path.join(h, "frames")
+        p = launch(h, x.disp, HYDRA_FRAMES=f)
+        time.sleep(15)
+        ticks = lambda: sum(int(v) for v in open(f"/proc/{p.pid}/stat").read().rsplit(")", 1)[1].split()[11:13])
+        n = lambda: int(open(f).read().split()[0])
+        t0, f0 = ticks(), n()
+        time.sleep(20)
+        t1, f1 = ticks(), n()
+        stop(p)
+        shutil.rmtree(h, ignore_errors=True)
+    cpu = (t1 - t0) / os.sysconf("SC_CLK_TCK") / 20 * 100
+    row("idle: CPU over 20 s after start-up (app process, llvmpipe)", f"{cpu:.1f}% of a core", "< 2%", cpu < 2)
+    row("idle: frames drawn over 20 s", f"{f1 - f0} ({(f1 - f0) / 20:.2f}/s)", "0/s apart from animations (<= 1 heartbeat)", f1 - f0 <= 1)
+
+
 def frames():
     with Xvfb() as x:
         h = home()
@@ -320,7 +339,7 @@ def main(names):
     stub = subprocess.Popen([sys.executable, os.path.join(ROOT, "scripts", "qa_stub.py"), str(PORT)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.8)
     try:
-        for name, fn in [("cold", cold), ("memory", memory), ("frames", frames), ("kill", kill_runs), ("backend_kill", backend_kill), ("corrupt", corrupt), ("bundle", bundle)]:
+        for name, fn in [("cold", cold), ("idle", idle), ("memory", memory), ("frames", frames), ("kill", kill_runs), ("backend_kill", backend_kill), ("corrupt", corrupt), ("bundle", bundle)]:
             if not names or name in names:
                 fn()
     finally:

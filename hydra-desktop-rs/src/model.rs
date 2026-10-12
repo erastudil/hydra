@@ -125,6 +125,28 @@ pub enum Status {
     Unread,
 }
 
+/// D18: errors name the model the user picked (its label, not the provider's id) and say what to do next.
+pub fn explain_error(label: &str, raw: &str) -> String {
+    let msg = raw.strip_prefix("ProviderError:").unwrap_or(raw).trim();
+    let low = msg.to_lowercase();
+    let hint = if low.contains("credentials") || low.contains("401") || low.contains("api key") {
+        " Open Settings (Ctrl+,) to add a key."
+    } else if low.contains("unknown url type") || low.contains("invalid url") || low.contains("no host") {
+        " The endpoint URL is not valid: fix it in Settings (Ctrl+,)."
+    } else if low.contains("connection refused") || low.contains("name or service not known") || low.contains("failed to establish") {
+        " Nothing answered at the endpoint: is the local server running? The URL is in Settings (Ctrl+,)."
+    } else if low.contains("timed out") {
+        " The provider did not answer in time. Try again or pick another model."
+    } else {
+        ""
+    };
+    if msg.contains(label) {
+        format!("{msg}{hint}")
+    } else {
+        format!("{label}: {msg}{hint}")
+    }
+}
+
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -223,6 +245,8 @@ pub struct Model {
     pub mcp: Option<(Option<String>, Vec<Value>)>,
     pub caps: Vec<String>,
     state_was_bad: bool,
+    /// An always-rule was just added; reload the Rules list after the agent's next event for it.
+    pub rules_stale: bool,
     /// Prompt tokens of the last provider request, for the context meter.
     pub last_prompt: u64,
     pub notice: String,
@@ -310,6 +334,7 @@ impl Model {
             mcp: None,
             caps: vec![],
             state_was_bad: false,
+            rules_stale: false,
             last_prompt: 0,
             cp_pending: HashMap::new(),
             sent: HashMap::new(),
@@ -710,6 +735,9 @@ impl Model {
             Some(pos) => {
                 let a = self.approvals.remove(pos);
                 be.approve_always(&a.id, scope, prefix);
+                // D20: the agent stores the rule while it handles the approval; reload the Rules list once it has
+                self.rules_stale = true;
+                self.rules.0.clear();
                 true
             }
             None => false,
@@ -903,6 +931,7 @@ impl Model {
             Some(pos) => {
                 let a = self.approvals.remove(pos);
                 be.approve(&a.id, decision);
+                self.note_decision(&a, decision);
                 true
             }
             None => false,
@@ -921,6 +950,20 @@ impl Model {
         if let Some(pos) = self.approvals.iter().position(|a| a.sid == sid) {
             let a = self.approvals.remove(pos);
             be.approve(&a.id, decision);
+            self.note_decision(&a, decision);
+        }
+    }
+
+    /// D27: a skipped or aborted tool call leaves a line in the chat, not just the model's reply.
+    fn note_decision(&mut self, a: &Approval, decision: &str) {
+        let what = match decision {
+            "skip" => "skipped by you",
+            "abort" => "denied, turn aborted",
+            _ => return,
+        };
+        let line = format!("– {} {what}  {}", a.tool, short(&a.args));
+        if let Some(m) = self.last_assistant(a.sid) {
+            m.actions.push(line);
         }
     }
 
@@ -1017,14 +1060,9 @@ impl Model {
     }
 
     fn fail_bubble(&mut self, sid: u32, msg: &str) {
-        let msg = msg.strip_prefix("ProviderError:").unwrap_or(msg).trim();
-        let hinted;
-        let msg = if msg.to_lowercase().contains("credentials") {
-            hinted = format!("{msg} Open Settings (Ctrl+,) to add a key.");
-            hinted.as_str()
-        } else {
-            msg
-        };
+        let label = MODELS.get(self.model).map(|m| m.1).unwrap_or("the model");
+        let explained = explain_error(label, msg);
+        let msg = explained.as_str();
         if let Some(m) = self.last_assistant(sid) {
             m.actions.retain(|a| a != "Thinking…");
             if m.text.is_empty() {
@@ -1036,6 +1074,10 @@ impl Model {
     }
 
     pub fn apply(&mut self, ev: Ev) {
+        if self.rules_stale && matches!(ev, Ev::ToolStart { .. } | Ev::ToolResult { .. } | Ev::AutoDecision { .. } | Ev::Done { .. }) {
+            self.rules_stale = matches!(ev, Ev::ToolStart { .. }); // reload after start, and once more after it finishes
+            self.rules.0.clear();
+        }
         match ev {
             Ev::Hello { caps } => {
                 crate::app::timing_mark("hello");
@@ -1170,7 +1212,8 @@ impl Model {
                     if let Some(s) = self.session_mut(sid) {
                         s.diffs.push(DiffItem { path, diff });
                     }
-                    if self.sessions[self.active].id == sid && !self.tab_pinned {
+                    // only from the passive tabs: a tab the user opened to work in (Rules, Files, ...) is never yanked away
+                    if self.sessions[self.active].id == sid && !self.tab_pinned && matches!(self.drawer_tab, "screen" | "term" | "agent" | "diff") {
                         self.drawer_tab = "diff";
                     }
                 }
@@ -1480,6 +1523,16 @@ mod tests {
         assert!(m.sessions[1].unread);
         let hits = m.search("OK", 10);
         assert_eq!((hits.len(), hits[0].session), (1, 1));
+    }
+
+    #[test]
+    fn errors_name_the_picked_model_and_give_a_next_step() {
+        let e = explain_error("Offline Local (Ollama)", "ProviderError: <urlopen error unknown url type: '<redacted>/v1/chat'>");
+        assert!(e.starts_with("Offline Local (Ollama): "), "{e}");
+        assert!(e.contains("Settings (Ctrl+,)") && e.contains("not valid"), "{e}");
+        assert!(explain_error("X", "Connection refused").contains("local server running"));
+        assert!(explain_error("X", "no credentials for openrouter").contains("add a key"));
+        assert_eq!(explain_error("X", "X broke"), "X broke");
     }
 
     fn running_thread(m: &mut Model, idx: usize, turn: &str) {

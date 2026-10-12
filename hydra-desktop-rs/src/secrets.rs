@@ -96,6 +96,39 @@ pub fn set_in(path: &Path, name: &str, value: &str) -> Result<(), String> {
 }
 
 /// Show that something is stored without revealing it: first 3 and last 2 characters of long values.
+/// D22: check a settings value before anything is written. The message names the bad value for non-secret
+/// fields (a URL), and only its masked form for keys, so a typo is visible without leaking a secret.
+pub fn validate(name: &str, value: &str) -> Result<(), String> {
+    let v = value.trim();
+    if name == "LOCAL_AI_BASE" {
+        let rest = v.strip_prefix("http://").or_else(|| v.strip_prefix("https://")).ok_or_else(|| format!("\"{v}\" is not a URL: it must start with http:// or https://"))?;
+        if v.contains(char::is_whitespace) {
+            return Err(format!("\"{v}\" has spaces; a URL has none"));
+        }
+        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let (h, port) = match host.rsplit_once(':') {
+            Some((h, p)) if !h.ends_with(']') || p.is_empty() => (h, Some(p)),
+            _ => (host, None),
+        };
+        if h.is_empty() || !h.chars().all(|c| c.is_ascii_alphanumeric() || ".-[]:".contains(c)) {
+            return Err(format!("\"{v}\" has no valid host name"));
+        }
+        if let Some(p) = port {
+            if p.parse::<u16>().map(|n| n == 0).unwrap_or(true) {
+                return Err(format!("\"{v}\": port \"{p}\" is not a number from 1 to 65535"));
+            }
+        }
+        return Ok(());
+    }
+    if v.contains(char::is_whitespace) {
+        return Err(format!("{} has spaces; paste the key alone", mask(v)));
+    }
+    if v.len() < 8 {
+        return Err(format!("{} is too short for a key", mask(v)));
+    }
+    Ok(())
+}
+
 pub fn mask(value: &str) -> String {
     let n = value.chars().count();
     if n <= 8 {
@@ -109,6 +142,21 @@ pub fn mask(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_values_are_checked_before_saving_and_errors_show_the_url() {
+        assert!(validate("LOCAL_AI_BASE", "http://127.0.0.1:8000").is_ok());
+        assert!(validate("LOCAL_AI_BASE", "https://my-box.local/v1").is_ok());
+        let e = validate("LOCAL_AI_BASE", "not a url").unwrap_err();
+        assert!(e.contains("not a url"), "the bad value is shown: {e}");
+        assert!(validate("LOCAL_AI_BASE", "ftp://x").unwrap_err().contains("http://"));
+        assert!(validate("LOCAL_AI_BASE", "http://").is_err());
+        assert!(validate("LOCAL_AI_BASE", "http://host:99999").unwrap_err().contains("99999"));
+        assert!(validate("OPENROUTER_API_KEY", "sk-or-v1-abcdefgh").is_ok());
+        let e = validate("OPENROUTER_API_KEY", "sk-or v1-secretvalue").unwrap_err();
+        assert!(!e.contains("secretvalue"), "a key is never echoed: {e}");
+        assert!(validate("HF_TOKEN", "abc").is_err());
+    }
 
     fn tmp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("hydra-secrets-{name}-{}", std::process::id()));
