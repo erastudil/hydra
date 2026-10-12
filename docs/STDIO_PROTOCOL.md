@@ -227,6 +227,8 @@ store : a bare git repository under ~/.hydra/shadow, one per project directory, 
 
 conversation : each checkpoint also keeps a copy of the thread's ledger.db under ~/.hydra/sessions/<thread>/checkpoints/<id>.db, made with the sqlite backup API. rewind copies it back the same way. the backup checkpoint keeps the conversation as it was before the rewind, so rewinding to the backup undoes both files and conversation. history and the next turn read the rewound conversation.
 
+pruning : each new checkpoint deletes that thread's conversation copies older than HYDRA_CHECKPOINT_KEEP_DAYS, default 7, then the oldest beyond HYDRA_CHECKPOINT_KEEP, default 200, at least 1. the copy just made, for a turn or for a rewind backup, is the newest and always stays. a pruned checkpoint still lists, with turns null, and still rewinds its files, with conversation false. the shadow git commits themselves are not pruned. they share objects, so old ones cost little.
+
 limits : a rewind restores and removes files only. it does not undo commands run outside the project directory and it does not rewind the conversation ledger.
 
 ## mcp servers
@@ -282,5 +284,7 @@ windows stop : each task starts with CREATE_NEW_PROCESS_GROUP. stop runs `taskki
 ## shared state
 
 several agents may run on one home at once. every change to a thread's thread.json or to a rules.json file holds an exclusive lock on ~/.hydra/.state.lock across the read, the change and the write. the lock code is native_tools.file_lock, the same one the task folder uses.
+
+one turn per thread : a turn holds an OS lock on ~/.hydra/sessions/<thread>/.turn.lock from start to `done`, taken with native_tools.file_lock without waiting. a turn or rewind for that thread in any other agent gets `error` code busy, with a message that names another agent. the OS frees the lock when the holder dies, so a killed agent never leaves a thread stuck.
 
 every such file is written to a temp file unique to the writer and then moved over the old one with os.replace. a reader sees the old file or the new one, never a mix.

@@ -44,6 +44,7 @@ class _Turn:
         self.pending: Optional[str] = None
         self.asked: Optional[tuple] = None
         self.worker: Optional[threading.Thread] = None
+        self.thread_lock: Any = None
 
     def release(self, decision: str) -> None:
         self.decision = decision
@@ -229,10 +230,17 @@ class Adapter:
             if len(self._turns) >= MAX_TURNS:
                 return self.error(f"{MAX_TURNS} turns are already running", "busy", turn=turn)
             t = _Turn(turn, thread, permission)
-            with _state_lock():
-                title = _load_meta(thread).get("title") or prompt.strip()[:80]
-                _save_meta(thread, {"cwd": cwd, "mode": mode, "model": msg.get("model"), "permission": permission,
-                                    "title": title, "updated": int(time.time())})
+            t.thread_lock = _thread_lock(thread)
+            if t.thread_lock is None:
+                return self.error(f"thread {thread} is running a turn in another agent", "busy", turn=turn)
+            try:
+                with _state_lock():
+                    title = _load_meta(thread).get("title") or prompt.strip()[:80]
+                    _save_meta(thread, {"cwd": cwd, "mode": mode, "model": msg.get("model"), "permission": permission,
+                                        "title": title, "updated": int(time.time())})
+            except BaseException:
+                t.thread_lock.__exit__(None, None, None)
+                raise
             self._turns[turn] = t
             self._busy_threads[thread] = turn
             t.worker = threading.Thread(target=self._run_turn, args=(t, msg), name=f"hydra-turn-{turn}", daemon=True)
@@ -292,7 +300,9 @@ class Adapter:
                 if made.returncode:
                     return {"ok": False, "id": None, "reason": made.stderr.decode("utf-8", "replace").strip()[:300]}
                 sha = self._git(cwd, "rev-parse", "HEAD").stdout.decode().strip()
-            return {"ok": True, "id": sha, "reason": None, "turns": _save_conversation(thread, sha)}
+            turns = _save_conversation(thread, sha)
+            _prune_conversations(thread)
+            return {"ok": True, "id": sha, "reason": None, "turns": turns}
         except Exception as exc:  # git missing or unusable: the turn still runs, the app is told
             return {"ok": False, "id": None, "reason": f"{type(exc).__name__}: {exc}"[:300]}
 
@@ -322,12 +332,16 @@ class Adapter:
         with self._state:
             if thread in self._busy_threads:
                 return self.error(f"thread {thread} is running a turn", "busy", req=req)
+            held = _thread_lock(thread)
+            if held is None:
+                return self.error(f"thread {thread} is running a turn in another agent", "busy", req=req)
             self._busy_threads[thread] = f"rewind {req}"
         try:
             with self._shadow_lock:
                 self._rewind_locked(req, thread, cwd, target)
         finally:
             with self._state:
+                held.__exit__(None, None, None)
                 self._busy_threads.pop(thread, None)
 
     def _rewind_locked(self, req: Optional[str], thread: str, cwd: str, target: str) -> None:
@@ -695,6 +709,7 @@ class Adapter:
         # The slot frees and `done` is written under one lock: a turn sent right after `done` is never refused as
         # busy, and its messages cannot overtake this `done`.
         with self._state:
+            t.thread_lock.__exit__(None, None, None)
             self._turns.pop(turn, None)
             self._busy_threads.pop(thread, None)
             if t.pending:
@@ -787,6 +802,28 @@ def _save_conversation(thread: str, sha: str) -> int:
     return _conversation_turns(copy) or 0
 
 
+def _prune_conversations(thread: str) -> List[str]:
+    """Delete the conversation copies of a thread's checkpoints older than HYDRA_CHECKPOINT_KEEP_DAYS, default 7, then
+    the oldest beyond HYDRA_CHECKPOINT_KEEP, default 200, at least 1. _snapshot prunes right after it makes a copy, for
+    a turn or for a rewind backup. That copy is the newest and was written just now, so neither bound reaches it. A pruned
+    checkpoint still rewinds its files, with conversation false."""
+    import glob
+    import time as _time
+
+    days = float(os.environ.get("HYDRA_CHECKPOINT_KEEP_DAYS", "7"))
+    cap = max(1, int(os.environ.get("HYDRA_CHECKPOINT_KEEP", "200")))
+    folder = os.path.dirname(_conversation_copy(thread, "x"))
+    copies = sorted(glob.glob(os.path.join(folder, "*.db")), key=os.path.getmtime, reverse=True)
+    now = _time.time()
+    gone = []
+    for i, path in enumerate(copies):
+        sha = os.path.basename(path)[:-3]
+        if i >= cap or os.path.getmtime(path) < now - days * 86400:
+            os.remove(path)
+            gone.append(sha)
+    return gone
+
+
 def _restore_conversation(thread: str, sha: str) -> Optional[int]:
     """Put the thread's conversation back to what it was at this checkpoint. None when the checkpoint kept none."""
     copy = _conversation_copy(thread, sha)
@@ -816,6 +853,21 @@ def _save_meta(thread: str, meta: Dict[str, Any]) -> None:
     from hydra_cli.native_tools import atomic_write_json
 
     atomic_write_json(_meta_path(thread), meta)
+
+
+def _thread_lock(thread: str) -> Any:
+    """Take the OS lock that marks a thread as running a turn, across every agent on this home. Returns the entered
+    lock, or None when another agent holds it. The OS frees it if the holder dies."""
+    from pathlib import Path
+
+    from hydra_cli.native_tools import file_lock
+
+    lock = file_lock(str(Path.home() / ".hydra" / "sessions" / thread / ".turn.lock"), wait=False)
+    try:
+        lock.__enter__()
+    except BlockingIOError:
+        return None
+    return lock
 
 
 def _state_lock() -> Any:
