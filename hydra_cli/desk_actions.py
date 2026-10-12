@@ -26,7 +26,9 @@ def _swarm_run(p: Dict[str, Any]) -> Dict[str, Any]:
     task = str(p.get("task") or "").strip()
     if not task:
         return {"isError": True, "error": "task is required"}
-    results = execute_swarm(task, custom_model=p.get("model") or None, stream_output=False)
+    model = str(p.get("model") or "")
+    tier = "local" if model == "local" else "free" if model == "free" or ":free" in model else None
+    results = execute_swarm(task, custom_model=None if tier else (model or None), stream_output=False, tier=tier)
     rows = [r.to_dict() for r in results]
     synth = next((r for r in rows if r["role"] == "synthesizer"), None)
     heads = [r for r in rows if r["role"] != "synthesizer"]

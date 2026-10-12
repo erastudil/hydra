@@ -5,6 +5,10 @@ edition = "2021"
 description = "Hydra Desktop: native Rust port of the Hydra web desk. No browser, no web view, no localhost."
 license = "MIT"
 
+[lib]
+name = "hydra_desktop"
+path = "src/lib.rs"
+
 [[bin]]
 name = "Hydra"
 path = "src/main.rs"
@@ -14,6 +18,7 @@ eframe = { version = "0.36", default-features = false, features = ["glow", "x11"
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = "0.22"
 
 [build-dependencies]
 serde_json = "1"
