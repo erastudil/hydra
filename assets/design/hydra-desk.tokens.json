@@ -566,7 +566,18 @@
     "translate_y": 0
    }
   },
-  "reduced_motion": "skip keyframes and transforms; keep color changes instant"
+  "reduced_motion": "skip keyframes and transforms; keep color changes instant",
+  "hover_ms": 250,
+  "reduced_motion_env": "HYDRA_NO_ANIM",
+  "message_arrival": {
+   "duration_ms": 250,
+   "from_opacity": 0,
+   "from_translate_y": 8
+  },
+  "sidebar_toggle": {
+   "duration_ms": 250,
+   "easing": "apple"
+  }
  },
  "layout": {
   "header": {
@@ -655,7 +666,24 @@
    "radius": 16,
    "shadow": "screen"
   },
-  "narrow_note": "At 900px wide the transcript column shrinks to 180px because sidebar 220 and drawer 500 stay fixed; the old header wraps to 73px."
+  "narrow_note": "At 900px wide the transcript column shrinks to 180px because sidebar 220 and drawer 500 stay fixed; the old header wraps to 73px.",
+  "responsive": {
+   "header_narrow_below": 1180,
+   "sidebar_overlay_below": 1000,
+   "drawer_width_pct": 0.4,
+   "drawer_min": 300,
+   "drawer_max": 500,
+   "min_window": [
+    720,
+    480
+   ],
+   "default_window": [
+    1280,
+    800
+   ],
+   "message_max_width_pct": 0.8,
+   "note": "Port decision for narrow windows: below sidebar_overlay_below the left nav becomes a slide-over opened with Ctrl+B or the menu chip, so the transcript keeps its width. The old page instead squeezed the transcript to 180px at 900px."
+  }
  },
  "components": {
   "brand": {
@@ -1092,6 +1120,29 @@
    "shadow": "palette",
    "overlay": "$colors.overlay",
    "overlay_blur_px": 16
+  },
+  "empty_state": {
+   "color": "$colors.text_muted",
+   "size": 12,
+   "title_color": "$colors.text_secondary",
+   "border": "1px dashed $colors.border",
+   "radius": 16,
+   "padding": 24,
+   "note": "port addition; the old page had no empty states, so values reuse existing tokens"
+  },
+  "error_card": {
+   "bg": "$colors.error_dim",
+   "border": "1px solid $colors.error",
+   "border_left": "3px solid $colors.error",
+   "color": "$colors.text_primary",
+   "title_color": "$colors.error",
+   "radius": 12,
+   "padding": [
+    12,
+    16
+   ],
+   "size": 12,
+   "note": "port addition built from the error and error_dim tokens"
   }
  }
 }

@@ -25,6 +25,9 @@ pub fn accent_dim() -> Color32 {
     ACCENT_DIM
 }
 
+/// Amber for "needs you" markers; not part of the retired page's tokens.
+pub const WARN: Color32 = Color32::from_rgb(255, 196, 64);
+
 pub const BOLD: &str = "mono_bold";
 
 pub fn cr(r: u8) -> CornerRadius {
@@ -56,7 +59,17 @@ pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+/// True once the bold family is bound. Fonts set during a pass only take effect on the next one.
+pub fn fonts_ready(ctx: &egui::Context) -> bool {
+    ctx.fonts_mut(|f| f.families().contains(&FontFamily::Name(BOLD.into())))
+}
+
 pub fn apply(ctx: &egui::Context) {
+    let done = egui::Id::new("hydra-theme-applied");
+    if ctx.data(|d| d.get_temp::<bool>(done)).unwrap_or(false) {
+        return;
+    }
+    ctx.data_mut(|d| d.insert_temp(done, true));
     install_fonts(ctx);
     ctx.set_pixels_per_point(ctx.pixels_per_point());
     let mut v = egui::Visuals::dark();
@@ -97,7 +110,7 @@ pub fn apply(ctx: &egui::Context) {
 }
 
 pub fn window_icon() -> Option<egui::IconData> {
-    let bytes = include_bytes!("../assets/hydra_desktop.png");
+    let bytes = include_bytes!("../../assets/hydra_desktop.png");
     let img = image::load_from_memory(bytes).ok()?.into_rgba8();
     let (width, height) = img.dimensions();
     Some(egui::IconData { rgba: img.into_raw(), width, height })

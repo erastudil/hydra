@@ -1,5 +1,5 @@
 //! Drives the real `python -m hydra_cli stdio` adapter from the Rust client and model, against a stub model endpoint.
-//! Needs python3 with this repo importable (HYDRA_REPO, default ..). Skips with a message when python is missing.
+//! Needs python3 with this repo importable (HYDRA_REPO, default ..). Fails loudly when python is missing.
 
 use hydra_desktop::backend::{Backend, Ev};
 use hydra_desktop::model::*;
@@ -46,6 +46,14 @@ fn handle(mut s: TcpStream) {
     }
     let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n");
     let send = |s: &mut TcpStream, v: Value| s.write_all(format!("data: {v}\n\n").as_bytes()).and_then(|_| s.flush());
+    if prompt.contains("HANG") {
+        std::thread::sleep(Duration::from_secs(300));
+        return;
+    }
+    if prompt.contains("CUT") {
+        let _ = send(&mut s, json!({"choices": [{"delta": {"content": "partial "}}]}));
+        return; // closes without [DONE] or a finish reason
+    }
     if prompt.contains("WRITE") && !has_tool {
         let args = json!({"path": "hello.txt", "content": "hi\n"}).to_string();
         let _ = send(&mut s, json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": ""}}]}}]}));
@@ -83,8 +91,7 @@ fn rig(name: &str) -> Option<Rig> {
     let repo = std::env::var("HYDRA_REPO").unwrap_or_else(|_| format!("{}/..", env!("CARGO_MANIFEST_DIR")));
     let py = std::env::var("HYDRA_PYTHON").unwrap_or_else(|_| "python3".into());
     if std::process::Command::new(&py).arg("--version").output().is_err() {
-        eprintln!("skip: no python");
-        return None;
+        panic!("python is required for these tests (HYDRA_PYTHON={py}); a missing interpreter must fail, not skip (D11)");
     }
     std::env::set_var("HYDRA_PYTHON", &py);
     std::env::set_var("HYDRA_REPO", &repo);
@@ -115,12 +122,12 @@ fn pump(r: &mut Rig, secs: u64, mut until: impl FnMut(&Model) -> bool) -> Vec<Ev
 }
 
 fn done(r: &mut Rig) -> Vec<Ev> {
-    pump(r, 60, |m| m.busy.is_none())
+    pump(r, 60, |m| !m.any_busy())
 }
 
 #[test]
 fn chat_streams_tokens_and_tallies_real_usage() {
-    let Some(mut r) = rig("chat") else { return };
+    let mut r = rig("chat").expect("rig");
     pump(&mut r, 20, |m| m.agent_ready);
     assert!(r.m.agent_ready, "adapter said hello");
     assert!(r.m.submit(&mut r.be, "say something"));
@@ -136,12 +143,12 @@ fn chat_streams_tokens_and_tallies_real_usage() {
 
 #[test]
 fn stop_cancels_a_running_turn() {
-    let Some(mut r) = rig("stop") else { return };
+    let mut r = rig("stop").expect("rig");
     assert!(r.m.submit(&mut r.be, "SLOW please"));
     pump(&mut r, 30, |m| m.sessions[0].messages.last().map(|x| !x.text.is_empty()).unwrap_or(false));
     r.m.stop(&mut r.be);
     done(&mut r);
-    assert!(r.m.busy.is_none());
+    assert!(!r.m.any_busy());
     let last = r.m.sessions[0].messages.last().unwrap();
     assert!(last.actions.iter().any(|a| a.contains("cancelled")), "{:?}", last);
     assert!(last.text.matches("tick").count() < 60);
@@ -150,17 +157,17 @@ fn stop_cancels_a_running_turn() {
 
 #[test]
 fn approval_gates_a_write_and_the_diff_event_lands() {
-    let Some(mut r) = rig("approve") else { return };
-    r.m.approve_tools = true;
+    let mut r = rig("approve").expect("rig");
+    assert_eq!(r.m.sessions[0].permission, "manual", "a new thread asks by default (D01)");
     assert!(r.m.submit(&mut r.be, "WRITE the file"));
-    pump(&mut r, 40, |m| m.approval.is_some());
-    let a = r.m.approval.clone().expect("approval request arrives");
+    pump(&mut r, 40, |m| !m.approvals.is_empty());
+    let a = r.m.approvals.first().cloned().expect("approval request arrives");
     assert_eq!(a.tool, "write_file");
     assert!(!std::path::Path::new(&r.m.cwd).join("hello.txt").exists(), "nothing written before approval");
     r.m.answer_approval(&mut r.be, "allow");
     done(&mut r);
     assert!(std::path::Path::new(&r.m.cwd).join("hello.txt").exists());
-    assert!(r.m.diffs.iter().any(|d| d.path.ends_with("hello.txt") && d.diff.contains("+hi")), "{:?}", r.m.diffs);
+    assert!(r.m.sessions[0].diffs.iter().any(|d| d.path.ends_with("hello.txt") && d.diff.contains("+hi")), "{:?}", r.m.sessions[0].diffs);
     assert!(r.m.term.contains("write_file"), "terminal log shows the tool");
     assert_eq!(r.m.sessions[0].messages.last().unwrap().text, "finished");
     let _ = std::fs::remove_dir_all(&r.dir);
@@ -168,10 +175,10 @@ fn approval_gates_a_write_and_the_diff_event_lands() {
 
 #[test]
 fn skipping_an_approval_writes_nothing() {
-    let Some(mut r) = rig("skip") else { return };
-    r.m.approve_tools = true;
+    let mut r = rig("skip").expect("rig");
+    assert_eq!(r.m.sessions[0].permission, "manual", "a new thread asks by default (D01)");
     assert!(r.m.submit(&mut r.be, "WRITE the file"));
-    pump(&mut r, 40, |m| m.approval.is_some());
+    pump(&mut r, 40, |m| !m.approvals.is_empty());
     r.m.answer_approval(&mut r.be, "skip");
     done(&mut r);
     assert!(!std::path::Path::new(&r.m.cwd).join("hello.txt").exists());
@@ -180,7 +187,7 @@ fn skipping_an_approval_writes_nothing() {
 
 #[test]
 fn terminal_sandbox_runs_a_real_command() {
-    let Some(mut r) = rig("term") else { return };
+    let mut r = rig("term").expect("rig");
     r.m.set_nav("terminal");
     assert!(r.m.submit(&mut r.be, "echo hydra-native"));
     done(&mut r);
@@ -195,10 +202,10 @@ fn terminal_sandbox_runs_a_real_command() {
 
 #[test]
 fn swarm_returns_heads_and_synthesis() {
-    let Some(mut r) = rig("swarm") else { return };
+    let mut r = rig("swarm").expect("rig");
     r.m.set_nav("swarm");
     assert!(r.m.submit(&mut r.be, "compare two designs"));
-    pump(&mut r, 90, |m| m.busy.is_none());
+    pump(&mut r, 90, |m| !m.any_busy());
     let msgs = &r.m.sessions[0].messages;
     let last = msgs.last().unwrap();
     assert_eq!(last.header, "SWARM SYNTHESIS");
@@ -211,7 +218,7 @@ fn swarm_returns_heads_and_synthesis() {
 
 #[test]
 fn computer_use_capture_and_agent_status_and_jobs() {
-    let Some(mut r) = rig("misc") else { return };
+    let mut r = rig("misc").expect("rig");
     r.m.capture(&mut r.be);
     pump(&mut r, 30, |m| m.screen_seq > 0 && m.window_title != "Detecting...");
     assert!(r.m.screen_seq > 0 && r.m.screen_b64.len() > 100, "screen capture returned a png");
@@ -228,5 +235,33 @@ fn computer_use_capture_and_agent_status_and_jobs() {
     r.m.load_jobs(&mut r.be);
     pump(&mut r, 10, |m| !m.jobs.is_empty());
     assert!(r.m.jobs.iter().any(|j| j["name"] == "nightly"), "{:?}", r.m.jobs);
+    let _ = std::fs::remove_dir_all(&r.dir);
+}
+
+#[test]
+fn stop_cancels_a_provider_that_never_answers_and_the_next_turn_runs() {
+    let mut r = rig("hang").expect("rig");
+    assert!(r.m.submit(&mut r.be, "HANG please"));
+    std::thread::sleep(Duration::from_millis(800));
+    assert!(r.m.any_busy(), "waiting on the provider");
+    let t0 = Instant::now();
+    r.m.stop(&mut r.be);
+    pump(&mut r, 5, |m| !m.any_busy());
+    assert!(!r.m.any_busy(), "Stop frees the thread (D02)");
+    assert!(t0.elapsed() < Duration::from_secs(3), "cancel took {:?}", t0.elapsed());
+    assert!(r.m.submit(&mut r.be, "say something"), "new input is accepted after a cancelled hang");
+    done(&mut r);
+    assert_eq!(r.m.sessions[0].messages.last().unwrap().text, "alpha beta gamma");
+    let _ = std::fs::remove_dir_all(&r.dir);
+}
+
+#[test]
+fn a_reply_cut_off_mid_stream_is_reported_not_silently_kept() {
+    let mut r = rig("cut").expect("rig");
+    assert!(r.m.submit(&mut r.be, "CUT test"));
+    done(&mut r);
+    let last = r.m.sessions[0].messages.last().unwrap();
+    let shown = format!("{} {}", last.text, last.actions.join(" ")).to_lowercase();
+    assert!(shown.contains("cut off") || shown.contains("error") || shown.contains("failed"), "D05: {shown}");
     let _ = std::fs::remove_dir_all(&r.dir);
 }

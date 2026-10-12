@@ -15,6 +15,7 @@ pub enum Ev {
     Diff { turn: String, path: String, diff: String },
     Usage { model: String, prompt: u64, completion: u64, cost: f64 },
     Approval { turn: String, id: String, tool: String, args: Value },
+    AutoDecision { turn: String, tool: String, allow: bool, reason: String },
     Done { turn: String, text: String, ok: bool, cancelled: bool },
     Error { code: String, message: String, turn: Option<String>, id: Option<String> },
     ActionResult { id: String, action: String, result: Value },
@@ -38,7 +39,8 @@ pub fn parse_line(line: &str) -> Option<Ev> {
             completion: n("completion_tokens"),
             cost: v.get("cost_usd").and_then(|x| x.as_f64()).unwrap_or(0.0),
         },
-        "approval_request" => Ev::Approval { turn: s("turn"), id: s("id"), tool: s("tool"), args: v.get("arguments").cloned().unwrap_or(Value::Null) },
+        "auto_decision" => Ev::AutoDecision { turn: s("turn"), tool: s("tool"), allow: s("decision") == "allow", reason: s("reason") },
+                "approval_request" => Ev::Approval { turn: s("turn"), id: s("id"), tool: s("tool"), args: v.get("arguments").cloned().unwrap_or(Value::Null) },
         "done" => Ev::Done { turn: s("turn"), text: s("text"), ok: b("ok"), cancelled: b("cancelled") },
         "error" => Ev::Error {
             code: s("code"),
@@ -193,8 +195,8 @@ impl Backend {
         }
     }
 
-    pub fn turn(&mut self, turn: &str, prompt: &str, thread: &str, cwd: &str, model: &str, approve: bool) {
-        self.send(json!({"type": "turn", "turn": turn, "prompt": prompt, "thread": thread, "cwd": cwd, "model": model, "approve": approve}));
+    pub fn turn(&mut self, turn: &str, prompt: &str, thread: &str, cwd: &str, model: &str, permission: &str, context: &str) {
+        self.send(json!({"type": "turn", "turn": turn, "prompt": prompt, "thread": thread, "cwd": cwd, "model": model, "permission": permission, "mode": context}));
     }
 
     pub fn cancel(&mut self, turn: &str) {

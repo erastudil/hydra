@@ -50,12 +50,12 @@ pub fn run() -> Vec<Check> {
     let _ = std::fs::remove_file(&probe);
     out.push(Check { name: "Saved sessions folder", ok: writable, detail: dir.display().to_string(), fatal: true });
     // provider keys (names only, never values)
-    let keys = ["OPENROUTER_API_KEY", "AI_GATEWAY_API_KEY", "CHEAPERINFERENCE_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LOCAL_AI_BASE"];
-    let found: Vec<_> = keys.iter().filter(|k| std::env::var(k).map(|v| !v.is_empty()).unwrap_or(false)).collect();
+    let file = crate::secrets::env_path();
+    let found: Vec<_> = crate::secrets::PROVIDERS.iter().filter(|k| crate::secrets::is_set(k.0, &file)).collect();
     out.push(Check {
         name: "Model access",
         ok: !found.is_empty(),
-        detail: if found.is_empty() { "no provider key or local endpoint set; turns will fail until one is configured".into() } else { format!("{} configured", found.len()) },
+        detail: if found.is_empty() { "no provider key or local endpoint yet; open Settings (Ctrl+,) and add one".into() } else { format!("{} configured", found.len()) },
         fatal: false,
     });
     out

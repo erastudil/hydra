@@ -1,7 +1,5 @@
 #![windows_subsystem = "windows"]
-mod app;
-mod theme;
-mod widgets;
+use hydra_desktop::{app, theme};
 
 fn main() -> eframe::Result<()> {
     hydra_desktop::crash::install();
@@ -12,7 +10,7 @@ fn main() -> eframe::Result<()> {
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Hydra")
         .with_inner_size(size)
-        .with_min_inner_size([820.0, 560.0]);
+        .with_min_inner_size(theme::RESP_MIN_WINDOW);
     if let Some(icon) = theme::window_icon() {
         viewport = viewport.with_icon(icon);
     }
