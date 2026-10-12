@@ -12035,6 +12035,75 @@ def stdio_sessions_history_and_actions():
         assert child.close() == 0
 
 
+@check
+def stdio_permission_modes():
+    """manual asks, accept_edits lets edits through, plan skips writes, allow_always sticks to one thread and tool, bypass never asks."""
+    def write(name):
+        return {"name": "write_file", "arguments": {"path": name, "content": "x\n"}}
+
+    def kinds(replies):
+        return [m["type"] for m in replies]
+
+    with _stdio_session(tool=write("w.txt")) as (child, seen):
+        target = os.path.join(child.project, "w.txt")
+
+        replies = child.run_turn("plan", "write", thread="p1", permission="plan", model="local")
+        auto = [m for m in replies if m["type"] == "auto_decision"]
+        assert len(auto) == 1 and auto[0]["decision"] == "skip" and auto[0]["tool"] == "write_file", replies
+        assert "approval_request" not in kinds(replies) and "tool_start" not in kinds(replies)
+        assert not os.path.exists(target) and replies[-1]["ok"] is True, "plan mode wrote a file"
+
+        replies = child.run_turn("edits", "write", thread="p2", permission="accept_edits", model="local")
+        auto = [m for m in replies if m["type"] == "auto_decision"]
+        assert auto and auto[0]["decision"] == "allow" and "approval_request" not in kinds(replies), replies
+        assert kinds(replies).index("auto_decision") < kinds(replies).index("tool_start")
+        assert open(target, encoding="utf-8").read() == "x\n"
+        os.remove(target)
+
+        replies = child.run_turn("bypass", "write", thread="p3", permission="bypass", model="local")
+        assert "approval_request" not in kinds(replies) and "auto_decision" not in kinds(replies) and os.path.exists(target)
+        os.remove(target)
+
+        child.turn("m1", "write", thread="p4", permission="manual", model="local")
+        req = child.until("approval_request")[-1]
+        assert not os.path.exists(target)
+        child.send(type="approval", id=req["id"], decision="allow_always")
+        child.until("done", turn="m1")
+        assert os.path.exists(target)
+        os.remove(target)
+        replies = child.run_turn("m2", "write", thread="p4", permission="manual", model="local")
+        auto = [m for m in replies if m["type"] == "auto_decision"]
+        assert auto and auto[0]["decision"] == "allow" and "approval_request" not in kinds(replies) and os.path.exists(target), replies
+        os.remove(target)
+        child.turn("m3", "write", thread="p5", permission="manual", model="local")  # another thread still asks
+        req = child.until("approval_request")[-1]
+        child.send(type="approval", id=req["id"], decision="skip")
+        child.until("done", turn="m3")
+        assert not os.path.exists(target)
+
+        child.send(type="turn", turn="bad", prompt="hi", thread="p6", cwd=child.project, permission="root")
+        assert child.until("error")[-1]["code"] == "bad_request"
+        assert child.close() == 0
+
+    with _stdio_session(tool={"name": "run_command", "arguments": {"command": "echo hi"}}) as (child, seen):
+        child.turn("cmd", "run it", thread="p7", permission="accept_edits", model="local")
+        req = child.until("approval_request")[-1]
+        assert req["tool"] == "run_command", req
+        child.send(type="approval", id=req["id"], decision="abort")
+        assert child.until("done", turn="cmd")[-1]["ok"] is False
+        assert child.close() == 0
+
+    with _stdio_session(tool={"name": "read_file", "arguments": {"path": "r.txt"}}) as (child, seen):
+        with open(os.path.join(child.project, "r.txt"), "w", encoding="utf-8") as handle:
+            handle.write("readable\n")
+        replies = child.run_turn("read", "read it", thread="p8", permission="plan", model="local")
+        auto = [m for m in replies if m["type"] == "auto_decision"]
+        assert auto and auto[0]["decision"] == "allow", replies
+        result = [m for m in replies if m["type"] == "tool_result"][0]
+        assert result["is_error"] is False and "readable" in result["output"], result
+        assert child.close() == 0
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")

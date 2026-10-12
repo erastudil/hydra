@@ -55,7 +55,7 @@ agent hello : `{"type":"hello","protocol":1,"agent":"hydra","capabilities":[...]
 
 app hello : `{"type":"hello","protocol":1}`
 
-capabilities : turn, cancel, approval, sessions, history, action.
+capabilities : turn, cancel, approval, permission, sessions, history, action.
 
 
 ## messages from the app to the agent
@@ -67,13 +67,19 @@ turn : start a turn.
 - cwd : string, required, an existing directory. the project dir the tools work in.
 - mode : recall, compact or sliding. default recall.
 - model : alias string. default is the orchestrator model. `local` and `free` pick those tiers.
-- approve : boolean. when true every tool call asks for approval first. default false.
+- permission : manual, accept_edits, plan or bypass. default bypass, or manual when approve is true. may differ on every turn.
+  - manual : every tool call asks the app, except tools the app allowed for good with `allow_always`.
+  - accept_edits : read only tools and write_file and edit_file run on their own, every other tool asks.
+  - plan : read only tools run on their own, every other tool is skipped without asking and the model is told it was skipped.
+  - bypass : nothing asks.
+- approve : boolean, older spelling. true means manual, false means bypass. permission wins when both are sent.
 - context_chars : integer of at least 4096. the context budget in characters. default is four times the model window.
 
 cancel : stop a turn. fields turn. the turn ends with `done` cancelled true. a pending approval is released.
 
-approval : answer an `approval_request`. fields id, decision. decision is allow, skip or abort.
+approval : answer an `approval_request`. fields id, decision. decision is allow, allow_always, skip or abort.
 - allow runs the tool.
+- allow_always runs the tool and lets that tool run unasked for the rest of the process, in that thread only.
 - skip does not run it, the turn continues and the model sees that it was skipped.
 - abort ends the turn. `done` has ok false and cancelled false.
 
@@ -96,11 +102,13 @@ tool_start : fields turn, call, tool, arguments. arguments is the parsed object,
 
 tool_result : fields turn, call, tool, is_error, output, truncated. output is cut at 4000 characters and truncated says so. always follows its `tool_start`.
 
+auto_decision : fields turn, tool, decision, reason. decision is allow or skip. sent instead of an `approval_request` when the permission mode or an earlier allow_always settled the call. comes before the matching `tool_start`.
+
 diff : fields turn, path, diff. the unified diff of a file change made by write_file or edit_file. sent after the write and before the matching `tool_result`.
 
-usage : fields turn, model, prompt_tokens, completion_tokens, cost_usd (priced by desktop_core.TokenAccountingManager for that round). the provider's own usage numbers for one completion round, as reported by the endpoint. sent once per round, only when the provider reports usage. never estimated. the app sums them for the token and cost tally.
+usage : fields turn, model, prompt_tokens, completion_tokens, cost_usd, priced by desktop_core.TokenAccountingManager for that round. the provider's own usage numbers for one completion round, as reported by the endpoint. sent once per round, only when the provider reports usage. never estimated. the app sums them for the token and cost tally.
 
-approval_request : fields turn, id, tool, arguments. sent only when the turn has approve true. the turn is blocked until the matching `approval`, a `cancel`, `shutdown` or stdin EOF. the last three count as abort.
+approval_request : fields turn, id, tool, arguments. sent only when the permission mode asks for that tool. the turn is blocked until the matching `approval`, a `cancel`, `shutdown` or stdin EOF. the last three count as abort.
 
 done : fields turn, text, ok, cancelled. exactly one per turn and always the last message of that turn. text is the final answer, or the cancel marker text when cancelled. ok is false on cancel, abort and failure.
 
@@ -117,7 +125,7 @@ action_result : fields id, action, result. result is whatever the service return
 
 per turn : tokens, tool events, diffs and approval requests come in the order the agent produced them. nothing for a turn follows its `done`.
 
-tool order : approval_request, then tool_start, then diff if any, then tool_result.
+tool order : approval_request or auto_decision, then tool_start, then diff if any, then tool_result.
 
 one turn at a time : a `turn` while another runs gets `error` code busy and the running turn is untouched. a turn sent after the `done` of the previous one is always accepted, and none of its messages come before that `done`.
 
