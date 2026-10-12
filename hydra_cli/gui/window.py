@@ -170,8 +170,11 @@ class MainWindow(QMainWindow):
 
     # turns
     def submit(self, text: str) -> None:
-        if self.busy or not self.project_id:
+        if self.busy:
             return
+        if not self.project_id:
+            # first run: no project yet, so use the launch folder instead of silently ignoring Send
+            self.add_project(os.getcwd())
         if self.thread_id is None:
             self.create_thread()
         thread = self.store.thread(self.thread_id)
