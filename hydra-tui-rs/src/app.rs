@@ -1,5 +1,6 @@
 //! Terminal session state. Context mode defaults to compact. Recall stays available and is not the default.
 
+use std::time::Instant;
 use hydra_stdio::{Backend, Ev};
 
 use crate::endpoints::{budgets, free_usage, local_endpoints};
@@ -14,16 +15,19 @@ pub struct AgentRow {
 
 pub struct App {
     pub input: String,
+    pub cursor_pos: usize,
     pub transcript: Vec<String>,
     pub scroll: usize,
     pub autoscroll: bool,
     pub mode: String,
     pub model: String,
+    pub dialect: String,
     pub window: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub cost: f64,
     pub busy_turn: Option<String>,
+    pub busy_start: Option<Instant>,
     pub spin_i: usize,
     pub status_label: String,
     pub agents: Vec<AgentRow>,
@@ -40,21 +44,30 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into());
+        let rules_detected = std::path::Path::new(&cwd).join("AGENTS.md").exists()
+            || std::path::Path::new(&cwd).join(".cursorrules").exists()
+            || std::path::Path::new(&cwd).join("CLAUDE.md").exists();
+        let dialect = std::env::var("HYDRA_DIALECT")
+            .unwrap_or_else(|_| if rules_detected { "progen".into() } else { "slack".into() });
+        let model = std::env::var("HYDRA_ORCHESTRATOR_MODEL")
+            .or_else(|_| std::env::var("HYDRA_DEFAULT_MODEL"))
+            .unwrap_or_else(|_| "mimo 2.6 pro".into());
+
         let mut app = Self {
             input: String::new(),
-            transcript: vec![
-                "hydra tui : rust".into(),
-                "mode compact. /help lists commands.".into(),
-            ],
+            cursor_pos: 0,
+            transcript: Vec::new(),
             scroll: 0,
             autoscroll: true,
             mode: "compact".into(),
-            model: "mimo 2.6 pro".into(),
+            model,
+            dialect,
             window: std::env::var("HYDRA_CONTEXT_WINDOW").ok().and_then(|s| s.parse().ok()).unwrap_or(1_048_576),
             prompt_tokens: 0,
             completion_tokens: 0,
             cost: 0.0,
             busy_turn: None,
+            busy_start: None,
             spin_i: 0,
             status_label: "idle".into(),
             agents: Vec::new(),
@@ -74,6 +87,20 @@ impl App {
         app
     }
 
+    pub fn session_info(&self) -> Vec<(&'static str, String)> {
+        let rules_detected = std::path::Path::new(&self.cwd).join("AGENTS.md").exists()
+            || std::path::Path::new(&self.cwd).join(".cursorrules").exists()
+            || std::path::Path::new(&self.cwd).join("CLAUDE.md").exists();
+        vec![
+            ("Session", self.thread.clone()),
+            ("Model", format!("{} (frontier)", self.model)),
+            ("Dialect", self.dialect.clone()),
+            ("Project", if rules_detected { "Detected (AGENTS.md)".into() } else { "None".into() }),
+            ("Working Dir", self.cwd.clone()),
+            ("Strategy", format!("{} (sliding, recall)", self.mode)),
+        ]
+    }
+
     pub fn tick(&mut self) {
         if self.busy_turn.is_some() {
             self.spin_i = self.spin_i.wrapping_add(1);
@@ -82,11 +109,56 @@ impl App {
     }
 
     pub fn on_char(&mut self, c: char) {
-        self.input.push(c);
+        if self.cursor_pos >= self.input.len() {
+            self.input.push(c);
+        } else {
+            self.input.insert(self.cursor_pos, c);
+        }
+        self.cursor_pos += c.len_utf8();
     }
 
     pub fn backspace(&mut self) {
-        self.input.pop();
+        if self.cursor_pos > 0 && !self.input.is_empty() {
+            let mut prev_char_idx = 0;
+            for (idx, _) in self.input.char_indices() {
+                if idx < self.cursor_pos {
+                    prev_char_idx = idx;
+                } else {
+                    break;
+                }
+            }
+            self.input.remove(prev_char_idx);
+            self.cursor_pos = prev_char_idx;
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if self.cursor_pos < self.input.len() {
+            self.input.remove(self.cursor_pos);
+        }
+    }
+
+    pub fn cursor_left(&mut self) {
+        if self.cursor_pos > 0 {
+            let mut prev = 0;
+            for (idx, _) in self.input.char_indices() {
+                if idx < self.cursor_pos {
+                    prev = idx;
+                } else {
+                    break;
+                }
+            }
+            self.cursor_pos = prev;
+        }
+    }
+
+    pub fn cursor_right(&mut self) {
+        for (idx, ch) in self.input.char_indices() {
+            if idx == self.cursor_pos {
+                self.cursor_pos += ch.len_utf8();
+                break;
+            }
+        }
     }
 
     pub fn scroll_by(&mut self, delta: isize) {
@@ -98,6 +170,44 @@ impl App {
         }
     }
 
+    pub fn candidates(&self) -> Vec<(&'static str, &'static str)> {
+        let cmds = [
+            ("/model", "alias picker; provider id listed here"),
+            ("/endpoints", "query all local endpoints, free quota, and credit balances"),
+            ("/budgets", "query inference credit balances and limits"),
+            ("/credits", "alias for /budgets"),
+            ("/usage", "display free endpoint quota usage remaining"),
+            ("/free", "alias for /usage"),
+            ("/mode", "switch context strategy: compact, sliding, recall"),
+            ("/window", "set context window size in tokens"),
+            ("/agents", "list active runner tasks"),
+            ("/allow", "approve pending tool call"),
+            ("/skip", "skip pending tool call"),
+            ("/abort", "abort running turn"),
+            ("/clear", "reset session transcript and memory"),
+            ("/help", "slash command and key reference"),
+            ("/quit", "leave hydra"),
+            ("/exit", "leave hydra"),
+        ];
+        if !self.input.starts_with('/') || self.input.contains(' ') {
+            return Vec::new();
+        }
+        let prefix = self.input.to_lowercase();
+        cmds.iter()
+            .filter(|(cmd, _)| cmd.starts_with(&prefix))
+            .copied()
+            .collect()
+    }
+
+    pub fn complete(&mut self) {
+        let cands = self.candidates();
+        if cands.is_empty() {
+            return;
+        }
+        self.input = format!("{} ", cands[0].0);
+        self.cursor_pos = self.input.len();
+    }
+
     pub fn submit(&mut self) {
         self.autoscroll = true;
         let text = self.input.trim().to_string();
@@ -105,6 +215,7 @@ impl App {
             return;
         }
         self.input.clear();
+        self.cursor_pos = 0;
         self.transcript.push(format!("you : {text}"));
         if let Some(rest) = text.strip_prefix('/') {
             self.command(rest);
@@ -123,6 +234,7 @@ impl App {
         let chars = self.window.saturating_mul(4).max(4096);
         be.turn_mode(&turn, &text, &self.thread, &self.cwd, &self.model, false, &self.mode, chars);
         self.busy_turn = Some(turn.clone());
+        self.busy_start = Some(Instant::now());
         self.status_label = "working".into();
         self.transcript.push(String::new());
         self.assistant_at = Some(self.transcript.len() - 1);
@@ -135,6 +247,11 @@ impl App {
                 be.cancel(&turn);
             }
             self.status_label = "cancel".into();
+            self.busy_turn = None;
+            self.busy_start = None;
+            self.transcript.push("hydra : turn cancelled by user".into());
+        } else if self.approval.is_some() {
+            self.decide("abort");
         }
     }
 
@@ -152,21 +269,27 @@ impl App {
         let name = parts.next().unwrap_or("");
         match name {
             "help" => {
-                for line in [
-                    "/help",
-                    "/mode compact | sliding | recall",
-                    "/model <alias>",
-                    "/window <tokens>",
-                    "/endpoints",
-                    "/budgets (or /credits)",
-                    "/usage (or /free)",
-                    "/agents",
-                    "/allow  /skip  /abort",
-                    "/cancel",
-                    "/quit",
+                self.transcript.push("--- hydra slash commands ---".into());
+                for (cmd, desc) in [
+                    ("/model [alias]", "alias picker; provider id listed here"),
+                    ("/endpoints", "query all local endpoints, free quota, and credit balances"),
+                    ("/budgets", "query inference credit balances and limits"),
+                    ("/usage", "display free endpoint quota usage remaining"),
+                    ("/mode [compact|sliding|recall]", "switch context strategy"),
+                    ("/window [tokens]", "set context window size in tokens"),
+                    ("/agents", "list active runner tasks"),
+                    ("/allow", "approve pending tool call"),
+                    ("/skip", "skip pending tool call"),
+                    ("/abort", "abort running turn"),
+                    ("/clear", "reset session transcript"),
+                    ("/help", "slash command and key reference"),
+                    ("/quit", "leave hydra"),
                 ] {
-                    self.transcript.push(line.into());
+                    self.transcript.push(format!("  {cmd:30} : {desc}"));
                 }
+            }
+            "clear" => {
+                self.transcript.clear();
             }
             "quit" | "exit" => {
                 self.quit = true;
@@ -213,11 +336,13 @@ impl App {
                 }
             }
             "budgets" | "credits" => {
+                self.transcript.push("--- provider credit balances ---".into());
                 for row in budgets() {
                     self.transcript.push(format!("credit balance {} : {}", row.provider, row.detail));
                 }
             }
             "usage" | "free" => {
+                self.transcript.push("--- free quota remaining ---".into());
                 for row in free_usage() {
                     self.transcript.push(format!("free quota {} : {}", row.provider, row.detail));
                 }
@@ -300,7 +425,15 @@ impl App {
             }
             Ev::Done { turn, text, ok, cancelled } => {
                 if !text.is_empty() {
-                    self.transcript.push(text);
+                    if let Some(i) = self.assistant_at {
+                        if let Some(line) = self.transcript.get_mut(i) {
+                            if line.is_empty() {
+                                *line = text;
+                            }
+                        }
+                    } else {
+                        self.transcript.push(text);
+                    }
                 }
                 let state = if cancelled {
                     "cancelled"
@@ -312,6 +445,7 @@ impl App {
                 self.mark_agent(&turn, state);
                 if self.busy_turn.as_deref() == Some(turn.as_str()) {
                     self.busy_turn = None;
+                    self.busy_start = None;
                     self.status_label = "idle".into();
                     self.assistant_at = None;
                 }
@@ -322,6 +456,7 @@ impl App {
                     self.mark_agent(&turn, "error");
                     if self.busy_turn.as_deref() == Some(turn.as_str()) {
                         self.busy_turn = None;
+                        self.busy_start = None;
                         self.status_label = "idle".into();
                         self.assistant_at = None;
                     }
@@ -342,6 +477,7 @@ impl App {
             Ev::Exited(reason) => {
                 self.transcript.push(format!("agent exited : {reason}"));
                 self.busy_turn = None;
+                self.busy_start = None;
                 self.status_label = "idle".into();
                 self.be = None;
             }
@@ -362,6 +498,7 @@ impl App {
         SPIN[self.spin_i % SPIN.len()]
     }
 
+    #[allow(dead_code)]
     pub fn footer(&self) -> String {
         let used = self.prompt_tokens.saturating_add(self.completion_tokens);
         let running = self.agents.iter().filter(|a| a.state == "running").count();
@@ -370,7 +507,6 @@ impl App {
             self.mode, self.model, used, self.window, self.cost, running
         )
     }
-
 }
 
 fn clip_label(text: &str) -> String {
@@ -405,4 +541,3 @@ pub fn log_layout(width: u16, fit_spin: usize, fit_label: usize, overflow: bool,
     }
     // #endregion
 }
-
