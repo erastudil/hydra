@@ -245,7 +245,7 @@ impl HydraApp {
             m.set_nav(&n);
         }
         if let Ok(t) = std::env::var("HYDRA_TAB") {
-            if let Some(k) = DRAWER_TABS.iter().chain([("files", ""), ("git", "")].iter()).find(|d| d.0 == t) {
+            if let Some(k) = DRAWER_TABS.iter().chain([("files", ""), ("git", ""), ("approvals", ""), ("rules", "")].iter()).find(|d| d.0 == t) {
                 m.drawer_tab = k.0;
             }
         }

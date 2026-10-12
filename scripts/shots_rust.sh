@@ -25,4 +25,5 @@ shot mode_swarm 1280x800 40 HYDRA_NAV=swarm
 shot cut_off_stream 1280x800 100000 HYDRA_SHOT_SECS=9 HYDRA_DEMO_PROMPT="CUT test"
 shot narrow_820 820x560 60
 shot narrow_900 900x700 60
+shot rules_tab 1280x800 100000 HYDRA_SHOT_SECS=10 HYDRA_TAB=rules HYDRA_DEMO_PROMPT="WRITE the file" HYDRA_PERMISSION=accept_edits
 ls -1 "$OUT"
