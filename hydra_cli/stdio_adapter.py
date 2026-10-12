@@ -289,6 +289,7 @@ class Adapter:
         set_diff_sink(lambda path, text: self.emit({"type": "diff", "turn": turn, "path": path, "diff": text}))
         set_tool_start_sink(start)
         set_tool_sink(result)
+        final: Dict[str, Any]
         try:
             answer = run_agent_loop(
                 alias=alias, prompt=msg["prompt"], session_id=thread, resume_session=True, cwd=msg["cwd"],
@@ -299,20 +300,23 @@ class Adapter:
             )
             cancelled = self._cancel.is_set() or answer == CANCELLED_TEXT
             ok = not cancelled and answer != "[Turn aborted by developer]"
-            self.emit({"type": "done", "turn": turn, "text": CANCELLED_TEXT if cancelled else (answer or ""),
-                       "ok": ok, "cancelled": cancelled})
+            final = {"type": "done", "turn": turn, "text": CANCELLED_TEXT if cancelled else (answer or ""),
+                     "ok": ok, "cancelled": cancelled}
         except Exception as exc:
             self.error(f"{type(exc).__name__}: {exc}", "turn_failed", turn=turn)
-            self.emit({"type": "done", "turn": turn, "text": "", "ok": False, "cancelled": self._cancel.is_set()})
+            final = {"type": "done", "turn": turn, "text": "", "ok": False, "cancelled": self._cancel.is_set()}
         finally:
             set_usage_sink(None)
             set_approval_handler(None)
             set_diff_sink(None)
             set_tool_sink(None)
             set_tool_start_sink(None)
-            with self._state:
-                self._turn_id = None
-                self._pending = None
+        # The slot frees and `done` is written under one lock: a turn sent right after `done` is never refused as
+        # busy, and its messages cannot overtake this `done`.
+        with self._state:
+            self._turn_id = None
+            self._pending = None
+            self.emit(final)
 
 
 def _text(value: Any) -> Optional[str]:
