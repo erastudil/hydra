@@ -204,8 +204,16 @@ impl Backend {
         }
     }
 
-    pub fn turn(&mut self, turn: &str, prompt: &str, thread: &str, cwd: &str, model: &str, permission: &str, context: &str) {
-        self.send(json!({"type": "turn", "turn": turn, "prompt": prompt, "thread": thread, "cwd": cwd, "model": model, "permission": permission, "mode": context}));
+    /// Start a turn. Optional fields are omitted when None: the agent keeps each thread's last cwd, model, permission
+    /// and mode, so the app only sends what changed (and everything for a thread this agent process has not seen).
+    pub fn turn(&mut self, turn: &str, prompt: &str, thread: &str, cwd: Option<&str>, model: Option<&str>, permission: Option<&str>, context: Option<&str>) {
+        let mut m = json!({"type": "turn", "turn": turn, "prompt": prompt, "thread": thread});
+        for (k, v) in [("cwd", cwd), ("model", model), ("permission", permission), ("mode", context)] {
+            if let Some(v) = v {
+                m[k] = json!(v);
+            }
+        }
+        self.send(m);
     }
 
     pub fn cancel(&mut self, turn: &str) {

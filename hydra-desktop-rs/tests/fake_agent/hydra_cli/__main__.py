@@ -12,6 +12,8 @@ cancel = {}
 waits = {}
 state = threading.Lock()
 counter = [0]
+thread_cwd = {}
+fields_seen = []
 
 
 def emit(m):
@@ -21,7 +23,20 @@ def emit(m):
 
 
 def turn(msg):
-    t, prompt, thread, cwd = msg["turn"], msg["prompt"], msg["thread"], msg["cwd"]
+    t, prompt, thread = msg["turn"], msg["prompt"], msg["thread"]
+    # like the real adapter: cwd is required for a new thread, later turns reuse the thread's last one
+    with state:
+        if "cwd" in msg:
+            thread_cwd[thread] = msg["cwd"]
+        cwd = thread_cwd.get(thread)
+    if cwd is None:
+        emit({"type": "error", "code": "bad_request", "turn": t, "message": "cwd is required for a new thread"})
+        emit({"type": "done", "turn": t, "text": "", "ok": False, "cancelled": False})
+        return
+    with state:
+        fields_seen.append(sorted(k for k in ("cwd", "model", "permission", "mode") if k in msg))
+    if "FIELDS" in prompt:
+        emit({"type": "token", "turn": t, "text": json.dumps(fields_seen[-1])})
     stop = cancel[t]
     emit({"type": "token", "turn": t, "text": f"[{thread}@{cwd}] "})
     if "ASK" in prompt:

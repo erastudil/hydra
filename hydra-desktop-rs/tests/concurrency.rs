@@ -194,3 +194,26 @@ fn a_thread_with_a_worktree_runs_its_turn_there_and_other_threads_stay_put() {
     assert!(m.sessions[second].worktree.is_none());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn turns_send_cwd_model_permission_mode_only_when_they_change() {
+    let (mut m, mut be, dir) = setup("fields", 1);
+    assert!(pump(&mut m, &be, 10, |m| m.agent_ready));
+    let last_text = |m: &Model| m.sessions[m.active].messages.last().unwrap().text.clone();
+    assert!(m.submit(&mut be, "FIELDS one"));
+    assert!(pump(&mut m, &be, 10, |m| !m.any_busy()));
+    assert!(last_text(&m).contains(r#"["cwd", "mode", "model", "permission"]"#), "a new thread gets everything: {}", last_text(&m));
+    assert!(m.submit(&mut be, "FIELDS two"));
+    assert!(pump(&mut m, &be, 10, |m| !m.any_busy()));
+    assert!(last_text(&m).starts_with("[]["), "nothing changed, nothing resent: {}", last_text(&m));
+    m.cycle_permission();
+    assert!(m.submit(&mut be, "FIELDS three"));
+    assert!(pump(&mut m, &be, 10, |m| !m.any_busy()));
+    assert!(last_text(&m).starts_with(r#"["permission"]"#), "{}", last_text(&m));
+    // a restarted agent process gets the full set again
+    m.apply(hydra_desktop::backend::Ev::Hello { caps: vec![] });
+    assert!(m.submit(&mut be, "FIELDS four"));
+    assert!(pump(&mut m, &be, 10, |m| !m.any_busy()));
+    assert!(last_text(&m).contains(r#""cwd""#), "{}", last_text(&m));
+    let _ = std::fs::remove_dir_all(dir);
+}

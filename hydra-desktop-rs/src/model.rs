@@ -198,6 +198,8 @@ pub struct Model {
     /// The agent snapshots the project before each turn (capability "checkpoint").
     pub agent_checkpoints: bool,
     cp_pending: HashMap<String, (u32, usize, String)>,
+    /// What this agent process last received per thread: [cwd, model, permission, mode].
+    pub sent: HashMap<String, [String; 4]>,
     /// Approval rules of the thread last listed: (thread, rules).
     pub rules: (String, Vec<Value>),
     pub notice: String,
@@ -278,6 +280,7 @@ impl Model {
             agent_ready: false,
             agent_checkpoints: false,
             cp_pending: HashMap::new(),
+            sent: HashMap::new(),
             rules: (String::new(), vec![]),
             notice: String::new(),
             turn_counter: 0,
@@ -727,7 +730,11 @@ impl Model {
                 if agent_cp {
                     self.cp_pending.insert(turn.clone(), (sid, user_at, text.chars().take(60).collect()));
                 }
-                be.turn(&turn, &prompt, &thread, &cwd, model, &permission, &context);
+                let now_meta = [cwd.clone(), model.to_string(), permission.clone(), context.clone()];
+                let last = self.sent.get(&thread).cloned();
+                let pick = |i: usize| -> Option<&str> { if last.as_ref().map(|l| l[i] == now_meta[i]).unwrap_or(false) { None } else { Some(now_meta[i].as_str()) } };
+                be.turn(&turn, &prompt, &thread, pick(0), pick(1), pick(2), pick(3));
+                self.sent.insert(thread.clone(), now_meta.clone());
                 self.runs.insert(turn, sid);
             }
         }
@@ -886,6 +893,7 @@ impl Model {
         match ev {
             Ev::Hello { caps } => {
                 self.agent_ready = true;
+                self.sent.clear(); // a new agent process: send every field again on each thread's next turn
                 self.agent_checkpoints = caps.iter().any(|c| c == "checkpoint");
             }
             Ev::Checkpoint { turn, ok, id, reason } => {
