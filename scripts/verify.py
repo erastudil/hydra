@@ -12231,7 +12231,7 @@ def stdio_parallel_turns_share_nothing():
         assert [m["path"] for m in by_turn["B"] if m["type"] == "diff"] == ["b.txt"]
         assert [m["path"] for m in by_turn["E"] if m["type"] == "diff"] == ["e.txt"]
         assert not [m for m in by_turn["C"] if m["type"] == "diff"]
-        assert all(m["type"] in ("checkpoint", "token", "usage") for m in by_turn["A"]), by_turn["A"]
+        assert all(m["type"] in ("checkpoint", "context", "token", "usage") for m in by_turn["A"]), by_turn["A"]
         # usage numbers come from each turn's own provider reply
         child.turn("P", "PLAIN1", thread="tp", cwd=pa, model="local")
         child.turn("Q", "PLAIN22222", thread="tq", cwd=pa, model="local")
@@ -12605,6 +12605,36 @@ def stdio_two_hundred_runs_of_four_parallel_turns():
             assert child.close() == 0
     finally:
         httpd.shutdown()
+
+
+@check
+def stdio_rules_and_skills_reach_the_model():
+    """The project's AGENTS.md and the skills the app picks go into the system prompt, and the context message says which."""
+    with _stdio_session() as (child, seen):
+        with open(os.path.join(child.project, "AGENTS.md"), "w", encoding="utf-8") as handle:
+            handle.write("rule : MARKER_RULE_42 answer tersely\n")
+        child.send(type="skills", id="k")
+        listed = child.until("skill_list")[-1]["skills"]
+        code = [x for x in listed if x["id"] == "code"]
+        assert code and code[0]["keys"] and code[0]["title"], listed
+        replies = child.run_turn("s1", "hello", thread="sk", model="local", skills=["code"])
+        ctx = [m for m in replies if m["type"] == "context"]
+        assert len(ctx) == 1 and ctx[0]["turn"] == "s1" and ctx[0]["skills"] == ["code"], ctx
+        assert os.path.realpath(ctx[0]["rules"]) == os.path.realpath(os.path.join(child.project, "AGENTS.md")), ctx
+        system = seen[-1]["messages"][0]["content"]
+        system = system if isinstance(system, str) else json.dumps(system)
+        assert "MARKER_RULE_42" in system and "[SKILL: code]" in system and "read the file before an edit" in system
+        replies = child.run_turn("s2", "hello", thread="sk2", model="local")
+        system = json.dumps(seen[-1]["messages"][0]["content"])
+        assert "[SKILL:" not in system and "MARKER_RULE_42" in system
+        assert [m["skills"] for m in replies if m["type"] == "context"] == [[]]
+        os.remove(os.path.join(child.project, "AGENTS.md"))
+        replies = child.run_turn("s3", "hello", thread="sk3", model="local")
+        assert [m["rules"] for m in replies if m["type"] == "context"] == [None], replies
+        assert "MARKER_RULE_42" not in json.dumps(seen[-1]["messages"][0]["content"])
+        child.send(type="turn", turn="s4", prompt="hi", thread="sk4", cwd=child.project, skills=["no-such-skill"])
+        assert child.until("error")[-1]["code"] == "bad_request"
+        assert child.close() == 0
 
 
 def main() -> int:

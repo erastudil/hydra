@@ -271,6 +271,25 @@ def progen_paths(text: str) -> List[str]:
     return found
 
 
+def find_project_rules(cwd: Optional[str] = None) -> Optional[str]:
+    """Path of the guidance file detect_project_rules loads for this directory, or None."""
+    curr = os.path.abspath(cwd or os.getcwd())
+    for _ in range(6):
+        for fname in PROJECT_RULE_FILES:
+            target = os.path.join(curr, fname)
+            try:
+                with open(target, "r", encoding="utf-8", errors="replace") as handle:
+                    if handle.read().strip():
+                        return target
+            except OSError:
+                continue
+        parent = os.path.dirname(curr)
+        if parent == curr:
+            break
+        curr = parent
+    return None
+
+
 def detect_project_rules(cwd: Optional[str] = None) -> Optional[str]:
     """
     Search cwd and up to 5 parent directories for project guidance files
@@ -3125,6 +3144,7 @@ def _run_agent_loop(
     on_reasoning: Optional[Callable[[str], None]] = None,
     max_context_chars: Optional[int] = None,
     cancel: Optional[threading.Event] = None,
+    extra_context: Optional[str] = None,
 ) -> str:
     """
     Execute autonomous agent loop with native coding tools and MCP tool invocation until completion or max turns.
@@ -3194,6 +3214,8 @@ def _run_agent_loop(
     register = dialect_instruction(dialect) if dialect else ""
     if register and register not in effective_sys:
         effective_sys = f"{effective_sys}\n\n{register}"
+    if extra_context and extra_context.strip():
+        effective_sys = f"{effective_sys}\n\n{extra_context.strip()}"
     effective_sys = f"{effective_sys}\n\n{_memory_block(target_cwd)}"
 
     original_prompt = prompt

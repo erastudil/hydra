@@ -24,7 +24,7 @@ DECISIONS = {"allow": "y", "allow_always": "y", "skip": "n", "abort": "q"}
 PERMISSIONS = ("manual", "accept_edits", "plan", "bypass")
 READ_ONLY_TOOLS = frozenset({"read_file", "list_dir", "grep_search", "find_files", "search_files", "compact_context", "retrieve_context"})
 EDIT_TOOLS = frozenset({"write_file", "edit_file"})
-CAPABILITIES = ["turn", "cancel", "approval", "permission", "rules", "checkpoint", "sessions", "history", "action"]
+CAPABILITIES = ["turn", "cancel", "approval", "permission", "rules", "checkpoint", "skills", "sessions", "history", "action"]
 EXIT_OK = 0
 EXIT_VERSION = 2
 EXIT_FATAL = 70
@@ -151,7 +151,7 @@ class Adapter:
         handler = {
             "hello": self._on_hello, "turn": self._on_turn, "cancel": self._on_cancel,
             "approval": self._on_approval, "shutdown": lambda m: False, "sessions": self._on_sessions,
-            "history": self._on_history, "action": self._on_action, "rules": self._on_rules,
+            "history": self._on_history, "action": self._on_action, "rules": self._on_rules, "skills": self._on_skills,
             "checkpoints": self._on_checkpoints, "rewind": self._on_rewind,
         }.get(kind)
         if handler is None:
@@ -199,6 +199,10 @@ class Adapter:
             problems.append("context_chars must be an integer of at least 4096")
         if msg.get("permission") is not None and msg.get("permission") not in PERMISSIONS:
             problems.append(f"permission must be one of {', '.join(PERMISSIONS)}")
+        skills = msg.get("skills", [])
+        known_skills = {sk["id"] for sk in _skills()}
+        if not isinstance(skills, list) or any(not isinstance(x, str) or x not in known_skills for x in skills):
+            problems.append(f"skills must be a list of known skill ids: {', '.join(sorted(known_skills))}")
         if msg.get("model") is not None and not isinstance(msg.get("model"), str):
             problems.append("model must be a string")
         if problems:
@@ -420,6 +424,10 @@ class Adapter:
             rules = self._read_rules(thread)
         self.emit({"type": "rules_result", "id": req, "thread": thread, "rules": rules})
 
+    def _on_skills(self, msg: Dict[str, Any]) -> None:
+        listed = [{"id": sk["id"], "keys": sk["keys"], "title": (sk["body"].splitlines() or [""])[0]} for sk in _skills()]
+        self.emit({"type": "skill_list", "id": _text(msg.get("id")), "skills": listed})
+
     def _on_sessions(self, msg: Dict[str, Any]) -> None:
         from pathlib import Path
 
@@ -548,12 +556,19 @@ class Adapter:
         try:
             if msg.get("checkpoint", True):
                 self.emit({"type": "checkpoint", "turn": turn, "thread": thread, **self._snapshot(msg["cwd"], f"turn={turn}", thread)})
+            from hydra_cli.agent import find_project_rules
+
+            chosen = [sk for sk in _skills() if sk["id"] in (msg.get("skills") or [])]
+            extra = "\n\n".join(f"[SKILL: {sk['id']}]\n{sk['body']}" for sk in chosen)
+            self.emit({"type": "context", "turn": turn, "rules": find_project_rules(msg["cwd"]),
+                       "skills": [sk["id"] for sk in chosen]})
             answer = run_agent_loop(
                 alias=alias, prompt=msg["prompt"], session_id=thread, resume_session=True, cwd=msg["cwd"],
                 steer_mode=permission != "bypass", ledger=ledger, strategy=msg.get("mode", "recall"),
                 on_token=lambda text: self.emit({"type": "token", "turn": turn, "text": text}),
                 max_context_chars=msg.get("context_chars") or get_context_window(alias) * 4,
                 cancel=t.cancel,
+                extra_context=extra,
             )
             cancelled = t.cancel.is_set() or answer == CANCELLED_TEXT
             ok = not cancelled and answer != "[Turn aborted by developer]"
@@ -640,6 +655,12 @@ def _command_has_prefix(command: str, prefix: str) -> bool:
     if not prefix or any(token in command for token in _SHELL_CONTROL):
         return False
     return command == prefix or command.startswith(prefix + " ")
+
+
+def _skills() -> List[Dict[str, Any]]:
+    from hydra_cli.alice_gate import load_skills
+
+    return load_skills()
 
 
 def _text(value: Any) -> Optional[str]:

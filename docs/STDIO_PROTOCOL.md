@@ -55,7 +55,7 @@ agent hello : `{"type":"hello","protocol":1,"agent":"hydra","capabilities":[...]
 
 app hello : `{"type":"hello","protocol":1}`
 
-capabilities : turn, cancel, approval, permission, rules, checkpoint, sessions, history, action.
+capabilities : turn, cancel, approval, permission, rules, checkpoint, skills, sessions, history, action.
 
 
 ## messages from the app to the agent
@@ -72,6 +72,7 @@ turn : start a turn.
   - accept_edits : read only tools and write_file and edit_file run on their own, every other tool asks.
   - plan : read only tools run on their own, every other tool is skipped without asking and the model is told it was skipped.
   - bypass : nothing asks.
+- skills : list of skill ids from `skill_list`, default empty. the body of each picked skill is added to the system prompt of this turn only. an unknown id fails the turn with `bad_request`.
 - checkpoint : boolean, default true. when true the project is snapshotted before the turn runs, see `checkpoint`.
 - approve : boolean, older spelling. true means manual, false means bypass. permission wins when both are sent.
 - context_chars : integer of at least 4096. the context budget in characters. default is four times the model window.
@@ -94,6 +95,8 @@ checkpoints : list the checkpoints of a thread, newest first. fields id, thread.
 
 rewind : put the project files back to a checkpoint. fields id, thread, checkpoint. code only, the conversation is not rewound. the thread must not be running a turn, else `error` code busy. an unknown checkpoint or thread gets `error` code bad_request. before touching anything the adapter snapshots the current state, so a rewind can be undone by rewinding to the backup id in the reply. reply `rewind_result`.
 
+skills : list the skills a turn may pick. field id. reply `skill_list`.
+
 rules : list or remove the approval rules that apply to a thread. fields id, thread, op, rule. op is list, the default, or remove, which also needs rule, the rule id. reply `rules_result`.
 
 sessions : list threads on disk. fields id, optional. reply `session_list`.
@@ -108,6 +111,8 @@ action : run a desktop service by command palette name, for the old panels. fiel
 hello : see handshake.
 
 token : fields turn, text. streamed answer text in arrival order. concatenated they are the model reply of the current round.
+
+context : fields turn, rules, skills. sent once per turn after `checkpoint` and before the model runs. rules is the path of the AGENTS.md, .cursorrules or CLAUDE.md file found in cwd or up to five parents above it, or null. its text goes into the system prompt. skills is the list of skill ids added to this turn.
 
 tool_start : fields turn, call, tool, arguments. arguments is the parsed object, or the raw string if it was not JSON. sent after approval, just before the tool runs. skipped tools never produce it.
 
@@ -130,6 +135,8 @@ approval_request : fields turn, id, tool, arguments. sent only when the permissi
 done : fields turn, text, ok, cancelled. exactly one per turn and always the last message of that turn. text is the final answer, or the cancel marker text when cancelled. ok is false on cancel, abort and failure.
 
 error : fields code, message, redacted, and turn or id when the failure belongs to one. redacted is true when secrets or url paths were scrubbed from message. a failure inside a turn writes `error` with turn, then `done` with ok false.
+
+skill_list : fields id, skills. each skill has id, keys, the words it is about, and title, the first line of its body.
 
 rules_result : fields id, thread, rules. each rule has id, tool, prefix or null, and scope.
 
