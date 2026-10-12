@@ -13394,6 +13394,96 @@ def background_task_records_are_pruned_at_startup():
             live_agent.wait()
 
 
+@check
+def stdio_two_agents_write_one_thread_without_loss():
+    """Two real agents remove different rules from one thread at once. Every removal sticks, and a reader never sees a torn file or a stray temp file."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, ".hydra", "sessions", "shared", "rules.json")
+            os.makedirs(os.path.dirname(path))
+            a, b = _StdioChild(base, home), _StdioChild(base, home)
+            a.next()
+            b.next()
+            for round_ in range(3):
+                ids = [f"r{round_}x{n}" for n in range(60)]
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump([{"id": i, "tool": "run_command", "prefix": "echo"} for i in ids], handle)
+                stop, torn = threading.Event(), []
+
+                def read():
+                    while not stop.is_set():
+                        try:
+                            with open(path, "rb") as handle:
+                                data = handle.read()
+                            json.loads(data)
+                        except FileNotFoundError:
+                            torn.append("missing")
+                        except ValueError:
+                            torn.append(data[:80])
+
+                reader = threading.Thread(target=read)
+                reader.start()
+                for n, rid in enumerate(ids):
+                    (a if n % 2 else b).send(type="rules", id=rid, thread="shared", op="remove", rule=rid)
+                for child in (a, b):
+                    got = 0
+                    while got < 30:
+                        if child.next()["type"] == "rules_result":
+                            got += 1
+                stop.set()
+                reader.join()
+                assert not torn, f"round {round_}: a reader saw {torn[:3]}"
+                with open(path, encoding="utf-8") as handle:
+                    left = json.load(handle)
+                assert left == [], f"round {round_}: {len(left)} removed rules came back"
+                assert sorted(os.listdir(os.path.dirname(path))) == ["rules.json"], os.listdir(os.path.dirname(path))
+            assert a.close() == 0 and b.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_rewind_takes_the_conversation_back_too():
+    """A rewind puts the thread's conversation back to the checkpoint along with the files. History and the next turn see it, and rewinding to the backup undoes it."""
+    with _marker_session() as (child, seen):
+        first = child.run_turn("c1", "PLAIN alpha zebra", thread="cv", model="local", mode="sliding")
+        second = child.run_turn("c2", "PLAIN beta yak", thread="cv", model="local")
+        cp1 = [m for m in first if m["type"] == "checkpoint"][0]
+        cp2 = [m for m in second if m["type"] == "checkpoint"][0]
+        assert cp1["turns"] == 0 and cp2["turns"] >= 2, (cp1, cp2)
+        child.send(type="checkpoints", id="l", thread="cv")
+        listed = {c["id"]: c for c in child.until("checkpoint_list")[-1]["checkpoints"]}
+        assert cp1["id"] in listed and cp2["id"] in listed, (cp1, cp2, listed)
+        assert listed[cp2["id"]]["turns"] == cp2["turns"] and listed[cp1["id"]]["turns"] == 0, listed
+
+        def history():
+            child.send(type="history", id="h", thread="cv")
+            return json.dumps(child.until("history_result")[-1]["turns"])
+
+        assert "yak" in history()
+        child.send(type="rewind", id="w", thread="cv", checkpoint=cp2["id"])
+        result = child.until("rewind_result")[-1]
+        assert result["conversation"] is True and result["turns"] == cp2["turns"], result
+        text = history()
+        assert "zebra" in text and "yak" not in text, text
+        third = child.run_turn("c3", "PLAIN gamma", thread="cv", model="local")
+        sent = json.dumps(seen[-1]["messages"])
+        assert third[-1]["ok"] and "zebra" in sent and "yak" not in sent, sent[:600]
+
+        child.send(type="rewind", id="u", thread="cv", checkpoint=result["backup"])
+        undone = child.until("rewind_result")[-1]
+        assert undone["conversation"] is True and undone["turns"] > cp2["turns"], undone
+        text = history()
+        assert "yak" in text and "gamma" not in text, text
+
+        child.send(type="rewind", id="z", thread="cv", checkpoint=cp1["id"])
+        assert child.until("rewind_result")[-1]["turns"] == 0
+        assert history() == "[]"
+        assert child.close() == 0
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")

@@ -2238,6 +2238,58 @@ class AstFstringModernizer:
 
 
 
+def file_lock(path: str) -> Any:
+    """Context manager for an exclusive lock on path across processes: fcntl.flock on POSIX, msvcrt.locking on
+    Windows. The OS drops it when its holder dies, so a crashed process never leaves it stuck."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def held() -> Any:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        handle = open(path, "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                import time as _time
+
+                handle.seek(0)
+                while True:
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                        break
+                    except OSError:
+                        _time.sleep(0.05)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+    return held()
+
+
+def atomic_write_json(path: str, data: Any) -> None:
+    """Write JSON through a temp file unique to this writer, then os.replace, so a reader sees the old or the new file."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 CREATE_NO_WINDOW = 0x08000000
 # the shell runs the command in a subshell, so `exit` inside it still lets the wrapper write the exit code
@@ -2349,40 +2401,8 @@ class BackgroundTasks:
         return bool(owner.get("identity")) and process_identity(owner["pid"], self.platform) == owner["identity"]
 
     def _folder_lock(self) -> Any:
-        """An exclusive lock on ~/.hydra/tasks/.lock across agent processes. The OS drops it when its holder dies."""
-        import contextlib
-
-        @contextlib.contextmanager
-        def held() -> Any:
-            handle = open(os.path.join(self.folder(), ".lock"), "a+b")
-            try:
-                if os.name == "nt":
-                    import msvcrt
-                    import time as _time
-
-                    handle.seek(0)
-                    while True:
-                        try:
-                            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-                            break
-                        except OSError:
-                            _time.sleep(0.05)
-                    try:
-                        yield
-                    finally:
-                        handle.seek(0)
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-                    try:
-                        yield
-                    finally:
-                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-            finally:
-                handle.close()
-        return held()
+        """The exclusive lock on ~/.hydra/tasks/.lock that every task claim and prune holds."""
+        return file_lock(os.path.join(self.folder(), ".lock"))
 
     def _read_record(self, task: str) -> Optional[Dict[str, Any]]:
         try:
@@ -2429,10 +2449,7 @@ class BackgroundTasks:
                 pass
 
     def _save(self, info: Dict[str, Any]) -> None:
-        path = os.path.join(self.folder(), info["task"] + ".json")
-        with open(path + ".tmp", "w", encoding="utf-8") as handle:
-            json.dump(info, handle)
-        os.replace(path + ".tmp", path)
+        atomic_write_json(os.path.join(self.folder(), info["task"] + ".json"), info)
 
     @staticmethod
     def _exit_code(info: Dict[str, Any]) -> Optional[int]:
