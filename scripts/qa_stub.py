@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """QA stub OpenAI-compatible provider. Scenario chosen by keyword in last user msg:
-SLOW (60 ticks@150ms), HANG (never responds), MALFORMED (garbage SSE), CUT (stream then close w/o DONE), E500, BIG (4000-line markdown stream), WRITE (write_file tool call), default alpha beta gamma. Port arg."""
+SLOW (60 ticks@150ms), HANG (never responds), MALFORMED (garbage SSE), CUT (stream then close w/o DONE), E500, BIG (4000-line markdown stream), BGTASK (start_background_task), WRITE (write_file tool call), default alpha beta gamma. Port arg."""
 import json,sys,time,threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 class H(BaseHTTPRequestHandler):
@@ -27,6 +27,8 @@ class H(BaseHTTPRequestHandler):
             if "WRITE" in p and not has_tool:
                 sse({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"write_file","arguments":""}}]}}]})
                 sse({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":json.dumps({"path":"hello.txt","content":"hi\n"})}}]}}]});sse({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3}});self.wfile.write(b"data: [DONE]\n\n");return
+            if "BGTASK" in p and not has_tool:
+                sse({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"start_background_task","arguments":json.dumps({"command":"sleep 120"})}}]}}]});sse({"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3}});self.wfile.write(b"data: [DONE]\n\n");return
             if "BIGDIFF" in p and not has_tool:
                 c="".join("line %d\n"%i for i in range(5000))
                 sse({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"write_file","arguments":""}}]}}]})

@@ -88,6 +88,7 @@ struct Rig {
     m: Model,
     be: Backend,
     dir: std::path::PathBuf,
+    envs: Vec<(String, String)>,
 }
 
 fn rig(name: &str) -> Option<Rig> {
@@ -117,7 +118,7 @@ fn rig(name: &str) -> Option<Rig> {
     let be = Backend::spawn_with(&envs, || {}).expect("spawn adapter");
     let mut m = Model::new(None, proj.display().to_string());
     m.model = MODELS.iter().position(|x| x.0 == "local").unwrap();
-    Some(Rig { m, be, dir })
+    Some(Rig { m, be, dir, envs })
 }
 
 fn pump(r: &mut Rig, secs: u64, mut until: impl FnMut(&Model) -> bool) -> Vec<Ev> {
@@ -379,6 +380,19 @@ fn mcp_status_shows_good_and_broken_servers() {
     done(&mut r);
     let acts = r.m.sessions[0].messages.last().unwrap().actions.clone();
     assert!(acts.iter().any(|a| a == "mcp: 1 tools") && acts.iter().any(|a| a.starts_with("× mcp broken")), "{acts:?}");
+    // per-server toggle: broken off for this project, so its error is gone from the next turn
+    r.m.mcp = None;
+    r.m.toggle_mcp(&mut r.be, &cwd, "broken", false);
+    pump(&mut r, 20, |m| m.mcp.is_some());
+    let servers = r.m.mcp.clone().unwrap().1;
+    let broken = servers.iter().find(|s| s["name"] == "broken").unwrap();
+    assert_eq!(broken["enabled"], false);
+    assert!(broken["error"].is_null() && broken["tools"] == json!([]));
+    assert_eq!(servers.iter().find(|s| s["name"] == "demo").unwrap()["enabled"], true);
+    assert!(r.m.submit(&mut r.be, "hello mcp again"));
+    done(&mut r);
+    let acts = r.m.sessions[0].messages.last().unwrap().actions.clone();
+    assert!(acts.iter().any(|a| a == "mcp: 1 tools") && !acts.iter().any(|a| a.contains("broken")), "{acts:?}");
     let _ = std::fs::remove_dir_all(&r.dir);
 }
 
@@ -417,4 +431,34 @@ fn a_503_before_the_first_token_shows_a_retry_notice_then_answers() {
     assert!(last.actions.iter().any(|a| a.starts_with("↻ retry 1/") && a.contains("HTTP 503")), "{:?}", last.actions);
     assert_eq!(last.text, "alpha beta gamma");
     let _ = std::fs::remove_dir_all(&r.dir);
+}
+
+#[test]
+fn a_respawned_agent_adopts_a_running_task_and_the_app_can_stop_it() {
+    let mut r = rig("adopt").expect("rig");
+    r.m.sessions[0].permission = "bypass".into();
+    assert!(r.m.submit(&mut r.be, "BGTASK start a server"));
+    done(&mut r);
+    pump(&mut r, 10, |m| m.running_tasks() == 1);
+    let (id, t) = r.m.tasks.iter().next().map(|(k, v)| (k.clone(), v.clone())).unwrap();
+    let pid = t["pid"].as_i64().unwrap();
+    // kill -9 the agent: its task keeps running; a new agent with the same home adopts it after hello
+    unsafe_kill(r.be.pid());
+    pump(&mut r, 10, |m| !m.agent_ready);
+    r.be = Backend::spawn_with(&r.envs, || {}).expect("respawn");
+    let evs = pump(&mut r, 20, |m| m.agent_ready && m.running_tasks() == 1);
+    assert!(evs.iter().any(|e| matches!(e, Ev::TaskUpdate { task } if task["adopted"] == true && task["task"] == json!(id))), "{evs:?}");
+    assert_eq!(r.m.tasks[&id]["adopted"], true);
+    assert!(std::path::Path::new(&format!("/proc/{pid}")).exists());
+    r.m.stop_task(&mut r.be, &id);
+    pump(&mut r, 15, |m| m.running_tasks() == 0);
+    assert_eq!(r.m.tasks[&id]["state"], "stopped");
+    std::thread::sleep(Duration::from_millis(300));
+    let alive = std::fs::read_to_string(format!("/proc/{pid}/stat")).map(|s| !s.contains(") Z ")).unwrap_or(false);
+    assert!(!alive, "the adopted process is gone after Stop");
+    let _ = std::fs::remove_dir_all(&r.dir);
+}
+
+fn unsafe_kill(pid: u32) {
+    let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
 }

@@ -16,7 +16,7 @@ MUTATIONS = [
     ("running thread can be closed", M, "if i >= self.sessions.len() || self.is_running(self.sessions[i].id) {", "if i >= self.sessions.len() {", ["--lib"]),
     ("projects not deduped", M, "let id = match self.projects.iter().find(|q| q.path == canon) {\n            Some(q) => q.id,\n            None => self.add_project_unchecked(&canon),\n        };", "let id = self.add_project_unchecked(&canon);", ["--lib"]),
     ("background finish not unread", M, "if background && sid != active_id {", "if false && sid != active_id {", ["--lib"]),
-    ("state backup ignored", M, "let loaded = try_load(p).or_else(|| try_load(&p.with_extension(\"bak\")));", "let loaded = try_load(p);", ["--lib"]),
+    ("state backup ignored", M, "let loaded = main.or_else(|| try_load(&p.with_extension(\"bak\")));", "let loaded = main;", ["--lib"]),
  ("shift+enter sends", "src/app.rs", "!i.modifiers.shift && !i.modifiers.alt && i.consume_key", "i.consume_key", ["--test", "ui"]),
     ("idle window keeps repainting", "src/app.rs", "if animating { 50 } else { 2000 }", "if animating { 50 } else { 50 }", ["--test", "ui"]),
     ("new threads bypass approvals", M, "    \"manual\".into()\n}", "    \"accept_edits\".into()\n}", ["--test", "ui"]),
@@ -28,6 +28,8 @@ MUTATIONS = [
     ("retry notice dropped", M, "m.actions.push(format!(\"↻ retry {attempt}/{of} in {wait:.1}s: {reason}\"));", "let _ = (attempt, of, wait, &reason);", ["--test", "stdio_integration", "retry"]),
     ("task_update ignored", M, "                    self.tasks.insert(id, task);", "                    let _ = (id, task);", ["--test", "stdio_integration", "background_task"]),
     ("diff yanks a pinned tab", M, "if self.sessions[self.active].id == sid && !self.tab_pinned {", "if self.sessions[self.active].id == sid {", ["--test", "stdio_integration", "pinned"]),
+    ("mcp toggle ignored", "src/backend.rs", "\"server\": server, \"enabled\": enabled}", "\"server\": server, \"enabled\": true}", ["--test", "stdio_integration", "mcp_status"]),
+    ("token journal off", M, "                    self.journal(sid, &text);\n", "", ["--lib", "journal"]),
     ("unchanged fields resent", M, "if last.as_ref().map(|l| l[i] == now_meta[i]).unwrap_or(false) { None }", "if false { None }", ["--test", "concurrency"]),
 ]
 

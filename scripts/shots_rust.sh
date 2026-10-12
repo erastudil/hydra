@@ -3,7 +3,7 @@
 # usage: scripts/shots_rust.sh OUTDIR
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; OUT="${1:-/tmp/hydra-shots}"; mkdir -p "$OUT"
-BIN="$ROOT/hydra-desktop-rs/target/release/Hydra"; PORT=18999
+BIN="${HYDRA_BIN:-$ROOT/hydra-desktop-rs/target/release/Hydra}"; PORT=18999
 python3 "$ROOT/scripts/qa_stub.py" $PORT >/dev/null 2>&1 & STUB=$!
 trap 'kill $STUB 2>/dev/null || true' EXIT
 sleep 1
@@ -27,9 +27,10 @@ shot narrow_820 820x560 60
 shot narrow_900 900x700 60
 shot rules_tab 1280x800 100000 HYDRA_SHOT_SECS=10 HYDRA_TAB=rules HYDRA_DEMO_PROMPT="WRITE the file" HYDRA_PERMISSION=accept_edits
 
+shot tasks_running 1280x800 100000 HYDRA_SHOT_SECS=12 HYDRA_TAB=tasks HYDRA_PERMISSION=bypass HYDRA_DEMO_PROMPT="BGTASK start a server"
 # every drawer tab at both release-bar sizes (pinned via HYDRA_TAB; a diff never yanks the drawer)
 for sz in 1280x800 900x700; do
-  for t in screen term diff agent files git approvals rules; do
+  for t in screen term diff agent files git approvals rules skills mcp tasks; do
     shot "tab_${t}_${sz}" $sz 100000 HYDRA_SHOT_SECS=9 HYDRA_TAB=$t HYDRA_DEMO_PROMPT="WRITE the file" HYDRA_PERMISSION=accept_edits
   done
 done

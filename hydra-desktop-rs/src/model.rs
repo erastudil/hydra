@@ -737,6 +737,11 @@ impl Model {
         self.act(Pending::Query, id);
     }
 
+    pub fn toggle_mcp(&mut self, be: &mut Backend, cwd: &str, server: &str, enabled: bool) {
+        let id = be.mcp_toggle(cwd, server, enabled);
+        self.act(Pending::Query, id);
+    }
+
     pub fn pending_tasks(&mut self, be: &mut Backend) {
         let id = be.tasks();
         self.act(Pending::Query, id);
@@ -1056,7 +1061,8 @@ impl Model {
                 if let Some(id) = task.get("task").and_then(|x| x.as_str()).map(String::from) {
                     let state = task.get("state").and_then(|x| x.as_str()).unwrap_or("").to_string();
                     let cmd = task.get("command").and_then(|x| x.as_str()).unwrap_or("").to_string();
-                    self.log(&format!("\n[task {id}] {state} {cmd}"));
+                    let adopted = if task.get("adopted").and_then(|x| x.as_bool()).unwrap_or(false) { " (adopted from the previous agent)" } else { "" };
+                    self.log(&format!("\n[task {id}] {state} {cmd}{adopted}"));
                     self.tasks.insert(id, task);
                 }
             }

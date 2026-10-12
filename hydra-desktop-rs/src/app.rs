@@ -1656,6 +1656,7 @@ impl HydraApp {
             let cwd = self.m.cwd.clone();
             self.m.pending_mcp(be, &cwd, r);
         }
+        let mut toggle: Option<(String, bool)> = None;
         match &self.m.mcp {
             None => {
                 ui.label(rt("Asking the agent…", 11.0, MUTED));
@@ -1664,14 +1665,25 @@ impl HydraApp {
                 ui.label(rt(format!("config: {}", config.as_deref().unwrap_or("none (.hydra/mcp_servers.json or ~/.hydra/mcp_servers.json)")), 11.0, MUTED));
                 for sv in servers {
                     let ok = sv["ok"].as_bool().unwrap_or(false);
+                    let mut on = sv["enabled"].as_bool().unwrap_or(true);
+                    let name = sv["name"].as_str().unwrap_or("?").to_string();
                     ui.horizontal(|ui| {
-                        ui.label(rt(if ok { "●" } else { "×" }, 12.0, if ok { ACCENT } else { ERROR }));
-                        ui.label(rtb(sv["name"].as_str().unwrap_or("?"), 12.0, TEXT));
+                        if ui.checkbox(&mut on, "").on_hover_text("Use this server in this project").changed() {
+                            toggle = Some((name.clone(), on));
+                        }
+                        let (dot, col) = if !on { ("○", MUTED) } else if ok { ("●", ACCENT) } else { ("×", ERROR) };
+                        ui.label(rt(dot, 12.0, col));
+                        ui.label(rtb(&name, 12.0, if on { TEXT } else { MUTED }));
                         let tools = sv["tools"].as_array().map(|a| a.len()).unwrap_or(0);
-                        ui.label(rt(if ok { format!("{tools} tools") } else { sv["error"].as_str().unwrap_or("failed").to_string() }, 11.0, MUTED));
+                        let what = if !on { "off for this project".to_string() } else if ok { format!("{tools} tools") } else { sv["error"].as_str().unwrap_or("failed").to_string() };
+                        ui.label(rt(what, 11.0, MUTED));
                     });
                 }
             }
+        }
+        if let (Some((server, on)), Some(be)) = (toggle, &mut self.be) {
+            let cwd = self.m.cwd.clone();
+            self.m.toggle_mcp(be, &cwd, &server, on);
         }
     }
 
@@ -1697,6 +1709,9 @@ impl HydraApp {
                     None => state.to_string(),
                 };
                 ui.label(rt(tail, 11.0, MUTED));
+                if t["adopted"].as_bool().unwrap_or(false) {
+                    ui.label(rt("adopted", 11.0, WARN)).on_hover_text("Started by an earlier agent process; this one took it over after a restart");
+                }
                 if state == "running" {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if widgets::button(ui, "Stop", Kind::Danger, 11.0, (8.0, 2.0), None).clicked() {

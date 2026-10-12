@@ -296,6 +296,18 @@ impl Backend {
         id
     }
 
+    /// Turn one MCP server on or off for the project at cwd. Reply: Ev::McpStatus.
+    pub fn mcp_toggle(&mut self, cwd: &str, server: &str, enabled: bool) -> String {
+        let id = self.req();
+        self.send(json!({"type": "mcp_toggle", "id": id, "cwd": cwd, "server": server, "enabled": enabled}));
+        id
+    }
+
+    /// Process id of the agent child (tests kill it to check respawn and task adoption).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Reply: Ev::TaskList.
     pub fn tasks(&mut self) -> String {
         let id = self.req();
