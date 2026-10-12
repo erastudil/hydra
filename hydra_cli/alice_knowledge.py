@@ -372,10 +372,11 @@ CARDS: List[Dict[str, str]] = [
         "card_id": "oss:docker",
         "kind": "oss",
         "topic": "docker",
-        "keys": "docker container",
-        "cues": "image mcp github",
+        "keys": "docker container toolkit",
+        "cues": "image mcp github prompt",
         "comment": (
-            "Hydra's GitHub MCP server runs in Docker. Hydra itself is one Python process and takes no third-party packages."
+            "Hydra's GitHub MCP server runs in Docker. Hydra itself is one Python process. "
+            "The terminal UI depends on prompt_toolkit. The Node package uses the runtime standard library only."
         ),
     },
     {

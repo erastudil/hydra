@@ -12142,6 +12142,27 @@ def knowledge_semver():
 
 
 @check
+def knowledge_runtime_deps():
+    """The docker card and the README name the Python package's real dependency."""
+    from hydra_cli.alice_knowledge import search_knowledge
+
+    card = search_knowledge("docker container")
+    assert card and card["card_id"] == "oss:docker", card
+    assert "prompt_toolkit" in card["comment"]
+    assert "no third-party" not in card["comment"]
+    hit = search_knowledge("prompt_toolkit")
+    assert hit and hit["card_id"] == "oss:docker", hit
+    readme = open(os.path.join(REPO, "README.md"), encoding="utf-8").read()
+    assert "zero external dependencies" not in readme
+    assert "prompt_toolkit" in readme
+    pyproject = open(os.path.join(REPO, "pyproject.toml"), encoding="utf-8").read()
+    assert "prompt_toolkit>=" in pyproject
+    with open(os.path.join(REPO, "package.json"), encoding="utf-8") as handle:
+        package = json.load(handle)
+    assert "dependencies" not in package, "Node package gained a dependency; update the README"
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
