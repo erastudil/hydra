@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -104,7 +104,7 @@ impl Backend {
         let mut spawned: Option<Child> = None;
         let mut last_err = String::from("no python interpreter found");
         for (py, lead) in python_candidates() {
-            let mut cmd = Command::new(&py);
+            let mut cmd = crate::proc::command(&py);
             cmd.args(&lead).args(["-m", "hydra_cli", "stdio"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
             if let Some(r) = &repo {
                 cmd.current_dir(r);
@@ -118,11 +118,6 @@ impl Backend {
             cmd.env("PYTHONIOENCODING", "utf-8");
             for (k, v) in envs {
                 cmd.env(k, v);
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
             }
             match cmd.spawn() {
                 Ok(c) => {
