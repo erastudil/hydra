@@ -57,6 +57,18 @@ fn main() {
     out += &format!("pub const LAYOUT_DRAWER_WIDTH_DESIGN: f32 = {:?};\n", l["side_drawer"]["width"].as_f64().unwrap());
     out += &format!("pub const LAYOUT_HEADER_HEIGHT: f32 = {:?};\n", l["header"]["height_measured"].as_f64().unwrap());
     out += &format!("pub const LAYOUT_SESSION_BAR_HEIGHT: f32 = {:?};\n", l["session_bar"]["height_measured"].as_f64().unwrap());
+    let m = &t["motion"];
+    let b = m["easing"]["apple"].as_array().unwrap();
+    out += &format!("pub const EASING_APPLE: [f32; 4] = [{:?}, {:?}, {:?}, {:?}];\n", b[0].as_f64().unwrap(), b[1].as_f64().unwrap(), b[2].as_f64().unwrap(), b[3].as_f64().unwrap());
+    out += &format!("pub const MOTION_TRANSITION_MS: f32 = {:?};\n", m["durations_ms"]["transition"].as_f64().unwrap());
+    out += &format!("pub const MOTION_FADE_IN_MS: f32 = {:?};\n", m["message_arrival"]["duration_ms"].as_f64().unwrap());
+    out += &format!("pub const MOTION_FADE_FROM_Y: f32 = {:?};\n", m["message_arrival"]["from_translate_y"].as_f64().unwrap());
+    let r = &l["responsive"];
+    for (k, name) in [("header_narrow_below", "HEADER_NARROW_BELOW"), ("sidebar_overlay_below", "SIDEBAR_OVERLAY_BELOW"), ("drawer_width_pct", "DRAWER_PCT"), ("drawer_min", "DRAWER_MIN"), ("drawer_max", "DRAWER_MAX"), ("message_max_width_pct", "MESSAGE_MAX_PCT")] {
+        out += &format!("pub const RESP_{name}: f32 = {:?};\n", r[k].as_f64().unwrap());
+    }
+    let mw = r["min_window"].as_array().unwrap();
+    out += &format!("pub const RESP_MIN_WINDOW: [f32; 2] = [{:?}, {:?}];\n", mw[0].as_f64().unwrap(), mw[1].as_f64().unwrap());
     let dest = Path::new(&env::var("OUT_DIR").unwrap()).join("tokens.rs");
     fs::write(dest, out).unwrap();
 }

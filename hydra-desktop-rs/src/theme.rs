@@ -110,7 +110,7 @@ pub fn apply(ctx: &egui::Context) {
 }
 
 pub fn window_icon() -> Option<egui::IconData> {
-    let bytes = include_bytes!("../assets/hydra_desktop.png");
+    let bytes = include_bytes!("../../assets/hydra_desktop.png");
     let img = image::load_from_memory(bytes).ok()?.into_rgba8();
     let (width, height) = img.dimensions();
     Some(egui::IconData { rgba: img.into_raw(), width, height })

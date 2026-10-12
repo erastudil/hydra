@@ -11,3 +11,5 @@ pub mod app;
 pub mod theme;
 pub mod widgets;
 pub mod secrets;
+pub mod layout;
+pub mod motion;
