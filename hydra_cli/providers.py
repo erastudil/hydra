@@ -3920,6 +3920,43 @@ def _iter_sse_payloads(resp: Any) -> Generator[str, None, None]:
         yield event["data"]
 
 
+TRANSIENT_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+def transient_reason(exc: BaseException) -> Optional[str]:
+    """Why a failed provider request is worth sending again, or None when it is not. Shared by every request path."""
+    import http.client
+
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}" if exc.code in TRANSIENT_HTTP_CODES else None
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, http.client.RemoteDisconnected)):
+        return f"connection lost: {type(reason).__name__}"
+    return None
+
+
+def retry_wait(exc: BaseException, attempt: int, base_wait: float, cap: float = 8.0) -> float:
+    """Seconds before the next attempt. A 429 with Retry-After is honored up to 10 seconds, else the wait doubles up to cap."""
+    if isinstance(exc, urllib.error.HTTPError) and exc.code == 429 and exc.headers:
+        try:
+            return min(float(exc.headers.get("Retry-After") or ""), 10.0)
+        except ValueError:
+            pass
+    return min(cap, base_wait * (2 ** attempt))
+
+
+def _raise_provider_failure(url: str, where: str, exc: BaseException, label: str) -> None:
+    if isinstance(exc, urllib.error.HTTPError):
+        record_provider_failure(url, exc, is_429=(exc.code == 429))
+        raise _http_error(url, exc) from exc
+    record_provider_failure(url, exc)
+    if isinstance(exc, ProviderError):
+        raise exc
+    if isinstance(exc, urllib.error.URLError):
+        raise ProviderError(redact(f"Connection failed to {where}: {exc.reason}")) from exc
+    raise ProviderError(redact(f"{label} {where}: {exc}")) from exc
+
+
 def stream_chat_completion(
     url: str,
     headers: Dict[str, str],
@@ -3977,31 +4014,12 @@ def stream_chat_completion(
                     raise ProviderError(f"Stream from {where} ended before data: [DONE]")
                 record_provider_success(url)
                 return
-        except urllib.error.HTTPError as exc:
-            if exc.code == 429 and attempt < retries and not saw_token:
-                record_provider_failure(url, exc, is_429=True)
-                retry_after_str = exc.headers.get("Retry-After") if exc.headers else None
-                backoff = None
-                if retry_after_str:
-                    try:
-                        backoff = min(float(retry_after_str), 10.0)
-                    except ValueError:
-                        pass
-                if backoff is None:
-                    backoff = min(8.0, base_wait * (2 ** attempt)) + random.uniform(0.05, 0.15)
-                time.sleep(backoff)
-                continue
-            record_provider_failure(url, exc, is_429=(exc.code == 429))
-            raise _http_error(url, exc) from exc
-        except ProviderError as exc:
-            record_provider_failure(url, exc)
-            raise
-        except urllib.error.URLError as exc:
-            record_provider_failure(url, exc)
-            raise ProviderError(redact(f"Connection failed to {where}: {exc.reason}")) from exc
         except Exception as exc:
-            record_provider_failure(url, exc)
-            raise ProviderError(redact(f"Streaming error from {where}: {exc}")) from exc
+            if transient_reason(exc) is not None and attempt < retries and not saw_token:
+                record_provider_failure(url, exc, is_429=isinstance(exc, urllib.error.HTTPError) and exc.code == 429)
+                time.sleep(retry_wait(exc, attempt, base_wait))
+                continue
+            _raise_provider_failure(url, where, exc, "Streaming error from")
 
 
 def fetch_chat_completion(
@@ -4072,31 +4090,12 @@ def fetch_chat_completion(
                         meta_dict["savings_audit"] = audit_cache_savings(url, effective_model, prompt_t, cached_t)
                     return meta_dict
                 return content
-        except urllib.error.HTTPError as exc:
-            if exc.code == 429 and attempt < retries:
-                record_provider_failure(url, exc, is_429=True)
-                retry_after_str = exc.headers.get("Retry-After") if exc.headers else None
-                backoff = None
-                if retry_after_str:
-                    try:
-                        backoff = min(float(retry_after_str), 10.0)
-                    except ValueError:
-                        pass
-                if backoff is None:
-                    backoff = min(8.0, base_wait * (2 ** attempt)) + random.uniform(0.05, 0.15)
-                time.sleep(backoff)
-                continue
-            record_provider_failure(url, exc, is_429=(exc.code == 429))
-            raise _http_error(url, exc) from exc
-        except ProviderError as exc:
-            record_provider_failure(url, exc)
-            raise
-        except urllib.error.URLError as exc:
-            record_provider_failure(url, exc)
-            raise ProviderError(redact(f"Connection failed to {where}: {exc.reason}")) from exc
         except Exception as exc:
-            record_provider_failure(url, exc)
-            raise ProviderError(redact(f"Request to {where} failed: {exc}")) from exc
+            if transient_reason(exc) is not None and attempt < retries:
+                record_provider_failure(url, exc, is_429=isinstance(exc, urllib.error.HTTPError) and exc.code == 429)
+                time.sleep(retry_wait(exc, attempt, base_wait))
+                continue
+            _raise_provider_failure(url, where, exc, "Request failed at")
 
 
 # ===========================================================================

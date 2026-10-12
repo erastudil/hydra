@@ -13144,6 +13144,97 @@ def stdio_mcp_servers_toggle_per_project():
         httpd.shutdown()
 
 
+@check
+def provider_paths_share_the_transient_retry():
+    """stream_chat_completion and fetch_chat_completion retry 429, 500, 502, 503, 504 and lost connections before the first token, through the same helper as the agent loop."""
+    import socket
+    import struct
+
+    from hydra_cli import agent, providers
+
+    assert agent.transient_reason is providers.transient_reason and agent.retry_wait is providers.retry_wait
+    assert not hasattr(agent, "_transient_reason"), "the loop keeps its own copy"
+    calls = {}
+
+    def script(handler, body):
+        plan = handler.path.strip("/").split("/")[0].split("-")
+        n = calls[handler.path] = calls.get(handler.path, 0) + 1
+        step = plan[min(n, len(plan)) - 1]
+        if step.isdigit():
+            handler.send_response(int(step))
+            handler.send_header("Content-Length", "0")
+            if step == "429":
+                handler.send_header("Retry-After", "0.01")
+            handler.end_headers()
+            return
+        if step == "reset":
+            handler.close_connection = True
+            return
+        if body.get("stream"):
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.end_headers()
+            handler.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': 'ok'}}]})}\n\n".encode())
+            handler.wfile.flush()
+            if step == "cut":
+                handler.wfile.write(b": pad\n" * 2000)  # past the 4096 byte read, so the token is parsed and yielded first
+                handler.wfile.flush()
+                time.sleep(0.3)
+                handler.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                handler.connection.close()
+                return
+            handler.wfile.write(b"data: [DONE]\n\n")
+        else:
+            data = json.dumps({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}).encode()
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+        handler.close_connection = True
+
+    httpd, base = _scripted_model(script)
+    msgs = [{"role": "user", "content": "hi"}]
+    stream = lambda path: "".join(providers.stream_chat_completion(f"{base}/{path}", {}, "m", msgs, max_retries=3, backoff_base=0.01))
+    fetch = lambda path: providers.fetch_chat_completion(f"{base}/{path}", {}, "m", msgs, max_retries=3, backoff_base=0.01)
+    try:
+        for name, call in (("s", stream), ("f", fetch)):
+            for plan in ("503-reset-ok", "500-502-504-ok", "429-ok"):
+                path = f"{plan}/{name}"
+                assert call(path) == "ok", (name, plan)
+                assert calls["/" + path] == len(plan.split("-")), (name, plan, calls)
+            for plan, count in (("400-ok", 1), ("404-ok", 1), ("503-503-503-503-503-ok", 4)):
+                path = f"{plan}/{name}"
+                try:
+                    call(path)
+                    raise AssertionError(f"{name} {plan} did not fail")
+                except providers.ProviderError:
+                    pass
+                assert calls["/" + path] == count, (name, plan, calls)
+        got = []
+        try:  # a reset after a token may read as an early end, which the stream path accepts; it is never sent again
+            for token in providers.stream_chat_completion(f"{base}/cut-ok/s", {}, "m", msgs, max_retries=3, backoff_base=0.01):
+                got.append(token)
+        except providers.ProviderError:
+            pass
+        assert got == ["ok"] and calls["/cut-ok/s"] == 1, (got, calls)
+    finally:
+        httpd.shutdown()
+
+    from urllib.error import HTTPError
+
+    def http_error(code, retry_after=None):
+        headers = {"Retry-After": retry_after} if retry_after is not None else {}
+        return HTTPError("http://x", code, "x", headers, None)
+
+    assert providers.retry_wait(http_error(429, "3"), 0, 0.5) == 3.0
+    assert providers.retry_wait(http_error(429, "99"), 0, 0.5) == 10.0
+    assert providers.retry_wait(http_error(429, "soon"), 1, 0.5) == 1.0
+    assert providers.retry_wait(http_error(503, "3"), 5, 0.5) == 8.0 and providers.retry_wait(http_error(503), 5, 0.5, cap=4.0) == 4.0
+    assert [providers.transient_reason(http_error(c)) for c in (429, 500, 501, 502, 503, 504, 400)] == ["HTTP 429", "HTTP 500", None, "HTTP 502", "HTTP 503", "HTTP 504", None]
+    assert providers.transient_reason(ConnectionRefusedError()) is None and providers.transient_reason(ConnectionResetError()).startswith("connection lost")
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")
