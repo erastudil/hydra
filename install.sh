@@ -46,8 +46,8 @@ hydra_cli/cli.py
 hydra_cli/computer_use.py
 hydra_cli/config.py
 hydra_cli/context.py
-hydra_cli/desktop_core.py
 hydra_cli/data/stacks_cards.jsonl
+hydra_cli/desktop_core.py
 hydra_cli/dictation.py
 hydra_cli/display.py
 hydra_cli/gui/__init__.py
