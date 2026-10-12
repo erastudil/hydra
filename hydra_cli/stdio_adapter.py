@@ -571,7 +571,7 @@ class Adapter:
 
     def _run_turn(self, t: _Turn, msg: Dict[str, Any]) -> None:
         turn, thread = t.id, t.thread
-        from hydra_cli.agent import CANCELLED_TEXT, run_agent_loop, set_usage_sink
+        from hydra_cli.agent import CANCELLED_TEXT, run_agent_loop, set_retry_sink, set_usage_sink
         from hydra_cli.config import DEFAULT_ORCHESTRATOR_MODEL, get_context_window
         from hydra_cli.context import SessionContextLedger
         from hydra_cli.ui import set_approval_handler, set_diff_sink, set_tool_sink, set_tool_start_sink
@@ -599,6 +599,7 @@ class Adapter:
                        "cost_usd": rec["total_cost_usd"]})
 
         set_usage_sink(usage)
+        set_retry_sink(lambda info: self.emit({"type": "retry", "turn": turn, **info}))
         permission = t.permission
         set_approval_handler(lambda tool, args_json: self._approve(t, tool, args_json))
         set_diff_sink(lambda path, text: self.emit({"type": "diff", "turn": turn, "path": path, "diff": text}))
@@ -636,6 +637,7 @@ class Adapter:
             final = {"type": "done", "turn": turn, "text": "", "ok": False, "cancelled": t.cancel.is_set()}
         finally:
             set_usage_sink(None)
+            set_retry_sink(None)
             set_approval_handler(None)
             set_diff_sink(None)
             set_tool_sink(None)

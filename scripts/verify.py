@@ -12780,6 +12780,114 @@ def stdio_git_tools_follow_permissions_and_keep_off_main():
         assert child.close() == 0
 
 
+@check
+def stdio_provider_retries_transient_failures_before_the_first_token():
+    """A 503 or a dropped connection before any token is sent again with a retry message. A 400, or a failure after a token, is not."""
+    calls = {}
+
+    def script(handler, body):
+        users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        word = users[-1].split()[-1]
+        calls[word] = n = calls.get(word, 0) + 1
+        if (word == "FLAKY" and n == 1) or word == "DOWN":
+            handler.send_response(503)
+            handler.send_header("Content-Length", "0")
+            handler.end_headers()
+            return
+        if word == "FLAKY" and n == 2:
+            handler.close_connection = True
+            return
+        if word == "HARD":
+            handler.send_response(400)
+            handler.send_header("Content-Length", "2")
+            handler.end_headers()
+            handler.wfile.write(b"no")
+            return
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.end_headers()
+        handler.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': 'ok-' + word}}]})}\n\n".encode())
+        handler.wfile.flush()
+        if word == "RESET":
+            import socket
+            import struct
+
+            time.sleep(0.2)
+            handler.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            handler.connection.close()
+        elif word != "CUT":
+            handler.wfile.write(b"data: [DONE]\n\n")
+        handler.close_connection = True
+
+    httpd, base = _scripted_model(script)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home, env={"HYDRA_BACKOFF_BASE": "0.01", "HYDRA_PROVIDER_RETRIES": "2"})
+            assert child.next()["type"] == "hello"
+            replies = child.run_turn("r1", "FLAKY", thread="r1", model="local")
+            retries = [m for m in replies if m["type"] == "retry"]
+            assert [(m["attempt"], m["of"]) for m in retries] == [(1, 2), (2, 2)], replies
+            assert retries[0]["reason"] == "HTTP 503" and retries[1]["reason"].startswith("connection lost"), retries
+            assert retries[0]["wait"] < retries[1]["wait"] and all(m["turn"] == "r1" for m in retries)
+            assert replies[-1]["ok"] and replies[-1]["text"] == "ok-FLAKY" and calls["FLAKY"] == 3, replies
+            assert "".join(m["text"] for m in replies if m["type"] == "token") == "ok-FLAKY"
+
+            replies = child.run_turn("r2", "DOWN", thread="r2", model="local")
+            assert len([m for m in replies if m["type"] == "retry"]) == 2 and not replies[-1]["ok"], replies
+            assert calls["DOWN"] == 3, calls
+            for word in ("HARD", "CUT", "RESET"):
+                before = dict(calls)
+                replies = child.run_turn("r-" + word, word, thread="r-" + word, model="local")
+                assert not [m for m in replies if m["type"] == "retry"] and not replies[-1]["ok"], replies
+                assert calls[word] - before.get(word, 0) == 1, calls
+            assert child.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_respawn_after_a_killed_backend():
+    """The app kills the agent mid-turn and starts a new one. Threads, history, checkpoints, rewind and resume all still work."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            first = _StdioChild(base, home)
+            first.next()
+            project = _project(first, "respawn")
+            assert first.run_turn("k1", "WRITE_one remember zebra", thread="keep", cwd=project, model="local", mode="sliding")[-1]["ok"]
+            first.turn("k2", "SLOW and long", thread="keep", cwd=project, model="local")
+            replies = first.until("token", turn="k2")
+            killed_checkpoint = [m for m in replies if m["type"] == "checkpoint" and m["turn"] == "k2"][0]["id"]
+            first.proc.kill()
+            assert first.proc.wait(timeout=10) != 0
+            with open(os.path.join(project, "one.txt"), "w", encoding="utf-8") as handle:
+                handle.write("changed after the crash\n")
+
+            second = _StdioChild(base, home)
+            assert second.next()["type"] == "hello"
+            second.send(type="sessions", id="s")
+            entry = [x for x in second.until("session_list")[-1]["sessions"] if x["thread"] == "keep"][0]
+            assert entry["cwd"] == project, entry
+            second.send(type="history", id="h", thread="keep")
+            turns = second.until("history_result")[-1]["turns"]
+            assert any("zebra" in str(t["content"]) for t in turns if t["role"] == "user"), turns
+            assert not any("SLOW-" in str(t["content"]) for t in turns if t["role"] == "assistant"), "a killed reply was stored"
+            second.send(type="checkpoints", id="c", thread="keep")
+            listed = second.until("checkpoint_list")[-1]["checkpoints"]
+            assert [c["turn"] for c in listed][:2] == ["k2", "k1"] and listed[0]["id"] == killed_checkpoint, listed
+            second.send(type="rewind", id="w", thread="keep", checkpoint=killed_checkpoint)
+            result = second.until("rewind_result")[-1]
+            assert result["restored"] == ["one.txt"], result
+            assert open(os.path.join(project, "one.txt"), encoding="utf-8").read() == "content of one\n"
+            replies = second.run_turn("k3", "PLAIN again", thread="keep", model="local")
+            assert replies[-1]["ok"] and replies[0]["type"] == "checkpoint" and replies[0]["ok"], replies
+            assert "zebra" in json.dumps(seen[-1]["messages"]), json.dumps([m for m in seen[-1]["messages"] if m["role"] != "system"])[:1400]
+            assert second.close() == 0
+    finally:
+        httpd.shutdown()
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")

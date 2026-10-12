@@ -116,6 +116,8 @@ token : fields turn, text. streamed answer text in arrival order. concatenated t
 
 context : fields turn, rules, skills. sent once per turn after `checkpoint` and before the model runs. rules is the path of the AGENTS.md, .cursorrules or CLAUDE.md file found in cwd or up to five parents above it, or null. its text goes into the system prompt. skills is the list of skill ids added to this turn. mcp_tools lists the MCP tools the model gets this turn. mcp_errors maps each server that failed to start or list its tools to the reason.
 
+retry : fields turn, attempt, of, wait, reason. the provider request of this turn failed before its first token and is sent again after wait seconds. attempt counts from 1 up to of. reason is `HTTP <code>` for 429, 500, 502, 503 and 504, or `connection lost: <kind>` for a reset or dropped connection. any other failure, or any failure after a token, is not retried and ends the turn with `error` code turn_failed. HYDRA_PROVIDER_RETRIES sets of, default 2. HYDRA_BACKOFF_BASE sets the first wait, default 0.5, which doubles on each attempt up to 4 seconds. cancel during a wait ends the turn at once.
+
 tool_start : fields turn, call, tool, arguments. arguments is the parsed object, or the raw string if it was not JSON. sent after approval, just before the tool runs. skipped tools never produce it.
 
 tool_result : fields turn, call, tool, is_error, output, truncated. output is cut at 4000 characters and truncated says so. always follows its `tool_start`.
@@ -192,6 +194,21 @@ codes : malformed, unknown_type, bad_request, line_too_long, busy, unknown_turn,
 70 : the app closed its end of stdout. the adapter notes it on stderr and exits at once, without finishing running turns. there is nobody left to hear them. a failure of the stdin reader itself also exits 70, after `error` code fatal.
 
 kill : the app should send `shutdown` and wait before it kills the child.
+
+
+## respawn
+
+when the child dies, the app starts a new one with the same home directory and sends `hello` as usual. nothing from the dead child carries over in memory. everything below lives on disk and carries over.
+
+turns : every turn that was running is lost. the app shows each as failed. it never waits for their `done`.
+
+threads : `sessions` lists the dead child's threads with their saved cwd, mode, model and permission. a turn on such a thread needs no cwd.
+
+history : finished turns are kept. a reply cut off by the kill is never stored as an answer.
+
+checkpoints : the checkpoint taken before a killed turn is kept and listed. `rewind` to it puts the files back as they were before that turn.
+
+approvals : pending approvals die with the child. their ids mean nothing to the new one.
 
 
 ## checkpoints
