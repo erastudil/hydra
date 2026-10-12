@@ -134,20 +134,20 @@ fn rewind_restores_files_changed_by_a_turn_and_can_be_undone() {
     assert!(pump(&mut m, &be, 10, |m| m.agent_ready));
     assert!(m.submit(&mut be, "TOUCH the files"));
     assert!(m.sessions[m.active].checkpoints.len() == 1, "a checkpoint is taken before the turn");
-    assert!(m.rewind_code(0).unwrap_err().contains("stop the running turn"));
+    assert!(m.rewind_code(None, 0).unwrap_err().contains("stop the running turn"));
     assert!(pump(&mut m, &be, 10, |m| !m.any_busy()));
     assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "agent was here\n");
     assert!(repo.join("touched.txt").exists());
     let at = m.sessions[m.active].checkpoints[0].at;
     assert_eq!(m.checkpoint_for(at), Some(0));
     assert!(m.sessions[m.active].messages[at].user, "the checkpoint sits before the user message");
-    m.rewind_code(0).unwrap();
+    m.rewind_code(None, 0).unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "original\n");
     assert!(!repo.join("touched.txt").exists());
-    m.undo_rewind().unwrap();
+    m.undo_rewind(None).unwrap();
     assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "agent was here\n");
     assert!(repo.join("touched.txt").exists());
-    assert!(m.undo_rewind().is_err(), "only one level of undo");
+    assert!(m.undo_rewind(None).is_err(), "only one level of undo");
     let _ = std::fs::remove_dir_all(dir);
 }
 

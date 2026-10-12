@@ -8,7 +8,10 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub enum Ev {
-    Hello,
+    Hello { caps: Vec<String> },
+    Checkpoint { turn: String, ok: bool, id: Option<String>, reason: String },
+    RewindResult { id: String, backup: String, restored: Vec<String>, removed: Vec<String> },
+    RulesResult { id: String, thread: String, rules: Vec<Value> },
     Token { turn: String, text: String },
     ToolStart { turn: String, call: u64, tool: String, args: Value },
     ToolResult { turn: String, tool: String, is_error: bool, output: String },
@@ -28,7 +31,13 @@ pub fn parse_line(line: &str) -> Option<Ev> {
     let b = |k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
     let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
     Some(match v.get("type")?.as_str()? {
-        "hello" => Ev::Hello,
+        "hello" => Ev::Hello { caps: v.get("capabilities").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default() },
+        "checkpoint" => Ev::Checkpoint { turn: s("turn"), ok: b("ok"), id: v.get("id").and_then(|x| x.as_str()).map(String::from), reason: s("reason") },
+        "rewind_result" => {
+            let list = |k: &str| v.get(k).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
+            Ev::RewindResult { id: s("id"), backup: s("backup"), restored: list("restored"), removed: list("removed") }
+        }
+        "rules_result" => Ev::RulesResult { id: s("id"), thread: s("thread"), rules: v.get("rules").and_then(|x| x.as_array()).cloned().unwrap_or_default() },
         "token" => Ev::Token { turn: s("turn"), text: s("text") },
         "tool_start" => Ev::ToolStart { turn: s("turn"), call: n("call"), tool: s("tool"), args: v.get("arguments").cloned().unwrap_or(Value::Null) },
         "tool_result" => Ev::ToolResult { turn: s("turn"), tool: s("tool"), is_error: b("is_error"), output: s("output") },
@@ -203,6 +212,38 @@ impl Backend {
         self.send(json!({"type": "cancel", "turn": turn}));
     }
 
+    /// allow_always with a rule scope (thread or project) and, for run_command, an optional command prefix.
+    pub fn approve_always(&mut self, id: &str, scope: &str, prefix: Option<&str>) {
+        let mut m = json!({"type": "approval", "id": id, "decision": "allow_always", "scope": scope});
+        if let Some(p) = prefix.filter(|p| !p.trim().is_empty()) {
+            m["prefix"] = json!(p.trim());
+        }
+        self.send(m);
+    }
+
+    fn req(&mut self) -> String {
+        self.next += 1;
+        format!("r{}", self.next)
+    }
+
+    /// Restore project files to an agent checkpoint. Reply: Ev::RewindResult with this id.
+    pub fn rewind(&mut self, thread: &str, checkpoint: &str) -> String {
+        let id = self.req();
+        self.send(json!({"type": "rewind", "id": id, "thread": thread, "checkpoint": checkpoint}));
+        id
+    }
+
+    /// List (rule None) or remove the approval rules for a thread. Reply: Ev::RulesResult.
+    pub fn rules(&mut self, thread: &str, remove: Option<&str>) -> String {
+        let id = self.req();
+        let mut m = json!({"type": "rules", "id": id, "thread": thread, "op": if remove.is_some() { "remove" } else { "list" }});
+        if let Some(r) = remove {
+            m["rule"] = json!(r);
+        }
+        self.send(m);
+        id
+    }
+
     pub fn approve(&mut self, id: &str, decision: &str) {
         self.send(json!({"type": "approval", "id": id, "decision": decision}));
     }
@@ -253,7 +294,7 @@ mod tests {
 
     #[test]
     fn parse_known_lines() {
-        assert!(matches!(parse_line(r#"{"type":"hello","protocol":1}"#), Some(Ev::Hello)));
+        assert!(matches!(parse_line(r#"{"type":"hello","protocol":1}"#), Some(Ev::Hello { .. })));
         match parse_line(r#"{"type":"usage","model":"m","prompt_tokens":5,"completion_tokens":2,"cost_usd":0.5}"#) {
             Some(Ev::Usage { prompt, completion, cost, .. }) => assert_eq!((prompt, completion, cost), (5, 2, 0.5)),
             other => panic!("{other:?}"),

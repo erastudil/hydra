@@ -156,6 +156,7 @@ pub struct HydraApp {
     agent_steps: u32,
     heights: HashMap<(u32, usize), f32>,
     heights_width: i32,
+    always_prefix: (String, String),
     drawer_user: Option<f32>,
     toast: Option<(String, f64)>,
     settings: Option<SettingsState>,
@@ -268,6 +269,7 @@ impl HydraApp {
             agent_steps: 30,
             heights: HashMap::new(),
             heights_width: 0,
+            always_prefix: (String::new(), String::new()),
             drawer_user: None,
             toast: None,
             settings: if std::env::var("HYDRA_OPEN").as_deref() == Ok("settings") { Some(SettingsState { inputs: vec![String::new(); secrets::PROVIDERS.len()], message: String::new(), ok: true }) } else { None },
@@ -1033,8 +1035,24 @@ impl HydraApp {
         ui.horizontal(|ui| {
             let perm = self.m.sessions[self.m.active].permission.clone();
             let label = PERMISSIONS.iter().find(|p| p.0 == perm).map(|p| p.1).unwrap_or("Ask every time");
-            if widgets::button(ui, &format!("Permissions: {label}"), Kind::Secondary, 11.0, (10.0, 3.0), None).on_hover_text("Click to change what the agent may do without asking").clicked() {
-                cycle = true;
+            let _ = &mut cycle;
+            let mut pick: Option<&str> = None;
+            egui::containers::menu::MenuButton::from_button(egui::Button::new(rtb(format!("Permissions: {label} ▾"), 11.0, TEXT)).fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(10)))
+                .ui(ui, |ui| {
+                    for (key, name) in PERMISSIONS {
+                        let note = match *key {
+                            "manual" => "asks before every tool call",
+                            "accept_edits" => "file edits run, everything else asks",
+                            "plan" => "read only, other tools are skipped",
+                            _ => "nothing asks",
+                        };
+                        if ui.selectable_label(perm == *key, format!("{name}  ·  {note}")).clicked() {
+                            pick = Some(key);
+                        }
+                    }
+                });
+            if let Some(p) = pick {
+                self.m.set_permission(p);
             }
             let ctxm = self.m.sessions[self.m.active].context.clone();
             let (clabel, cnote) = CONTEXT_MODES.iter().find(|c| c.0 == ctxm).map(|c| (c.0, c.1)).unwrap_or(("recall", ""));
@@ -1062,7 +1080,7 @@ impl HydraApp {
             self.m.cycle_context();
         }
         if undo {
-            if let Err(e) = self.m.undo_rewind() {
+            if let Err(e) = self.m.undo_rewind(self.be.as_mut()) {
                 self.m.notice = e;
             }
         }
@@ -1435,7 +1453,7 @@ impl HydraApp {
             ui.set_width(width - 17.0);
             ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
             ui.horizontal(|ui| {
-                for (key, label) in [("files", "Files"), ("git", "Changes"), ("approvals", "Approvals")] {
+                for (key, label) in [("files", "Files"), ("git", "Changes"), ("approvals", "Approvals"), ("rules", "Rules")] {
                     let active = self.m.drawer_tab == key;
                     let mut text = label.to_string();
                     if key == "approvals" && !self.m.approvals.is_empty() {
@@ -1448,7 +1466,7 @@ impl HydraApp {
                             }
                         }
                     }
-                    let (rect, resp) = ui.allocate_exact_size(vec2((width - 17.0 - 8.0) / 3.0 - 4.0, 26.0), Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(vec2((width - 17.0 - 12.0) / 4.0 - 4.0, 26.0), Sense::click());
                     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, text.clone()));
                     if active {
                         ui.painter().rect_filled(rect, cr(10), ACCENT_DIM);
@@ -1476,6 +1494,7 @@ impl HydraApp {
                     "files" => self.files_tab(ui),
                     "git" => self.git_tab(ui),
                     "approvals" => self.approvals_tab(ui),
+                    "rules" => self.rules_tab(ui),
                     _ => self.agent_tab(ui, width - 33.0),
                 }
             });
@@ -1559,6 +1578,62 @@ impl HydraApp {
         });
     }
 
+    /// Saved "always allow" rules for this thread (and its project), plus this thread's checkpoints with Rewind.
+    fn rules_tab(&mut self, ui: &mut egui::Ui) {
+        let thread = self.m.sessions[self.m.active].thread.clone();
+        if self.m.rules.0 != thread {
+            self.m.rules = (thread.clone(), vec![]);
+            if let Some(be) = &mut self.be {
+                self.m.load_rules(be);
+            }
+        }
+        ui.label(rtb("APPROVAL RULES", 11.0, TEXT2));
+        let mut remove: Option<String> = None;
+        if self.m.rules.1.is_empty() {
+            ui.label(rt("No saved rules. Choose \"Always in thread\" or \"Always in project\" on an approval to add one.", 11.0, MUTED));
+        }
+        for r in &self.m.rules.1 {
+            let id = r["id"].as_str().unwrap_or("").to_string();
+            ui.horizontal(|ui| {
+                let what = match r["prefix"].as_str() {
+                    Some(p) => format!("{} starting with \"{p}\"", r["tool"].as_str().unwrap_or("?")),
+                    None => format!("every {}", r["tool"].as_str().unwrap_or("?")),
+                };
+                ui.label(rt(what, 12.0, TEXT));
+                ui.label(rt(format!("({})", r["scope"].as_str().unwrap_or("thread")), 11.0, MUTED));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if widgets::button(ui, "Remove", Kind::Danger, 11.0, (8.0, 2.0), None).clicked() {
+                        remove = Some(id.clone());
+                    }
+                });
+            });
+        }
+        if let (Some(id), Some(be)) = (remove, &mut self.be) {
+            self.m.remove_rule(be, &id);
+        }
+        ui.separator();
+        ui.label(rtb("CHECKPOINTS", 11.0, TEXT2));
+        let cps = self.m.sessions[self.m.active].checkpoints.clone();
+        if cps.is_empty() {
+            ui.label(rt("The project is snapshotted before each turn. Snapshots show up here; Rewind restores files only, not the conversation.", 11.0, MUTED));
+        }
+        let busy = self.m.active_busy();
+        let mut pick = None;
+        for (i, c) in cps.iter().enumerate().rev() {
+            ui.horizontal(|ui| {
+                ui.label(rt(format!("before \"{}\"", c.label), 12.0, TEXT));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if !busy && widgets::button(ui, "Rewind", Kind::Secondary, 11.0, (8.0, 2.0), None).clicked() {
+                        pick = Some(i);
+                    }
+                });
+            });
+        }
+        if pick.is_some() {
+            self.rewind_confirm = pick;
+        }
+    }
+
     fn approvals_tab(&mut self, ui: &mut egui::Ui) {
         if self.m.approvals.is_empty() {
             ui.label(rt("Nothing is waiting for you. Tool calls that need a decision show up here from every thread, with the thread they belong to.", 11.0, MUTED));
@@ -1587,7 +1662,7 @@ impl HydraApp {
                 }
                 ui.add(egui::Label::new(RichText::new(args).size(11.0).family(egui::FontFamily::Monospace).color(TEXT2)).wrap());
                 ui.horizontal_wrapped(|ui| {
-                    for (label, key, kind) in [("Allow", "allow", Kind::Primary), ("Always", "allow_always", Kind::Secondary), ("Skip", "skip", Kind::Secondary), ("Abort", "abort", Kind::Danger)] {
+                    for (label, key, kind) in [("Allow", "allow", Kind::Primary), ("Always in thread", "always_thread", Kind::Secondary), ("Always in project", "always_project", Kind::Secondary), ("Skip", "skip", Kind::Secondary), ("Abort", "abort", Kind::Danger)] {
                         if widgets::button(ui, label, kind, 12.0, (12.0, 5.0), None).clicked() {
                             answer = Some((a.id.clone(), key));
                         }
@@ -1596,7 +1671,17 @@ impl HydraApp {
             });
         }
         if let (Some((id, d)), Some(be)) = (answer, &mut self.be) {
-            self.m.answer_approval_id(be, &id, d);
+            match d {
+                "always_thread" => {
+                    self.m.approve_always(be, &id, "thread", None);
+                }
+                "always_project" => {
+                    self.m.approve_always(be, &id, "project", None);
+                }
+                _ => {
+                    self.m.answer_approval_id(be, &id, d);
+                }
+            }
         }
         if let Some(sid) = go_to {
             if let Some(i) = self.m.sessions.iter().position(|s| s.id == sid) {
@@ -1802,19 +1887,35 @@ impl HydraApp {
         }
         if let Some(a) = self.m.approval_for_active().cloned() {
             let mut decision: Option<&str> = None;
-            modal_frame(ctx, "approval", 520.0, |ui| {
+            if self.always_prefix.0 != a.id {
+                let first = a.args["command"].as_str().and_then(|c| c.split_whitespace().next()).unwrap_or("").to_string();
+                self.always_prefix = (a.id.clone(), first);
+            }
+            let is_cmd = a.tool == "run_command";
+            let prefix = &mut self.always_prefix.1;
+            modal_frame(ctx, "approval", 560.0, |ui| {
                 ui.label(rtb("APPROVAL REQUIRED", 13.0, ACCENT));
                 ui.label(rtb(&a.tool, 14.0, TEXT));
                 egui::Frame::new().fill(BG).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(12)).inner_margin(Margin::same(12)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.add(egui::Label::new(RichText::new(serde_json::to_string_pretty(&a.args).unwrap_or_default()).size(12.0).color(TEXT2)).wrap());
                 });
-                ui.horizontal(|ui| {
+                if is_cmd {
+                    ui.horizontal(|ui| {
+                        ui.label(rt("\"Always\" covers commands starting with", 11.0, MUTED));
+                        ui.add(egui::TextEdit::singleline(prefix).desired_width(160.0).font(egui::FontId::new(12.0, egui::FontFamily::Monospace)));
+                    });
+                    ui.label(rt("Empty means every command. Chained or redirected commands always ask.", 10.0, MUTED));
+                }
+                ui.horizontal_wrapped(|ui| {
                     if widgets::button(ui, "Allow", Kind::Primary, 13.0, (16.0, 8.0), None).clicked() {
                         decision = Some("allow");
                     }
-                    if widgets::button(ui, "Always allow", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
-                        decision = Some("allow_always");
+                    if widgets::button(ui, "Always in thread", Kind::Secondary, 13.0, (16.0, 8.0), None).on_hover_text("Allow now and stop asking for this in this thread").clicked() {
+                        decision = Some("always_thread");
+                    }
+                    if widgets::button(ui, "Always in project", Kind::Secondary, 13.0, (16.0, 8.0), None).on_hover_text("Allow now and stop asking for this in every thread of this project").clicked() {
+                        decision = Some("always_project");
                     }
                     if widgets::button(ui, "Skip", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
                         decision = Some("skip");
@@ -1824,8 +1925,20 @@ impl HydraApp {
                     }
                 });
             });
+            if is_cmd {
+                // shown under the buttons by the next frame; kept here so the field and the buttons share state
+            }
             if let (Some(d), Some(be)) = (decision, &mut self.be) {
-                self.m.answer_approval(be, d);
+                let p = if is_cmd { Some(self.always_prefix.1.clone()) } else { None };
+                match d {
+                    "always_thread" => {
+                        self.m.approve_always(be, &a.id, "thread", p.as_deref());
+                    }
+                    "always_project" => {
+                        self.m.approve_always(be, &a.id, "project", p.as_deref());
+                    }
+                    _ => self.m.answer_approval(be, d),
+                }
             }
             return;
         }
@@ -1886,7 +1999,7 @@ impl HydraApp {
                 cancel = true;
             }
             if go {
-                if let Err(e) = self.m.rewind_code(i) {
+                if let Err(e) = self.m.rewind_code(self.be.as_mut(), i) {
                     self.m.notice = e.clone();
                     self.work.note = format!("error: {e}");
                 }

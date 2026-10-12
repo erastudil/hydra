@@ -76,6 +76,9 @@ pub struct Session {
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct Checkpoint {
     pub sha: String,
+    /// Agent checkpoint id (shadow git under ~/.hydra/shadow). When set, rewinds go through the agent.
+    #[serde(default)]
+    pub agent: Option<String>,
     pub label: String,
     /// Index into `messages` of the user message this checkpoint precedes.
     pub at: usize,
@@ -157,6 +160,9 @@ pub enum Pending {
     JobsList,
     JobCreate,
     JobOp,
+    Rewind(u32, String),
+    UndoRewind(u32),
+    Rules,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -189,6 +195,11 @@ pub struct Model {
     pub runs: HashMap<String, u32>, // turn id or action id -> session id; at most one run per thread
     pub approvals: Vec<Approval>,
     pub agent_ready: bool,
+    /// The agent snapshots the project before each turn (capability "checkpoint").
+    pub agent_checkpoints: bool,
+    cp_pending: HashMap<String, (u32, usize, String)>,
+    /// Approval rules of the thread last listed: (thread, rules).
+    pub rules: (String, Vec<Value>),
     pub notice: String,
     pub turn_counter: u64,
     pub cwd: String,
@@ -265,6 +276,9 @@ impl Model {
             runs: HashMap::new(),
             approvals: vec![],
             agent_ready: false,
+            agent_checkpoints: false,
+            cp_pending: HashMap::new(),
+            rules: (String::new(), vec![]),
             notice: String::new(),
             turn_counter: 0,
             cwd,
@@ -534,7 +548,7 @@ impl Model {
         if let Ok(sha) = crate::git::checkpoint(root, &format!("{thread}/{n}")) {
             let s = &mut self.sessions[self.active];
             let at = s.messages.len();
-            s.checkpoints.push(Checkpoint { sha, label: label.chars().take(60).collect(), at, ts: now() });
+            s.checkpoints.push(Checkpoint { sha, agent: None, label: label.chars().take(60).collect(), at, ts: now() });
         }
     }
 
@@ -545,15 +559,22 @@ impl Model {
 
     /// Put the project's files back to how they were before checkpoint `i`. The state just before the rewind is saved
     /// first so it can be undone. Refused while the thread is running.
-    pub fn rewind_code(&mut self, i: usize) -> Result<String, String> {
+    pub fn rewind_code(&mut self, be: Option<&mut Backend>, i: usize) -> Result<String, String> {
         let sid = self.sessions[self.active].id;
         if self.is_running(sid) {
             return Err("stop the running turn before rewinding".into());
         }
         let cp = self.sessions[self.active].checkpoints.get(i).cloned().ok_or("no such checkpoint")?;
+        let thread = self.sessions[self.active].thread.clone();
+        if let Some(agent_id) = &cp.agent {
+            // the agent restores from its shadow repository and snapshots the current state first (the undo point)
+            let be = be.ok_or("the agent is not running")?;
+            let id = be.rewind(&thread, agent_id);
+            self.pending.insert(id, Pending::Rewind(sid, cp.label.clone()));
+            return Ok(cp.label);
+        }
         let cwd = self.work_path();
         let root = std::path::Path::new(&cwd);
-        let thread = self.sessions[self.active].thread.clone();
         let pre = crate::git::checkpoint(root, &format!("{thread}/pre-rewind"))?;
         crate::git::restore(root, &cp.sha)?;
         let s = &mut self.sessions[self.active];
@@ -563,17 +584,57 @@ impl Model {
         Ok(cp.label)
     }
 
-    pub fn undo_rewind(&mut self) -> Result<(), String> {
+    pub fn undo_rewind(&mut self, be: Option<&mut Backend>) -> Result<(), String> {
         let sid = self.sessions[self.active].id;
         if self.is_running(sid) {
             return Err("stop the running turn first".into());
         }
-        let pre = self.sessions[self.active].pre_rewind.take().ok_or("nothing to undo")?;
+        let pre = self.sessions[self.active].pre_rewind.clone().ok_or("nothing to undo")?;
+        if let Some(backup) = pre.strip_prefix("agent:") {
+            let be = be.ok_or("the agent is not running")?;
+            let thread = self.sessions[self.active].thread.clone();
+            let id = be.rewind(&thread, backup);
+            self.pending.insert(id, Pending::UndoRewind(sid));
+            self.sessions[self.active].pre_rewind = None;
+            return Ok(());
+        }
+        self.sessions[self.active].pre_rewind = None;
         let cwd = self.work_path();
         crate::git::restore(std::path::Path::new(&cwd), &pre)?;
         self.sessions[self.active].messages.push(Msg { user: false, header: "HYDRA".into(), text: "Rewind undone: files are back as they were.".into(), actions: vec![] });
         self.save();
         Ok(())
+    }
+
+    pub fn load_rules(&mut self, be: &mut Backend) {
+        let thread = self.sessions[self.active].thread.clone();
+        let id = be.rules(&thread, None);
+        self.pending.insert(id, Pending::Rules);
+    }
+
+    pub fn remove_rule(&mut self, be: &mut Backend, rule: &str) {
+        let thread = self.sessions[self.active].thread.clone();
+        let id = be.rules(&thread, Some(rule));
+        self.pending.insert(id, Pending::Rules);
+    }
+
+    pub fn set_permission(&mut self, p: &str) {
+        if PERMISSIONS.iter().any(|x| x.0 == p) {
+            self.sessions[self.active].permission = p.into();
+            self.save();
+        }
+    }
+
+    /// Allow this call and save a rule. scope is "thread" or "project"; prefix only applies to run_command.
+    pub fn approve_always(&mut self, be: &mut Backend, id: &str, scope: &str, prefix: Option<&str>) -> bool {
+        match self.approvals.iter().position(|a| a.id == id) {
+            Some(pos) => {
+                let a = self.approvals.remove(pos);
+                be.approve_always(&a.id, scope, prefix);
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn cycle_permission(&mut self) {
@@ -636,9 +697,11 @@ impl Model {
         let header = MODELS[self.model].1.to_uppercase();
         let chat_like = !matches!(self.nav, "terminal" | "swarm");
         let (prompt, attached) = if chat_like { crate::fsx::expand_mentions(text, std::path::Path::new(&cwd)) } else { (text.to_string(), vec![]) };
-        if chat_like {
+        let agent_cp = chat_like && self.agent_checkpoints;
+        if chat_like && !agent_cp {
             self.take_checkpoint(&cwd, text);
         }
+        let user_at = self.sessions[self.active].messages.len();
         {
             let s = &mut self.sessions[self.active];
             s.messages.push(Msg { user: true, header: "YOU".into(), text: text.into(), actions: attached.iter().map(|a| format!("attached {a}")).collect() });
@@ -661,6 +724,9 @@ impl Model {
             _ => {
                 let permission = self.sessions[self.active].permission.clone();
                 let context = self.sessions[self.active].context.clone();
+                if agent_cp {
+                    self.cp_pending.insert(turn.clone(), (sid, user_at, text.chars().take(60).collect()));
+                }
                 be.turn(&turn, &prompt, &thread, &cwd, model, &permission, &context);
                 self.runs.insert(turn, sid);
             }
@@ -818,7 +884,42 @@ impl Model {
 
     pub fn apply(&mut self, ev: Ev) {
         match ev {
-            Ev::Hello => self.agent_ready = true,
+            Ev::Hello { caps } => {
+                self.agent_ready = true;
+                self.agent_checkpoints = caps.iter().any(|c| c == "checkpoint");
+            }
+            Ev::Checkpoint { turn, ok, id, reason } => {
+                if let Some((sid, at, label)) = self.cp_pending.remove(&turn) {
+                    match (ok, id) {
+                        (true, Some(id)) => {
+                            if let Some(s) = self.session_mut(sid) {
+                                s.checkpoints.push(Checkpoint { sha: String::new(), agent: Some(id), label, at, ts: now() });
+                            }
+                        }
+                        _ => self.log(&format!("\n[checkpoint] not taken: {reason}")),
+                    }
+                }
+            }
+            Ev::RewindResult { id, backup, restored, removed } => match self.pending.remove(&id) {
+                Some(Pending::Rewind(sid, label)) => {
+                    if let Some(s) = self.session_mut(sid) {
+                        s.pre_rewind = Some(format!("agent:{backup}"));
+                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: format!("Rewound files to before: {label}\n{} restored, {} removed.", restored.len(), removed.len()), actions: vec!["Undo rewind is available".into()] });
+                    }
+                    self.save();
+                }
+                Some(Pending::UndoRewind(sid)) => {
+                    if let Some(s) = self.session_mut(sid) {
+                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: "Rewind undone: files are back as they were.".into(), actions: vec![] });
+                    }
+                    self.save();
+                }
+                _ => {}
+            },
+            Ev::RulesResult { id, thread, rules } => {
+                self.pending.remove(&id);
+                self.rules = (thread, rules);
+            }
             Ev::Exited(why) => {
                 self.agent_ready = false;
                 self.notice = why;
@@ -926,6 +1027,7 @@ impl Model {
                 self.fail_bubble(sid, message);
                 self.finish_sid(sid);
             }
+            Pending::Rewind(_, _) | Pending::UndoRewind(_) => self.notice = format!("Rewind failed: {message}"),
             _ => self.log(&format!("\n[error] {message}")),
         }
     }
@@ -934,6 +1036,7 @@ impl Model {
         let is_err = r.get("isError").and_then(|x| x.as_bool()).unwrap_or(false);
         let err_text = r.get("error").and_then(|x| x.as_str()).unwrap_or("action failed").to_string();
         match kind {
+            Pending::Rewind(_, _) | Pending::UndoRewind(_) | Pending::Rules => {}
             Pending::Terminal(sid) => {
                 if is_err {
                     return self.action_failed(Pending::Terminal(sid), &err_text);

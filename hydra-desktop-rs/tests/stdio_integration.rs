@@ -265,3 +265,40 @@ fn a_reply_cut_off_mid_stream_is_reported_not_silently_kept() {
     assert!(shown.contains("cut off") || shown.contains("error") || shown.contains("failed"), "D05: {shown}");
     let _ = std::fs::remove_dir_all(&r.dir);
 }
+
+#[test]
+fn agent_checkpoints_rewind_undo_and_scoped_always_rules() {
+    let mut r = rig("rules").expect("rig");
+    pump(&mut r, 20, |m| m.agent_ready);
+    assert!(r.m.agent_checkpoints, "the adapter advertises checkpoints");
+    assert!(r.m.submit(&mut r.be, "WRITE the file"));
+    pump(&mut r, 40, |m| !m.approvals.is_empty());
+    let id = r.m.approvals[0].id.clone();
+    assert!(r.m.approve_always(&mut r.be, &id, "project", None));
+    done(&mut r);
+    let file = std::path::Path::new(&r.m.cwd).join("hello.txt");
+    assert!(file.exists());
+    let cps = r.m.sessions[0].checkpoints.clone();
+    assert_eq!(cps.len(), 1, "one agent checkpoint per turn");
+    assert!(cps[0].agent.is_some());
+    assert_eq!(r.m.checkpoint_for(1), Some(0), "checkpoint is attached to the user message");
+    r.m.load_rules(&mut r.be);
+    pump(&mut r, 10, |m| !m.rules.1.is_empty());
+    assert_eq!(r.m.rules.1[0]["tool"], "write_file");
+    assert_eq!(r.m.rules.1[0]["scope"], "project");
+    // the rule now settles the same call without asking
+    assert!(r.m.submit(&mut r.be, "WRITE the file"));
+    done(&mut r);
+    assert!(r.m.approvals.is_empty(), "rule answered it");
+    r.m.rewind_code(Some(&mut r.be), 0).unwrap();
+    pump(&mut r, 10, |m| m.sessions[0].pre_rewind.is_some());
+    assert!(!file.exists(), "rewind removed the file the turn created");
+    r.m.undo_rewind(Some(&mut r.be)).unwrap();
+    pump(&mut r, 10, |m| m.sessions[0].messages.last().map(|x| x.text.contains("undone")).unwrap_or(false));
+    assert!(file.exists(), "undo brings it back");
+    let rid = r.m.rules.1[0]["id"].as_str().unwrap().to_string();
+    r.m.remove_rule(&mut r.be, &rid);
+    pump(&mut r, 10, |m| m.rules.1.is_empty());
+    assert!(r.m.rules.1.is_empty());
+    let _ = std::fs::remove_dir_all(&r.dir);
+}
