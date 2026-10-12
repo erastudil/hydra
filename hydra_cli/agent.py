@@ -2820,6 +2820,8 @@ def _empty_stream_state() -> Dict[str, Any]:
 
 
 CANCELLED_TEXT = "[Turn cancelled by user]"
+# stored as the reply of a prompt whose turn ended without one, for example when the agent process was killed
+INTERRUPTED_TEXT = "[Turn interrupted before a reply]"
 
 
 class TurnCancelled(Exception):
@@ -3336,6 +3338,7 @@ def _run_agent_loop(
             raise ProviderError(redact(f"Compaction failed on every provider: {failure}"))
 
         ledger.compact_if_needed(window_tokens, summarize, len(sys_text) + len(prompt) + schema_chars(tools))
+    ledger.close_unanswered(INTERRUPTED_TEXT)
     prior = ledger.render_prior(original_prompt, mode)
     if prior:
         messages[1]["content"] = prior + "\n\n" + original_prompt
@@ -3488,6 +3491,7 @@ def _run_agent_loop(
         checkpointer.transition("COMPLETED")
         checkpointer.final_response = CANCELLED_TEXT
         checkpointer.save()
+        ledger.close_unanswered(CANCELLED_TEXT)
         return CANCELLED_TEXT
 
     while turn_idx < max_turns:

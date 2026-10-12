@@ -213,6 +213,16 @@ class SessionContextLedger:
         conn.execute("INSERT INTO kw (rowid, terms) VALUES (?, ?)", (cur.lastrowid, " ".join(_enc(k) for k in keywords)))
         conn.commit()
 
+    def close_unanswered(self, text: str) -> bool:
+        """Answer a prompt that never got its final reply with an assistant marker, so roles keep alternating.
+        Returns True when it wrote one. The last user, assistant or tool row decides: only an assistant reply without
+        tool calls counts as an answer."""
+        rows = self._select("WHERE role IN ('user', 'assistant', 'tool')", order="id DESC LIMIT 1")
+        if not rows or (rows[0]["role"] == "assistant" and not rows[0].get("tool_calls")):
+            return False
+        self.append_turn(role="assistant", content=text)
+        return True
+
     def categories(self) -> Dict[str, int]:
         return dict(self._conn.execute("SELECT category, COUNT(*) FROM turns GROUP BY category").fetchall())
 

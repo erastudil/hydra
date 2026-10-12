@@ -1957,7 +1957,7 @@ def context_modes_agent_loop():
             db = sqlite3.connect(recall.ledger_path)
             cats = dict(db.execute("SELECT category, COUNT(*) FROM turns GROUP BY category"))
             db.close()
-            assert cats.get("instruction") == 1 and cats.get("error") == 1 and cats.get("chat") == 2 and cats.get("code") == 1, cats
+            assert cats.get("instruction") == 1 and cats.get("error") == 1 and cats.get("chat") == 3 and cats.get("code") == 1, cats  # chat holds the marker that answers the seeded lunch prompt
             assert [t["role"] for t in SessionContextLedger(session_id="gate_modes_a").turns][-2:] == ["user", "assistant"]
 
             # Mode B: turns stay live until 80 percent of the window, then older ones become one summary.
@@ -2049,8 +2049,9 @@ def agent_loop_cancel_tool_round():
             assert result == CANCELLED_TEXT, result
             assert ledger._db is None
             turns = SessionContextLedger(session_id="gate_cancel_tools").turns
-            assert [t["role"] for t in turns][-2:] == ["assistant", "tool"], [t["role"] for t in turns]
-            results = turns[-1]["tool_results"]
+            assert [t["role"] for t in turns][-3:] == ["assistant", "tool", "assistant"], [t["role"] for t in turns]
+            assert turns[-1]["content"] == CANCELLED_TEXT, turns[-1]
+            results = turns[-2]["tool_results"]
             assert len(results) == 2 and all(r["result"] == "[Tool execution cancelled by user]" for r in results), results
             assert "cancelmarker" not in dispatch_native("memory_search", {"query": "cancelmarker0"})
     finally:
@@ -13541,6 +13542,84 @@ def stdio_checkpoint_conversations_are_pruned():
             again = child.until("rewind_result")[-1]
             assert again["backup"] in kept(), (again, kept())
             assert child.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_interrupted_prompt_gets_an_explicit_reply():
+    """A prompt whose agent was killed mid-stream, or whose turn was cancelled, gets an assistant marker. History says so, and the next request alternates roles."""
+    from hydra_cli.agent import CANCELLED_TEXT, INTERRUPTED_TEXT
+
+    def alternates(roles):
+        return all(a != b for a, b in zip(roles, roles[1:]))
+
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            first = _StdioChild(base, home)
+            first.next()
+            assert first.run_turn("i1", "PLAIN alpha", thread="ir", model="local", mode="sliding")[-1]["ok"]
+            first.turn("i2", "SLOW beta", thread="ir", model="local")
+            first.until("token", turn="i2")
+            first.proc.kill()
+            first.proc.wait(timeout=10)
+
+            second = _StdioChild(base, home)
+            second.next()
+            second.send(type="history", id="h", thread="ir")
+            turns = second.until("history_result")[-1]["turns"]
+            assert [(t["role"], t["content"]) for t in turns] == [("user", "PLAIN alpha"), ("assistant", "reply-to-PLAIN"),
+                                                                  ("user", "SLOW beta"), ("assistant", INTERRUPTED_TEXT)], turns
+            second.send(type="history", id="h2", thread="ir")
+            assert len(second.until("history_result")[-1]["turns"]) == 4, "history wrote the marker twice"
+
+            assert second.run_turn("i3", "PLAIN gamma", thread="ir", model="local")[-1]["ok"]
+            sent = seen[-1]["messages"]
+            assert alternates([m["role"] for m in sent if m["role"] in ("user", "assistant")]), sent
+            prior = [line.split(" : ", 1)[0] for line in sent[-1]["content"].split("\n") if line.startswith(("user : ", "assistant : "))]
+            assert prior and alternates(prior) and INTERRUPTED_TEXT in sent[-1]["content"], sent[-1]["content"]
+
+            second.turn("i4", "SLOW delta", thread="ir", model="local")
+            second.until("token", turn="i4")
+            second.send(type="history", id="busy", thread="ir")
+            assert second.until("history_result")[-1]["turns"][-1] == {"role": "user", "content": "SLOW delta"}, "a running turn got a marker"
+            second.send(type="cancel", turn="i4")
+            assert second.until("done", turn="i4")[-1]["cancelled"]
+            second.send(type="history", id="h3", thread="ir")
+            turns = second.until("history_result")[-1]["turns"]
+            assert alternates([t["role"] for t in turns]) and turns[-1] == {"role": "assistant", "content": CANCELLED_TEXT}, turns
+            assert second.run_turn("i5", "PLAIN epsilon", thread="ir", model="local")[-1]["ok"]
+            second.send(type="history", id="h4", thread="ir")
+            turns = second.until("history_result")[-1]["turns"]
+            assert alternates([t["role"] for t in turns]) and len(turns) == 10, turns
+            second.turn("i6", "SLOW zeta", thread="ir", model="local")
+            second.until("token", turn="i6")
+            second.proc.kill()
+            second.proc.wait(timeout=10)
+
+            third = _StdioChild(base, home)
+            third.next()
+            assert third.run_turn("i7", "PLAIN eta", thread="ir", model="local")[-1]["ok"]
+            assert INTERRUPTED_TEXT in seen[-1]["messages"][-1]["content"], "the next turn skipped the marker"
+            third.send(type="history", id="h5", thread="ir")
+            turns = third.until("history_result")[-1]["turns"]
+            assert alternates([t["role"] for t in turns]) and turns[-3] == {"role": "assistant", "content": INTERRUPTED_TEXT}, turns
+            assert third.close() == 0
+
+            from hydra_cli.context import SessionContextLedger
+            saved = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                ledger = SessionContextLedger(session_id="ir-tools")
+                ledger.append_turn(role="user", content="run it")
+                ledger.append_turn(role="assistant", content="", tool_calls=[{"id": "c", "function": {"name": "list_dir", "arguments": "{}"}}])
+                assert ledger.close_unanswered(INTERRUPTED_TEXT), "a tool call round counted as a reply"
+                assert not ledger.close_unanswered(INTERRUPTED_TEXT), "a marker was written twice"
+                ledger.end_turn()
+            finally:
+                os.environ["HOME"] = saved
     finally:
         httpd.shutdown()
 
