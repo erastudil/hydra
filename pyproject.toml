@@ -34,6 +34,11 @@ dependencies = [
   "prompt_toolkit>=3.0.36",
 ]
 
+[project.optional-dependencies]
+desktop = ["PySide6>=6.6; python_version >= '3.9'", "psutil>=5.9"]
+browser = ["playwright>=1.40"]
+build = ["pyinstaller>=6.0"]
+
 [project.scripts]
 hydra = "hydra_cli.cli:main"
 
@@ -46,5 +51,5 @@ Repository = "https://github.com/erastudil/hydra"
 include = ["hydra_cli*"]
 
 [tool.setuptools.package-data]
-hydra_cli = ["catalog.json", "mcp_servers.default.json", "data/*.jsonl", "skills/*.md"]
+hydra_cli = ["catalog.json", "invariants.json", "mcp_servers.default.json", "data/*.jsonl", "skills/*.md"]
 

@@ -951,7 +951,7 @@ class AutonomousAgentRunner:
         """
         Summon LLM model with automatic fallback routing across providers on 429/disconnect.
         """
-        from hydra_cli.desktop import resolve_and_complete_with_fallback
+        from hydra_cli.desktop_core import resolve_and_complete_with_fallback
         target_model = model or self.current_model or self.default_model
         return resolve_and_complete_with_fallback(
             model=target_model,

@@ -61,3 +61,16 @@ zero stubs : either code executes against real subprocesses and interfaces retur
 ## universal principles
 
 live intelligence : for every task involving AI tools, models, harnesses, context limits, or machine learning, search the web or live documentation first to verify current upstream state; never accept internal training weights regarding AI or ML; treat state older than three months as obsolete; set model context defaults to match true hardware and provider capability; zero undersizing.
+
+
+## memory gate
+
+one gate : scripts/gate.py over hydra_cli/memory.py, stdlib only; ledger at ~/.hydra/memory/ledger.jsonl, append-only, hash-chained.
+
+turn start : agent loop calls preturn; stored state facts are re-proved with a read-only probe, a failed probe drops the fact and the context shows "memory said X; live check says Y".
+
+hooks : python scripts/gate.py install in a repo; uninstall reverses it. pre-commit and pre-push refuse main, junk, mass test deletes, force pushes; commit-msg stamps a Ledger-Head trailer.
+
+sweep : python scripts/gate.py sweep (dry) or --apply; moves go to ~/.hydra/memory/purgatory, restore with gate.py restore <id>. Hydra runs it on launch, at most every 20 hours.
+
+replies : python scripts/gate.py reply FILE checks one topic : comment per line, then progen lint.

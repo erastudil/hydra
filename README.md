@@ -232,3 +232,8 @@ Node.js 18+ is required for the `bin/hydra.js` checks inside that same command.
 ## License
 
 Apache-2.0. Source and issues: https://github.com/erastudil/hydra
+
+## Desktop app
+
+Native PySide6 app, no browser. Install with `pip install -e .[desktop]`, run `python -m hydra_cli.gui` or `hydra desktop`. Build the exe with `pip install -e .[build]` then `python scripts/build_exe.py` (writes `dist/Hydra/Hydra.exe`). `python scripts/create_desktop_shortcut.py` makes the Desktop shortcut.
+

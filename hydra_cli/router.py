@@ -348,7 +348,7 @@ def route_command(argv: List[str]) -> int:
     if argv and argv[0] in ("sandbox", "--sandbox"):
         return execute_sandbox_command(argv[1:])
     if argv and argv[0] in ("desktop", "--desktop"):
-        from hydra_cli.desktop import main as desktop_main
+        from hydra_cli.gui.app import main as desktop_main
         return desktop_main(argv[1:])
     if argv and argv[0] in ("alice-loop", "--alice-loop", "alice_loop"):
         from hydra_cli.alice_cloud_loop import main as alice_loop_main

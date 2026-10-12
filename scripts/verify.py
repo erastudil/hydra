@@ -145,10 +145,13 @@ def run_cli(args, stdin=None, timeout=20, extra_env=None):
 def _runtime_files():
     names = ["bin/hydra", "bin/hydra.js"]
     cli = os.path.join(REPO, "hydra_cli")
-    for name in sorted(os.listdir(cli)):
-        path = os.path.join(cli, name)
-        if os.path.isfile(path) and name.endswith((".py", ".json")):
-            names.append(f"hydra_cli/{name}")
+    found = []
+    for sub in ("", "gui"):
+        folder = os.path.join(cli, sub)
+        for name in os.listdir(folder):
+            if os.path.isfile(os.path.join(folder, name)) and name.endswith((".py", ".json")):
+                found.append(f"hydra_cli/{sub + '/' if sub else ''}{name}")
+    names.extend(sorted(found))
     return names
 
 
@@ -1017,10 +1020,6 @@ def tools_sandbox_and_memory():
     assert collapsed_action_line("search", '"reflow_rows"', "3 matches") == '▸ Searched "reflow_rows" · 3 matches'
     assert collapsed_action_line("ran", "pytest -q", "exit 0") == "▸ Ran pytest -q · exit 0"
     assert collapsed_action_line("error", "turn") == "▸ Error turn"
-    from hydra_cli.desktop import get_desktop_html
-    desk = get_desktop_html()
-    assert "/api/chat/stream" in desk and "action-row" in desk and "hydra-think" in desk
-    assert "min(420px, 34vw)" in desk and "Ask anything, pick a model, and send." in desk
     assert resolve_model_choice("1") == "alice"
     assert resolve_model_choice("alise") == "alice"
     assert resolve_model_choice("nope") is None
@@ -1932,6 +1931,547 @@ def context_modes_agent_loop():
             assert "SCRIPTED SUMMARY" in ask(normal, "compact", "next question", window)
     finally:
         httpd.shutdown()
+
+
+def _scripted_model(script):
+    """Local HTTP model endpoint. script(handler, body) writes the whole reply. Returns (httpd, base_url)."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Scripted(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            script(self, body)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", 0), Scripted)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+
+def _sse(handler, tokens, pause, sent):
+    """Stream tokens as server-sent events. Stops when the client hangs up."""
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.end_headers()
+    try:
+        for token in tokens:
+            chunk = {"choices": [{"delta": {"content": token}}]}
+            handler.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            handler.wfile.flush()
+            sent.append(token)
+            time.sleep(pause)
+        handler.wfile.write(b"data: [DONE]\n\n")
+        handler.wfile.flush()
+    except ConnectionError:
+        sent.append("<client closed>")
+
+
+@check
+def agent_loop_cancel_tool_round():
+    """A cancel set while the model asks for tools runs none of them and closes the ledger."""
+    from hydra_cli.agent import CANCELLED_TEXT, run_agent_loop
+    from hydra_cli.context import SessionContextLedger
+    from hydra_cli.hands import dispatch_native
+
+    cancel = threading.Event()
+    calls = [{"id": f"call_{n}", "type": "function",
+              "function": {"name": "memory_write", "arguments": json.dumps({"query": f"fact: cancelmarker{n}"})}}
+             for n in range(2)]
+
+    def script(handler, body):
+        message = {"role": "assistant", "content": "", "tool_calls": calls}
+        cancel.set()  # the user presses stop while this reply is in flight
+        data = json.dumps({"choices": [{"message": message, "finish_reason": "tool_calls"}]}).encode()
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/json")
+        handler.send_header("Content-Length", str(len(data)))
+        handler.end_headers()
+        handler.wfile.write(data)
+
+    httpd, base = _scripted_model(script)
+    try:
+        with isolated(env={"LOCAL_AI_BASE": base}):
+            ledger = SessionContextLedger(session_id="gate_cancel_tools")
+            result = run_agent_loop("local", "keep two notes", session_id="gate_cancel_tools", ledger=ledger,
+                                    tier="local", cancel=cancel)
+            assert result == CANCELLED_TEXT, result
+            assert ledger._db is None
+            turns = SessionContextLedger(session_id="gate_cancel_tools").turns
+            assert [t["role"] for t in turns][-2:] == ["assistant", "tool"], [t["role"] for t in turns]
+            results = turns[-1]["tool_results"]
+            assert len(results) == 2 and all(r["result"] == "[Tool execution cancelled by user]" for r in results), results
+            assert "cancelmarker" not in dispatch_native("memory_search", {"query": "cancelmarker0"})
+    finally:
+        httpd.shutdown()
+
+
+@contextmanager
+def _gui_thread(worker):
+    """Park the worker on a real QThread. Yields turn(request, until) -> (tokens, (text, ok)).
+
+    until(tokens) runs on the main thread for every streamed token and may call worker.cancel().
+    """
+    from PySide6.QtCore import QEventLoop, QObject, QThread, QTimer, Signal
+    from PySide6.QtWidgets import QApplication
+
+    class Starter(QObject):
+        start = Signal(dict)
+
+    app = QApplication.instance() or QApplication([])
+    thread = QThread()
+    worker.moveToThread(thread)
+    starter = Starter()
+    starter.start.connect(worker.run_turn)
+    thread.start()
+
+    def turn(request, until):
+        tokens, done = [], []
+        loop = QEventLoop()
+
+        def on_token(text):
+            tokens.append(text)
+            until(tokens)
+
+        def on_finished(text, ok):
+            done.append((text, ok))
+            loop.quit()
+
+        worker.token.connect(on_token)
+        worker.finished.connect(on_finished)
+        try:
+            QTimer.singleShot(20000, loop.quit)
+            starter.start.emit(request)
+            loop.exec()
+        finally:
+            worker.token.disconnect(on_token)
+            worker.finished.disconnect(on_finished)
+        assert done, "turn never finished"
+        return tokens, done[0]
+
+    try:
+        yield turn
+    finally:
+        thread.quit()
+        thread.wait(5000)
+
+
+@check
+def gui_worker_live_turn():
+    """AgentWorker on a QThread streams tokens in order and delivers the answer."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        from hydra_cli.gui.worker import AgentWorker
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    words = [f"w{n} " for n in range(12)]
+    sent = []
+    httpd, base = _scripted_model(lambda handler, body: _sse(handler, words, 0.0, sent))
+    try:
+        with isolated(env={"LOCAL_AI_BASE": base}):
+            worker = AgentWorker()
+            with _gui_thread(worker) as turn:
+                tokens, (text, ok) = turn(
+                    {"session_id": "gate_gui_live", "prompt": "count", "cwd": tempfile.gettempdir(), "alias": "local"},
+                    lambda seen: None)
+            assert ok and tokens == words, (ok, tokens)
+            assert text == "".join(words), text
+            from hydra_cli.context import SessionContextLedger
+            assert worker._ledgers["gate_gui_live"]._db is None
+            assert SessionContextLedger(session_id="gate_gui_live").turns[-1]["content"] == "".join(words)
+    finally:
+        httpd.shutdown()
+
+
+@check
+def gui_worker_cancel_mid_stream():
+    """worker.cancel() during a slow stream stops the turn, hangs up on the model and leaves a reloadable ledger."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        from hydra_cli.gui.worker import AgentWorker
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    from hydra_cli.agent import CANCELLED_TEXT
+    from hydra_cli.context import SessionContextLedger
+
+    words = [f"w{n} " for n in range(200)]
+    sent = []
+    httpd, base = _scripted_model(lambda handler, body: _sse(handler, words, 0.05, sent))
+    try:
+        with isolated(env={"LOCAL_AI_BASE": base}):
+            worker = AgentWorker()
+            with _gui_thread(worker) as turn:
+                tokens, (text, ok) = turn(
+                    {"session_id": "gate_gui_cancel", "prompt": "count", "cwd": tempfile.gettempdir(), "alias": "local"},
+                    lambda seen: worker.cancel() if len(seen) == 3 else None)
+                assert (text, ok) == (CANCELLED_TEXT, False), (text, ok)
+                assert tokens[:3] == words[:3] and len(tokens) < 20, len(tokens)
+                deadline = time.time() + 5
+                while "<client closed>" not in sent and time.time() < deadline:
+                    time.sleep(0.05)
+                assert "<client closed>" in sent and len(sent) < 100, len(sent)
+                assert worker._ledgers["gate_gui_cancel"]._db is None
+                assert SessionContextLedger(session_id="gate_gui_cancel").turns is not None
+                # the same worker takes the next turn: the cancel flag does not stick
+                words[:] = ["ok "]
+                tokens, (text, ok) = turn(
+                    {"session_id": "gate_gui_cancel", "prompt": "again", "cwd": tempfile.gettempdir(), "alias": "local"},
+                    lambda seen: None)
+                assert ok and text == "ok ", (text, ok)
+    finally:
+        httpd.shutdown()
+
+
+def _json_reply(handler, message):
+    data = json.dumps({"choices": [{"message": message, "finish_reason": "stop"}]}).encode()
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def _tool_call(name, **args):
+    return {"role": "assistant", "content": "", "tool_calls": [
+        {"id": "call_1", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]}
+
+
+def _replying(replies, seen):
+    """Script for _scripted_model: records every request body, answers from replies in order.
+
+    A str reply streams as text; a dict reply is a whole assistant message (tool calls).
+    """
+    def script(handler, body):
+        seen.append(body)
+        reply = replies.pop(0)
+        if isinstance(reply, dict):
+            _json_reply(handler, reply)
+        else:
+            _sse(handler, [reply], 0.0, [])
+    return script
+
+
+@contextmanager
+def _gui_window(state_path):
+    """MainWindow over a Store at state_path, offscreen. Closing it joins the worker thread."""
+    from PySide6.QtWidgets import QApplication
+    from hydra_cli.gui.store import Store
+    from hydra_cli.gui.window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    win = MainWindow(Store(state_path))
+    win.composer.model.setCurrentText("local")
+    try:
+        yield win
+    finally:
+        win.close()
+        assert win.thread.wait(5000), "worker thread did not stop"
+        app.processEvents()
+
+
+def _gui_wait(until, seconds=20):
+    from PySide6.QtWidgets import QApplication
+
+    deadline = time.time() + seconds
+    while not until():
+        assert time.time() < deadline, "timed out waiting for the window"
+        QApplication.instance().processEvents()
+        time.sleep(0.01)
+
+
+def _gui_send(win, text, while_busy=None):
+    """Submit through the window and wait for the turn to end. while_busy() runs on every poll."""
+    win.submit(text)
+    assert win.busy, "submit did not start a turn"
+    _gui_wait(lambda: (while_busy and while_busy(), not win.busy)[1])
+
+
+def _gui_mode(win, mode):
+    win.composer.mode.setCurrentIndex(win.composer.mode.findData(mode))
+
+
+@check
+def gui_restart_keeps_projects_threads_and_context():
+    """Projects, threads, history and the thread's ledger come back from the data dir in a fresh window."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    root = tempfile.mkdtemp(prefix="gui-restart-")
+    seen = []
+    httpd, base = _scripted_model(_replying(["noted zebrafish", "hello b", "your word was zebrafish"], seen))
+    try:
+        with isolated(home=root, env={"LOCAL_AI_BASE": base}):
+            state = os.path.join(root, "data", "state.json")
+            proj_a, proj_b = os.path.join(root, "alpha"), os.path.join(root, "beta")
+            os.makedirs(proj_a)
+            os.makedirs(proj_b)
+            with _gui_window(state) as win:
+                win.add_project(proj_a)
+                thread_a = win.create_thread()
+                _gui_send(win, "remember the word zebrafish")
+                win.add_project(proj_b)
+                thread_b = win.create_thread()
+                _gui_send(win, "greet beta, zebrafish stays in alpha")
+                win.select_thread(thread_a["id"])
+            with _gui_window(state) as win:
+                assert [p["name"] for p in win.store.projects()] == ["alpha", "beta"]
+                assert win.sidebar.projects.count() == 2
+                assert win.worker._ledgers == {}, "fresh window must not carry ledgers over"
+                saved = win.store.thread(thread_b["id"])
+                assert [m["role"] for m in saved["messages"]] == ["user", "assistant"], saved["messages"]
+                assert saved["messages"][1]["text"] == "hello b"
+                assert win.thread_id == thread_a["id"] and win.project_id == thread_a["project_id"]
+                assert "remember the word zebrafish" in win.transcript.toPlainText()
+                assert "noted zebrafish" in win.transcript.toPlainText()
+                assert win.sidebar.threads.count() == 1 and win.sidebar.threads.item(0).text() == "remember the word zebrafish"
+                win.select_project(thread_b["project_id"])
+                assert win.sidebar.threads.count() == 1 and win.sidebar.threads.item(0).text() == "greet beta, zebrafish stays in alpha"
+                win.select_thread(thread_b["id"])
+                assert "hello b" in win.transcript.toPlainText()
+                win.select_thread(thread_a["id"])
+                seen.clear()
+                _gui_send(win, "what was the word zebrafish")
+                context = seen[0]["messages"][1]["content"]
+                assert "remember the word zebrafish" in context and "noted zebrafish" in context, context
+                assert "greet beta, zebrafish stays in alpha" not in context and "hello b" not in context, context
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@check
+def gui_context_mode_selector_reaches_the_model():
+    """The mode box sets the strategy the worker runs: each mode sends its own context shape, and it survives a restart."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    root = tempfile.mkdtemp(prefix="gui-modes-")
+    seen = []
+    replies = []
+    for _ in range(3):
+        replies += ["answer pelican", "answer quokka", "answer raccoon", "answer sparrow"]
+    httpd, base = _scripted_model(_replying(replies, seen))
+    prompts = ["alpha apple talk", "bravo banana talk", "charlie cherry talk", "delta apple question"]
+
+    def last_context():
+        return seen[-1]["messages"][1]["content"]
+
+    try:
+        with isolated(home=root, env={"LOCAL_AI_BASE": base}):
+            state = os.path.join(root, "state.json")
+            proj = os.path.join(root, "proj")
+            os.makedirs(proj)
+            ids = {}
+            with _gui_window(state) as win:
+                assert [win.composer.mode.itemData(i) for i in range(win.composer.mode.count())] == ["recall", "compact", "sliding"]
+                win.add_project(proj)
+                for mode in ("recall", "compact", "sliding"):
+                    thread = win.create_thread()
+                    _gui_mode(win, mode)  # the box edits the active thread
+                    ids[mode] = thread["id"]
+                    assert win.store.thread(thread["id"])["mode"] == mode
+                    for text in prompts[:3]:
+                        _gui_send(win, text)
+                    _gui_send(win, prompts[3])
+                    context = last_context()
+                    if mode == "recall":
+                        assert context.startswith("[RETRIEVED CONTEXT]"), context
+                        assert "alpha apple talk" in context
+                        assert "bravo" not in context and "charlie" not in context, context
+                    elif mode == "compact":
+                        assert context.startswith("[CONVERSATION SO FAR]"), context
+                        assert all(word in context for word in ("alpha", "bravo", "charlie")), context
+                    else:
+                        assert context.startswith("[PRIOR TURNS]"), context
+                        assert "bravo" in context and "charlie" in context and "alpha" not in context, context
+                # switching the box on a live thread changes the very next request
+                win.select_thread(ids["recall"])
+                assert win.composer.mode.currentData() == "recall"
+                _gui_mode(win, "sliding")
+                assert win.store.thread(ids["recall"])["mode"] == "sliding"
+                replies.append("answer tern")
+                _gui_send(win, "echo question")
+                assert last_context().startswith("[PRIOR TURNS]"), last_context()
+            with _gui_window(state) as win:
+                for mode, tid in ids.items():
+                    win.select_thread(tid)
+                    assert win.composer.mode.currentData() == ("sliding" if mode == "recall" else mode), (mode, win.composer.mode.currentData())
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@check
+def gui_approval_flow_end_to_end():
+    """Allow runs the tool, Skip returns a denial the model sees, Abort and Stop release a pending approval."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    root = tempfile.mkdtemp(prefix="gui-approval-")
+    seen = []
+    replies = []
+    httpd, base = _scripted_model(_replying(replies, seen))
+    try:
+        with isolated(home=root, env={"LOCAL_AI_BASE": base}):
+            proj = os.path.join(root, "proj")
+            os.makedirs(proj)
+            with _gui_window(os.path.join(root, "state.json")) as win:
+                win.add_project(proj)
+                win.create_thread()
+                assert win.composer.approve.isChecked()
+                target = lambda name: os.path.join(proj, name)
+
+                def ask(name, press, text="write it"):
+                    """One turn where the model asks to write `name`; press(win) answers the pending approval."""
+                    seen.clear()
+                    replies[:] = [_tool_call("write_file", path=name, content=f"body of {name}"), f"finished {name}"]
+                    state = {"asked": False}
+
+                    def poll():
+                        if win.approval.allow.isEnabled() and not state["asked"]:
+                            state["asked"] = True
+                            assert win.tabs.currentWidget() is win.approval
+                            assert name in win.approval.body.toPlainText(), win.approval.body.toPlainText()
+                            assert win.approval.title.text() == "Approve tool : write_file"
+                            assert not os.path.exists(target(name)), "tool ran before it was approved"
+                            press()
+                    _gui_send(win, text, poll)
+                    assert state["asked"], "approval was never requested"
+                    assert not win.approval.allow.isEnabled()
+
+                ask("yes.txt", win.approval.allow.click)
+                assert open(target("yes.txt")).read() == "body of yes.txt"
+                assert len(seen) == 2 and "finished" not in json.dumps(seen[0])
+                assert win.store.thread(win.thread_id)["messages"][-1]["text"] == "finished yes.txt"
+
+                ask("no.txt", win.approval.deny.click)
+                assert not os.path.exists(target("no.txt"))
+                tool_msgs = [m for m in seen[1]["messages"] if m.get("role") == "tool"]
+                assert tool_msgs and tool_msgs[-1]["content"] == "[Tool execution skipped by developer]", tool_msgs
+                assert win.store.thread(win.thread_id)["messages"][-1]["text"] == "finished no.txt"
+
+                for name, button in (("abort.txt", win.approval.abort.click), ("stop.txt", win.composer.stop.click)):
+                    seen.clear()
+                    replies[:] = [_tool_call("write_file", path=name, content="never")]
+                    fired = []
+
+                    def poll():
+                        if win.approval.allow.isEnabled() and not fired:
+                            fired.append(1)
+                            button()
+                    _gui_send(win, "write it", poll)
+                    assert fired and not os.path.exists(target(name)), name
+                    assert len(seen) == 1, f"{name}: the model was called again after the abort"
+                    assert not win.busy
+                # the same window still takes a normal turn afterwards
+                replies[:] = ["still alive"]
+                _gui_send(win, "ping")
+                assert win.store.thread(win.thread_id)["messages"][-1]["text"] == "still alive"
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@check
+def gui_diff_pane_shows_real_edits():
+    """A turn that edits files sends the true unified diff to the pane and the store; both survive a restart."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    import difflib
+
+    root = tempfile.mkdtemp(prefix="gui-diff-")
+    seen = []
+    replies = [_tool_call("edit_file", path="app.py", old_text="beta = 2", new_text="beta = 22"), "edited"]
+    httpd, base = _scripted_model(_replying(replies, seen))
+    try:
+        with isolated(home=root, env={"LOCAL_AI_BASE": base}):
+            proj = os.path.join(root, "proj")
+            os.makedirs(proj)
+            path = os.path.join(proj, "app.py")
+            before = "alpha = 1\nbeta = 2\ngamma = 3\n"
+            with open(path, "w", newline="") as fh:
+                fh.write(before)
+            state = os.path.join(root, "state.json")
+            with _gui_window(state) as win:
+                win.add_project(proj)
+                win.create_thread()
+                win.composer.approve.setChecked(False)
+                _gui_send(win, "bump beta")
+                with open(path, newline="") as fh:
+                    after = fh.read()
+                assert after == "alpha = 1\nbeta = 22\ngamma = 3\n", after
+                expected = "".join(difflib.unified_diff(
+                    before.splitlines(keepends=True), after.splitlines(keepends=True), fromfile="a/app.py", tofile="b/app.py"))
+                saved = win.store.thread(win.thread_id)["diffs"]
+                assert saved == [{"path": "app.py", "text": expected}], saved
+                pane = win.diffs.toPlainText()
+                assert "-beta = 2" in pane and "+beta = 22" in pane and "app.py" in pane, pane
+                assert "-alpha" not in pane and "+alpha" not in pane
+                thread_id = win.thread_id
+            with _gui_window(state) as win:
+                assert win.thread_id == thread_id
+                assert "-beta = 2" in win.diffs.toPlainText() and "+beta = 22" in win.diffs.toPlainText()
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
+
+
+@check
+def gui_collapsed_rows_and_thinking_pulse():
+    """Steps reach the native transcript as one collapsed row each, and the composer pulses only while a turn runs."""
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    from PySide6.QtCore import QAbstractAnimation
+
+    root = tempfile.mkdtemp(prefix="gui-rows-")
+    seen = []
+    replies = [_tool_call("read_file", path="app.py"), "read it"]
+    httpd, base = _scripted_model(_replying(replies, seen))
+    try:
+        with isolated(home=root, env={"LOCAL_AI_BASE": base, "HYDRA_NO_ANIM": ""}):
+            proj = os.path.join(root, "proj")
+            os.makedirs(proj)
+            with open(os.path.join(proj, "app.py"), "w") as fh:
+                fh.write("SECRET_BODY_LINE = 1\n")
+            with _gui_window(os.path.join(root, "state.json")) as win:
+                win.add_project(proj)
+                win.create_thread()
+                win.composer.approve.setChecked(False)
+                glow = win.composer._glow
+                states = []
+
+                def probe():
+                    pulse = glow._fx.property("_pulse")
+                    states.append(isinstance(pulse, QAbstractAnimation) and pulse.state() == QAbstractAnimation.State.Running)
+
+                from hydra_cli.gui import theme
+                _gui_send(win, "look at app.py", while_busy=probe)
+                text = win.transcript.toPlainText()
+                assert "▸ Read app.py" in text, text
+                assert text.count("▸ Read app.py") == 1, "one row per step, not a duplicate from the tool sink"
+                assert "SECRET_BODY_LINE" not in text, "tool bodies stay out of the transcript"
+                if not theme.reduced_motion():
+                    assert any(states), "composer never pulsed during the turn"
+                pulse = glow._fx.property("_pulse")
+                assert pulse is None, "pulse must stop when the turn ends"
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def alice_retrieval_stacks():
     from hydra_cli import alice_retrieve as ar
     from hydra_cli.alice_gate import consult
@@ -8122,9 +8662,12 @@ def status_assert_contracts():
         assert "Playwright uninstalled" in action_res["error"]
 
     action_cat = dispatch_browser_action("classify_status", text="404")
-    assert action_cat["isError"] is False
-    assert action_cat["category"] == "client_error"
-    assert action_cat["status"] == 404
+    if PLAYWRIGHT_AVAILABLE:
+        assert action_cat["isError"] is False
+        assert action_cat["category"] == "client_error"
+        assert action_cat["status"] == 404
+    else:
+        assert action_cat["isError"] is True and "Playwright uninstalled" in action_cat["error"]
 
     # 8. Singleton lifecycle
     reset_status_assert()
@@ -9518,88 +10061,6 @@ def computer_use_native_tool_registry():
 
 
 @check
-def desktop_app_server_and_gateway_contracts():
-    import json
-    import time
-    import urllib.request
-    import hydra_cli.desktop as d
-    server = d.DesktopServer(host="127.0.0.1", port=7798)
-    server.start(open_browser=False, background=True)
-    time.sleep(1.0)
-    try:
-        with urllib.request.urlopen("http://127.0.0.1:7798/api/status", timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            assert data["status"] == "ok"
-            assert data["gateway_url"] == "http://127.0.0.1:7777"
-        with urllib.request.urlopen("http://127.0.0.1:7798/api/models", timeout=5) as resp:
-            m = json.loads(resp.read().decode("utf-8"))
-            assert len(m["models"]) > 0
-        with urllib.request.urlopen("http://127.0.0.1:7798/api/computer/screen", timeout=5) as resp:
-            img_bytes = resp.read()
-            assert img_bytes.startswith(b"\x89PNG\r\n\x1a\n")
-    finally:
-        server.stop()
-
-
-@check
-def hydra_desktop_cli_launcher():
-    import subprocess
-    import sys
-    res1 = subprocess.run([sys.executable, "-m", "hydra_cli.desktop", "--help"], capture_output=True, text=True)
-    assert res1.returncode == 0
-    assert "Hydra Sovereign Desktop Application" in res1.stdout
-
-    res2 = subprocess.run([sys.executable, "-m", "hydra_cli.cli", "desktop", "--help"], capture_output=True, text=True)
-    assert res2.returncode == 0
-    assert "Hydra Sovereign Desktop Application" in res2.stdout
-
-
-@check
-def desktop_packaging_and_composite_contracts():
-    import subprocess
-    import sys
-    from hydra_cli.desktop import get_desktop_html
-    from hydra_cli.computer_use import get_computer_use_engine
-    from hydra_cli.native_tools import NativeToolRegistry
-
-    pkg_script = os.path.join(REPO, "scripts", "package_desktop.py")
-    assert os.path.isfile(pkg_script)
-    res = subprocess.run([sys.executable, pkg_script], capture_output=True, text=True)
-    assert res.returncode == 0, f"scripts/package_desktop.py failed: {res.stdout}\n{res.stderr}"
-
-    html = get_desktop_html()
-    assert "session-bar" in html
-    assert "crosshair" in html
-    assert "diff-container" in html
-
-    eng = get_computer_use_engine()
-    for method in [
-        "fill_form",
-        "scroll_until_visible",
-        "extract_table_data",
-        "safe_drag_and_drop",
-        "find_window_by_title_pattern",
-        "set_window_bounds",
-        "capture_active_window",
-        "safe_key_sequence",
-    ]:
-        assert hasattr(eng, method), f"Engine missing composite method: {method}"
-
-    reg = NativeToolRegistry()
-    for tool in [
-        "browser_fill_form",
-        "browser_scroll_until_visible",
-        "browser_extract_table",
-        "computer_safe_drag_and_drop",
-        "computer_find_window",
-        "computer_set_window_bounds",
-        "computer_capture_active_window",
-        "computer_safe_key_sequence",
-    ]:
-        assert reg.has_tool(tool), f"Registry missing composite tool: {tool}"
-
-
-@check
 def agent_runner_safety_and_abort_contracts():
     import subprocess
     import time
@@ -9678,7 +10139,7 @@ def workspace_context_and_session_export_contracts():
         AutonomousAgentRunner,
         validate_session_trace,
     )
-    from hydra_cli.desktop import (
+    from hydra_cli.desktop_core import (
         FALLBACK_CHAINS,
         resolve_and_complete_with_fallback,
     )
@@ -9795,7 +10256,7 @@ def workspace_context_and_session_export_contracts():
 
 @check
 def desktop_resilience_and_token_accounting_contracts():
-    from hydra_cli.desktop import (
+    from hydra_cli.desktop_core import (
         MODEL_PRICING,
         ResponsiveCoordinateScaler,
         TokenAccountingManager,
@@ -9885,7 +10346,7 @@ def desktop_tool_presets_and_markdown_report_contracts():
         is_tool_allowed_under_profile,
         generate_markdown_report,
     )
-    from hydra_cli.desktop import (
+    from hydra_cli.desktop_core import (
         COMMAND_PALETTE_ACTIONS,
         dispatch_command_palette_action,
     )
@@ -9964,7 +10425,7 @@ def desktop_scheduled_jobs_and_workflow_templates_contracts():
         list_workflow_templates,
         reset_job_scheduler,
     )
-    from hydra_cli.desktop import (
+    from hydra_cli.desktop_core import (
         COMMAND_PALETTE_ACTIONS,
         dispatch_command_palette_action,
     )
@@ -10049,26 +10510,6 @@ def desktop_scheduled_jobs_and_workflow_templates_contracts():
         assert disp_clear.get("cleared") is True
     finally:
         reset_job_scheduler()
-
-
-
-@check
-def session_player_and_build_dist_contracts():
-    from desktop.session_player import SessionTracePlayer, ActionTracer, create_player_from_runner
-    from desktop.build_dist import (
-        validate_asset_tree,
-        validate_api_contracts,
-        validate_session_playback_engine,
-    )
-
-    assets_ok, missing = validate_asset_tree()
-    assert assets_ok is True, f"Missing desktop assets: {missing}"
-
-    api_ok, api_errs = validate_api_contracts()
-    assert api_ok is True, f"API contract failures: {api_errs}"
-
-    player_ok, player_errs = validate_session_playback_engine()
-    assert player_ok is True, f"Session player failures: {player_errs}"
 
 
 
@@ -10776,17 +11217,1042 @@ def wave22_session_logger_and_mimo_routing():
         shutil.rmtree(temp_s, ignore_errors=True)
 
 
+# ---- native desktop app (hydra_cli.gui) -------------------------------------------------
+
+
+def _gui_app():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance() or QApplication(["verify"])
+    from hydra_cli.gui import theme
+
+    theme.apply(app)
+    return app
+
+
+def _gui_pump(app, cond, seconds=30.0):
+    end = time.time() + seconds
+    while time.time() < end and not cond():
+        app.processEvents()
+        time.sleep(0.005)
+    return cond()
+
+
+def _gui_model_server(replies):
+    """Scripted model endpoint: pops one reply per request. Only the network edge is faked."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    queue_ = list(replies)
+
+    class Scripted(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            message = queue_.pop(0) if queue_ else {"role": "assistant", "content": "done"}
+            data = json.dumps({"choices": [{"message": message, "finish_reason": "stop"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", 0), Scripted)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+
+def _gui_stop(httpd):
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def _gui_write_call(path, content):
+    return {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": {"name": "write_file", "arguments": json.dumps({"path": path, "content": content})},
+        }],
+    }
+
+
+@check
+def gui_store_persistence():
+    from hydra_cli.gui.store import Store
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "state.json")
+        store = Store(path)
+        proj = store.add_project(tmp)
+        assert store.add_project(tmp)["id"] == proj["id"]
+        thread = store.new_thread(proj["id"], "compact")
+        store.add_message(thread["id"], "user", "first line\nsecond")
+        store.add_message(thread["id"], "assistant", "ok")
+        store.add_diff(thread["id"], "a.txt", "+x\n")
+        again = Store(path)
+        t = again.thread(thread["id"])
+        assert t["title"] == "first line" and t["mode"] == "compact"
+        assert [m["role"] for m in t["messages"]] == ["user", "assistant"]
+        assert t["diffs"][0]["path"] == "a.txt"
+        assert again.threads(proj["id"])[0]["id"] == thread["id"]
+        again.delete_thread(thread["id"])
+        assert Store(path).thread(thread["id"]) is None
+        again.remove_project(proj["id"])
+        assert Store(path).projects() == []
+
+
+@check
+def gui_window_agent_turn_diff_approval_cancel():
+    """Real MainWindow, real worker thread, real run_agent_loop and write_file. Only the model endpoint is scripted."""
+    app = _gui_app()
+    from hydra_cli.gui.store import Store
+    from hydra_cli.gui.window import MainWindow
+
+    with tempfile.TemporaryDirectory() as tmp:
+        work = os.path.join(tmp, "proj")
+        os.makedirs(work)
+        httpd, base = _gui_model_server([])
+        try:
+            with isolated(home=tmp, env={"LOCAL_AI_BASE": base, **_cleared_secrets()}):
+                state = os.path.join(tmp, "state.json")
+                win = MainWindow(Store(state))
+                win.show()
+                win.add_project(work)
+                win.create_thread()
+                win.composer.model.setCurrentText("local")
+                assert win.windowTitle() == "Hydra" and win.isVisible()
+
+                # allowed tool call: approval pane arms, diff pane fills, file lands on disk
+                scripted = [_gui_write_call("hello.txt", "hello gui\n"), {"role": "assistant", "content": "wrote it"}]
+                _gui_stop(httpd)
+                httpd, base = _gui_model_server(scripted)
+                os.environ["LOCAL_AI_BASE"] = base
+                win.submit("make hello.txt")
+                assert _gui_pump(app, lambda: win.approval.allow.isEnabled()), "approval pane never armed"
+                assert win.approval.title.text().startswith("Approve tool : write_file")
+                win.approval.allow.click()
+                assert _gui_pump(app, lambda: not win.busy), "turn never finished"
+                assert open(os.path.join(work, "hello.txt"), encoding="utf-8").read() == "hello gui\n"
+                assert "+hello gui" in win.diffs.toPlainText() and "hello.txt" in win.diffs.toPlainText()
+                assert "wrote it" in win.transcript.toPlainText()
+
+                # skipped tool call: nothing written
+                _gui_stop(httpd)
+                httpd, base = _gui_model_server([_gui_write_call("skip.txt", "no\n"), {"role": "assistant", "content": "skipped"}])
+                os.environ["LOCAL_AI_BASE"] = base
+                win.submit("make skip.txt")
+                assert _gui_pump(app, lambda: win.approval.deny.isEnabled())
+                win.approval.deny.click()
+                assert _gui_pump(app, lambda: not win.busy)
+                assert not os.path.exists(os.path.join(work, "skip.txt"))
+
+                # Stop while a tool call waits: turn ends, nothing written, window stays usable
+                _gui_stop(httpd)
+                httpd, base = _gui_model_server([_gui_write_call("stop.txt", "no\n"), {"role": "assistant", "content": "late"}])
+                os.environ["LOCAL_AI_BASE"] = base
+                win.submit("make stop.txt")
+                assert _gui_pump(app, lambda: win.approval.allow.isEnabled())
+                win.composer.stop.click()
+                assert _gui_pump(app, lambda: not win.busy), "Stop did not end the turn"
+                assert not os.path.exists(os.path.join(work, "stop.txt"))
+                assert "late" not in win.transcript.toPlainText()
+                assert "turn cancelled" in win.transcript.toPlainText()
+
+                # context mode selector persists on the thread
+                win.composer.mode.setCurrentIndex(win.composer.mode.findData("compact"))
+                assert win.store.thread(win.thread_id)["mode"] == "compact"
+                tid = win.thread_id
+                win.close()
+                saved = Store(state).thread(tid)
+                roles = [m["role"] for m in saved["messages"]]
+                assert roles.count("user") == 3 and "assistant" in roles and "cancelled" in roles and saved["diffs"]
+        finally:
+            _gui_stop(httpd)
+
+
+@check
+def gui_no_browser_app_remains():
+    assert not os.path.exists(os.path.join(REPO, "hydra_cli", "desktop.py"))
+    assert not os.path.exists(os.path.join(REPO, "scripts", "package_desktop.py"))
+    import re
+
+    pattern = re.compile(r"hydra_cli\.desktop(?!_core)\b|FastAPI|uvicorn|QtWebEngine|QWebEngine")
+    skip = {os.path.join(REPO, "scripts", "verify.py"), os.path.join(REPO, "scripts", "build_exe.py"), os.path.join(REPO, "hydra_cli", "desktop_core.py")}
+    hits = []
+    for base in ("hydra_cli", "desktop", "scripts", "launch"):
+        for root, _dirs, files in os.walk(os.path.join(REPO, base)):
+            for name in files:
+                full = os.path.join(root, name)
+                if full in skip or not name.endswith((".py", ".bat", ".ps1", ".sh")):
+                    continue
+                with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+                if pattern.search(text) and not full.endswith(("computer_use.py", "browser.py", "mcp.py", "native_tools.py")):
+                    hits.append(os.path.relpath(full, REPO))
+    assert not hits, "browser-app references remain: " + ", ".join(hits)
+    for rel in ("install.ps1", "install.sh"):
+        with open(os.path.join(REPO, rel), "r", encoding="utf-8") as fh:
+            assert "hydra_cli/desktop.py" not in fh.read()
+
+
+@check
+def gui_desktop_shortcut_targets_native_app():
+    if os.name != "nt":
+        raise Skip("Windows shortcut; this host is POSIX")
+    sys.path.insert(0, os.path.join(REPO, "scripts"))
+    import create_desktop_shortcut as cds
+
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"USERPROFILE": tmp}):
+        lnk = cds.create_shortcut(repo_root=REPO)
+        info = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f'$s=(New-Object -ComObject WScript.Shell).CreateShortcut("{lnk}"); "$($s.TargetPath)|$($s.Arguments)"'],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        target, args = info.split("|", 1)
+        assert os.path.isfile(target)
+        assert "hydra_cli.gui" in args or target.lower().endswith("hydra.exe"), info
+
+
+def _gui_find_windows(pid):
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _lparam):
+        owner = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(hwnd, buf, 256)
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            found.append((hwnd, buf.value, rect.right - rect.left, rect.bottom - rect.top))
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return found
+
+
+@check
+def gui_real_launch_window_and_frames():
+    """Launch the app the way the shortcut does (pythonw), find its visible top-level window, then time streaming frames."""
+    if os.name != "nt":
+        raise Skip("Win32 window handle check; this host is POSIX")
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    if not os.path.isfile(pythonw):
+        raise Skip("pythonw.exe not found beside the interpreter")
+    home = tempfile.mkdtemp(prefix="hydra_gui_")
+    env = dict(os.environ, USERPROFILE=home, HOME=home)
+    env.pop("QT_QPA_PLATFORM", None)
+    proc = subprocess.Popen([pythonw, "-m", "hydra_cli.gui"], cwd=REPO, env=env)
+    try:
+        windows = []
+        for _ in range(60):
+            if proc.poll() is not None:
+                break
+            windows = [w for w in _gui_find_windows(proc.pid) if w[1] == "Hydra"]
+            if windows:
+                break
+            time.sleep(0.5)
+        assert windows, f"no visible Hydra window (exit {proc.poll()})"
+        assert windows[0][2] >= 800 and windows[0][3] >= 500, windows
+        time.sleep(3)
+        assert proc.poll() is None, "app exited after opening"
+        assert [w for w in _gui_find_windows(proc.pid) if w[1] == "Hydra"], "window vanished"
+        log = os.path.join(home, ".hydra", "desktop.log")
+        assert not os.path.isfile(log) or "Traceback" not in open(log, encoding="utf-8", errors="replace").read()
+    finally:
+        proc.kill()
+        proc.wait()
+    out = os.path.join(home, "frames.json")
+    run = subprocess.run([sys.executable, "-m", "hydra_cli.gui", "--probe-frames", out], cwd=REPO, env=env, timeout=120)
+    assert run.returncode == 0 and os.path.isfile(out), "frame probe did not finish"
+    stats = json.load(open(out, encoding="utf-8"))
+    assert stats["chars"] > 20000 and stats["doc_chars"] >= stats["chars"], stats
+    assert stats["p95_ms"] < 40 and stats["max_ms"] < 250, f"UI thread stalls while streaming: {stats}"
+    shutil.rmtree(home, ignore_errors=True)
+
+
+@check
+def gui_theme_and_motion_contracts():
+    """Runs in a child process: earlier checks may already hold a QCoreApplication, which blocks QApplication."""
+    import subprocess
+    import sys
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        raise Skip("PySide6 not installed")
+    code = "import sys; sys.path.insert(0, sys.argv[1]); import scripts.verify as v; v._gui_theme_and_motion_body()"
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
+    res = subprocess.run([sys.executable, "-c", code, REPO], capture_output=True, text=True, env=env, cwd=REPO)
+    assert res.returncode == 0, res.stdout[-800:] + res.stderr[-800:]
+
+
+def _gui_theme_and_motion_body():
+    from PySide6.QtCore import QEasingCurve
+    from PySide6.QtWidgets import QApplication, QWidget
+    from desktop.theme_manager import BUILTIN_PALETTES, calculate_contrast_ratio
+    from hydra_cli.gui import motion, theme
+
+    app = QApplication.instance() or QApplication([])
+
+    # tokens derive from the one palette source and the QSS builds from them
+    base = BUILTIN_PALETTES[theme.THEME_ID]
+    assert theme.PALETTE == theme.derive_palette(base)
+    qss = theme.build_qss()
+    for role in ("bg", "panel", "raised", "accent", "ring", "danger"):
+        assert theme.PALETTE[role] in qss, role
+    assert "{" in qss and "None" not in qss
+    theme.apply(app)
+    assert app.styleSheet() == qss
+
+    # contrast : text roles on every surface they sit on
+    P = theme.PALETTE
+    for fg, bgk, floor in (("text", "bg", 7.0), ("text", "panel", 7.0), ("text", "raised", 7.0),
+                           ("muted", "bg", 4.5), ("muted", "panel", 4.5), ("on_accent", "accent", 4.5),
+                           ("danger", "bg", 4.5), ("text", "add", 7.0), ("text", "del", 7.0), ("text", "select", 7.0)):
+        ratio = calculate_contrast_ratio(P[fg], P[bgk])
+        assert ratio >= floor, f"{fg} on {bgk} {ratio} < {floor}"
+
+    # motion tokens
+    assert set(theme.DURATION) == {"instant", "fast", "base", "slow"}
+    assert theme.DURATION["instant"] == 0 < theme.DURATION["fast"] < theme.DURATION["base"] < theme.DURATION["slow"]
+    assert all(isinstance(theme.easing(n), QEasingCurve) for n in theme.EASING)
+
+    # normal motion : animation runs for the token duration with the token curve
+    os.environ["HYDRA_NO_ANIM"] = "0"
+    assert theme.reduced_motion() is False
+    seen = []
+    host = QWidget()
+    anim = motion.glide(host, 0, 100, seen.append, name="base", curve="standard")
+    assert anim is not None and anim.duration() == theme.DURATION["base"]
+    assert anim.easingCurve().type() == theme.EASING["standard"]
+    anim.stop()
+    fade = motion.fade_in(host, "fast")
+    assert fade is not None and fade.duration() == theme.DURATION["fast"]
+    fade.stop()
+
+    # reduced motion : durations drop to zero, no animation object, end state applied at once
+    os.environ["HYDRA_NO_ANIM"] = "1"
+    try:
+        assert theme.reduced_motion() is True
+        assert all(theme.duration(n) == 0 for n in theme.DURATION)
+        landed = []
+        assert motion.glide(host, 0, 100, landed.append) is None
+        assert landed == [100]
+        assert motion.fade_in(host) is None and host.graphicsEffect() is None
+    finally:
+        os.environ["HYDRA_NO_ANIM"] = "1"
+
+
+@check
+def gui_entry_runs_launch_sweep_and_memory_check():
+    """The packaged entry runs the scheduled sweep and a memory check at launch."""
+    import importlib.util
+    try:
+        import hydra_cli.memory  # noqa: F401
+    except ImportError:
+        raise Skip("hydra_cli.memory arrives with the atmem gate PR")
+    spec = importlib.util.spec_from_file_location("hydra_gui_entry", os.path.join(REPO, "scripts", "hydra_gui_entry.py"))
+    entry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(entry)
+    with tempfile.TemporaryDirectory() as tmp:
+        home = os.path.join(tmp, "hh")
+        repo = os.path.join(tmp, "r")
+        os.makedirs(repo)
+        run = lambda *a: subprocess.run(["git", *a], cwd=repo, capture_output=True, text=True, env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"})
+        run("init", "-q", "-b", "main")
+        open(os.path.join(repo, "README.md"), "w").write("x\n")
+        run("add", "-A")
+        run("commit", "-q", "-m", "init")
+        open(os.path.join(repo, "Copy of a.txt"), "w").write("junk\n")
+        with isolated(env={"HYDRA_HOME": home}):
+            assert "sweep moved 1" in entry.gate_startup(repo)
+            assert not os.path.exists(os.path.join(repo, "Copy of a.txt"))
+            assert "sweep moved 0" in entry.gate_startup(repo), "second launch inside 20 hours must not sweep"
+            assert "startup skipped" in entry.gate_startup(tmp)
+        subjects = [json.loads(ln)["subject"] for ln in open(os.path.join(home, "memory", "ledger.jsonl"))]
+        assert "sweep_move" in subjects and subjects.count("preturn") == 2
+
+
+def _mem():
+    import importlib
+    return importlib.import_module("hydra_cli.memory")
+
+
+def _gate(args, cwd, hh, stdin=None):
+    env = {**os.environ, "HYDRA_HOME": hh, "PYTHONIOENCODING": "utf-8"}
+    return subprocess.run([sys.executable, os.path.join(REPO, "scripts", "gate.py"), *args], cwd=cwd, env=env, input=stdin,
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+
+
+def _git(cwd, *args, hh=None, stdin=None):
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    if hh:
+        env["HYDRA_HOME"] = hh
+    return subprocess.run(["git", *args], cwd=cwd, env=env, input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def _atmem_repo(base, name="proj", remote=True):
+    """A real repo with one commit on main and, when asked, a real bare origin."""
+    repo = os.path.join(base, name)
+    os.makedirs(repo)
+    _git(repo, "init", "-q", "-b", "main")
+    with open(os.path.join(repo, "README.md"), "w") as handle:
+        handle.write("x\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    if remote:
+        bare = os.path.join(base, name + ".git")
+        _git(base, "init", "-q", "--bare", bare)
+        _git(repo, "remote", "add", "origin", bare)
+        _git(repo, "push", "-q", "origin", "main")
+        _git(repo, "fetch", "-q", "origin")
+    return repo
+
+
+@check
+def atmem_ledger_chain_classes_and_supersede():
+    """Step 1: hash chain, fact classes, supersede lines, git trailer as checkpoint."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": tmp}):
+        repo = _atmem_repo(tmp, remote=False)
+        probe = {"name": "git_remote", "repo": repo, "expect": "empty"}
+        fact = m.append("fact", "proj", "no github remote", **{"class": "state"}, source="agent:x", probe=probe)
+        pref = m.append("fact", "global", "no browser dependency", **{"class": "preference"}, source="user:t105u")
+        note = m.append("fact", "proj", "maybe flaky", **{"class": "note"}, source="agent:x")
+        for bad in (
+            dict(kind="fact", fields={"class": "state", "source": "agent:x"}),
+            dict(kind="fact", fields={"class": "state", "source": "agent:x", "probe": {"name": "rm", "repo": repo, "expect": "empty"}}),
+            dict(kind="fact", fields={"class": "preference", "source": "agent:x"}),
+            dict(kind="fact", fields={"class": "note", "source": "nowhere"}),
+            dict(kind="supersede", fields={"target": "L999", "reason": "superseded"}),
+            dict(kind="supersede", fields={"target": fact["id"], "reason": "because"}),
+        ):
+            try:
+                m.append(bad["kind"], "proj", "x", **bad["fields"])
+            except m.GateError:
+                continue
+            raise AssertionError(f"accepted {bad}")
+        m.append("supersede", "proj", "wrong", target=note["id"], reason="superseded")
+        try:
+            m.append("supersede", "proj", "again", target=note["id"], reason="superseded")
+        except m.GateError:
+            pass
+        else:
+            raise AssertionError("double supersede accepted")
+        assert {f["id"] for f in m.live_facts()} == {fact["id"], pref["id"]}
+        assert m.live_facts()[0]["id"] == pref["id"], "user source must outrank agent source"
+        assert m.chain_problems() == []
+        path = m.ledger_path()
+        original = open(path, "rb").read()
+        lines = original.splitlines(keepends=True)
+        open(path, "wb").write(original.replace(b"no github remote", b"has github remote"))
+        assert m.chain_problems(), "edited line passed the chain"
+        open(path, "wb").write(b"".join(lines[1:]))
+        assert m.chain_problems(), "deleted first line passed the chain"
+        open(path, "wb").write(b"".join(lines[:1] + lines[2:]))
+        assert m.chain_problems(), "deleted middle line passed the chain"
+        forged = [json.loads(ln) for ln in lines]
+        forged[1]["body"] = "forged"
+        forged[1]["hash"] = m._hash(forged[1])
+        open(path, "wb").write(b"".join((m._canon(e) + "\n").encode() for e in forged))
+        assert m.chain_problems(), "a rewritten line with a recomputed hash passed"
+        open(path, "wb").write(original)
+        assert m.chain_problems() == []
+        try:
+            open(path, "ab").write(b'{"junk":1}\n')
+            m.append("event", "x", "y")
+        except m.GateError:
+            pass
+        else:
+            raise AssertionError("append succeeded on a broken ledger")
+
+
+@check
+def atmem_preturn_drops_false_remote_fact():
+    """Step 2: the 'no github remote' incident. Stored claim is false, live check wins."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": tmp}):
+        repo = _atmem_repo(tmp)
+        remote = m._probe_git_remote(repo)[0]
+        assert remote
+        stale = m.append("fact", "proj", "no github remote", **{"class": "state"}, source="agent:old",
+                         probe={"name": "git_remote", "repo": repo, "expect": "empty"})
+        true = m.append("fact", "proj", "origin is set", **{"class": "state"}, source="agent:old",
+                        probe={"name": "git_remote", "repo": repo, "expect": f"equals:{remote}"})
+        branch = m.append("fact", "proj", "work is on main", **{"class": "state"}, source="agent:old",
+                          probe={"name": "git_branch", "repo": repo, "expect": "equals:feat/other"})
+        m.append("fact", "proj", "unproven idea", **{"class": "note"}, source="agent:old")
+        m.append("fact", "proj", "Pat wants no browser", **{"class": "preference"}, source="user:t108u")
+        block = m.preturn_block(repo)
+        assert f"memory said no github remote; live check says {remote}" in block, block
+        assert f"memory said work is on main; live check says main" in block, block
+        assert "origin is set (verified@" in block
+        assert "UNVERIFIED notes" in block and "unproven idea" in block
+        assert "Pat wants no browser (Pat, user:t108u)" in block
+        assert block.splitlines()[1].startswith("repo : proj branch main remote ")
+        ids = {f["id"] for f in m.live_facts()}
+        assert stale["id"] not in ids and branch["id"] not in ids and true["id"] in ids
+        entries = m.read_ledger()
+        assert any(e["kind"] == "verify" and e["fact"] == stale["id"] and e["ok"] is False for e in entries)
+        assert any(e["kind"] == "supersede" and e["target"] == stale["id"] and e["reason"] == "stale_probe_failed" for e in entries)
+        again = m.preturn_block(repo)
+        assert "memory said" not in again, "a dropped fact came back"
+        out = _gate(["preturn", "--repo", repo], tmp, tmp)
+        assert out.returncode == 0 and "repo : proj" in out.stdout, out.stdout + out.stderr
+    from hydra_cli.agent import _memory_block
+    with tempfile.TemporaryDirectory() as plain, isolated(env={"HYDRA_HOME": plain}):
+        assert "gate could not run here" in _memory_block(plain)
+
+
+@check
+def atmem_hooks_fail_closed_and_install_uninstall():
+    """Step 3: pre-commit, commit-msg, pre-push; refusal text carries the fix command."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp:
+        hh = os.path.join(tmp, "hh")
+        noremote = _atmem_repo(tmp, "noremote", remote=False)
+        _git(noremote, "switch", "-q", "-c", "feat/x")
+        assert _gate(["install", "--repo", noremote], noremote, hh).returncode == 0
+        open(os.path.join(noremote, "a.txt"), "w").write("a\n")
+        _git(noremote, "add", "a.txt")
+        res = _git(noremote, "commit", "-m", "add a", hh=hh)
+        assert res.returncode != 0 and "git remote add origin" in res.stdout + res.stderr, res.stdout + res.stderr
+
+        repo = _atmem_repo(tmp)
+        hooks = os.path.join(repo, ".git", "hooks")
+        with open(os.path.join(hooks, "pre-commit"), "w") as handle:
+            handle.write("#!/bin/sh\necho foreign >> foreign.log\nexit 0\n")
+        os.chmod(os.path.join(hooks, "pre-commit"), 0o755)
+        assert _gate(["install", "--repo", repo], repo, hh).returncode == 0
+        assert os.path.exists(os.path.join(hooks, "pre-commit.pre-gate"))
+        res = _git(repo, "commit", "--allow-empty", "-m", "on main", hh=hh)
+        assert res.returncode != 0 and "git switch -c" in res.stdout + res.stderr, "commit on main was allowed"
+        _git(repo, "switch", "-q", "-c", "feat/y")
+        os.makedirs(os.path.join(repo, "src"))
+        open(os.path.join(repo, "src", "notes.bak"), "w").write("old\n")
+        open(os.path.join(repo, "STRAY.txt"), "w").write("stray\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "junk", hh=hh)
+        assert res.returncode != 0 and "src/notes.bak is junk" in res.stdout + res.stderr and "STRAY.txt" in res.stdout + res.stderr
+        _git(repo, "reset", "-q")
+        shutil.rmtree(os.path.join(repo, "src"))
+        os.unlink(os.path.join(repo, "STRAY.txt"))
+        os.makedirs(os.path.join(repo, "tests"))
+        for i in range(7):
+            open(os.path.join(repo, "tests", f"test_{i}.py"), "w").write("pass\n")
+        _git(repo, "add", "-A")
+        assert _git(repo, "commit", "-q", "-m", "add tests", hh=hh).returncode == 0
+        _git(repo, "rm", "-q", "-r", "tests")
+        res = _git(repo, "commit", "-m", "drop tests", hh=hh)
+        assert res.returncode != 0 and "gate.py decide test_delete" in res.stdout + res.stderr, "mass test delete allowed"
+        assert _gate(["decide", "test_delete", "tests moved to verify.py"], repo, hh).returncode == 0
+        res = _git(repo, "commit", "-q", "-m", "drop tests", hh=hh)
+        assert res.returncode == 0, res.stdout + res.stderr
+        msg = _git(repo, "log", "-1", "--format=%B").stdout
+        value = m._trailer_value(msg)
+        assert value, msg
+        assert os.path.exists(os.path.join(repo, "foreign.log")), "chained foreign hook never ran"
+        # fail closed: the gate script disappearing blocks the commit
+        hook = open(os.path.join(hooks, "pre-commit")).read()
+        open(os.path.join(hooks, "pre-commit"), "w").write(hook.replace("gate.py", "gone.py"))
+        open(os.path.join(repo, "b.txt"), "w").write("b\n")
+        _git(repo, "add", "b.txt")
+        assert _git(repo, "commit", "-m", "b", hh=hh).returncode != 0, "hook failed open"
+        _git(repo, "reset", "-q")
+        os.unlink(os.path.join(repo, "b.txt"))
+        assert _gate(["uninstall", "--repo", repo], repo, hh).returncode == 0
+        assert not os.path.exists(os.path.join(hooks, "commit-msg")) and not os.path.exists(os.path.join(hooks, "pre-push"))
+        assert "foreign" in open(os.path.join(hooks, "pre-commit")).read(), "foreign hook not restored"
+        assert not os.path.exists(os.path.join(hooks, "pre-commit.pre-gate"))
+        subjects = [e["subject"] for e in json.loads("[" + ",".join(open(os.path.join(hh, "memory", "ledger.jsonl")).read().splitlines()) + "]")]
+        assert "install" in subjects and "uninstall" in subjects and "commit" in subjects
+
+
+@check
+def atmem_push_gate_blocks_main_force_and_logs_branches():
+    """Step 3: pre-push refuses direct main pushes (by branch, not author) and non-fast-forwards."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hh = os.path.join(tmp, "hh")
+        repo = _atmem_repo(tmp)
+        _gate(["install", "--repo", repo], repo, hh)
+        _git(repo, "switch", "-q", "-c", "feat/p")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "work", hh=hh)
+        res = _git(repo, "push", "origin", "HEAD:main", hh=hh)
+        assert res.returncode != 0 and "needs a PR" in res.stdout + res.stderr, res.stdout + res.stderr
+        res = _git(repo, "push", "origin", "feat/p", hh=hh)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "branch_pushed" in open(os.path.join(hh, "memory", "ledger.jsonl")).read()
+        _git(repo, "commit", "-q", "--amend", "--allow-empty", "-m", "rewritten", hh=hh)
+        res = _git(repo, "push", "--force", "origin", "feat/p", hh=hh)
+        assert res.returncode != 0 and "not a fast-forward" in res.stdout + res.stderr, "force push allowed"
+        # author identity is irrelevant: same author name, still refused on main
+        res = _git(repo, "-c", "user.name=bluebarrels", "push", "origin", "HEAD:refs/heads/main", hh=hh)
+        assert res.returncode != 0
+
+
+@check
+def atmem_sweep_purgatory_move_and_restore():
+    """Step 4: junk moves to purgatory with a ledger line, restore is byte-identical, dry run moves nothing."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": os.path.join(tmp, "hh")}):
+        repo = _atmem_repo(tmp)
+        _git(repo, "switch", "-q", "-c", "feat/s")
+        open(os.path.join(repo, "tracked.bak"), "wb").write(b"tracked junk\r\n\x00\x01")
+        _git(repo, "add", "-f", "tracked.bak")
+        _git(repo, "commit", "-q", "-m", "oops bak")
+        open(os.path.join(repo, "Copy of notes.txt"), "wb").write(b"untracked junk\n")
+        open(os.path.join(repo, "ROOTSTRAY.txt"), "wb").write(b"root stray\n")
+        os.makedirs(os.path.join(repo, "src"))
+        open(os.path.join(repo, "src", "util.py"), "w").write("a=1\n")
+        _git(repo, "add", "src")
+        _git(repo, "commit", "-q", "-m", "util")
+        open(os.path.join(repo, "tmp_util.py"), "w").write("x\n")
+        os.makedirs(os.path.join(repo, "scratch"))
+        open(os.path.join(repo, "scratch", "util.py"), "w").write("a=2\n")
+        os.makedirs(os.path.join(repo, "docs"))
+        keep = os.path.join(repo, "docs", "mywork.md")
+        open(keep, "w").write("untracked but real\n")
+        before = {n: open(os.path.join(repo, n), "rb").read() for n in ("tracked.bak", "Copy of notes.txt", "ROOTSTRAY.txt", os.path.join("scratch", "util.py"))}
+        dry = m.sweep(repo)
+        assert dry["moved"] == [] and all(os.path.exists(os.path.join(repo, n)) for n in before)
+        moves = {f["path"] for f in dry["findings"] if f["action"] == "move"}
+        assert moves == {"tracked.bak", "Copy of notes.txt", "ROOTSTRAY.txt", "tmp_util.py", "scratch/util.py"}, moves
+        flagged = {f["path"]: f for f in dry["findings"] if f["action"] == "flag"}
+        assert "docs/mywork.md" in flagged and "untracked" in flagged["docs/mywork.md"]["reason"]
+        old = time.time() - 40 * 86400
+        os.utime(keep, (old, old))
+        assert "stale untracked, 40 days old" in {f["path"]: f for f in m.sweep_scan(repo)}["docs/mywork.md"]["reason"]
+        done = m.sweep(repo, apply=True)
+        assert len(done["moved"]) == 5
+        assert not any(os.path.exists(os.path.join(repo, n)) for n in before)
+        assert os.path.exists(keep), "sweep touched a file it only flags"
+        assert _git(repo, "status", "--porcelain").stdout.count("D  tracked.bak") == 1
+        first = next(e for e in m.read_ledger() if e["subject"] == "sweep_move" and e["old"] == "ROOTSTRAY.txt")
+        open(os.path.join(repo, "ROOTSTRAY.txt"), "w").write("new file in its place\n")
+        try:
+            m.restore(first["id"])
+        except m.GateError:
+            assert open(os.path.join(repo, "ROOTSTRAY.txt")).read() == "new file in its place\n"
+        else:
+            raise AssertionError("restore overwrote a file")
+        os.unlink(os.path.join(repo, "ROOTSTRAY.txt"))
+        for n, data in before.items():
+            event = next(e for e in m.read_ledger() if e["subject"] == "sweep_move" and e["old"] == n.replace(os.sep, "/"))
+            assert open(event["new"], "rb").read() == data and event["sha256"]
+            assert m.restore(event["id"]) == os.path.join(repo, n.replace("/", os.sep))
+            assert open(os.path.join(repo, n), "rb").read() == data, f"{n} not byte-identical after restore"
+            try:
+                m.restore(event["id"])
+            except m.GateError:
+                pass
+            else:
+                raise AssertionError("restored twice")
+        assert _git(repo, "status", "--porcelain").stdout.count("tracked.bak") == 0, "tracked file not back in the index"
+        assert m.chain_problems() == []
+
+
+@check
+def atmem_launch_sweep_runs_once_and_ignores_pr_deletions():
+    """Step 4: Hydra launch sweep applies once per day, and --ignore-deleted-by skips files another branch removes."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": os.path.join(tmp, "hh")}):
+        repo = _atmem_repo(tmp)
+        _git(repo, "switch", "-q", "-c", "feat/old")
+        open(os.path.join(repo, "old.bak"), "w").write("x\n")
+        _git(repo, "add", "-f", "old.bak")
+        _git(repo, "commit", "-q", "-m", "bak")
+        _git(repo, "switch", "-q", "-c", "feat/removes")
+        _git(repo, "rm", "-q", "old.bak")
+        _git(repo, "commit", "-q", "-m", "removes bak")
+        _git(repo, "switch", "-q", "feat/old")
+        moves = lambda **kw: [f["path"] for f in m.sweep_scan(repo, **kw) if f["action"] == "move"]
+        assert moves() == ["old.bak"]
+        assert moves(ignore_deleted_by="feat/removes") == []
+        first = m.launch_sweep(repo)
+        assert first and len(first["moved"]) == 1
+        assert m.launch_sweep(repo) is None
+        assert m.launch_sweep(tmp) is None, "launch sweep ran outside a repo"
+
+
+@check
+def atmem_sweep_corpus_matches_the_hydra_dry_run():
+    """Step 4: the sweep rules against this real repo, the corpus from the 5S dry run."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": tmp}):
+        probe = os.path.join(tmp, "corpus")
+        os.makedirs(os.path.join(probe, "launch", "bin"))
+        os.makedirs(os.path.join(probe, "launch", "desktop"))
+        os.makedirs(os.path.join(probe, "bin"))
+        os.makedirs(os.path.join(probe, "queue"))
+        _git(tmp, "init", "-q", "-b", "main", probe)
+        files = {
+            "hydra.bat": "@echo off\n", "bin/hydra.bat": "@echo off\n",
+            "launch/bin/hydra-terminal.bat": "cd C:\\Users\\jpm05\\Documents\\hydra\nset P=C:/Users/jpm05/x\n",
+            "launch/desktop/Hydra Sovereign Terminal.bat": "x\n",
+            "queue/kaizen_state.json": "[" + "1," * 200000 + "1]", "GLM_REVIEW.md": "x\n", "setup.py": "x\n", "pyproject.toml": "x\n",
+            ".gitignore": "__pycache__/\n",
+        }
+        for rel, text in files.items():
+            with open(os.path.join(probe, rel), "w") as handle:
+                handle.write(text)
+        _git(probe, "add", "-A")
+        _git(probe, "commit", "-q", "-m", "corpus")
+        by_path = {f["path"]: f for f in m.sweep_scan(probe)}
+        assert any("4 launchers" in f["reason"] for f in by_path.values())
+        assert "queue/kaizen_state.json" in by_path and "over" in by_path["queue/kaizen_state.json"]["reason"]
+        assert by_path["queue/"]["rule"] == "seiton"
+        assert by_path["GLM_REVIEW.md"]["action"] == "flag"
+        assert "2 hard-coded Windows user paths" in by_path["launch/bin/hydra-terminal.bat"]["reason"]
+        assert "setup.py + pyproject.toml" in by_path
+        assert "missing" in by_path[".gitignore"]["reason"] and "*.bak" in by_path[".gitignore"]["reason"]
+        assert any("same basename" in f["reason"] for f in by_path.values())
+        _git(probe, "branch", "empty-branch")
+        bare = os.path.join(tmp, "corpus.git")
+        _git(tmp, "init", "-q", "--bare", bare)
+        _git(probe, "remote", "add", "origin", bare)
+        _git(probe, "push", "-q", "origin", "main", "empty-branch")
+        _git(probe, "fetch", "-q", "origin")
+        assert "empty branch" in {f["path"]: f for f in m.sweep_scan(probe)}["origin/empty-branch"]["reason"]
+
+
+@check
+def atmem_progen_lint_and_reply_format():
+    """Step 5: progen lint at the CLI it really has (progen lint FILE, exit 1 on error), and topic : comment per line."""
+    m = _mem()
+    try:
+        m.progen_path()
+    except m.GateError as exc:
+        raise Skip(str(exc))
+    assert m.lint_reply("hooks : installed\nbranch : feat/x, no remote yet\n") == []
+    bad = m.lint_reply("Great question! I would be happy to help you with that.\n")
+    assert any("not 'topic : comment'" in p for p in bad) and any("P002" in p for p in bad), bad
+    assert m.lint_reply("- bullet : thing\n")
+    assert m.lint_reply("one topic : fine\nno colon here\n")
+    out = subprocess.run([sys.executable, os.path.join(REPO, "scripts", "gate.py"), "reply", "-"], input="topic : comment\n", capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    out = subprocess.run([sys.executable, os.path.join(REPO, "scripts", "gate.py"), "reply", "-"], input="Sure! Happy to help.\n", capture_output=True, text=True)
+    assert out.returncode == 1
+    with tempfile.TemporaryDirectory() as tmp:
+        hh = os.path.join(tmp, "hh")
+        repo = _atmem_repo(tmp)
+        _gate(["install", "--repo", repo], repo, hh)
+        _git(repo, "switch", "-q", "-c", "feat/docs")
+        os.makedirs(os.path.join(repo, "docs"))
+        open(os.path.join(repo, "docs", "a.md"), "w").write("Great question! I would be happy to help you with that.\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "docs", hh=hh)
+        assert res.returncode != 0 and "progen : docs/a.md" in res.stdout + res.stderr, res.stdout + res.stderr
+        open(os.path.join(repo, "docs", "a.md"), "w").write("docs : topic and comment\n")
+        _git(repo, "add", "-A")
+        assert _git(repo, "commit", "-q", "-m", "docs", hh=hh).returncode == 0
+        env = {**os.environ, "HYDRA_PROGEN": os.path.join(tmp, "missing"), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        _git(repo, "reset", "-q")
+        open(os.path.join(repo, "docs", "b.md"), "w").write("docs : more\n")
+        _git(repo, "add", "-A")
+        proc = subprocess.run(["git", "commit", "-m", "b"], cwd=repo, env={**env, "HYDRA_HOME": hh}, capture_output=True, text=True)
+        assert proc.returncode != 0 and "progen : not found" in proc.stdout + proc.stderr, "missing progen must fail closed"
+
+
+@check
+def atmem_bypass_detection_and_ledger_rollback():
+    """Step 6: a --no-verify commit is flagged, shown in the next context block, and a rolled-back ledger is caught."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp:
+        hh = os.path.join(tmp, "hh")
+        repo = _atmem_repo(tmp)
+        _gate(["install", "--repo", repo], repo, hh)
+        _git(repo, "switch", "-q", "-c", "feat/b")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "gated", hh=hh)
+        assert _gate(["verify"], repo, hh).returncode == 0
+        _git(repo, "commit", "-q", "--allow-empty", "--no-verify", "-m", "sneaky", hh=hh)
+        res = _gate(["verify"], repo, hh)
+        assert res.returncode == 1 and "no Ledger-Head trailer" in res.stdout, res.stdout
+        with isolated(env={"HYDRA_HOME": hh}):
+            sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+            block = m.preturn_block(repo)
+            assert f"commit {sha[:10]} has no ledger event" in block, block
+            assert any(e["subject"] == "unverified_commit" and e["sha"] == sha for e in m.read_ledger())
+            before = len(m.read_ledger())
+            m.scan_commits(repo)
+            assert len([e for e in m.read_ledger() if e["subject"] == "unverified_commit"]) == 1, "same commit flagged twice"
+            _git(repo, "commit", "-q", "--allow-empty", "-m", "after", hh=hh)
+            path = m.ledger_path()
+            lines = open(path, "rb").read().splitlines(keepends=True)
+            open(path, "wb").write(b"".join(lines[:3]))
+            assert m.chain_problems() == [], "a clean prefix still chains, only git can catch the rollback"
+            scan = m.scan_commits(repo, record=False)
+            assert scan["rollback"], "rolled-back ledger was not caught by the commit trailers"
+
+
+@check
+def atmem_strays_flagged_via_pr_api():
+    """Stray branches with no PR are listed by asking the GitHub API shape (served locally over real HTTP)."""
+    import http.server
+    m = _mem()
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            if "/branches" in self.path:
+                body = [{"name": "main"}, {"name": "feat/has-pr"}, {"name": "feat/stray"}]
+            else:
+                body = [{"number": 7}] if "head=erastudil:feat/has-pr" in self.path else []
+            data = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _atmem_repo(tmp)
+            _git(repo, "remote", "set-url", "origin", "https://github.com/erastudil/hydra.git")
+            env = {"HYDRA_HOME": tmp, "HYDRA_GH_API": f"http://127.0.0.1:{server.server_address[1]}"}
+            with isolated(env=env):
+                assert m.stray_branches(repo) == ["feat/stray"]
+            res = subprocess.run([sys.executable, os.path.join(REPO, "scripts", "gate.py"), "strays", "--repo", repo],
+                                 env={**os.environ, **env}, capture_output=True, text=True)
+            assert res.returncode == 1 and "feat/stray has no pull request" in res.stdout and "has-pr" not in res.stdout
+    finally:
+        server.shutdown()
+
+
+@check
+def atmem_invariant_violations_block_commits_and_verify():
+    """Invariants are wired into check_commit and gate.py verify: a violated one refuses the commit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hh = os.path.join(tmp, "hh")
+        repo = _atmem_repo(tmp)
+        assert _gate(["install", "--repo", repo], repo, hh).returncode == 0
+        _git(repo, "switch", "-q", "-c", "feat/inv")
+        assert _gate(["verify"], repo, hh).returncode == 0, "clean repo must pass verify"
+        os.makedirs(os.path.join(repo, "src"))
+        open(os.path.join(repo, "src", "ok.py"), "w").write("VALUE = 1\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-q", "-m", "clean", hh=hh)
+        assert res.returncode == 0, res.stdout + res.stderr
+
+        marker = "# " + "TO" + "DO" + ": later\n"
+        open(os.path.join(repo, "src", "bad.py"), "w").write(marker)
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "marker", hh=hh)
+        assert res.returncode != 0 and "INV-CODE-001 : violated" in res.stdout + res.stderr, res.stdout + res.stderr
+        assert "INV-CODE-001 : violated" in _gate(["verify"], repo, hh).stdout, "verify must report the same violation"
+        _git(repo, "rm", "-q", "-f", "src/bad.py")
+
+        open(os.path.join(repo, "src", "old.py"), "w").write("moved to src/new.py\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "stub", hh=hh)
+        assert res.returncode != 0 and "INV-FS-001 : violated" in res.stdout + res.stderr
+        _git(repo, "rm", "-q", "-f", "src/old.py")
+
+        pre_push = os.path.join(repo, ".git", "hooks", "pre-push")
+        saved = open(pre_push).read()
+        os.unlink(pre_push)
+        open(os.path.join(repo, "src", "two.py"), "w").write("VALUE = 2\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "no pre-push", hh=hh)
+        assert res.returncode != 0 and "INV-GIT-001 : violated" in res.stdout + res.stderr, res.stdout + res.stderr
+        open(pre_push, "w").write(saved)
+        os.chmod(pre_push, 0o755)
+
+        res = _git(repo, "commit", "-q", "-m", "recovered", hh=hh)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert _gate(["verify"], repo, hh).returncode == 0
+    from hydra_cli import invariants
+    assert invariants.check_gate.__module__ == "hydra_cli.invariants"
+    assert not hasattr(_mem(), "probe_no_todo_markers"), "invariant logic must live only in invariants.py"
+
+
 @check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
         return
-    allowed = {"test_desktop_app.py", "test_computer_use.py", "test_e2e_desktop_automation.py", "test_agent_computer_use.py", "test_desktop_session_replay.py", "test_desktop_resilience.py", "test_desktop_presets_and_reports.py", "test_desktop_presets_and_palette.py", "test_desktop_scheduled_jobs.py", "test_session_player.py", "test_build_dist.py", "test_desktop_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py", "test_model_distillation_pipeline.py", "test_sandbox_jail_enforcer.py", "test_model_lora_adapter_hotloader.py", "test_concurrency_throttle_queue.py", "test_model_rag_reranker.py", "test_session_replay_debugger.py", "test_swarm_session_logger.py", "test_alice_gcloud.py"}
+    allowed = {"test_computer_use.py", "test_session_player.py", "test_multi_workspace.py", "test_browser_storage.py", "test_model_evaluator.py", "test_command_registry.py", "test_audio_transcriber.py", "test_notification_hub.py", "test_extension_system.py", "test_theme_manager.py", "test_clipboard_manager.py", "test_telemetry_gate.py", "test_model_fallback_mesh.py", "test_state_snapshotter.py", "test_playwright_codegen.py", "test_secret_vault.py", "test_system_metrics_collector.py", "test_model_quantizer_bridge.py", "test_model_context_compressor.py", "test_local_vector_indexer.py", "test_model_router_balancer.py", "test_audit_ledger_exporter.py", "test_model_speculative_decoder.py", "test_session_checkpoint_manager.py", "test_model_ensemble_voter.py", "test_secure_token_rotator.py", "test_model_distillation_pipeline.py", "test_sandbox_jail_enforcer.py", "test_model_lora_adapter_hotloader.py", "test_concurrency_throttle_queue.py", "test_model_rag_reranker.py", "test_session_replay_debugger.py", "test_swarm_session_logger.py", "test_alice_gcloud.py"}
     names = [
         name for name in os.listdir(root)
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed
     ]
     assert not names, "fold these into scripts/verify.py: " + ", ".join(sorted(names))
+
+
+@check
+def atmem_invariants_gate_context_and_episodes():
+    """Invariants: schema, real probes against fixtures, missing invariant fails, episodes lose to invariants, token caps, loaded every turn."""
+    inv = __import__("hydra_cli.invariants", fromlist=["x"])
+    m = _mem()
+    from hydra_cli.agent import _memory_block
+    marker = "TO" + "DO"
+    gate = os.path.join(REPO, "scripts", "gate.py")
+    real = json.load(open(inv.INVARIANT_FILE, encoding="utf-8"))
+    assert inv.validate(real) == [], inv.validate(real)
+    assert {i["id"] for i in real["invariants"]} >= set(inv.REQUIRED_IDS)
+    assert set(i["probe"] for i in real["invariants"]) == set(inv.PROBES), "every probe is used and every invariant has one"
+
+    # 1. schema: every malformed variant is rejected with a reason
+    def variant(mutate):
+        copy = json.loads(json.dumps(real))
+        mutate(copy)
+        return inv.validate(copy)
+    first = lambda d: d["invariants"][0]
+    for label, mutate in (
+        ("bad id", lambda d: first(d).update(id="INV-GIT-1")),
+        ("unknown area", lambda d: first(d).update(id="INV-NET-001")),
+        ("duplicate id", lambda d: d["invariants"][1].update(id=first(d)["id"])),
+        ("unknown probe", lambda d: first(d).update(probe="rm_rf")),
+        ("reason outside the closed set", lambda d: first(d).update(contradiction_reason="because")),
+        ("dangling supersedes", lambda d: first(d).update(supersedes="INV-GIT-099")),
+        ("bad source", lambda d: first(d).update(source="agent:me")),
+        ("bad regex", lambda d: first(d).update(forbids=["("])),
+        ("missing field", lambda d: first(d).pop("rule")),
+        ("extra field", lambda d: first(d).update(note="x")),
+        ("empty list", lambda d: d.update(invariants=[])),
+        ("cap over worst case", lambda d: d["token_cap"].update(invariants=20)),
+        ("reused retired id", lambda d: d.update(retired=[{"id": first(d)["id"], "rule": "old", "retired_by": "user:x"}])),
+    ):
+        assert variant(mutate), f"schema accepted: {label}"
+    assert not variant(lambda d: (d.update(retired=[{"id": "INV-GIT-050", "rule": "old", "retired_by": "user:x"}]), first(d).update(supersedes="INV-GIT-050"))), "valid supersedes link rejected"
+
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": os.path.join(tmp, "hh")}):
+        def fixture(name):
+            repo = _atmem_repo(tmp, name)
+            _git(repo, "switch", "-q", "-c", "feat/probe")
+            os.makedirs(os.path.join(repo, "hydra_cli"))
+            open(os.path.join(repo, "hydra_cli", "ok.py"), "w").write("def ok():\n    return 1\n")
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "-q", "-m", "code")
+            m.install(repo, gate)
+            return repo
+
+        def stage_file(repo, rel, text):
+            os.makedirs(os.path.dirname(os.path.join(repo, rel)) or repo, exist_ok=True)
+            open(os.path.join(repo, rel), "w").write(text)
+            _git(repo, "add", rel)
+
+        def uninstall(repo):
+            m.uninstall(repo)
+
+        def claim(repo):
+            m.append("fact", os.path.basename(repo), "this repo has no github remote", **{"class": "note"}, source="agent:x")
+
+        breakers = {
+            "push_main_refused": (uninstall, None),
+            "push_force_refused": (uninstall, None),
+            "remote_claims_probed": (claim, None),
+            "progen_lint_enforced": (lambda repo: None, {"HYDRA_PROGEN": os.path.join(tmp, "no-such-progen")}),
+            "no_todo_markers": (lambda repo: stage_file(repo, "hydra_cli/x.py", f"# {marker} finish this\n"), None),
+            "no_move_stubs": (lambda repo: stage_file(repo, "hydra_cli/old.py", "# moved to hydra_cli/new.py\n"), None),
+        }
+        assert set(breakers) == set(inv.PROBES), "every probe needs a negative fixture"
+        try:
+            m.progen_path()
+            progen_here = True
+        except m.GateError:
+            progen_here = False
+
+        # 2. each probe passes on a clean fixture and fails on its own breaker
+        for index, name in enumerate(inv.PROBES):
+            clean = fixture(f"clean{index}")
+            ok, detail = inv.run_probe(name, clean)
+            if name == "progen_lint_enforced" and not progen_here:
+                assert not ok, "missing progen must fail closed"
+            else:
+                assert ok, f"{name} failed on a clean fixture: {detail}"
+            broken = fixture(f"broken{index}")
+            fix, env = breakers[name]
+            with isolated(env=env):
+                fix(broken)
+                ok, detail = inv.run_probe(name, broken)
+            assert not ok, f"{name} passed on a violating fixture"
+        clean = fixture("whole")
+        expected = [] if progen_here else [p for p in inv.check_gate(clean) if p.startswith("INV-DOC-001")]
+        assert (inv.check_gate(clean) == expected), inv.check_gate(clean)
+        assert any("INV-CODE-001" in p for p in (stage_file(clean, "hydra_cli/y.py", f"x = 1  # {marker}\n"), inv.check_gate(clean))[1])
+
+        # 3. a missing invariant fails the gate, so do an unreadable and a broken file
+        trimmed = json.loads(json.dumps(real))
+        trimmed["invariants"] = [i for i in trimmed["invariants"] if i["id"] != "INV-GIT-001"]
+        for label, body in (("trimmed", json.dumps(trimmed)), ("empty", ""), ("not json", "{")):
+            path = os.path.join(tmp, f"{label}.json")
+            open(path, "w").write(body)
+            problems = inv.check_gate(clean, path=path)
+            assert problems, f"{label} file passed the gate"
+        assert any("INV-GIT-001 : required invariant is missing" in p for p in inv.check_gate(clean, path=os.path.join(tmp, "trimmed.json")))
+        assert inv.check_gate(clean, path=os.path.join(tmp, "absent.json"))
+        assert "BROKEN" in inv.build_context(clean, path=os.path.join(tmp, "empty.json")), "a broken invariant file must be loud in the context"
+
+        # 4. episodes lose to invariants and to live probes, and nothing is edited, only superseded
+        repo = fixture("episodes")
+        name = os.path.basename(repo)
+        remote = m._probe_git_remote(repo)[0]
+        assert remote
+        stale = m.append("fact", name, "no github remote", **{"class": "state"}, source="agent:old", probe={"name": "git_remote", "repo": repo, "expect": "empty"})
+        forbidden = m.append("fact", "global", "pushing directly to main is fine", **{"class": "preference"}, source="user:t1")
+        unprobed = m.append("fact", name, "no github remote here", **{"class": "note"}, source="agent:old")
+        retired = m.append("fact", name, "retired build note zzz", **{"class": "note"}, source="agent:old")
+        m.append("supersede", name, "replaced", target=retired["id"], reason="superseded")
+        kept = m.append("fact", name, "build uses setup.py", **{"class": "note"}, source="agent:old")
+        before = len(m.read_ledger())
+        block = inv.build_context(repo)
+        for fact in (stale, forbidden, unprobed, retired):
+            assert f"state : {fact['body']}" not in block and f"note : {fact['body']}" not in block and f"preference : {fact['body']}" not in block, f"{fact['id']} injected as current"
+        assert "zzz" not in block and "pushing directly to main is fine" not in block
+        assert f"memory said no github remote; live check says {remote}" in block, "live observation must be shown"
+        assert f"note : {kept['body']}" in block and "UNVERIFIED" in block
+        entries = m.read_ledger()
+        assert len(entries) > before and m.chain_problems(entries) == []
+        reasons = {e["target"]: e["reason"] for e in entries if e["kind"] == "supersede"}
+        assert reasons[stale["id"]] == "stale_probe_failed" and reasons[forbidden["id"]] == "contradicted_by_user" and reasons[unprobed["id"]] == "contradicted_by_user"
+        assert set(reasons.values()) <= set(m.REASONS)
+        assert [e for e in entries if e["id"] == stale["id"]][0]["body"] == "no github remote", "history must stay readable"
+        assert stale["id"] not in {f["id"] for f in m.live_facts()}
+
+        # 5. token caps: a flood of notes cannot crowd out the invariants
+        caps = real["token_cap"]
+        for n in range(300):
+            m.append("fact", name, f"flood note {n} " + "lorem ipsum dolor " * 20, **{"class": "note"}, source="agent:flood")
+        episodes_raw = m.preturn_block(repo)
+        assert inv.estimate_tokens(episodes_raw) > caps["episodes"], "the flood must be big enough to matter"
+        flooded = inv.build_context(repo)
+        head, _, tail = flooded.partition("\n\n")
+        assert inv.estimate_tokens(head) <= caps["invariants"], inv.estimate_tokens(head)
+        assert inv.estimate_tokens(tail) <= caps["episodes"], inv.estimate_tokens(tail)
+        assert "episodes : older lines archived" in tail and "scripts/gate.py log" in tail
+        assert tail.splitlines()[0].startswith("MEMORY (verified at turn start"), "episode header and repo status must survive trimming"
+        assert all(i["id"] in head for i in real["invariants"]), "invariants are never trimmed"
+
+        # 6. the invariant set is in the block the agent loop builds, on every turn, even after the ledger grows
+        for turn in range(3):
+            built = _memory_block(repo)
+            assert all(f"{i['id']} : {i['rule']}" in built for i in real["invariants"]), f"turn {turn} lost an invariant"
+            assert built.index("INVARIANTS") < built.index("MEMORY (verified")
+            m.append("fact", name, f"turn {turn} note", **{"class": "note"}, source="agent:loop")
+        broken = fixture("violating")
+        m.uninstall(broken)
+        shown = inv.build_context(broken)
+        assert "INV-GIT-001 : never push to main" in shown and "push_main_refused VIOLATED" in shown, "a violated invariant stays loaded and is flagged"
+        out = subprocess.run([sys.executable, "-m", "hydra_cli.invariants", "check", broken], cwd=REPO, capture_output=True, text=True, env={**os.environ, "HYDRA_HOME": os.path.join(tmp, "hh")})
+        assert out.returncode == 1 and "INV-GIT-001 : violated" in out.stdout, out.stdout + out.stderr
+        out = subprocess.run([sys.executable, "-m", "hydra_cli.invariants", "check", fixture("final")], cwd=REPO, capture_output=True, text=True, env={**os.environ, "HYDRA_HOME": os.path.join(tmp, "hh")})
+        assert out.returncode == (0 if progen_here else 1), out.stdout + out.stderr
 
 
 def main() -> int:
