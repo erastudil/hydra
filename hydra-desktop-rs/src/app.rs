@@ -658,6 +658,7 @@ impl HydraApp {
             let active = self.m.nav == *key;
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 35.5), Sense::click());
             let hover = resp.hovered();
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, *label));
             let rect = rect.translate(vec2(if hover && !active { 3.0 } else { 0.0 }, 0.0));
             if active {
                 ui.painter().rect_filled(rect, cr(12), ACCENT_DIM);
@@ -1253,6 +1254,7 @@ impl HydraApp {
                     let text = if wrapped { label.replacen(' ', "\n", 1) } else { label.to_string() };
                     let h: f32 = if wrapped { 17.0 * 2.0 + 16.0 } else { 17.0 + 16.0 };
                     let (rect, resp) = ui.allocate_exact_size(vec2(cell, h.max(33.0)), Sense::click());
+                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, *label));
                     let hover = resp.hovered();
                     if active {
                         widgets::shadow(ui, rect, 10, SHADOW_DRAWER_TAB_GLOW);
@@ -1286,6 +1288,7 @@ impl HydraApp {
                         }
                     }
                     let (rect, resp) = ui.allocate_exact_size(vec2((width - 17.0 - 8.0) / 3.0 - 4.0, 26.0), Sense::click());
+                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, text.clone()));
                     if active {
                         ui.painter().rect_filled(rect, cr(10), ACCENT_DIM);
                     } else if resp.hovered() {

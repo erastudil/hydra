@@ -83,6 +83,8 @@ pub fn button(ui: &mut Ui, text: &str, kind: Kind, size: f32, pad: (f32, f32), w
     let pos = pos2(rect.center().x, rect.center().y - galley.size().y / 2.0);
     ui.painter().galley(pos, galley, tcolor);
     let _ = (Align2::CENTER_CENTER, tcolor);
+    let enabled = ui.is_enabled();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, text));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

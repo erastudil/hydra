@@ -66,3 +66,108 @@ fn shift_enter_inserts_a_newline_and_enter_sends() {
     h.run();
     assert_eq!(user_messages(app(&mut h)), 1, "Enter sends");
 }
+
+fn say(h: &mut Harness<'static, HydraApp>, text: &str) {
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).click();
+    h.run();
+    h.event(egui::Event::Text(text.into()));
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run_steps(4);
+}
+
+fn wait(h: &mut Harness<'static, HydraApp>, secs: u64, mut cond: impl FnMut(&mut HydraApp) -> bool) -> bool {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < end {
+        h.step();
+        if cond(app(h)) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    false
+}
+
+#[test]
+fn a_new_thread_asks_before_tools_and_the_approval_modal_and_tab_appear() {
+    let mut h = harness("approve");
+    settle(&mut h);
+    assert_eq!(app(&mut h).model().sessions[0].permission, "manual");
+    h.get_by_label_contains("Permissions: Ask every time");
+    wait(&mut h, 10, |a| a.model().agent_ready);
+    say(&mut h, "ASK please");
+    assert!(wait(&mut h, 10, |a| !a.model().approvals.is_empty()), "approval request arrives");
+    h.run_steps(3);
+    h.get_by_label_contains("APPROVAL REQUIRED");
+    app(&mut h).model_mut().drawer_tab = "approvals";
+    h.run_steps(3);
+    h.get_by_label_contains("Approvals (1)");
+}
+
+#[test]
+fn each_mode_changes_the_centre_pane() {
+    let mut h = harness("modes");
+    settle(&mut h);
+    for (nav, title) in [("agent", "AGENT REACT LOOP"), ("swarm", "3-HEADED SWARM"), ("computer", "COMPUTER USE"), ("terminal", "TERMINAL SANDBOX")] {
+        app(&mut h).model_mut().set_nav(nav);
+        h.run_steps(3);
+        h.get_by_label_contains(title);
+    }
+    app(&mut h).model_mut().set_nav("chat");
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("TERMINAL SANDBOX").is_none());
+}
+
+#[test]
+fn settings_opens_with_ctrl_comma_and_saves_a_key_without_echoing_it() {
+    let home = std::env::temp_dir().join(format!("hydra-ui-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::env::set_var("HYDRA_HOME", &home);
+    let mut h = harness("settings");
+    settle(&mut h);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
+    h.run_steps(3);
+    h.get_by_label_contains("SETTINGS: MODEL ACCESS");
+    h.get_by_label_contains("OpenRouter key");
+    assert!(h.get_all_by_role(egui::accesskit::Role::PasswordInput).count() >= 1, "secret fields are masked");
+    h.get_all_by_role(egui::accesskit::Role::PasswordInput).next().unwrap().click();
+    h.run();
+    h.event(egui::Event::Text("sk-test-123456789".into()));
+    h.run();
+    h.get_by_label("Save").click();
+    h.run_steps(4);
+    let text = std::fs::read_to_string(home.join(".env")).expect("env file written");
+    assert!(text.contains("OPENROUTER_API_KEY=sk-test-123456789"), "{text}");
+    assert!(h.query_by_label_contains("sk-test-123456789").is_none(), "the key is not displayed back");
+    std::env::remove_var("HYDRA_HOME");
+}
+
+#[test]
+fn long_messages_collapse_and_the_window_stays_fast_with_thousands_of_messages() {
+    let mut h = harness("long");
+    settle(&mut h);
+    {
+        let m = app(&mut h).model_mut();
+        let big: String = (0..5000).map(|i| format!("line {i}\n")).collect();
+        for i in 0..3200 {
+            m.sessions[0].messages.push(Msg { user: i % 2 == 0, header: "X".into(), text: format!("message number {i}"), actions: vec![] });
+        }
+        m.sessions[0].messages.push(Msg { user: false, header: "X".into(), text: big, actions: vec![] });
+    }
+    h.run_steps(12);
+    h.get_by_label_contains("Show 4987 more lines");
+    // frame time with 3,200 messages stays close to an empty thread's (virtualized), D06
+    let t = std::time::Instant::now();
+    for _ in 0..10 {
+        h.step();
+    }
+    let per = t.elapsed().as_millis() / 10;
+    assert!(per < 120, "{per} ms per frame with 3,200 messages (debug build)");
+}
+
+#[test]
+fn diff_rows_carry_line_numbers_and_files_collapse() {
+    let rows = hydra_desktop::app::parse_diff("--- a/x\n+++ b/x\n@@ -3,2 +3,3 @@\n keep\n-old\n+new\n+added\n");
+    let shape: Vec<(u8, Option<u32>, Option<u32>)> = rows.iter().map(|r| (r.kind, r.old, r.new)).collect();
+    assert_eq!(shape, vec![(b'@', None, None), (b' ', Some(3), Some(3)), (b'-', Some(4), None), (b'+', None, Some(4)), (b'+', None, Some(5))]);
+}
