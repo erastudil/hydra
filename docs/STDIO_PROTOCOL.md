@@ -93,7 +93,7 @@ shutdown : finish cleanly. a running turn is cancelled and awaited, then the pro
 
 checkpoints : list the checkpoints of a thread, newest first. fields id, thread. reply `checkpoint_list`.
 
-rewind : put the project files back to a checkpoint. fields id, thread, checkpoint. code only, the conversation is not rewound. the thread must not be running a turn, else `error` code busy. an unknown checkpoint or thread gets `error` code bad_request. before touching anything the adapter snapshots the current state, so a rewind can be undone by rewinding to the backup id in the reply. reply `rewind_result`.
+rewind : put the project files back to a checkpoint. fields id, thread, checkpoint. the thread's conversation goes back too, to what it was when the checkpoint was taken. the thread must not be running a turn, else `error` code busy. an unknown checkpoint or thread gets `error` code bad_request. before touching anything the adapter snapshots the current state, so a rewind can be undone by rewinding to the backup id in the reply. reply `rewind_result`.
 
 tasks : list the background tasks of this agent process. field id. reply `task_list`.
 
@@ -130,11 +130,11 @@ tool_start : fields turn, call, tool, arguments. arguments is the parsed object,
 
 tool_result : fields turn, call, tool, is_error, output, truncated. output is cut at 4000 characters and truncated says so. always follows its `tool_start`.
 
-checkpoint : fields turn, thread, ok, id, reason. sent once per turn before anything else of that turn, unless the turn set checkpoint false. id is the checkpoint id, the state of the project just before the turn. ok false means the snapshot failed, for example git is missing, id is null, reason says why and the turn runs anyway.
+checkpoint : fields turn, thread, ok, id, reason, turns. turns is the number of stored conversation turns at the checkpoint, absent when ok is false. sent once per turn before anything else of that turn, unless the turn set checkpoint false. id is the checkpoint id, the state of the project just before the turn. ok false means the snapshot failed, for example git is missing, id is null, reason says why and the turn runs anyway.
 
-checkpoint_list : fields id, thread, checkpoints. each has id, turn, time in epoch seconds.
+checkpoint_list : fields id, thread, checkpoints. each has id, turn, time in epoch seconds, and turns, the number of stored conversation turns at that checkpoint or null when it kept none.
 
-rewind_result : fields id, thread, checkpoint, backup, restored, removed. restored lists files written back, removed lists files deleted because the checkpoint did not have them. paths are relative to the project, in sorted order.
+rewind_result : fields id, thread, checkpoint, backup, restored, removed, conversation, turns. conversation is true when the conversation was put back, and turns is its length after the rewind. both are false and null for a checkpoint older than this feature. restored lists files written back, removed lists files deleted because the checkpoint did not have them. paths are relative to the project, in sorted order.
 
 auto_decision : fields turn, tool, decision, reason, and rule when a saved rule settled the call. decision is allow or skip. sent instead of an `approval_request` when the permission mode or a saved rule settled the call. comes before the matching `tool_start`.
 
@@ -224,6 +224,8 @@ approvals : pending approvals die with the child. their ids mean nothing to the 
 ## checkpoints
 
 store : a bare git repository under ~/.hydra/shadow, one per project directory, using the project as work tree. the project's own repository, branches, stashes and files are never written. the project's .gitignore rules apply, so ignored files are neither saved nor restored. .git and .hydra directories are always skipped. git must be on the path, else every checkpoint reports ok false.
+
+conversation : each checkpoint also keeps a copy of the thread's ledger.db under ~/.hydra/sessions/<thread>/checkpoints/<id>.db, made with the sqlite backup API. rewind copies it back the same way. the backup checkpoint keeps the conversation as it was before the rewind, so rewinding to the backup undoes both files and conversation. history and the next turn read the rewound conversation.
 
 limits : a rewind restores and removes files only. it does not undo commands run outside the project directory and it does not rewind the conversation ledger.
 

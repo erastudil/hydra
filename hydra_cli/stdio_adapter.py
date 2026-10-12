@@ -291,7 +291,8 @@ class Adapter:
                 made = self._git(cwd, "commit", "--quiet", "--allow-empty", "-m", f"hydra checkpoint thread={thread} {label}")
                 if made.returncode:
                     return {"ok": False, "id": None, "reason": made.stderr.decode("utf-8", "replace").strip()[:300]}
-                return {"ok": True, "id": self._git(cwd, "rev-parse", "HEAD").stdout.decode().strip(), "reason": None}
+                sha = self._git(cwd, "rev-parse", "HEAD").stdout.decode().strip()
+            return {"ok": True, "id": sha, "reason": None, "turns": _save_conversation(thread, sha)}
         except Exception as exc:  # git missing or unusable: the turn still runs, the app is told
             return {"ok": False, "id": None, "reason": f"{type(exc).__name__}: {exc}"[:300]}
 
@@ -307,7 +308,8 @@ class Adapter:
             sha, when, subject = (line.split("\x00") + ["", "", ""])[:3]
             if not sha or "turn=" not in subject:
                 continue
-            found.append({"id": sha, "turn": subject.split("turn=", 1)[1], "time": int(when or 0)})
+            found.append({"id": sha, "turn": subject.split("turn=", 1)[1], "time": int(when or 0),
+                          "turns": _conversation_turns(_conversation_copy(thread, sha))})
         self.emit({"type": "checkpoint_list", "id": req, "thread": thread, "checkpoints": found})
 
     def _on_rewind(self, msg: Dict[str, Any]) -> None:
@@ -350,8 +352,9 @@ class Adapter:
                              stdin=("\x00".join(restore) + "\x00").encode("utf-8"))
             if done.returncode:
                 return self.error(f"restore failed: {done.stderr.decode('utf-8', 'replace').strip()[:300]}", "internal", req=req)
+        turns = _restore_conversation(thread, target)
         self.emit({"type": "rewind_result", "id": req, "thread": thread, "checkpoint": target, "backup": backup["id"],
-                   "restored": sorted(restore), "removed": sorted(remove)})
+                   "restored": sorted(restore), "removed": sorted(remove), "conversation": turns is not None, "turns": turns})
 
     # approval rules
 
@@ -725,6 +728,72 @@ def hide_child_consoles() -> bool:
     init._hydra_hidden = True  # type: ignore[attr-defined]
     subprocess.Popen.__init__ = init  # type: ignore[method-assign]
     return True
+
+
+def _ledger_file(thread: str) -> str:
+    from pathlib import Path
+
+    return str(Path.home() / ".hydra" / "sessions" / thread / "ledger.db")
+
+
+def _conversation_copy(thread: str, sha: str) -> str:
+    from pathlib import Path
+
+    return str(Path.home() / ".hydra" / "sessions" / thread / "checkpoints" / f"{sha}.db")
+
+
+def _conversation_turns(path: str) -> Optional[int]:
+    import sqlite3
+
+    if not os.path.isfile(path):
+        return None
+    db = sqlite3.connect(path)
+    try:
+        return int(db.execute("SELECT COUNT(*) FROM turns").fetchone()[0])
+    except sqlite3.Error:
+        return 0
+    finally:
+        db.close()
+
+
+def _copy_sqlite(source: str, target: str) -> None:
+    """Copy one sqlite file onto another through the backup API, so the target is never half written."""
+    import sqlite3
+
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    src, dst = sqlite3.connect(source), sqlite3.connect(target)
+    try:
+        src.backup(dst)
+    finally:
+        src.close()
+        dst.close()
+
+
+def _save_conversation(thread: str, sha: str) -> int:
+    """Keep the thread's conversation as it is now under this checkpoint. Returns its turn count."""
+    import sqlite3
+
+    copy = _conversation_copy(thread, sha)
+    ledger = _ledger_file(thread)
+    if os.path.isfile(ledger):
+        _copy_sqlite(ledger, copy)
+    else:
+        os.makedirs(os.path.dirname(copy), exist_ok=True)
+        db = sqlite3.connect(copy)
+        db.execute("CREATE TABLE IF NOT EXISTS turns (id INTEGER PRIMARY KEY, role TEXT, category TEXT,"
+                   " labels TEXT, pinned INTEGER, covers INTEGER, body TEXT)")
+        db.commit()
+        db.close()
+    return _conversation_turns(copy) or 0
+
+
+def _restore_conversation(thread: str, sha: str) -> Optional[int]:
+    """Put the thread's conversation back to what it was at this checkpoint. None when the checkpoint kept none."""
+    copy = _conversation_copy(thread, sha)
+    if not os.path.isfile(copy):
+        return None
+    _copy_sqlite(copy, _ledger_file(thread))
+    return _conversation_turns(copy)
 
 
 def _meta_path(thread: str) -> str:
