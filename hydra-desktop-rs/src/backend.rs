@@ -58,9 +58,38 @@ pub struct Backend {
     next: u64,
 }
 
-pub fn python_command() -> (String, Option<String>) {
-    let py = std::env::var("HYDRA_PYTHON").unwrap_or_else(|_| if cfg!(windows) { "python".into() } else { "python3".into() });
-    (py, std::env::var("HYDRA_REPO").ok())
+/// The checkout that holds `hydra_cli`: HYDRA_REPO, else a parent of the exe or of the working directory.
+pub fn repo_dir() -> Option<String> {
+    if let Ok(r) = std::env::var("HYDRA_REPO") {
+        return Some(r);
+    }
+    let mut starts = vec![];
+    if let Ok(exe) = std::env::current_exe() {
+        starts.push(exe);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        starts.push(cwd);
+    }
+    for start in starts {
+        for dir in start.ancestors().skip(1).take(8) {
+            if dir.join("hydra_cli").join("__init__.py").is_file() {
+                return Some(dir.display().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Interpreters to try, in order, as (program, leading args).
+pub fn python_candidates() -> Vec<(String, Vec<String>)> {
+    if let Ok(p) = std::env::var("HYDRA_PYTHON") {
+        return vec![(p, vec![])];
+    }
+    if cfg!(windows) {
+        vec![("python".into(), vec![]), ("py".into(), vec!["-3".into()])]
+    } else {
+        vec![("python3".into(), vec![]), ("python".into(), vec![])]
+    }
 }
 
 impl Backend {
@@ -71,28 +100,39 @@ impl Backend {
 
     /// Same as `spawn` with extra environment for the child.
     pub fn spawn_with(envs: &[(String, String)], repaint: impl Fn() + Send + 'static) -> Result<Backend, String> {
-        let (py, repo) = python_command();
-        let mut cmd = Command::new(&py);
-        cmd.args(["-m", "hydra_cli", "stdio"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        if let Some(r) = &repo {
-            cmd.current_dir(r);
-            let sep = if cfg!(windows) { ";" } else { ":" };
-            let pp = match std::env::var("PYTHONPATH") {
-                Ok(old) if !old.is_empty() => format!("{r}{sep}{old}"),
-                _ => r.clone(),
-            };
-            cmd.env("PYTHONPATH", pp);
+        let repo = repo_dir();
+        let mut spawned: Option<Child> = None;
+        let mut last_err = String::from("no python interpreter found");
+        for (py, lead) in python_candidates() {
+            let mut cmd = Command::new(&py);
+            cmd.args(&lead).args(["-m", "hydra_cli", "stdio"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+            if let Some(r) = &repo {
+                cmd.current_dir(r);
+                let sep = if cfg!(windows) { ";" } else { ":" };
+                let pp = match std::env::var("PYTHONPATH") {
+                    Ok(old) if !old.is_empty() => format!("{r}{sep}{old}"),
+                    _ => r.clone(),
+                };
+                cmd.env("PYTHONPATH", pp);
+            }
+            cmd.env("PYTHONIOENCODING", "utf-8");
+            for (k, v) in envs {
+                cmd.env(k, v);
+            }
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
+            match cmd.spawn() {
+                Ok(c) => {
+                    spawned = Some(c);
+                    break;
+                }
+                Err(e) => last_err = format!("could not start {py}: {e}"),
+            }
         }
-        cmd.env("PYTHONIOENCODING", "utf-8");
-        for (k, v) in envs {
-            cmd.env(k, v);
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        let mut child = cmd.spawn().map_err(|e| format!("could not start {py}: {e}"))?;
+        let mut child = spawned.ok_or(last_err)?;
         let stdin = Arc::new(Mutex::new(child.stdin.take().ok_or("no stdin")?));
         let stdout = child.stdout.take().ok_or("no stdout")?;
         let (tx, rx): (Sender<Ev>, Receiver<Ev>) = channel();

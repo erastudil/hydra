@@ -22,13 +22,12 @@ def get_desktop_dir() -> str:
 
 
 def native_target(repo_root: str) -> Tuple[str, str]:
-    """Return (target, arguments) for the native app: the built exe when present, else pythonw -m hydra_cli.gui."""
-    exe = os.path.join(repo_root, "dist", "Hydra", "Hydra.exe")
-    if os.path.isfile(exe):
-        return exe, ""
-    py_dir = os.path.dirname(sys.executable)
-    pythonw = os.path.join(py_dir, "pythonw.exe")
-    return (pythonw if os.path.isfile(pythonw) else sys.executable), "-m hydra_cli.gui"
+    """Return (target, arguments) for the native Rust app. The built exe is required; there is no Python fallback."""
+    for sub in (("dist", "Hydra"), ("dist",), ("hydra-desktop-rs", "target", "release"), ("hydra-desktop-rs", "target", "x86_64-pc-windows-gnu", "release")):
+        exe = os.path.join(repo_root, *sub, "Hydra.exe")
+        if os.path.isfile(exe):
+            return exe, ""
+    raise FileNotFoundError("Hydra.exe not built; run scripts/check_rust.sh first")
 
 
 def create_shortcut(

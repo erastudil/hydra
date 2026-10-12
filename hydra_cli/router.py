@@ -192,6 +192,24 @@ def _emit_stream(token_iter) -> bool:
     return writer.write_all(token_iter, trailing_newline=True)
 
 
+def launch_desktop() -> int:
+    """Start the native Rust desktop app (Hydra.exe). It spawns `hydra stdio` itself; no server, no browser."""
+    import subprocess
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    names = ("Hydra.exe", "Hydra")
+    candidates = [os.environ.get("HYDRA_DESKTOP_EXE", "")]
+    for sub in (("dist", "Hydra"), ("dist",), ("hydra-desktop-rs", "target", "release")):
+        candidates += [os.path.join(root, *sub, n) for n in names]
+    exe = next((c for c in candidates if c and os.path.isfile(c)), "")
+    if not exe:
+        print("Native desktop app not built. Run scripts/check_rust.sh (needs a Rust toolchain), then copy "
+              "hydra-desktop-rs/target/release/Hydra.exe to dist/Hydra/Hydra.exe.", file=sys.stderr)
+        return 1
+    subprocess.Popen([exe], cwd=root, env={**os.environ, "HYDRA_REPO": root})
+    return 0
+
+
 def print_setup_guide():
     """Print a comprehensive setup and application/agent integration guide."""
     guide = f"""
@@ -352,8 +370,7 @@ def route_command(argv: List[str]) -> int:
         from hydra_cli.stdio_adapter import main as stdio_main
         return stdio_main(argv[1:])
     if argv and argv[0] in ("desktop", "--desktop"):
-        from hydra_cli.gui.app import main as desktop_main
-        return desktop_main(argv[1:])
+        return launch_desktop()
     if argv and argv[0] in ("alice-loop", "--alice-loop", "alice_loop"):
         from hydra_cli.alice_cloud_loop import main as alice_loop_main
         return alice_loop_main(argv[1:])
