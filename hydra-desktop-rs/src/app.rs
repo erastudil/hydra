@@ -28,7 +28,80 @@ enum Cmd {
     Templates,
     Jobs,
     Settings,
+    Permission(&'static str),
+    Help,
+    Search,
+    EditInstructions,
 }
+
+/// Slash commands typed at the start of the composer. Enter runs the command instead of sending a message.
+pub const SLASH: &[(&str, &str)] = &[
+    ("/new", "New thread"),
+    ("/clear", "Clear this chat"),
+    ("/plan", "Permissions: plan (read only)"),
+    ("/ask", "Permissions: ask every time"),
+    ("/accept", "Permissions: accept edits"),
+    ("/bypass", "Permissions: bypass approvals"),
+    ("/skills", "Pick skills for the next turns"),
+    ("/mcp", "MCP servers of this project"),
+    ("/tasks", "Background tasks"),
+    ("/rules", "Approval rules and checkpoints"),
+    ("/rewind", "Checkpoints: rewind files"),
+    ("/diff", "Diffs of this thread"),
+    ("/agents", "Edit this project's AGENTS.md"),
+    ("/search", "Search every chat"),
+    ("/settings", "Provider keys"),
+    ("/help", "Keyboard shortcuts"),
+];
+
+/// Matching slash commands for the composer text, or none when the text is not a bare command.
+pub fn slash_matches(input: &str) -> Vec<(&'static str, &'static str)> {
+    let t = input.trim_start();
+    if !t.starts_with('/') || t.contains(char::is_whitespace) {
+        return vec![];
+    }
+    SLASH.iter().filter(|(c, _)| c.starts_with(t)).copied().collect()
+}
+
+fn slash_cmd(name: &str) -> Option<Cmd> {
+    Some(match name {
+        "/new" => Cmd::NewSession,
+        "/clear" => Cmd::Clear,
+        "/plan" => Cmd::Permission("plan"),
+        "/ask" => Cmd::Permission("manual"),
+        "/accept" => Cmd::Permission("accept_edits"),
+        "/bypass" => Cmd::Permission("bypass"),
+        "/skills" => Cmd::Tab("skills"),
+        "/mcp" => Cmd::Tab("mcp"),
+        "/tasks" => Cmd::Tab("tasks"),
+        "/rules" | "/rewind" => Cmd::Tab("rules"),
+        "/diff" => Cmd::Tab("diff"),
+        "/agents" => Cmd::EditInstructions,
+        "/search" => Cmd::Search,
+        "/settings" => Cmd::Settings,
+        "/help" => Cmd::Help,
+        _ => return None,
+    })
+}
+
+pub const SHORTCUTS: &[(&str, &str)] = &[
+    ("Enter", "Send (queues while a turn runs)"),
+    ("Shift+Enter", "New line"),
+    ("Ctrl+Enter", "Steer: stop the running turn and send this now"),
+    ("/", "Slash commands at the start of the composer"),
+    ("@", "Attach a file"),
+    ("Ctrl+K", "Command palette"),
+    ("Ctrl+Shift+F", "Search every chat"),
+    ("Ctrl+P", "Find a file"),
+    ("Ctrl+O", "Open a folder"),
+    ("Ctrl+T", "New thread"),
+    ("Ctrl+B", "Toggle the sidebar"),
+    ("Ctrl+S", "Save the open file"),
+    ("Ctrl+,", "Settings"),
+    ("Alt+1 / 2 / 3", "Chat, Agent, Swarm"),
+    ("F1 or Ctrl+/", "This sheet"),
+    ("Esc", "Close a dialog"),
+];
 
 /// Provider-key form state. Inputs start empty: stored values are never shown, only a masked hint.
 pub struct SettingsState {
@@ -140,6 +213,12 @@ fn palette_entries() -> Vec<(&'static str, &'static str, Cmd)> {
         ("Settings: provider keys", "Ctrl+,", Cmd::Settings),
         ("New Session", "Ctrl+T", Cmd::NewSession),
         ("Clear Chat", "", Cmd::Clear),
+        ("Search All Chats", "Ctrl+Shift+F", Cmd::Search),
+        ("Keyboard Shortcuts", "F1", Cmd::Help),
+        ("Edit AGENTS.md (project instructions)", "/agents", Cmd::EditInstructions),
+        ("Open Skills", "/skills", Cmd::Tab("skills")),
+        ("Open MCP Servers", "/mcp", Cmd::Tab("mcp")),
+        ("Open Background Tasks", "/tasks", Cmd::Tab("tasks")),
     ]
 }
 
@@ -192,6 +271,8 @@ pub struct HydraApp {
     probe: Option<Probe>,
     child_died: bool,
     deaths: Vec<f64>,
+    help_open: bool,
+    search: Option<String>,
     skills_asked: bool,
     mcp_asked: bool,
     tasks_asked: bool,
@@ -266,7 +347,7 @@ impl HydraApp {
         Self {
             m,
             be,
-            input: String::new(),
+            input: std::env::var("HYDRA_INPUT").unwrap_or_default(), // screenshot hook: preset composer text
             palette,
             templates_open: false,
             templates_q: String::new(),
@@ -289,7 +370,7 @@ impl HydraApp {
             tex: None,
             last_poll: 0.0,
             shot,
-            focus_input: std::env::var("HYDRA_SHOT").is_err(),
+            focus_input: std::env::var("HYDRA_SHOT").is_err() || std::env::var("HYDRA_INPUT").is_ok(),
             composer_rect: egui::Rect::NOTHING,
             health_rx: { let (tx, rx) = std::sync::mpsc::channel(); std::thread::spawn(move || { let _ = tx.send(health::run()); }); rx },
             checks: vec![],
@@ -303,6 +384,8 @@ impl HydraApp {
             births_seen: false,
             child_died: false,
             deaths: vec![],
+            help_open: std::env::var("HYDRA_OPEN").as_deref() == Ok("help"),
+            search: if std::env::var("HYDRA_OPEN").as_deref() == Ok("search") { Some(std::env::var("HYDRA_SEARCH").unwrap_or_default()) } else { None },
             skills_asked: false,
             mcp_asked: false,
             tasks_asked: false,
@@ -365,6 +448,18 @@ impl HydraApp {
                 }
             }
             Cmd::Settings => self.open_settings(),
+            Cmd::Permission(p) => self.m.set_permission(p),
+            Cmd::Help => self.help_open = true,
+            Cmd::Search => self.search = Some(String::new()),
+            Cmd::EditInstructions => {
+                // the agent reads AGENTS.md from the project (docs/STDIO_PROTOCOL.md, context); create it empty if missing
+                let path = std::path::Path::new(&self.m.project_path()).join("AGENTS.md");
+                if !path.exists() {
+                    let _ = std::fs::write(&path, "# Project instructions for Hydra\n\n");
+                }
+                self.work.open_file("AGENTS.md");
+                self.m.drawer_tab = "files";
+            }
             Cmd::Jobs => {
                 self.jobs_open = true;
                 if let Some(be) = &mut self.be {
@@ -447,6 +542,11 @@ impl HydraApp {
 
     fn send(&mut self) {
         let text = self.input.clone();
+        if let Some(cmd) = slash_cmd(text.trim()) {
+            self.input.clear();
+            self.run(cmd);
+            return;
+        }
         if self.m.active_busy() && !text.trim().is_empty() && !matches!(self.m.nav, "terminal" | "swarm") {
             let sid = self.m.sessions[self.m.active].id;
             self.queue.entry(sid).or_default().push(text.trim().to_string());
@@ -997,13 +1097,17 @@ impl HydraApp {
         ui.spacing_mut().item_spacing.x = 12.0;
         let mut do_send = false;
         let mut do_stop = false;
+        let mut do_steer = false;
         ui.horizontal(|ui| {
             let send_w = 62.0;
             let width = ui.available_width() - send_w - 12.0;
             let id = egui::Id::new("prompt");
             let focused = ui.memory(|m| m.has_focus(id));
             // Enter sends; Shift+Enter (and Alt+Enter) fall through to the text box as a newline
-            if focused && ui.input_mut(|i| !i.modifiers.shift && !i.modifiers.alt && i.consume_key(Modifiers::NONE, Key::Enter)) {
+            if focused && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
+                do_steer = true;
+            }
+            if focused && !self.slash_menu(ui) && ui.input_mut(|i| !i.modifiers.shift && !i.modifiers.alt && i.consume_key(Modifiers::NONE, Key::Enter)) {
                 do_send = true;
             }
             if focused && self.composer_rect.is_positive() {
@@ -1076,6 +1180,10 @@ impl HydraApp {
             if widgets::button(ui, &format!("Context: {}", clabel), Kind::Secondary, 11.0, (10.0, 3.0), None).on_hover_text(format!("{cnote}\nClick to change how earlier turns are carried forward")).clicked() {
                 cycle_ctx = true;
             }
+            if self.m.last_prompt > 0 {
+                let k = self.m.last_prompt as f64 / 1000.0;
+                ui.label(rt(format!("ctx {k:.1}k"), 11.0, if self.m.last_prompt > 100_000 { WARN } else { MUTED })).on_hover_text("Tokens the model read on the last request of this app (prompt plus carried context)");
+            }
             let q = self.queue.get(&self.m.sessions[self.m.active].id).map(|q| q.len()).unwrap_or(0);
             if q > 0 {
                 ui.add(egui::Label::new(rt(format!("{q} queued, sends when this turn ends"), 11.0, ACCENT)).truncate());
@@ -1105,9 +1213,57 @@ impl HydraApp {
                 self.m.stop(be);
             }
         }
+        if do_steer {
+            self.steer();
+        }
         if do_send {
             self.send();
         }
+    }
+
+    /// Ctrl+Enter while a turn runs: stop it and send this text first; when idle it is a normal send.
+    fn steer(&mut self) {
+        let text = self.input.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if !self.m.active_busy() {
+            return self.send();
+        }
+        let sid = self.m.sessions[self.m.active].id;
+        self.queue.entry(sid).or_default().insert(0, text);
+        self.input.clear();
+        if let Some(be) = &mut self.be {
+            self.m.stop(be);
+        }
+        self.toast = Some(("Steering: the running turn was stopped, your message goes next.".into(), f64::NAN));
+    }
+
+    /// Popup of slash commands above the composer. Tab completes the highlighted one. Returns true if it took Enter.
+    fn slash_menu(&mut self, ui: &mut egui::Ui) -> bool {
+        let hits = slash_matches(&self.input);
+        if hits.is_empty() {
+            return false;
+        }
+        let sel = self.mention_sel.min(hits.len() - 1);
+        if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab)) {
+            self.input = hits[sel].0.to_string();
+        }
+        let exact = hits.iter().any(|h| h.0 == self.input.trim());
+        let anchor = self.composer_rect.left_top() - vec2(0.0, 8.0);
+        egui::Area::new(egui::Id::new("slash_menu")).order(egui::Order::Foreground).fixed_pos(anchor - vec2(0.0, 26.0 * hits.len() as f32 + 12.0)).show(ui.ctx(), |ui| {
+            egui::Frame::new().fill(BG2).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(10)).inner_margin(Margin::same(6)).show(ui, |ui| {
+                for (i, (c, d)) in hits.iter().enumerate() {
+                    ui.label(rt(format!("{c}   {d}"), 12.0, if i == sel { ACCENT } else { TEXT2 }));
+                }
+            });
+        });
+        // Enter on a partial command completes it; on a full command the normal send path runs it
+        if !exact && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+            self.input = hits[sel].0.to_string();
+            return true;
+        }
+        false
     }
 
     // ---------------------------------------------------------------- files
@@ -2289,6 +2445,55 @@ impl HydraApp {
             self.rename = if ok || cancel { None } else { Some((idx, name)) };
             return;
         }
+        if self.help_open {
+            let mut close = ctx.input(|i| i.key_pressed(Key::Escape));
+            modal_frame(ctx, "help", 520.0, |ui| {
+                ui.label(rtb("KEYBOARD SHORTCUTS", 13.0, ACCENT));
+                egui::Grid::new("keys").num_columns(2).spacing(vec2(24.0, 8.0)).show(ui, |ui| {
+                    for (k, what) in SHORTCUTS {
+                        ui.label(egui::RichText::new(*k).monospace().size(12.0).color(ACCENT));
+                        ui.label(rt(*what, 12.0, TEXT));
+                        ui.end_row();
+                    }
+                });
+                if widgets::button(ui, "Close", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+                    close = true;
+                }
+            });
+            if close {
+                self.help_open = false;
+            }
+            return;
+        }
+        if let Some(mut q) = self.search.clone() {
+            let mut close = ctx.input(|i| i.key_pressed(Key::Escape));
+            let mut pick: Option<usize> = None;
+            let hits = self.m.search(&q, 50);
+            modal_frame(ctx, "search", 640.0, |ui| {
+                ui.label(rtb("SEARCH ALL CHATS", 13.0, ACCENT));
+                ui.add(egui::TextEdit::singleline(&mut q).hint_text(rt("Words to find in any thread...", 13.0, MUTED)).desired_width(f32::INFINITY)).request_focus();
+                if !q.trim().is_empty() && hits.is_empty() {
+                    ui.label(rt("No message matches.", 12.0, MUTED));
+                }
+                ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+                    for h in &hits {
+                        let resp = ui.add(egui::Label::new(rt(format!("{}  ·  {}", h.thread_name, h.snippet), 12.0, TEXT)).sense(Sense::click()));
+                        if resp.clicked() {
+                            pick = Some(h.session);
+                        }
+                    }
+                });
+                if ui.input(|i| i.key_pressed(Key::Enter)) {
+                    pick = hits.first().map(|h| h.session);
+                }
+            });
+            if let Some(i) = pick {
+                self.m.select(i);
+                close = true;
+            }
+            self.search = if close { None } else { Some(q) };
+            return;
+        }
         if let Some((q, sel)) = self.palette.clone() {
             let (mut q, mut sel) = (q, sel);
             let entries: Vec<_> = palette_entries().into_iter().filter(|e| q.is_empty() || e.0.to_lowercase().contains(&q.to_lowercase())).collect();
@@ -2451,6 +2656,12 @@ impl HydraApp {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
             self.palette = if self.palette.is_some() { None } else { Some((String::new(), 0)) };
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::F)) {
+            self.search = Some(String::new());
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F1) || i.consume_key(Modifiers::COMMAND, Key::Slash)) {
+            self.help_open = !self.help_open;
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma)) {
             self.open_settings();
@@ -2664,6 +2875,14 @@ impl HydraApp {
 
     pub fn model_mut(&mut self) -> &mut Model {
         &mut self.m
+    }
+
+    pub fn toast_text(&self) -> Option<&str> {
+        self.toast.as_ref().map(|t| t.0.as_str())
+    }
+
+    pub fn queued(&self, sid: u32) -> Vec<String> {
+        self.queue.get(&sid).cloned().unwrap_or_default()
     }
 
     pub fn input_text(&self) -> &str {

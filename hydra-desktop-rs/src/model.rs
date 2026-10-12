@@ -136,6 +136,14 @@ pub struct DiffItem {
 }
 
 #[derive(Clone, Debug)]
+pub struct SearchHit {
+    pub session: usize,
+    pub message: usize,
+    pub thread_name: String,
+    pub snippet: String,
+}
+
+#[derive(Clone, Debug)]
 pub struct Approval {
     pub sid: u32,
     pub turn: String,
@@ -215,6 +223,8 @@ pub struct Model {
     pub mcp: Option<(Option<String>, Vec<Value>)>,
     pub caps: Vec<String>,
     state_was_bad: bool,
+    /// Prompt tokens of the last provider request, for the context meter.
+    pub last_prompt: u64,
     pub notice: String,
     pub turn_counter: u64,
     pub cwd: String,
@@ -300,6 +310,7 @@ impl Model {
             mcp: None,
             caps: vec![],
             state_was_bad: false,
+            last_prompt: 0,
             cp_pending: HashMap::new(),
             sent: HashMap::new(),
             rules: (String::new(), vec![]),
@@ -715,10 +726,18 @@ impl Model {
     fn touch(&mut self, sid: u32, background: bool) {
         let active_id = self.sessions[self.active].id;
         let t = now();
+        let mut finished = None;
         if let Some(s) = self.session_mut(sid) {
             s.updated = t;
             if background && sid != active_id {
                 s.unread = true;
+                finished = Some(s.name.clone());
+            }
+        }
+        // a thread you are not looking at finished: say so (toast), the sidebar dot stays until you open it
+        if let Some(name) = finished {
+            if self.notice.is_empty() {
+                self.notice = format!("\u{201c}{name}\u{201d} finished");
             }
         }
     }
@@ -751,6 +770,31 @@ impl Model {
     pub fn stop_task(&mut self, be: &mut Backend, task: &str) {
         let id = be.task_stop(task);
         self.act(Pending::TaskStop, id);
+    }
+
+    /// Case-insensitive search over every thread's messages, newest thread first.
+    pub fn search(&self, q: &str, limit: usize) -> Vec<SearchHit> {
+        let q = q.trim().to_lowercase();
+        if q.is_empty() {
+            return vec![];
+        }
+        let mut order: Vec<usize> = (0..self.sessions.len()).filter(|i| !self.sessions[*i].archived).collect();
+        order.sort_by_key(|i| std::cmp::Reverse(self.sessions[*i].updated));
+        let mut out = vec![];
+        for i in order {
+            for (mi, m) in self.sessions[i].messages.iter().enumerate() {
+                let low = m.text.to_lowercase();
+                if let Some(at) = low.find(&q) {
+                    let start = low[..at].char_indices().rev().nth(40).map(|c| c.0).unwrap_or(0);
+                    let snippet: String = m.text.get(start..).unwrap_or(&m.text).chars().take(120).collect::<String>().replace('\n', " ");
+                    out.push(SearchHit { session: i, message: mi, thread_name: self.sessions[i].name.clone(), snippet });
+                    if out.len() >= limit {
+                        return out;
+                    }
+                }
+            }
+        }
+        out
     }
 
     pub fn toggle_skill(&mut self, id: &str) {
@@ -1133,6 +1177,7 @@ impl Model {
             }
             Ev::Usage { prompt, completion, cost, .. } => {
                 self.tokens += prompt + completion;
+                self.last_prompt = prompt;
                 self.cost += cost;
                 self.save();
             }
@@ -1419,6 +1464,22 @@ mod tests {
         assert_eq!(rec.sessions[0].messages.last().unwrap().text, "alpha beta");
         assert!(serde_json::from_str::<Value>(&std::fs::read_to_string(&path).unwrap()).is_ok(), "state.json rewritten after recovery");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_background_thread_finishing_raises_a_toast_and_the_meter_reads_usage() {
+        let mut m = Model::new(None, "/tmp".into());
+        m.new_session();
+        m.sessions[1].name = "Build".into();
+        running_thread(&mut m, 1, "t9");
+        m.select(0);
+        m.apply(Ev::Usage { model: "x".into(), prompt: 12_345, completion: 10, cost: 0.0 });
+        assert_eq!(m.last_prompt, 12_345);
+        m.apply(Ev::Done { turn: "t9".into(), text: "ok".into(), ok: true, cancelled: false });
+        assert_eq!(m.notice, "\u{201c}Build\u{201d} finished");
+        assert!(m.sessions[1].unread);
+        let hits = m.search("OK", 10);
+        assert_eq!((hits.len(), hits[0].session), (1, 1));
     }
 
     fn running_thread(m: &mut Model, idx: usize, turn: &str) {

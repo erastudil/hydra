@@ -28,6 +28,10 @@ shot narrow_900 900x700 60
 shot rules_tab 1280x800 100000 HYDRA_SHOT_SECS=10 HYDRA_TAB=rules HYDRA_DEMO_PROMPT="WRITE the file" HYDRA_PERMISSION=accept_edits
 
 shot tasks_running 1280x800 100000 HYDRA_SHOT_SECS=12 HYDRA_TAB=tasks HYDRA_PERMISSION=bypass HYDRA_DEMO_PROMPT="BGTASK start a server"
+shot shortcuts_sheet 1280x800 40 HYDRA_OPEN=help
+shot search_all_chats 1280x800 40 HYDRA_OPEN=search HYDRA_SEARCH=hello
+shot slash_menu 1280x800 40 HYDRA_INPUT=/s
+shot retry_notice 1280x800 100000 HYDRA_SHOT_SECS=10 HYDRA_DEMO_PROMPT="E500 then give up"
 # every drawer tab at both release-bar sizes (pinned via HYDRA_TAB; a diff never yanks the drawer)
 for sz in 1280x800 900x700; do
   for t in screen term diff agent files git approvals rules skills mcp tasks; do

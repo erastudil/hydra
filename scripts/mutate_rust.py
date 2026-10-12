@@ -30,6 +30,10 @@ MUTATIONS = [
     ("diff yanks a pinned tab", M, "if self.sessions[self.active].id == sid && !self.tab_pinned {", "if self.sessions[self.active].id == sid {", ["--test", "stdio_integration", "pinned"]),
     ("mcp toggle ignored", "src/backend.rs", "\"server\": server, \"enabled\": enabled}", "\"server\": server, \"enabled\": true}", ["--test", "stdio_integration", "mcp_status"]),
     ("token journal off", M, "                    self.journal(sid, &text);\n", "", ["--lib", "journal"]),
+    ("slash command sent as a message", "src/app.rs", "        if let Some(cmd) = slash_cmd(text.trim()) {", "        if let Some(cmd) = None::<Cmd>.filter(|_| text.is_empty()) {", ["--test", "ui", "slash"]),
+    ("steer only queues", "src/app.rs", "        if let Some(be) = &mut self.be {\n            self.m.stop(be);\n        }\n        self.toast = Some((\"Steering", "        if let Some(be) = None::<&mut Backend> {\n            self.m.stop(be);\n        }\n        self.toast = Some((\"Steering", ["--test", "ui", "steer"]),
+    ("background finish silent", M, "            if self.notice.is_empty() {\n                self.notice = format!(", "            if false {\n                self.notice = format!(", ["--lib", "background_thread"]),
+    ("search ignores case", M, "        let q = q.trim().to_lowercase();", "        let q = q.trim().to_string();", ["--test", "ui", "search"]),
     ("unchanged fields resent", M, "if last.as_ref().map(|l| l[i] == now_meta[i]).unwrap_or(false) { None }", "if false { None }", ["--test", "concurrency"]),
 ]
 

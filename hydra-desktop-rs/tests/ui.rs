@@ -204,3 +204,100 @@ fn skills_picker_ticks_a_skill_and_the_next_turn_carries_it() {
     say(&mut h, "hello");
     assert!(wait(&mut h, 10, |a| a.model().sessions[0].messages.last().map(|m| m.actions.iter().any(|x| x == "skills: code")).unwrap_or(false)), "turn carried the skill");
 }
+
+fn type_and_enter(h: &mut Harness<'static, HydraApp>, text: &str) {
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).click();
+    h.run();
+    h.event(egui::Event::Text(text.into()));
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+}
+
+#[test]
+fn slash_commands_run_instead_of_sending_and_tab_completes() {
+    let mut h = harness("slash");
+    settle(&mut h);
+    type_and_enter(&mut h, "/plan");
+    assert_eq!(app(&mut h).model().sessions[0].permission, "plan");
+    assert_eq!(user_messages(app(&mut h)), 0, "a slash command is not a message");
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).click();
+    h.run();
+    h.event(egui::Event::Text("/ta".into()));
+    h.run();
+    h.get_by_label_contains("/tasks");
+    h.key_press(egui::Key::Tab);
+    h.run();
+    assert_eq!(app(&mut h).input_text(), "/tasks");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(app(&mut h).model().drawer_tab, "tasks");
+    assert_eq!(app(&mut h).input_text(), "");
+    // a partial command completes on Enter rather than being sent
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).click();
+    h.run();
+    h.event(egui::Event::Text("/bypa".into()));
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    assert_eq!(app(&mut h).input_text(), "/bypass");
+    assert_eq!(user_messages(app(&mut h)), 0);
+}
+
+#[test]
+fn ctrl_enter_steers_a_running_turn() {
+    let mut h = harness("steer");
+    settle(&mut h);
+    say(&mut h, "SLOW count for a while");
+    assert!(app(&mut h).model().active_busy());
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).click();
+    h.run_steps(2);
+    h.event(egui::Event::Text("do this instead".into()));
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Enter);
+    h.run_steps(2);
+    assert!(app(&mut h).toast_text().unwrap_or("").starts_with("Steering"));
+    // SLOW runs 4 s; the steer message must go out well before that, so the first turn was really stopped
+    assert!(wait(&mut h, 2, |a| a.model().sessions[0].messages.iter().any(|m| m.user && m.text == "do this instead")), "the steer message is sent right after the stop");
+    let msgs = &app(&mut h).model().sessions[0].messages;
+    let first = msgs.iter().position(|m| m.text == "SLOW count for a while").unwrap();
+    assert!(msgs[first + 1].actions.iter().any(|a| a.contains("cancel")), "the first turn shows it was cancelled: {:?}", msgs[first + 1].actions);
+}
+
+#[test]
+fn f1_shows_the_shortcuts_sheet_and_ctrl_shift_f_searches_every_chat() {
+    let mut h = harness("help");
+    settle(&mut h);
+    h.key_press(egui::Key::F1);
+    h.run();
+    h.get_by_label("Ctrl+Shift+F");
+    h.get_by_label("Steer: stop the running turn and send this now");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    {
+        let m = app(&mut h).model_mut();
+        m.sessions[0].messages.push(Msg { user: true, header: String::new(), text: "the zebra parser is broken".into(), actions: vec![] });
+        m.new_session();
+    }
+    h.run();
+    assert_eq!(app(&mut h).model().active, 1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::F);
+    h.run();
+    h.event(egui::Event::Text("ZEBRA".into()));
+    h.run_steps(2);
+    h.get_by_label_contains("zebra parser").click();
+    h.run_steps(2);
+    assert_eq!(app(&mut h).model().active, 0, "clicking a hit opens its thread");
+}
+
+#[test]
+fn slash_agents_creates_and_opens_the_instruction_file() {
+    let mut h = harness("agentsmd");
+    settle(&mut h);
+    let root = app(&mut h).model().project_path();
+    let _ = std::fs::remove_file(std::path::Path::new(&root).join("AGENTS.md"));
+    type_and_enter(&mut h, "/agents");
+    assert!(std::path::Path::new(&root).join("AGENTS.md").is_file());
+    assert_eq!(app(&mut h).model().drawer_tab, "files");
+    h.get_by_label_contains("AGENTS.md");
+}
