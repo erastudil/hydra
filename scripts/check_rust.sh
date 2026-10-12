@@ -10,4 +10,10 @@ if rustup target list --installed 2>/dev/null | grep -q x86_64-pc-windows-gnu; t
   test -f target/x86_64-pc-windows-gnu/release/Hydra.exe
   echo "windows exe: $(du -h target/x86_64-pc-windows-gnu/release/Hydra.exe | cut -f1)"
 fi
+cd ..
+python3 scripts/check_no_console.py --src hydra-desktop-rs/src --runtime "$PWD/hydra-desktop-rs/target/release/Hydra" \
+  $( [ -f hydra-desktop-rs/target/x86_64-pc-windows-gnu/release/Hydra.exe ] && echo --exe hydra-desktop-rs/target/x86_64-pc-windows-gnu/release/Hydra.exe )
+scripts/package_windows.sh >/dev/null
+python3 scripts/check_bundle.py dist/Hydra
+scripts/mutate_checks.sh
 echo "check_rust: ok"

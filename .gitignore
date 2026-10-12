@@ -57,3 +57,4 @@ purgatory/
 *.log
 .venv/
 hydra-desktop-rs/target/
+dist/
