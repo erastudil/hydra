@@ -18,8 +18,11 @@ PROTOCOL_VERSION = 1
 MAX_LINE_BYTES = 1 << 20
 TOOL_OUTPUT_CHARS = 4000
 CONTEXT_MODES = ("recall", "compact", "sliding")
-DECISIONS = {"allow": "y", "skip": "n", "abort": "q"}
-CAPABILITIES = ["turn", "cancel", "approval", "sessions", "history", "action"]
+DECISIONS = {"allow": "y", "allow_always": "y", "skip": "n", "abort": "q"}
+PERMISSIONS = ("manual", "accept_edits", "plan", "bypass")
+READ_ONLY_TOOLS = frozenset({"read_file", "list_dir", "grep_search", "find_files", "search_files", "compact_context", "retrieve_context"})
+EDIT_TOOLS = frozenset({"write_file", "edit_file"})
+CAPABILITIES = ["turn", "cancel", "approval", "permission", "sessions", "history", "action"]
 EXIT_OK = 0
 EXIT_VERSION = 2
 EXIT_FATAL = 70
@@ -38,6 +41,8 @@ class Adapter:
         self._decision = ""
         self._gate = threading.Event()
         self._approvals = 0
+        self._always: set = set()  # (thread, tool) pairs the app allowed for good
+        self._asked: Optional[tuple] = None  # (thread, tool) of the request being awaited
         self._calls = 0
         self._ledgers: Dict[str, Any] = {}
         self.exit_code = EXIT_OK
@@ -159,6 +164,8 @@ class Adapter:
             problems.append(f"mode must be one of {', '.join(CONTEXT_MODES)}")
         if chars is not None and (not isinstance(chars, int) or isinstance(chars, bool) or chars < 4096):
             problems.append("context_chars must be an integer of at least 4096")
+        if msg.get("permission") is not None and msg.get("permission") not in PERMISSIONS:
+            problems.append(f"permission must be one of {', '.join(PERMISSIONS)}")
         if msg.get("model") is not None and not isinstance(msg.get("model"), str):
             problems.append("model must be a string")
         if problems:
@@ -190,6 +197,8 @@ class Adapter:
             if req is None or req != self._pending:
                 return self.error(f"no pending approval {req!r}", "unknown_approval", req=req)
             self._pending = None
+            if msg.get("decision") == "allow_always" and self._asked is not None:
+                self._always.add(self._asked)
             self._release(decision)
 
     def _on_sessions(self, msg: Dict[str, Any]) -> None:
@@ -244,13 +253,29 @@ class Adapter:
 
     # the turn worker
 
-    def _approve(self, turn: str, tool: str, args_json: str) -> str:
+    def _approve(self, turn: str, thread: str, permission: str, tool: str, args_json: str) -> str:
+        """Decide one tool call. Plan and accept_edits decide on their own for some tools, the rest ask the app."""
+        if permission == "plan":
+            decision, reason = ("y", "plan mode allows read only tools") if tool in READ_ONLY_TOOLS else ("n", "plan mode allows read only tools")
+        elif tool in READ_ONLY_TOOLS and permission != "manual":
+            decision, reason = "y", f"{permission} mode"
+        elif permission == "accept_edits" and tool in EDIT_TOOLS:
+            decision, reason = "y", "accept_edits mode"
+        elif (thread, tool) in self._always:
+            decision, reason = "y", "allowed always for this thread"
+        else:
+            decision, reason = "", ""
+        if decision:
+            self.emit({"type": "auto_decision", "turn": turn, "tool": tool,
+                       "decision": "allow" if decision == "y" else "skip", "reason": reason})
+            return decision
         with self._state:
             if self._cancel.is_set():
                 return "q"
             self._approvals += 1
             req = f"a{self._approvals}"
             self._pending = req
+            self._asked = (thread, tool)
             self._gate.clear()
         self.emit({"type": "approval_request", "turn": turn, "id": req, "tool": tool, "arguments": _args(args_json)})
         self._gate.wait()
@@ -285,34 +310,39 @@ class Adapter:
                        "cost_usd": rec["total_cost_usd"]})
 
         set_usage_sink(usage)
-        set_approval_handler(lambda tool, args_json: self._approve(turn, tool, args_json))
+        permission = msg.get("permission") or ("manual" if msg.get("approve") else "bypass")
+        set_approval_handler(lambda tool, args_json: self._approve(turn, thread, permission, tool, args_json))
         set_diff_sink(lambda path, text: self.emit({"type": "diff", "turn": turn, "path": path, "diff": text}))
         set_tool_start_sink(start)
         set_tool_sink(result)
+        final: Dict[str, Any]
         try:
             answer = run_agent_loop(
                 alias=alias, prompt=msg["prompt"], session_id=thread, resume_session=True, cwd=msg["cwd"],
-                steer_mode=bool(msg.get("approve")), ledger=ledger, strategy=msg.get("mode", "recall"),
+                steer_mode=permission != "bypass", ledger=ledger, strategy=msg.get("mode", "recall"),
                 on_token=lambda text: self.emit({"type": "token", "turn": turn, "text": text}),
                 max_context_chars=msg.get("context_chars") or get_context_window(alias) * 4,
                 cancel=self._cancel,
             )
             cancelled = self._cancel.is_set() or answer == CANCELLED_TEXT
             ok = not cancelled and answer != "[Turn aborted by developer]"
-            self.emit({"type": "done", "turn": turn, "text": CANCELLED_TEXT if cancelled else (answer or ""),
-                       "ok": ok, "cancelled": cancelled})
+            final = {"type": "done", "turn": turn, "text": CANCELLED_TEXT if cancelled else (answer or ""),
+                     "ok": ok, "cancelled": cancelled}
         except Exception as exc:
             self.error(f"{type(exc).__name__}: {exc}", "turn_failed", turn=turn)
-            self.emit({"type": "done", "turn": turn, "text": "", "ok": False, "cancelled": self._cancel.is_set()})
+            final = {"type": "done", "turn": turn, "text": "", "ok": False, "cancelled": self._cancel.is_set()}
         finally:
             set_usage_sink(None)
             set_approval_handler(None)
             set_diff_sink(None)
             set_tool_sink(None)
             set_tool_start_sink(None)
-            with self._state:
-                self._turn_id = None
-                self._pending = None
+        # The slot frees and `done` is written under one lock: a turn sent right after `done` is never refused as
+        # busy, and its messages cannot overtake this `done`.
+        with self._state:
+            self._turn_id = None
+            self._pending = None
+            self.emit(final)
 
 
 CREATE_NO_WINDOW = 0x08000000
