@@ -156,6 +156,8 @@ pub struct HydraApp {
     agent_steps: u32,
     heights: HashMap<(u32, usize), f32>,
     heights_width: i32,
+    drawer_user: Option<f32>,
+    toast: Option<(String, f64)>,
     settings: Option<SettingsState>,
     settings_auto: bool,
     diff_cache: HashMap<String, (usize, std::sync::Arc<Vec<DLine>>)>,
@@ -229,6 +231,18 @@ impl HydraApp {
         if let Some(e) = &start_error {
             m.notice = e.clone();
         }
+        // screenshot and demo hooks
+        if let Ok(p) = std::env::var("HYDRA_PERMISSION") {
+            if PERMISSIONS.iter().any(|x| x.0 == p) {
+                m.sessions[m.active].permission = p;
+            }
+        }
+        if let Some(i) = std::env::var("HYDRA_MODEL").ok().and_then(|k| MODELS.iter().position(|x| x.0 == k)) {
+            m.model = i;
+        }
+        if let Ok(n) = std::env::var("HYDRA_NAV") {
+            m.set_nav(&n);
+        }
         if let Ok(t) = std::env::var("HYDRA_TAB") {
             if let Some(k) = DRAWER_TABS.iter().chain([("files", ""), ("git", "")].iter()).find(|d| d.0 == t) {
                 m.drawer_tab = k.0;
@@ -254,7 +268,9 @@ impl HydraApp {
             agent_steps: 30,
             heights: HashMap::new(),
             heights_width: 0,
-            settings: None,
+            drawer_user: None,
+            toast: None,
+            settings: if std::env::var("HYDRA_OPEN").as_deref() == Ok("settings") { Some(SettingsState { inputs: vec![String::new(); secrets::PROVIDERS.len()], message: String::new(), ok: true }) } else { None },
             settings_auto: false,
             diff_cache: HashMap::new(),
             expanded: Default::default(),
@@ -347,12 +363,32 @@ impl HydraApp {
     fn start_agent(&mut self) {
         let task = if self.agent_task.trim().is_empty() { self.input.clone() } else { self.agent_task.clone() };
         if task.trim().is_empty() {
-            self.m.term.push_str("\n[AGENT] enter a task first");
+            self.m.notice = "Describe the task first, in the Agent Runner box or the prompt, then start the agent.".into();
             return;
         }
         if let Some(be) = &mut self.be {
             self.m.agent_start(be, &task, self.agent_steps, PROFILES[self.agent_profile]);
         }
+    }
+
+    /// A short message at the bottom of the window that fades after a few seconds.
+    fn toast_ui(&mut self, ctx: &egui::Context, time: f64) {
+        let Some((text, since)) = &mut self.toast else { return };
+        if since.is_nan() {
+            *since = time;
+        }
+        let age = time - *since;
+        if age > 5.0 {
+            self.toast = None;
+            return;
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        egui::Area::new(egui::Id::new("toast")).order(egui::Order::Tooltip).anchor(egui::Align2::CENTER_BOTTOM, vec2(0.0, -96.0)).show(ctx, |ui| {
+            egui::Frame::new().fill(BG3).stroke(Stroke::new(1.0, ACCENT_BORDER_HOVER)).corner_radius(cr(12)).inner_margin(Margin::symmetric(16, 10)).show(ui, |ui| {
+                ui.set_max_width(520.0);
+                ui.add(egui::Label::new(rt(text.as_str(), 12.0, TEXT)).wrap());
+            });
+        });
     }
 
     fn open_settings(&mut self) {
@@ -421,6 +457,11 @@ impl HydraApp {
         }
         for e in evs {
             self.m.apply(e);
+        }
+        if !self.m.notice.is_empty() && self.m.notice != "jobs-changed" {
+            let t = self.m.notice.clone();
+            self.m.notice.clear();
+            self.toast = Some((t, f64::NAN));
         }
         if self.m.notice == "jobs-changed" {
             self.m.notice.clear();
@@ -1002,11 +1043,11 @@ impl HydraApp {
             }
             let q = self.queue.get(&self.m.sessions[self.m.active].id).map(|q| q.len()).unwrap_or(0);
             if q > 0 {
-                ui.label(rt(format!("{q} queued, sends when this turn ends"), 11.0, ACCENT));
+                ui.add(egui::Label::new(rt(format!("{q} queued, sends when this turn ends"), 11.0, ACCENT)).truncate());
             } else if self.m.active_busy() {
                 ui.label(rt("Enter queues a follow-up", 11.0, MUTED));
             } else {
-                ui.label(rt("@ attaches a file   Ctrl+P finds files   Ctrl+O opens a folder", 11.0, MUTED));
+                ui.add(egui::Label::new(rt("@ attaches a file   Ctrl+P finds files   Ctrl+O opens a folder", 11.0, MUTED)).truncate());
             }
             if self.m.sessions[self.m.active].pre_rewind.is_some() && !self.m.active_busy() {
                 if widgets::button(ui, "Undo rewind", Kind::Secondary, 11.0, (10.0, 3.0), None).clicked() {
@@ -1624,7 +1665,7 @@ impl HydraApp {
                             let f = egui::FontId::new(TYPE_DIFF, egui::FontFamily::Monospace);
                             let num = |n: Option<u32>| n.map(|n| format!("{n:>5}")).unwrap_or_else(|| "     ".into());
                             p.text(rect.left_center() + vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, format!("{} {}", num(l.old), num(l.new)), f.clone(), MUTED);
-                            p.text(rect.left_center() + vec2(92.0, 0.0), egui::Align2::LEFT_CENTER, format!("{} {}", l.kind as char, l.text), f, fg);
+                            p.text(rect.left_center() + vec2(92.0, 0.0), egui::Align2::LEFT_CENTER, if l.kind == b'@' { l.text.clone() } else { format!("{} {}", l.kind as char, l.text) }, f, fg);
                         }
                     });
                 });
@@ -2104,8 +2145,11 @@ impl HydraApp {
                     }
                 });
                 ui.label(rtb("NEW JOB", 11.0, MUTED));
+                ui.label(rt("Name", 11.0, TEXT2));
                 ui.add(egui::TextEdit::singleline(&mut self.job_form.0).hint_text(rt("Job name", 12.0, MUTED)).desired_width(f32::INFINITY));
-                ui.add(egui::TextEdit::singleline(&mut self.job_form.1).hint_text(rt("Interval seconds", 12.0, MUTED)).desired_width(f32::INFINITY));
+                ui.label(rt("Repeat every (seconds, 5 or more)", 11.0, TEXT2));
+                ui.add(egui::TextEdit::singleline(&mut self.job_form.1).hint_text(rt("60", 12.0, MUTED)).desired_width(120.0));
+                ui.label(rt("Task", 11.0, TEXT2));
                 ui.add(egui::TextEdit::multiline(&mut self.job_form.3).hint_text(rt("Task", 12.0, MUTED)).desired_rows(2).desired_width(f32::INFINITY));
                 ui.horizontal(|ui| {
                     if widgets::button(ui, "Schedule", Kind::Primary, 13.0, (16.0, 8.0), None).clicked() {
@@ -2116,6 +2160,19 @@ impl HydraApp {
                     }
                 });
             });
+            if create {
+                match self.job_form.1.trim().parse::<f64>() {
+                    _ if self.job_form.0.trim().is_empty() || self.job_form.3.trim().is_empty() => {
+                        self.m.notice = "A job needs a name and a task.".into();
+                        create = false;
+                    }
+                    Ok(v) if v >= 5.0 => {}
+                    _ => {
+                        self.m.notice = "Repeat interval must be a number of seconds, 5 or more.".into();
+                        create = false;
+                    }
+                }
+            }
             if let Some(be) = &mut self.be {
                 if create {
                     let interval = self.job_form.1.trim().parse::<f64>().unwrap_or(60.0);
@@ -2430,14 +2487,28 @@ impl HydraApp {
                 });
         }
         let dw = fr.drawer_width;
+        // Pat's layout width by default; dragging the left edge sets a user width, kept within sane bounds as the window changes
+        let lo = dw.min(300.0);
+        let hi = (total * 0.6).max(lo);
+        let dw = self.drawer_user.map(|w| w.clamp(lo, hi)).unwrap_or(dw);
         egui::Panel::right("drawer")
-            .default_size(dw)
-            .size_range(dw.min(300.0)..=(total * 0.62).max(dw))
-            .resizable(true)
+            .exact_size(dw)
+            .resizable(false)
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(BG2))
             .show(root, |ui| {
                 ui.painter().vline(ui.max_rect().left() + 0.5, ui.max_rect().y_range(), border);
+                let edge = egui::Rect::from_x_y_ranges(ui.max_rect().left() - 3.0..=ui.max_rect().left() + 3.0, ui.max_rect().y_range());
+                let grip = ui.interact(edge, egui::Id::new("drawer-grip"), Sense::drag()).on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+                if grip.dragged() {
+                    self.drawer_user = Some((dw - grip.drag_delta().x).clamp(lo, hi));
+                }
+                if grip.double_clicked() {
+                    self.drawer_user = None;
+                }
+                if grip.hovered() || grip.dragged() {
+                    ui.painter().vline(ui.max_rect().left() + 0.5, ui.max_rect().y_range(), Stroke::new(2.0, ACCENT));
+                }
                 let live_w = ui.max_rect().width();
                 self.drawer(ui, live_w);
             });
@@ -2453,11 +2524,14 @@ impl HydraApp {
         });
         self.nav_overlay(ctx, fr, nav_t);
         self.modals(ctx);
+        self.toast_ui(ctx, time);
         let _ = &self.start_error;
 
         if let Some(plan) = &mut self.shot {
             plan.frames += 1;
-            if plan.frames >= std::env::var("HYDRA_SHOT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(20) && !plan.requested {
+            ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            let secs: f64 = std::env::var("HYDRA_SHOT_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(f64::MAX);
+            if (plan.frames >= std::env::var("HYDRA_SHOT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(20) || time - self.started >= secs) && !plan.requested {
                 plan.requested = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             }

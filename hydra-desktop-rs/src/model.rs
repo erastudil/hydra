@@ -1035,7 +1035,10 @@ impl Model {
                             let _ = std::fs::create_dir_all(d);
                         }
                         match std::fs::write(&p, body) {
-                            Ok(_) => self.log(&format!("\n[EXPORT] wrote {}", p.display())),
+                            Ok(_) => {
+                                self.log(&format!("\n[EXPORT] wrote {}", p.display()));
+                                self.notice = format!("Exported to {}", p.display());
+                            }
                             Err(e) => self.log(&format!("\n[EXPORT] failed: {e}")),
                         }
                     }

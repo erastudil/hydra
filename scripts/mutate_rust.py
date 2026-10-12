@@ -17,6 +17,13 @@ MUTATIONS = [
     ("projects not deduped", M, "let id = match self.projects.iter().find(|q| q.path == canon) {\n            Some(q) => q.id,\n            None => self.add_project_unchecked(&canon),\n        };", "let id = self.add_project_unchecked(&canon);", ["--lib"]),
     ("background finish not unread", M, "if background && sid != active_id {", "if false && sid != active_id {", ["--lib"]),
     ("state backup ignored", M, "let loaded = try_load(p).or_else(|| try_load(&p.with_extension(\"bak\")));", "let loaded = try_load(p);", ["--lib"]),
+ ("shift+enter sends", "src/app.rs", "!i.modifiers.shift && !i.modifiers.alt && i.consume_key", "i.consume_key", ["--test", "ui"]),
+    ("idle window keeps repainting", "src/app.rs", "if animating { 50 } else { 2000 }", "if animating { 50 } else { 50 }", ["--test", "ui"]),
+    ("new threads bypass approvals", M, "    \"manual\".into()\n}", "    \"accept_edits\".into()\n}", ["--test", "ui"]),
+    ("chat not virtualized", "src/app.rs", "if !near || (mi + 1 < n && known.is_none() && y > viewport.max.y + 500.0) {", "if false {", ["--test", "ui"]),
+    ("long messages never collapse", "src/app.rs", "    if expanded {\n        return (text, 0);\n    }", "    if true || expanded {\n        return (text, 0);\n    }", ["--test", "ui"]),
+    ("cut stream kept silently", "../hydra_cli/agent.py", "    if not saw_done and not state.get(\"finished\"):", "    if False:", ["--test", "stdio_integration"]),
+    ("env file accepts newlines", "src/secrets.rs", "if value.contains('\\n') || value.contains('\\r') {", "if false {", ["--lib"]),
 ]
 
 
