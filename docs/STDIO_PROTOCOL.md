@@ -40,7 +40,7 @@ turn : chosen by the app, a non-empty string, unique per process. every agent me
 
 id : chosen by the app on request messages that get a reply, echoed in the reply. approval requests carry an id chosen by the agent, a1, a2 and so on.
 
-thread : the conversation key, letters digits dash underscore dot. it is the session id on disk and the ledger key, so a thread survives restarts.
+thread : the conversation key, letters digits dash underscore dot. it is the session id on disk and the ledger key, so a thread survives restarts. the adapter saves cwd, mode, model, permission and a title taken from the first prompt in thread.json next to the ledger on every accepted turn. after a restart a turn that sends only thread and prompt resumes with the same project, settings and context.
 
 call : a counter per turn, starting at 1, tying a `tool_start` to its `tool_result`. tools run one at a time.
 
@@ -64,10 +64,10 @@ turn : start a turn.
 - turn : string, required.
 - prompt : string, required, non-empty.
 - thread : string, required.
-- cwd : string, required, an existing directory. the project dir the tools work in.
-- mode : recall, compact or sliding. default recall.
-- model : alias string. default is the orchestrator model. `local` and `free` pick those tiers.
-- permission : manual, accept_edits, plan or bypass. default bypass, or manual when approve is true. may differ on every turn.
+- cwd : string, an existing directory, the project dir the tools work in. required for a new thread. each thread keeps its own cwd, so parallel threads work in different projects.
+- mode : recall, compact or sliding. default is the thread's last mode, or recall for a new thread.
+- model : alias string. default is the thread's last model, or the orchestrator model for a new thread. `local` and `free` pick those tiers.
+- permission : manual, accept_edits, plan or bypass. default bypass, or manual when approve is true. may differ on every turn. when omitted the thread's last permission is used.
   - manual : every tool call asks the app, except tools the app allowed for good with `allow_always`.
   - accept_edits : read only tools and write_file and edit_file run on their own, every other tool asks.
   - plan : read only tools run on their own, every other tool is skipped without asking and the model is told it was skipped.
@@ -114,9 +114,9 @@ done : fields turn, text, ok, cancelled. exactly one per turn and always the las
 
 error : fields code, message, redacted, and turn or id when the failure belongs to one. redacted is true when secrets or url paths were scrubbed from message. a failure inside a turn writes `error` with turn, then `done` with ok false.
 
-session_list : fields id, sessions. each session has thread and updated, in epoch seconds.
+session_list : fields id, sessions. each session has thread, updated in epoch seconds, and cwd, mode, model, permission and title as last saved, null when unknown.
 
-history_result : fields id, thread, turns. each turn has role and content, oldest first.
+history_result : fields id, thread, turns, meta. each turn has role and content, oldest first. meta is the saved thread settings, empty for a thread without any.
 
 action_result : fields id, action, result. result is whatever the service returned, an object with isError.
 

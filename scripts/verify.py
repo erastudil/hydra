@@ -12133,7 +12133,7 @@ def _marker_model(seen):
         seen.append(body)
         users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
         prompt = users[-1] if users else ""
-        word = next((w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "PLAIN"))), "PLAIN")
+        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "PLAIN"))] or ["PLAIN"])[-1]
         if word.startswith("SLOW"):
             return _sse(handler, [f"{word}-{n} " for n in range(200)], 0.05, [])
         if word.startswith(("WRITE_", "EDIT_")) and not any(m.get("role") == "tool" for m in body["messages"]):
@@ -12306,6 +12306,41 @@ def stdio_tool_result_is_cut_at_4000_characters():
         result = [m for m in child.run_turn("small", "read it", model="local") if m["type"] == "tool_result"][0]
         assert result["truncated"] is False and "tiny" in result["output"], result
         assert child.close() == 0
+
+
+@check
+def stdio_thread_resumes_after_restart():
+    """A thread keeps its project, mode, model and context across a restart, and a new thread without a cwd is refused."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            first = _StdioChild(base, home)
+            first.next()
+            project = _project(first, "resumed")
+            done = first.run_turn("r1", "PLAIN remember zebra", thread="keep", cwd=project, mode="sliding", model="local", permission="bypass")[-1]
+            assert done["ok"] is True
+            assert first.close() == 0
+
+            second = _StdioChild(base, home)
+            second.next()
+            second.send(type="sessions", id="s")
+            entry = [x for x in second.until("session_list")[-1]["sessions"] if x["thread"] == "keep"][0]
+            assert entry["cwd"] == project and entry["mode"] == "sliding" and entry["model"] == "local", entry
+            assert entry["permission"] == "bypass" and entry["title"] == "PLAIN remember zebra", entry
+            second.send(type="history", id="h", thread="keep")
+            assert second.until("history_result")[-1]["meta"]["cwd"] == project
+            second.send(type="turn", turn="r2", prompt="WRITE_resumed now", thread="keep")
+            replies = second.until("done", turn="r2")
+            assert replies[-1]["ok"] is True, replies
+            assert open(os.path.join(project, "resumed.txt"), encoding="utf-8").read() == "content of resumed\n"
+            assert "zebra" in json.dumps(seen[-1]["messages"]) or any("zebra" in json.dumps(b["messages"]) for b in seen[-2:]), "context was not resumed"
+            second.send(type="turn", turn="r3", prompt="PLAIN", thread="brand-new")
+            err = second.until("error")[-1]
+            assert err["code"] == "bad_request" and "cwd" in err["message"], err
+            assert second.close() == 0
+    finally:
+        httpd.shutdown()
 
 
 def main() -> int:

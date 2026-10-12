@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 PROTOCOL_VERSION = 1
@@ -175,8 +176,12 @@ class Adapter:
             return self.error("turn needs a non-empty string turn id", "bad_request")
         prompt = msg.get("prompt")
         thread = "".join(c for c in str(msg.get("thread") or "") if c.isalnum() or c in "-_.")
-        cwd = msg.get("cwd")
-        mode = msg.get("mode", "recall")
+        stored = _load_meta(thread) if thread else {}
+        cwd = msg.get("cwd", stored.get("cwd"))
+        mode = msg.get("mode", stored.get("mode", "recall"))
+        for key in ("model", "permission"):
+            if msg.get(key) is None and stored.get(key) is not None:
+                msg[key] = stored[key]
         chars = msg.get("context_chars")
         problems = []
         if not isinstance(prompt, str) or not prompt.strip():
@@ -196,6 +201,7 @@ class Adapter:
         if problems:
             return self.error("; ".join(problems), "bad_request", turn=turn)
         permission = msg.get("permission") or ("manual" if msg.get("approve") else "bypass")
+        msg["cwd"], msg["mode"] = cwd, mode
         with self._state:
             if turn in self._turns:
                 return self.error(f"turn id {turn} is already running", "busy", turn=turn)
@@ -204,6 +210,8 @@ class Adapter:
             if len(self._turns) >= MAX_TURNS:
                 return self.error(f"{MAX_TURNS} turns are already running", "busy", turn=turn)
             t = _Turn(turn, thread, permission)
+            _save_meta(thread, {"cwd": cwd, "mode": mode, "model": msg.get("model"), "permission": permission,
+                                "title": stored.get("title") or prompt.strip()[:80], "updated": int(time.time())})
             self._turns[turn] = t
             self._busy_threads[thread] = turn
             t.worker = threading.Thread(target=self._run_turn, args=(t, msg), name=f"hydra-turn-{turn}", daemon=True)
@@ -241,7 +249,10 @@ class Adapter:
             for entry in sorted(root.iterdir()):
                 db = entry / "ledger.db"
                 if db.is_file():
-                    found.append({"thread": entry.name, "updated": int(db.stat().st_mtime)})
+                    meta = _load_meta(entry.name)
+                    found.append({"thread": entry.name, "updated": int(db.stat().st_mtime), "cwd": meta.get("cwd"),
+                                  "mode": meta.get("mode"), "model": meta.get("model"),
+                                  "permission": meta.get("permission"), "title": meta.get("title")})
         self.emit({"type": "session_list", "id": _text(msg.get("id")), "sessions": found})
 
     def _on_history(self, msg: Dict[str, Any]) -> None:
@@ -259,7 +270,7 @@ class Adapter:
             ledger = SessionContextLedger(session_id=thread)
         turns = [{"role": t["role"], "content": t["content"]} for t in ledger.turns][-limit:]
         ledger.end_turn()
-        self.emit({"type": "history_result", "id": req, "thread": thread, "turns": turns})
+        self.emit({"type": "history_result", "id": req, "thread": thread, "turns": turns, "meta": _load_meta(thread)})
 
     def _on_action(self, msg: Dict[str, Any]) -> None:
         req = _text(msg.get("id"))
@@ -407,6 +418,31 @@ def hide_child_consoles() -> bool:
     init._hydra_hidden = True  # type: ignore[attr-defined]
     subprocess.Popen.__init__ = init  # type: ignore[method-assign]
     return True
+
+
+def _meta_path(thread: str) -> str:
+    from pathlib import Path
+
+    return str(Path.home() / ".hydra" / "sessions" / thread / "thread.json")
+
+
+def _load_meta(thread: str) -> Dict[str, Any]:
+    """What the app chose for a thread last time: cwd, mode, model, permission, title. Empty when the thread is new."""
+    try:
+        with open(_meta_path(thread), "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_meta(thread: str, meta: Dict[str, Any]) -> None:
+    path = _meta_path(thread)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(meta, handle)
+    os.replace(tmp, path)
 
 
 def _text(value: Any) -> Optional[str]:
