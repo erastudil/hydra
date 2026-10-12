@@ -117,7 +117,7 @@ per turn : tokens, tool events, diffs and approval requests come in the order th
 
 tool order : approval_request, then tool_start, then diff if any, then tool_result.
 
-one turn at a time : a `turn` while another runs gets `error` code busy and the running turn is untouched.
+one turn at a time : a `turn` while another runs gets `error` code busy and the running turn is untouched. a turn sent after the `done` of the previous one is always accepted, and none of its messages come before that `done`.
 
 replies : `session_list`, `history_result` and `action_result` echo the request id and may interleave with turn messages.
 
