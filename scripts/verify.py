@@ -12135,14 +12135,18 @@ def _marker_model(seen):
         seen.append(body)
         users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
         prompt = users[-1] if users else ""
-        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "RUN_", "MCP_", "PLAIN"))] or ["PLAIN"])[-1]
+        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "RUN_", "MCP_", "GIT_", "PLAIN"))] or ["PLAIN"])[-1]
         if word.startswith("SLOW"):
             return _sse(handler, [f"{word}-{n} " for n in range(200)], 0.05, [])
-        if word.startswith(("WRITE_", "EDIT_", "RUN_", "MCP_")) and not any(m.get("role") == "tool" for m in body["messages"]):
+        if word.startswith(("WRITE_", "EDIT_", "RUN_", "MCP_", "GIT_")) and not any(m.get("role") == "tool" for m in body["messages"]):
             name = word.split("_", 1)[1]
             commands = {"status": "echo hello", "chain": "echo hello && echo bye", "other": "echo other", "near": "echo hellothere", "delete": "rm keep.txt"}
             if word.startswith("RUN_"):
                 tool_name, args = "run_command", json.dumps({"command": commands[name]})
+            elif word.startswith("GIT_"):
+                git_calls = {"status": ("git_status", {}), "diff": ("git_diff", {}), "commit": ("git_commit", {"message": "add a"}),
+                             "branch": ("git_branch", {"op": "create", "name": "feat/x"}), "master": ("git_branch", {"op": "create", "name": "master"})}
+                tool_name, args = git_calls[name][0], json.dumps(git_calls[name][1])
             elif word.startswith("MCP_"):
                 tool_name, args = "demo__" + name, json.dumps({"text": "ping"})
             else:
@@ -12709,6 +12713,70 @@ def stdio_mcp_server_tools_reach_the_loop_behind_permissions():
         assert not [m for m in replies if m["type"] == "tool_start"], replies
         with open(log, encoding="utf-8") as handle:
             assert handle.read().split() == ["ping"], "a skipped or denied MCP call still ran"
+        assert child.close() == 0
+
+
+@check
+def stdio_git_tools_follow_permissions_and_keep_off_main():
+    """git_status and git_diff run without asking, git_commit and git_branch ask under manual, and a commit on main is refused."""
+    with _marker_session() as (child, seen):
+        repo = child.project
+        git = lambda *a: subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True, check=True).stdout
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        with open(os.path.join(repo, "a.txt"), "w", encoding="utf-8") as handle:
+            handle.write("one\n")
+        git("add", "a.txt")
+        git("commit", "-qm", "base")
+        with open(os.path.join(repo, "a.txt"), "a", encoding="utf-8") as handle:
+            handle.write("two\n")
+
+        def result(replies, tool):
+            out = [m for m in replies if m["type"] == "tool_result" and m["tool"] == tool]
+            assert len(out) == 1, replies
+            return out[0]
+
+        replies = child.run_turn("g1", "GIT_status", thread="g", model="local", permission="plan")
+        status = json.loads(result(replies, "git_status")["output"])
+        assert status["branch"] == "main" and status["files"] == [{"status": " M", "path": "a.txt"}], status
+        replies = child.run_turn("g2", "GIT_diff", thread="g", model="local", permission="plan")
+        assert "+two" in json.loads(result(replies, "git_diff")["output"])["diff"]
+        assert not [m for m in child.log if m["type"] == "approval_request"]
+
+        replies = child.run_turn("g3", "GIT_commit", thread="g", model="local", permission="bypass")
+        refused = result(replies, "git_commit")
+        assert refused["is_error"] and "main" in refused["output"], refused
+        assert git("log", "--format=%s").split("\n")[0] == "base"
+        replies = child.run_turn("g4", "GIT_master", thread="g", model="local", permission="bypass")
+        assert "refusing" in result(replies, "git_branch")["output"] and "master" not in git("branch").split()
+        offered = {t["function"]["name"] for t in seen[-1].get("tools", [])}
+        assert {"git_status", "git_diff", "git_commit", "git_branch"} <= offered, offered
+
+        child.turn("g5", "GIT_branch", thread="g", model="local", permission="manual")
+        ask = child.until("approval_request", turn="g5")[-1]
+        assert ask["tool"] == "git_branch" and ask["arguments"] == {"op": "create", "name": "feat/x"}, ask
+        child.send(type="approval", id=ask["id"], decision="allow")
+        child.until("done", turn="g5")
+        assert git("branch", "--show-current").strip() == "feat/x"
+
+        child.turn("g6", "GIT_commit", thread="g", model="local", permission="manual")
+        ask = child.until("approval_request", turn="g6")[-1]
+        assert ask["tool"] == "git_commit", ask
+        child.send(type="approval", id=ask["id"], decision="skip")
+        child.until("done", turn="g6")
+        assert git("log", "-1", "--format=%s").strip() == "base"
+        replies = child.run_turn("g7", "GIT_commit", thread="g", model="local", permission="plan")
+        assert not [m for m in replies if m["type"] == "tool_start"] and git("log", "-1", "--format=%s").strip() == "base"
+
+        child.turn("g8", "GIT_commit", thread="g", model="local", permission="manual")
+        ask = child.until("approval_request", turn="g8")[-1]
+        child.send(type="approval", id=ask["id"], decision="allow")
+        replies = child.until("done", turn="g8")
+        done = json.loads(result(replies, "git_commit")["output"])
+        assert done["branch"] == "feat/x" and done["commit"] == git("rev-parse", "HEAD").strip(), done
+        assert git("log", "-1", "--format=%s").strip() == "add a" and git("status", "--porcelain") == ""
+        assert git("rev-parse", "main").strip() != done["commit"]
         assert child.close() == 0
 
 

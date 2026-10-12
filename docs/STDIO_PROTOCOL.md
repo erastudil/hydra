@@ -69,7 +69,7 @@ turn : start a turn.
 - model : alias string. default is the thread's last model, or the orchestrator model for a new thread. `local` and `free` pick those tiers.
 - permission : manual, accept_edits, plan or bypass. default bypass, or manual when approve is true. may differ on every turn. when omitted the thread's last permission is used.
   - manual : every tool call asks the app, except tools the app allowed for good with `allow_always`.
-  - accept_edits : read only tools and write_file and edit_file run on their own, every other tool asks.
+  - accept_edits : read only tools, git_status, git_diff, write_file and edit_file run on their own. every other tool asks.
   - plan : read only tools run on their own, every other tool is skipped without asking and the model is told it was skipped.
   - bypass : nothing asks.
 - skills : list of skill ids from `skill_list`, default empty. the body of each picked skill is added to the system prompt of this turn only. an unknown id fails the turn with `bad_request`.
@@ -211,3 +211,15 @@ names : a tool `echo` of server `demo` reaches the model as `demo__echo`.
 permission : MCP tools are never read only. manual asks for each call, accept_edits asks too, plan skips them, and bypass runs them. approval rules apply to them like to any other tool.
 
 failure : a server that fails to start leaves its tools out and shows in `mcp_errors`. the turn runs with the rest.
+
+## git tools
+
+git_status : read only. branch, clean and files, each file with its two letter porcelain status and path.
+
+git_diff : read only. fields path and staged. returns diff and truncated.
+
+git_commit : asks under manual and accept_edits, skipped under plan. fields message and paths. it stages paths, or every change, then commits. it refuses on main or master and when nothing is staged. returns branch and commit.
+
+git_branch : asks like git_commit. op list, create or switch, and name. create switches to the new branch. creating main or master is refused.
+
+git runs with an argument list, never through a shell. paths must stay inside the turn cwd. these tools never push.

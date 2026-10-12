@@ -2363,6 +2363,10 @@ class NativeToolRegistry:
             "capture_active_window": self.computer_capture_active_window,
             "computer_safe_key_sequence": self.computer_safe_key_sequence,
             "safe_key_sequence": self.computer_safe_key_sequence,
+            "git_status": self.git_status,
+            "git_diff": self.git_diff,
+            "git_commit": self.git_commit,
+            "git_branch": self.git_branch,
             "git_commit_and_push": self.git_commit_and_push,
             "git_push": self.git_commit_and_push,
             "trigger_vercel_deploy": self.trigger_vercel_deploy,
@@ -2659,6 +2663,107 @@ class NativeToolRegistry:
         if res.status != "SUCCESS" or res.exit_code != 0:
             out["isError"] = True
         return out
+
+    PROTECTED_BRANCHES = ("main", "master")
+
+    def _git(self, *args: str, stdin: Optional[str] = None) -> Tuple[int, str, str]:
+        """Run git in the workspace with an argument list, never through a shell."""
+        import subprocess
+
+        try:
+            proc = subprocess.run(["git", "-C", self.cwd, *args], input=stdin, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 127, "", f"{type(exc).__name__}: {exc}"
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def _git_current_branch(self) -> Optional[str]:
+        code, out, _ = self._git("symbolic-ref", "--quiet", "--short", "HEAD")
+        return out.strip() if code == 0 and out.strip() else None
+
+    def git_status(self) -> Dict[str, Any]:
+        """Branch and changed files of the workspace repository."""
+        code, out, err = self._git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+        if code != 0:
+            return {"isError": True, "error": f"git status failed: {err.strip() or out.strip()}"}
+        files = []
+        entries = out.split("\0")
+        i = 0
+        while i < len(entries):
+            entry = entries[i]
+            i += 1
+            if len(entry) < 4:
+                continue
+            item = {"status": entry[:2], "path": entry[3:]}
+            if entry[0] in "RC":
+                item["from"] = entries[i] if i < len(entries) else ""
+                i += 1
+            files.append(item)
+        return {"isError": False, "branch": self._git_current_branch(), "clean": not files, "files": files}
+
+    def git_diff(self, path: Optional[str] = None, staged: bool = False, max_chars: int = 100000) -> Dict[str, Any]:
+        """Unified diff of the workspace against the index, or of the index against HEAD when staged is true."""
+        args = ["diff", "--no-color"] + (["--cached"] if staged else [])
+        if path:
+            resolved, err = self._resolve_confined_path(path)
+            if err:
+                return {"isError": True, "error": err}
+            args += ["--", resolved]
+        code, out, err = self._git(*args)
+        if code != 0:
+            return {"isError": True, "error": f"git diff failed: {err.strip() or out.strip()}"}
+        limit = max(1, int(max_chars))
+        return {"isError": False, "diff": out[:limit], "truncated": len(out) > limit}
+
+    def git_commit(self, message: str, paths: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Stage the given paths, or every change, and commit them. Refuses to commit on main or master."""
+        if not isinstance(message, str) or not message.strip():
+            return {"isError": True, "error": "commit message required"}
+        branch = self._git_current_branch()
+        if branch is None:
+            return {"isError": True, "error": "HEAD is not on a branch, switch to a branch first"}
+        if branch in self.PROTECTED_BRANCHES:
+            return {"isError": True, "error": f"refusing to commit on {branch}, create a branch with git_branch first"}
+        if paths:
+            resolved = []
+            for item in paths:
+                target, err = self._resolve_confined_path(str(item))
+                if err:
+                    return {"isError": True, "error": err}
+                resolved.append(target)
+            code, out, err = self._git("add", "-A", "--", *resolved)
+        else:
+            code, out, err = self._git("add", "-A")
+        if code != 0:
+            return {"isError": True, "error": f"git add failed: {err.strip() or out.strip()}"}
+        if self._git("diff", "--cached", "--quiet")[0] == 0:
+            return {"isError": True, "error": "nothing to commit"}
+        code, out, err = self._git("commit", "-F", "-", stdin=message.strip() + "\n")
+        if code != 0:
+            return {"isError": True, "error": f"git commit failed: {err.strip() or out.strip()}"}
+        sha = self._git("rev-parse", "HEAD")[1].strip()
+        return {"isError": False, "branch": branch, "commit": sha}
+
+    def git_branch(self, op: str = "list", name: Optional[str] = None) -> Dict[str, Any]:
+        """List branches, create and switch to a new branch, or switch to an existing one."""
+        if op == "list":
+            code, out, err = self._git("branch", "--format=%(refname:short)")
+            if code != 0:
+                return {"isError": True, "error": f"git branch failed: {err.strip() or out.strip()}"}
+            return {"isError": False, "current": self._git_current_branch(), "branches": out.split()}
+        if op not in ("create", "switch"):
+            return {"isError": True, "error": "op must be list, create or switch"}
+        if not isinstance(name, str) or not name.strip() or name.startswith("-"):
+            return {"isError": True, "error": "branch name required"}
+        if self._git("check-ref-format", "--branch", name)[0] != 0:
+            return {"isError": True, "error": f"{name!r} is not a valid branch name"}
+        if op == "create" and name in self.PROTECTED_BRANCHES:
+            return {"isError": True, "error": f"refusing to create {name}"}
+        args = ("switch", "-c", name) if op == "create" else ("switch", name)
+        code, out, err = self._git(*args)
+        if code != 0:
+            return {"isError": True, "error": f"git switch failed: {err.strip() or out.strip()}"}
+        return {"isError": False, "current": self._git_current_branch()}
 
     def git_commit_and_push(
         self,
@@ -4520,6 +4625,58 @@ class NativeToolRegistry:
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "git_status",
+                    "description": "Current branch and changed files of the workspace git repository.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "git_diff",
+                    "description": "Unified diff of uncommitted changes. staged true shows what the next commit holds.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Optional file or directory to limit the diff to."},
+                            "staged": {"type": "boolean", "description": "Diff the index against HEAD instead of the worktree against the index."},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "git_commit",
+                    "description": "Stage paths, or every change when paths is omitted, and commit with the message. Refuses on main or master.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string", "description": "Commit message."},
+                            "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional paths to stage."},
+                        },
+                        "required": ["message"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "git_branch",
+                    "description": "List branches, create and switch to a new branch, or switch to an existing one.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "op": {"type": "string", "enum": ["list", "create", "switch"]},
+                            "name": {"type": "string", "description": "Branch name for create and switch."},
+                        },
+                        "required": ["op"],
+                    },
+                },
+            },
             {
                 "type": "function",
                 "function": {
