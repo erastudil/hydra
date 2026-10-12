@@ -10788,6 +10788,503 @@ def wave22_session_logger_and_mimo_routing():
         shutil.rmtree(temp_s, ignore_errors=True)
 
 
+def _mem():
+    import importlib
+    return importlib.import_module("hydra_cli.memory")
+
+
+def _gate(args, cwd, hh, stdin=None):
+    env = {**os.environ, "HYDRA_HOME": hh, "PYTHONIOENCODING": "utf-8"}
+    return subprocess.run([sys.executable, os.path.join(REPO, "scripts", "gate.py"), *args], cwd=cwd, env=env, input=stdin,
+                          capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+
+
+def _git(cwd, *args, hh=None, stdin=None):
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    if hh:
+        env["HYDRA_HOME"] = hh
+    return subprocess.run(["git", *args], cwd=cwd, env=env, input=stdin, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def _atmem_repo(base, name="proj", remote=True):
+    """A real repo with one commit on main and, when asked, a real bare origin."""
+    repo = os.path.join(base, name)
+    os.makedirs(repo)
+    _git(repo, "init", "-q", "-b", "main")
+    with open(os.path.join(repo, "README.md"), "w") as handle:
+        handle.write("x\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "init")
+    if remote:
+        bare = os.path.join(base, name + ".git")
+        _git(base, "init", "-q", "--bare", bare)
+        _git(repo, "remote", "add", "origin", bare)
+        _git(repo, "push", "-q", "origin", "main")
+        _git(repo, "fetch", "-q", "origin")
+    return repo
+
+
+@check
+def atmem_ledger_chain_classes_and_supersede():
+    """Step 1: hash chain, fact classes, supersede lines, git trailer as checkpoint."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": tmp}):
+        repo = _atmem_repo(tmp, remote=False)
+        probe = {"name": "git_remote", "repo": repo, "expect": "empty"}
+        fact = m.append("fact", "proj", "no github remote", **{"class": "state"}, source="agent:x", probe=probe)
+        pref = m.append("fact", "global", "no browser dependency", **{"class": "preference"}, source="user:t105u")
+        note = m.append("fact", "proj", "maybe flaky", **{"class": "note"}, source="agent:x")
+        for bad in (
+            dict(kind="fact", fields={"class": "state", "source": "agent:x"}),
+            dict(kind="fact", fields={"class": "state", "source": "agent:x", "probe": {"name": "rm", "repo": repo, "expect": "empty"}}),
+            dict(kind="fact", fields={"class": "preference", "source": "agent:x"}),
+            dict(kind="fact", fields={"class": "note", "source": "nowhere"}),
+            dict(kind="supersede", fields={"target": "L999", "reason": "superseded"}),
+            dict(kind="supersede", fields={"target": fact["id"], "reason": "because"}),
+        ):
+            try:
+                m.append(bad["kind"], "proj", "x", **bad["fields"])
+            except m.GateError:
+                continue
+            raise AssertionError(f"accepted {bad}")
+        m.append("supersede", "proj", "wrong", target=note["id"], reason="superseded")
+        try:
+            m.append("supersede", "proj", "again", target=note["id"], reason="superseded")
+        except m.GateError:
+            pass
+        else:
+            raise AssertionError("double supersede accepted")
+        assert {f["id"] for f in m.live_facts()} == {fact["id"], pref["id"]}
+        assert m.live_facts()[0]["id"] == pref["id"], "user source must outrank agent source"
+        assert m.chain_problems() == []
+        path = m.ledger_path()
+        original = open(path, "rb").read()
+        lines = original.splitlines(keepends=True)
+        open(path, "wb").write(original.replace(b"no github remote", b"has github remote"))
+        assert m.chain_problems(), "edited line passed the chain"
+        open(path, "wb").write(b"".join(lines[1:]))
+        assert m.chain_problems(), "deleted first line passed the chain"
+        open(path, "wb").write(b"".join(lines[:1] + lines[2:]))
+        assert m.chain_problems(), "deleted middle line passed the chain"
+        forged = [json.loads(ln) for ln in lines]
+        forged[1]["body"] = "forged"
+        forged[1]["hash"] = m._hash(forged[1])
+        open(path, "wb").write(b"".join((m._canon(e) + "\n").encode() for e in forged))
+        assert m.chain_problems(), "a rewritten line with a recomputed hash passed"
+        open(path, "wb").write(original)
+        assert m.chain_problems() == []
+        try:
+            open(path, "ab").write(b'{"junk":1}\n')
+            m.append("event", "x", "y")
+        except m.GateError:
+            pass
+        else:
+            raise AssertionError("append succeeded on a broken ledger")
+
+
+@check
+def atmem_preturn_drops_false_remote_fact():
+    """Step 2: the 'no github remote' incident. Stored claim is false, live check wins."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": tmp}):
+        repo = _atmem_repo(tmp)
+        remote = m._probe_git_remote(repo)[0]
+        assert remote
+        stale = m.append("fact", "proj", "no github remote", **{"class": "state"}, source="agent:old",
+                         probe={"name": "git_remote", "repo": repo, "expect": "empty"})
+        true = m.append("fact", "proj", "origin is set", **{"class": "state"}, source="agent:old",
+                        probe={"name": "git_remote", "repo": repo, "expect": f"equals:{remote}"})
+        branch = m.append("fact", "proj", "work is on main", **{"class": "state"}, source="agent:old",
+                          probe={"name": "git_branch", "repo": repo, "expect": "equals:feat/other"})
+        m.append("fact", "proj", "unproven idea", **{"class": "note"}, source="agent:old")
+        m.append("fact", "proj", "Pat wants no browser", **{"class": "preference"}, source="user:t108u")
+        block = m.preturn_block(repo)
+        assert f"memory said no github remote; live check says {remote}" in block, block
+        assert f"memory said work is on main; live check says main" in block, block
+        assert "origin is set (verified@" in block
+        assert "UNVERIFIED notes" in block and "unproven idea" in block
+        assert "Pat wants no browser (Pat, user:t108u)" in block
+        assert block.splitlines()[1].startswith("repo : proj branch main remote ")
+        ids = {f["id"] for f in m.live_facts()}
+        assert stale["id"] not in ids and branch["id"] not in ids and true["id"] in ids
+        entries = m.read_ledger()
+        assert any(e["kind"] == "verify" and e["fact"] == stale["id"] and e["ok"] is False for e in entries)
+        assert any(e["kind"] == "supersede" and e["target"] == stale["id"] and e["reason"] == "stale_probe_failed" for e in entries)
+        again = m.preturn_block(repo)
+        assert "memory said" not in again, "a dropped fact came back"
+        out = _gate(["preturn", "--repo", repo], tmp, tmp)
+        assert out.returncode == 0 and "repo : proj" in out.stdout, out.stdout + out.stderr
+    from hydra_cli.agent import _memory_block
+    with tempfile.TemporaryDirectory() as plain, isolated(env={"HYDRA_HOME": plain}):
+        assert "gate could not run here" in _memory_block(plain)
+
+
+@check
+def atmem_hooks_fail_closed_and_install_uninstall():
+    """Step 3: pre-commit, commit-msg, pre-push; refusal text carries the fix command."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp:
+        hh = os.path.join(tmp, "hh")
+        noremote = _atmem_repo(tmp, "noremote", remote=False)
+        _git(noremote, "switch", "-q", "-c", "feat/x")
+        assert _gate(["install", "--repo", noremote], noremote, hh).returncode == 0
+        open(os.path.join(noremote, "a.txt"), "w").write("a\n")
+        _git(noremote, "add", "a.txt")
+        res = _git(noremote, "commit", "-m", "add a", hh=hh)
+        assert res.returncode != 0 and "git remote add origin" in res.stdout + res.stderr, res.stdout + res.stderr
+
+        repo = _atmem_repo(tmp)
+        hooks = os.path.join(repo, ".git", "hooks")
+        with open(os.path.join(hooks, "pre-commit"), "w") as handle:
+            handle.write("#!/bin/sh\necho foreign >> foreign.log\nexit 0\n")
+        os.chmod(os.path.join(hooks, "pre-commit"), 0o755)
+        assert _gate(["install", "--repo", repo], repo, hh).returncode == 0
+        assert os.path.exists(os.path.join(hooks, "pre-commit.pre-gate"))
+        res = _git(repo, "commit", "--allow-empty", "-m", "on main", hh=hh)
+        assert res.returncode != 0 and "git switch -c" in res.stdout + res.stderr, "commit on main was allowed"
+        _git(repo, "switch", "-q", "-c", "feat/y")
+        os.makedirs(os.path.join(repo, "src"))
+        open(os.path.join(repo, "src", "notes.bak"), "w").write("old\n")
+        open(os.path.join(repo, "STRAY.txt"), "w").write("stray\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "junk", hh=hh)
+        assert res.returncode != 0 and "src/notes.bak is junk" in res.stdout + res.stderr and "STRAY.txt" in res.stdout + res.stderr
+        _git(repo, "reset", "-q")
+        shutil.rmtree(os.path.join(repo, "src"))
+        os.unlink(os.path.join(repo, "STRAY.txt"))
+        os.makedirs(os.path.join(repo, "tests"))
+        for i in range(7):
+            open(os.path.join(repo, "tests", f"test_{i}.py"), "w").write("pass\n")
+        _git(repo, "add", "-A")
+        assert _git(repo, "commit", "-q", "-m", "add tests", hh=hh).returncode == 0
+        _git(repo, "rm", "-q", "-r", "tests")
+        res = _git(repo, "commit", "-m", "drop tests", hh=hh)
+        assert res.returncode != 0 and "gate.py decide test_delete" in res.stdout + res.stderr, "mass test delete allowed"
+        assert _gate(["decide", "test_delete", "tests moved to verify.py"], repo, hh).returncode == 0
+        res = _git(repo, "commit", "-q", "-m", "drop tests", hh=hh)
+        assert res.returncode == 0, res.stdout + res.stderr
+        msg = _git(repo, "log", "-1", "--format=%B").stdout
+        value = m._trailer_value(msg)
+        assert value, msg
+        assert os.path.exists(os.path.join(repo, "foreign.log")), "chained foreign hook never ran"
+        # fail closed: the gate script disappearing blocks the commit
+        hook = open(os.path.join(hooks, "pre-commit")).read()
+        open(os.path.join(hooks, "pre-commit"), "w").write(hook.replace("gate.py", "gone.py"))
+        open(os.path.join(repo, "b.txt"), "w").write("b\n")
+        _git(repo, "add", "b.txt")
+        assert _git(repo, "commit", "-m", "b", hh=hh).returncode != 0, "hook failed open"
+        _git(repo, "reset", "-q")
+        os.unlink(os.path.join(repo, "b.txt"))
+        assert _gate(["uninstall", "--repo", repo], repo, hh).returncode == 0
+        assert not os.path.exists(os.path.join(hooks, "commit-msg")) and not os.path.exists(os.path.join(hooks, "pre-push"))
+        assert "foreign" in open(os.path.join(hooks, "pre-commit")).read(), "foreign hook not restored"
+        assert not os.path.exists(os.path.join(hooks, "pre-commit.pre-gate"))
+        subjects = [e["subject"] for e in json.loads("[" + ",".join(open(os.path.join(hh, "memory", "ledger.jsonl")).read().splitlines()) + "]")]
+        assert "install" in subjects and "uninstall" in subjects and "commit" in subjects
+
+
+@check
+def atmem_push_gate_blocks_main_force_and_logs_branches():
+    """Step 3: pre-push refuses direct main pushes (by branch, not author) and non-fast-forwards."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hh = os.path.join(tmp, "hh")
+        repo = _atmem_repo(tmp)
+        _gate(["install", "--repo", repo], repo, hh)
+        _git(repo, "switch", "-q", "-c", "feat/p")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "work", hh=hh)
+        res = _git(repo, "push", "origin", "HEAD:main", hh=hh)
+        assert res.returncode != 0 and "needs a PR" in res.stdout + res.stderr, res.stdout + res.stderr
+        res = _git(repo, "push", "origin", "feat/p", hh=hh)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "branch_pushed" in open(os.path.join(hh, "memory", "ledger.jsonl")).read()
+        _git(repo, "commit", "-q", "--amend", "--allow-empty", "-m", "rewritten", hh=hh)
+        res = _git(repo, "push", "--force", "origin", "feat/p", hh=hh)
+        assert res.returncode != 0 and "not a fast-forward" in res.stdout + res.stderr, "force push allowed"
+        # author identity is irrelevant: same author name, still refused on main
+        res = _git(repo, "-c", "user.name=bluebarrels", "push", "origin", "HEAD:refs/heads/main", hh=hh)
+        assert res.returncode != 0
+
+
+@check
+def atmem_sweep_purgatory_move_and_restore():
+    """Step 4: junk moves to purgatory with a ledger line, restore is byte-identical, dry run moves nothing."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": os.path.join(tmp, "hh")}):
+        repo = _atmem_repo(tmp)
+        _git(repo, "switch", "-q", "-c", "feat/s")
+        open(os.path.join(repo, "tracked.bak"), "wb").write(b"tracked junk\r\n\x00\x01")
+        _git(repo, "add", "-f", "tracked.bak")
+        _git(repo, "commit", "-q", "-m", "oops bak")
+        open(os.path.join(repo, "Copy of notes.txt"), "wb").write(b"untracked junk\n")
+        open(os.path.join(repo, "ROOTSTRAY.txt"), "wb").write(b"root stray\n")
+        os.makedirs(os.path.join(repo, "src"))
+        open(os.path.join(repo, "src", "util.py"), "w").write("a=1\n")
+        _git(repo, "add", "src")
+        _git(repo, "commit", "-q", "-m", "util")
+        open(os.path.join(repo, "tmp_util.py"), "w").write("x\n")
+        os.makedirs(os.path.join(repo, "scratch"))
+        open(os.path.join(repo, "scratch", "util.py"), "w").write("a=2\n")
+        os.makedirs(os.path.join(repo, "docs"))
+        keep = os.path.join(repo, "docs", "mywork.md")
+        open(keep, "w").write("untracked but real\n")
+        before = {n: open(os.path.join(repo, n), "rb").read() for n in ("tracked.bak", "Copy of notes.txt", "ROOTSTRAY.txt", os.path.join("scratch", "util.py"))}
+        dry = m.sweep(repo)
+        assert dry["moved"] == [] and all(os.path.exists(os.path.join(repo, n)) for n in before)
+        moves = {f["path"] for f in dry["findings"] if f["action"] == "move"}
+        assert moves == {"tracked.bak", "Copy of notes.txt", "ROOTSTRAY.txt", "tmp_util.py", "scratch/util.py"}, moves
+        flagged = {f["path"]: f for f in dry["findings"] if f["action"] == "flag"}
+        assert "docs/mywork.md" in flagged and "untracked" in flagged["docs/mywork.md"]["reason"]
+        old = time.time() - 40 * 86400
+        os.utime(keep, (old, old))
+        assert "stale untracked, 40 days old" in {f["path"]: f for f in m.sweep_scan(repo)}["docs/mywork.md"]["reason"]
+        done = m.sweep(repo, apply=True)
+        assert len(done["moved"]) == 5
+        assert not any(os.path.exists(os.path.join(repo, n)) for n in before)
+        assert os.path.exists(keep), "sweep touched a file it only flags"
+        assert _git(repo, "status", "--porcelain").stdout.count("D  tracked.bak") == 1
+        first = next(e for e in m.read_ledger() if e["subject"] == "sweep_move" and e["old"] == "ROOTSTRAY.txt")
+        open(os.path.join(repo, "ROOTSTRAY.txt"), "w").write("new file in its place\n")
+        try:
+            m.restore(first["id"])
+        except m.GateError:
+            assert open(os.path.join(repo, "ROOTSTRAY.txt")).read() == "new file in its place\n"
+        else:
+            raise AssertionError("restore overwrote a file")
+        os.unlink(os.path.join(repo, "ROOTSTRAY.txt"))
+        for n, data in before.items():
+            event = next(e for e in m.read_ledger() if e["subject"] == "sweep_move" and e["old"] == n.replace(os.sep, "/"))
+            assert open(event["new"], "rb").read() == data and event["sha256"]
+            assert m.restore(event["id"]) == os.path.join(repo, n.replace("/", os.sep))
+            assert open(os.path.join(repo, n), "rb").read() == data, f"{n} not byte-identical after restore"
+            try:
+                m.restore(event["id"])
+            except m.GateError:
+                pass
+            else:
+                raise AssertionError("restored twice")
+        assert _git(repo, "status", "--porcelain").stdout.count("tracked.bak") == 0, "tracked file not back in the index"
+        assert m.chain_problems() == []
+
+
+@check
+def atmem_launch_sweep_runs_once_and_ignores_pr_deletions():
+    """Step 4: Hydra launch sweep applies once per day, and --ignore-deleted-by skips files another branch removes."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": os.path.join(tmp, "hh")}):
+        repo = _atmem_repo(tmp)
+        _git(repo, "switch", "-q", "-c", "feat/old")
+        open(os.path.join(repo, "old.bak"), "w").write("x\n")
+        _git(repo, "add", "-f", "old.bak")
+        _git(repo, "commit", "-q", "-m", "bak")
+        _git(repo, "switch", "-q", "-c", "feat/removes")
+        _git(repo, "rm", "-q", "old.bak")
+        _git(repo, "commit", "-q", "-m", "removes bak")
+        _git(repo, "switch", "-q", "feat/old")
+        moves = lambda **kw: [f["path"] for f in m.sweep_scan(repo, **kw) if f["action"] == "move"]
+        assert moves() == ["old.bak"]
+        assert moves(ignore_deleted_by="feat/removes") == []
+        first = m.launch_sweep(repo)
+        assert first and len(first["moved"]) == 1
+        assert m.launch_sweep(repo) is None
+        assert m.launch_sweep(tmp) is None, "launch sweep ran outside a repo"
+
+
+@check
+def atmem_sweep_corpus_matches_the_hydra_dry_run():
+    """Step 4: the sweep rules against this real repo, the corpus from the 5S dry run."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": tmp}):
+        probe = os.path.join(tmp, "corpus")
+        os.makedirs(os.path.join(probe, "launch", "bin"))
+        os.makedirs(os.path.join(probe, "launch", "desktop"))
+        os.makedirs(os.path.join(probe, "bin"))
+        os.makedirs(os.path.join(probe, "queue"))
+        _git(tmp, "init", "-q", "-b", "main", probe)
+        files = {
+            "hydra.bat": "@echo off\n", "bin/hydra.bat": "@echo off\n",
+            "launch/bin/hydra-terminal.bat": "cd C:\\Users\\jpm05\\Documents\\hydra\nset P=C:/Users/jpm05/x\n",
+            "launch/desktop/Hydra Sovereign Terminal.bat": "x\n",
+            "queue/kaizen_state.json": "[" + "1," * 200000 + "1]", "GLM_REVIEW.md": "x\n", "setup.py": "x\n", "pyproject.toml": "x\n",
+            ".gitignore": "__pycache__/\n",
+        }
+        for rel, text in files.items():
+            with open(os.path.join(probe, rel), "w") as handle:
+                handle.write(text)
+        _git(probe, "add", "-A")
+        _git(probe, "commit", "-q", "-m", "corpus")
+        by_path = {f["path"]: f for f in m.sweep_scan(probe)}
+        assert any("4 launchers" in f["reason"] for f in by_path.values())
+        assert "queue/kaizen_state.json" in by_path and "over" in by_path["queue/kaizen_state.json"]["reason"]
+        assert by_path["queue/"]["rule"] == "seiton"
+        assert by_path["GLM_REVIEW.md"]["action"] == "flag"
+        assert "2 hard-coded Windows user paths" in by_path["launch/bin/hydra-terminal.bat"]["reason"]
+        assert "setup.py + pyproject.toml" in by_path
+        assert "missing" in by_path[".gitignore"]["reason"] and "*.bak" in by_path[".gitignore"]["reason"]
+        assert any("same basename" in f["reason"] for f in by_path.values())
+        _git(probe, "branch", "empty-branch")
+        bare = os.path.join(tmp, "corpus.git")
+        _git(tmp, "init", "-q", "--bare", bare)
+        _git(probe, "remote", "add", "origin", bare)
+        _git(probe, "push", "-q", "origin", "main", "empty-branch")
+        _git(probe, "fetch", "-q", "origin")
+        assert "empty branch" in {f["path"]: f for f in m.sweep_scan(probe)}["origin/empty-branch"]["reason"]
+
+
+@check
+def atmem_progen_lint_and_reply_format():
+    """Step 5: progen lint at the CLI it really has (progen lint FILE, exit 1 on error), and topic : comment per line."""
+    m = _mem()
+    try:
+        m.progen_path()
+    except m.GateError as exc:
+        raise Skip(str(exc))
+    assert m.lint_reply("hooks : installed\nbranch : feat/x, no remote yet\n") == []
+    bad = m.lint_reply("Great question! I would be happy to help you with that.\n")
+    assert any("not 'topic : comment'" in p for p in bad) and any("P002" in p for p in bad), bad
+    assert m.lint_reply("- bullet : thing\n")
+    assert m.lint_reply("one topic : fine\nno colon here\n")
+    out = subprocess.run([sys.executable, os.path.join(REPO, "scripts", "gate.py"), "reply", "-"], input="topic : comment\n", capture_output=True, text=True)
+    assert out.returncode == 0, out.stdout + out.stderr
+    out = subprocess.run([sys.executable, os.path.join(REPO, "scripts", "gate.py"), "reply", "-"], input="Sure! Happy to help.\n", capture_output=True, text=True)
+    assert out.returncode == 1
+    with tempfile.TemporaryDirectory() as tmp:
+        hh = os.path.join(tmp, "hh")
+        repo = _atmem_repo(tmp)
+        _gate(["install", "--repo", repo], repo, hh)
+        _git(repo, "switch", "-q", "-c", "feat/docs")
+        os.makedirs(os.path.join(repo, "docs"))
+        open(os.path.join(repo, "docs", "a.md"), "w").write("Great question! I would be happy to help you with that.\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "docs", hh=hh)
+        assert res.returncode != 0 and "progen : docs/a.md" in res.stdout + res.stderr, res.stdout + res.stderr
+        open(os.path.join(repo, "docs", "a.md"), "w").write("docs : topic and comment\n")
+        _git(repo, "add", "-A")
+        assert _git(repo, "commit", "-q", "-m", "docs", hh=hh).returncode == 0
+        env = {**os.environ, "HYDRA_PROGEN": os.path.join(tmp, "missing"), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        _git(repo, "reset", "-q")
+        open(os.path.join(repo, "docs", "b.md"), "w").write("docs : more\n")
+        _git(repo, "add", "-A")
+        proc = subprocess.run(["git", "commit", "-m", "b"], cwd=repo, env={**env, "HYDRA_HOME": hh}, capture_output=True, text=True)
+        assert proc.returncode != 0 and "progen : not found" in proc.stdout + proc.stderr, "missing progen must fail closed"
+
+
+@check
+def atmem_bypass_detection_and_ledger_rollback():
+    """Step 6: a --no-verify commit is flagged, shown in the next context block, and a rolled-back ledger is caught."""
+    m = _mem()
+    with tempfile.TemporaryDirectory() as tmp:
+        hh = os.path.join(tmp, "hh")
+        repo = _atmem_repo(tmp)
+        _gate(["install", "--repo", repo], repo, hh)
+        _git(repo, "switch", "-q", "-c", "feat/b")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "gated", hh=hh)
+        assert _gate(["verify"], repo, hh).returncode == 0
+        _git(repo, "commit", "-q", "--allow-empty", "--no-verify", "-m", "sneaky", hh=hh)
+        res = _gate(["verify"], repo, hh)
+        assert res.returncode == 1 and "no Ledger-Head trailer" in res.stdout, res.stdout
+        with isolated(env={"HYDRA_HOME": hh}):
+            sha = _git(repo, "rev-parse", "HEAD").stdout.strip()
+            block = m.preturn_block(repo)
+            assert f"commit {sha[:10]} has no ledger event" in block, block
+            assert any(e["subject"] == "unverified_commit" and e["sha"] == sha for e in m.read_ledger())
+            before = len(m.read_ledger())
+            m.scan_commits(repo)
+            assert len([e for e in m.read_ledger() if e["subject"] == "unverified_commit"]) == 1, "same commit flagged twice"
+            _git(repo, "commit", "-q", "--allow-empty", "-m", "after", hh=hh)
+            path = m.ledger_path()
+            lines = open(path, "rb").read().splitlines(keepends=True)
+            open(path, "wb").write(b"".join(lines[:3]))
+            assert m.chain_problems() == [], "a clean prefix still chains, only git can catch the rollback"
+            scan = m.scan_commits(repo, record=False)
+            assert scan["rollback"], "rolled-back ledger was not caught by the commit trailers"
+
+
+@check
+def atmem_strays_flagged_via_pr_api():
+    """Stray branches with no PR are listed by asking the GitHub API shape (served locally over real HTTP)."""
+    import http.server
+    m = _mem()
+    seen = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append(self.path)
+            if "/branches" in self.path:
+                body = [{"name": "main"}, {"name": "feat/has-pr"}, {"name": "feat/stray"}]
+            else:
+                body = [{"number": 7}] if "head=erastudil:feat/has-pr" in self.path else []
+            data = json.dumps(body).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = _atmem_repo(tmp)
+            _git(repo, "remote", "set-url", "origin", "https://github.com/erastudil/hydra.git")
+            env = {"HYDRA_HOME": tmp, "HYDRA_GH_API": f"http://127.0.0.1:{server.server_address[1]}"}
+            with isolated(env=env):
+                assert m.stray_branches(repo) == ["feat/stray"]
+            res = subprocess.run([sys.executable, os.path.join(REPO, "scripts", "gate.py"), "strays", "--repo", repo],
+                                 env={**os.environ, **env}, capture_output=True, text=True)
+            assert res.returncode == 1 and "feat/stray has no pull request" in res.stdout and "has-pr" not in res.stdout
+    finally:
+        server.shutdown()
+
+
+@check
+def atmem_invariant_violations_block_commits_and_verify():
+    """Invariants are wired into check_commit and gate.py verify: a violated one refuses the commit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        hh = os.path.join(tmp, "hh")
+        repo = _atmem_repo(tmp)
+        assert _gate(["install", "--repo", repo], repo, hh).returncode == 0
+        _git(repo, "switch", "-q", "-c", "feat/inv")
+        assert _gate(["verify"], repo, hh).returncode == 0, "clean repo must pass verify"
+        os.makedirs(os.path.join(repo, "src"))
+        open(os.path.join(repo, "src", "ok.py"), "w").write("VALUE = 1\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-q", "-m", "clean", hh=hh)
+        assert res.returncode == 0, res.stdout + res.stderr
+
+        marker = "# " + "TO" + "DO" + ": later\n"
+        open(os.path.join(repo, "src", "bad.py"), "w").write(marker)
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "marker", hh=hh)
+        assert res.returncode != 0 and "INV-CODE-001 : violated" in res.stdout + res.stderr, res.stdout + res.stderr
+        assert "INV-CODE-001 : violated" in _gate(["verify"], repo, hh).stdout, "verify must report the same violation"
+        _git(repo, "rm", "-q", "-f", "src/bad.py")
+
+        open(os.path.join(repo, "src", "old.py"), "w").write("moved to src/new.py\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "stub", hh=hh)
+        assert res.returncode != 0 and "INV-FS-001 : violated" in res.stdout + res.stderr
+        _git(repo, "rm", "-q", "-f", "src/old.py")
+
+        pre_push = os.path.join(repo, ".git", "hooks", "pre-push")
+        saved = open(pre_push).read()
+        os.unlink(pre_push)
+        open(os.path.join(repo, "src", "two.py"), "w").write("VALUE = 2\n")
+        _git(repo, "add", "-A")
+        res = _git(repo, "commit", "-m", "no pre-push", hh=hh)
+        assert res.returncode != 0 and "INV-GIT-001 : violated" in res.stdout + res.stderr, res.stdout + res.stderr
+        open(pre_push, "w").write(saved)
+        os.chmod(pre_push, 0o755)
+
+        res = _git(repo, "commit", "-q", "-m", "recovered", hh=hh)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert _gate(["verify"], repo, hh).returncode == 0
+    from hydra_cli import invariants
+    assert invariants.check_gate.__module__ == "hydra_cli.invariants"
+    assert not hasattr(_mem(), "probe_no_todo_markers"), "invariant logic must live only in invariants.py"
+
+
 @check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
@@ -10799,6 +11296,167 @@ def no_pytest_tree():
         if (name.startswith("test_") or name.endswith(".js")) and name not in allowed
     ]
     assert not names, "fold these into scripts/verify.py: " + ", ".join(sorted(names))
+
+
+@check
+def atmem_invariants_gate_context_and_episodes():
+    """Invariants: schema, real probes against fixtures, missing invariant fails, episodes lose to invariants, token caps, loaded every turn."""
+    inv = __import__("hydra_cli.invariants", fromlist=["x"])
+    m = _mem()
+    from hydra_cli.agent import _memory_block
+    marker = "TO" + "DO"
+    gate = os.path.join(REPO, "scripts", "gate.py")
+    real = json.load(open(inv.INVARIANT_FILE, encoding="utf-8"))
+    assert inv.validate(real) == [], inv.validate(real)
+    assert {i["id"] for i in real["invariants"]} >= set(inv.REQUIRED_IDS)
+    assert set(i["probe"] for i in real["invariants"]) == set(inv.PROBES), "every probe is used and every invariant has one"
+
+    # 1. schema: every malformed variant is rejected with a reason
+    def variant(mutate):
+        copy = json.loads(json.dumps(real))
+        mutate(copy)
+        return inv.validate(copy)
+    first = lambda d: d["invariants"][0]
+    for label, mutate in (
+        ("bad id", lambda d: first(d).update(id="INV-GIT-1")),
+        ("unknown area", lambda d: first(d).update(id="INV-NET-001")),
+        ("duplicate id", lambda d: d["invariants"][1].update(id=first(d)["id"])),
+        ("unknown probe", lambda d: first(d).update(probe="rm_rf")),
+        ("reason outside the closed set", lambda d: first(d).update(contradiction_reason="because")),
+        ("dangling supersedes", lambda d: first(d).update(supersedes="INV-GIT-099")),
+        ("bad source", lambda d: first(d).update(source="agent:me")),
+        ("bad regex", lambda d: first(d).update(forbids=["("])),
+        ("missing field", lambda d: first(d).pop("rule")),
+        ("extra field", lambda d: first(d).update(note="x")),
+        ("empty list", lambda d: d.update(invariants=[])),
+        ("cap over worst case", lambda d: d["token_cap"].update(invariants=20)),
+        ("reused retired id", lambda d: d.update(retired=[{"id": first(d)["id"], "rule": "old", "retired_by": "user:x"}])),
+    ):
+        assert variant(mutate), f"schema accepted: {label}"
+    assert not variant(lambda d: (d.update(retired=[{"id": "INV-GIT-050", "rule": "old", "retired_by": "user:x"}]), first(d).update(supersedes="INV-GIT-050"))), "valid supersedes link rejected"
+
+    with tempfile.TemporaryDirectory() as tmp, isolated(env={"HYDRA_HOME": os.path.join(tmp, "hh")}):
+        def fixture(name):
+            repo = _atmem_repo(tmp, name)
+            _git(repo, "switch", "-q", "-c", "feat/probe")
+            os.makedirs(os.path.join(repo, "hydra_cli"))
+            open(os.path.join(repo, "hydra_cli", "ok.py"), "w").write("def ok():\n    return 1\n")
+            _git(repo, "add", "-A")
+            _git(repo, "commit", "-q", "-m", "code")
+            m.install(repo, gate)
+            return repo
+
+        def stage_file(repo, rel, text):
+            os.makedirs(os.path.dirname(os.path.join(repo, rel)) or repo, exist_ok=True)
+            open(os.path.join(repo, rel), "w").write(text)
+            _git(repo, "add", rel)
+
+        def uninstall(repo):
+            m.uninstall(repo)
+
+        def claim(repo):
+            m.append("fact", os.path.basename(repo), "this repo has no github remote", **{"class": "note"}, source="agent:x")
+
+        breakers = {
+            "push_main_refused": (uninstall, None),
+            "push_force_refused": (uninstall, None),
+            "remote_claims_probed": (claim, None),
+            "progen_lint_enforced": (lambda repo: None, {"HYDRA_PROGEN": os.path.join(tmp, "no-such-progen")}),
+            "no_todo_markers": (lambda repo: stage_file(repo, "hydra_cli/x.py", f"# {marker} finish this\n"), None),
+            "no_move_stubs": (lambda repo: stage_file(repo, "hydra_cli/old.py", "# moved to hydra_cli/new.py\n"), None),
+        }
+        assert set(breakers) == set(inv.PROBES), "every probe needs a negative fixture"
+        try:
+            m.progen_path()
+            progen_here = True
+        except m.GateError:
+            progen_here = False
+
+        # 2. each probe passes on a clean fixture and fails on its own breaker
+        for index, name in enumerate(inv.PROBES):
+            clean = fixture(f"clean{index}")
+            ok, detail = inv.run_probe(name, clean)
+            if name == "progen_lint_enforced" and not progen_here:
+                assert not ok, "missing progen must fail closed"
+            else:
+                assert ok, f"{name} failed on a clean fixture: {detail}"
+            broken = fixture(f"broken{index}")
+            fix, env = breakers[name]
+            with isolated(env=env):
+                fix(broken)
+                ok, detail = inv.run_probe(name, broken)
+            assert not ok, f"{name} passed on a violating fixture"
+        clean = fixture("whole")
+        expected = [] if progen_here else [p for p in inv.check_gate(clean) if p.startswith("INV-DOC-001")]
+        assert (inv.check_gate(clean) == expected), inv.check_gate(clean)
+        assert any("INV-CODE-001" in p for p in (stage_file(clean, "hydra_cli/y.py", f"x = 1  # {marker}\n"), inv.check_gate(clean))[1])
+
+        # 3. a missing invariant fails the gate, so do an unreadable and a broken file
+        trimmed = json.loads(json.dumps(real))
+        trimmed["invariants"] = [i for i in trimmed["invariants"] if i["id"] != "INV-GIT-001"]
+        for label, body in (("trimmed", json.dumps(trimmed)), ("empty", ""), ("not json", "{")):
+            path = os.path.join(tmp, f"{label}.json")
+            open(path, "w").write(body)
+            problems = inv.check_gate(clean, path=path)
+            assert problems, f"{label} file passed the gate"
+        assert any("INV-GIT-001 : required invariant is missing" in p for p in inv.check_gate(clean, path=os.path.join(tmp, "trimmed.json")))
+        assert inv.check_gate(clean, path=os.path.join(tmp, "absent.json"))
+        assert "BROKEN" in inv.build_context(clean, path=os.path.join(tmp, "empty.json")), "a broken invariant file must be loud in the context"
+
+        # 4. episodes lose to invariants and to live probes, and nothing is edited, only superseded
+        repo = fixture("episodes")
+        name = os.path.basename(repo)
+        remote = m._probe_git_remote(repo)[0]
+        assert remote
+        stale = m.append("fact", name, "no github remote", **{"class": "state"}, source="agent:old", probe={"name": "git_remote", "repo": repo, "expect": "empty"})
+        forbidden = m.append("fact", "global", "pushing directly to main is fine", **{"class": "preference"}, source="user:t1")
+        unprobed = m.append("fact", name, "no github remote here", **{"class": "note"}, source="agent:old")
+        retired = m.append("fact", name, "retired build note zzz", **{"class": "note"}, source="agent:old")
+        m.append("supersede", name, "replaced", target=retired["id"], reason="superseded")
+        kept = m.append("fact", name, "build uses setup.py", **{"class": "note"}, source="agent:old")
+        before = len(m.read_ledger())
+        block = inv.build_context(repo)
+        for fact in (stale, forbidden, unprobed, retired):
+            assert f"state : {fact['body']}" not in block and f"note : {fact['body']}" not in block and f"preference : {fact['body']}" not in block, f"{fact['id']} injected as current"
+        assert "zzz" not in block and "pushing directly to main is fine" not in block
+        assert f"memory said no github remote; live check says {remote}" in block, "live observation must be shown"
+        assert f"note : {kept['body']}" in block and "UNVERIFIED" in block
+        entries = m.read_ledger()
+        assert len(entries) > before and m.chain_problems(entries) == []
+        reasons = {e["target"]: e["reason"] for e in entries if e["kind"] == "supersede"}
+        assert reasons[stale["id"]] == "stale_probe_failed" and reasons[forbidden["id"]] == "contradicted_by_user" and reasons[unprobed["id"]] == "contradicted_by_user"
+        assert set(reasons.values()) <= set(m.REASONS)
+        assert [e for e in entries if e["id"] == stale["id"]][0]["body"] == "no github remote", "history must stay readable"
+        assert stale["id"] not in {f["id"] for f in m.live_facts()}
+
+        # 5. token caps: a flood of notes cannot crowd out the invariants
+        caps = real["token_cap"]
+        for n in range(300):
+            m.append("fact", name, f"flood note {n} " + "lorem ipsum dolor " * 20, **{"class": "note"}, source="agent:flood")
+        episodes_raw = m.preturn_block(repo)
+        assert inv.estimate_tokens(episodes_raw) > caps["episodes"], "the flood must be big enough to matter"
+        flooded = inv.build_context(repo)
+        head, _, tail = flooded.partition("\n\n")
+        assert inv.estimate_tokens(head) <= caps["invariants"], inv.estimate_tokens(head)
+        assert inv.estimate_tokens(tail) <= caps["episodes"], inv.estimate_tokens(tail)
+        assert "episodes : older lines archived" in tail and "scripts/gate.py log" in tail
+        assert tail.splitlines()[0].startswith("MEMORY (verified at turn start"), "episode header and repo status must survive trimming"
+        assert all(i["id"] in head for i in real["invariants"]), "invariants are never trimmed"
+
+        # 6. the invariant set is in the block the agent loop builds, on every turn, even after the ledger grows
+        for turn in range(3):
+            built = _memory_block(repo)
+            assert all(f"{i['id']} : {i['rule']}" in built for i in real["invariants"]), f"turn {turn} lost an invariant"
+            assert built.index("INVARIANTS") < built.index("MEMORY (verified")
+            m.append("fact", name, f"turn {turn} note", **{"class": "note"}, source="agent:loop")
+        broken = fixture("violating")
+        m.uninstall(broken)
+        shown = inv.build_context(broken)
+        assert "INV-GIT-001 : never push to main" in shown and "push_main_refused VIOLATED" in shown, "a violated invariant stays loaded and is flagged"
+        out = subprocess.run([sys.executable, "-m", "hydra_cli.invariants", "check", broken], cwd=REPO, capture_output=True, text=True, env={**os.environ, "HYDRA_HOME": os.path.join(tmp, "hh")})
+        assert out.returncode == 1 and "INV-GIT-001 : violated" in out.stdout, out.stdout + out.stderr
+        out = subprocess.run([sys.executable, "-m", "hydra_cli.invariants", "check", fixture("final")], cwd=REPO, capture_output=True, text=True, env={**os.environ, "HYDRA_HOME": os.path.join(tmp, "hh")})
+        assert out.returncode == (0 if progen_here else 1), out.stdout + out.stderr
 
 
 def main() -> int:

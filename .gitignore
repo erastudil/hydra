@@ -47,3 +47,12 @@ lerna-debug.log*
 .DS_Store
 Thumbs.db
 .pytest_tmp/
+
+# gate hygiene
+*.bak
+*~
+tmp*
+.hydra/
+purgatory/
+*.log
+.venv/
