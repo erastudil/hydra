@@ -168,6 +168,40 @@ fn respawn_kill_9_drops_the_handle_restarts_with_backoff_and_shows_adopted_tasks
     unsafe { libc_kill(pid as i32, 9) };
 }
 
+#[test]
+fn bug5_a_reply_cut_by_kill_9_is_marked_unsaved_and_the_thread_reloads_from_the_agent() {
+    let (mut h, _dir) = harness("bug5");
+    say(&mut h, "first marker-one");
+    assert!(wait(&mut h, 20, |a| !a.model().any_busy()), "turn one done");
+    say(&mut h, "SLOW tell me more");
+    assert!(wait(&mut h, 20, |a| a.model().sessions[0].messages.last().is_some_and(|m| m.text.contains("tick tick"))), "partial reply streams");
+    let old = h.state_mut().backend_pid().unwrap();
+    unsafe { libc_kill(old as i32, 9) };
+    assert!(wait(&mut h, 5, |a| a.backend_pid().is_none()), "down");
+    let last = h.state_mut().model().sessions[0].messages.last().cloned().unwrap();
+    assert!(last.actions.iter().any(|a| a.contains("Not saved")), "cut reply marked unsaved: {last:?}");
+    assert!(wait(&mut h, 30, |a| a.model().sessions[0].messages.iter().any(|m| m.text.contains("Reloaded from the agent"))), "thread reloaded after respawn");
+    let msgs = h.state_mut().model().sessions[0].messages.clone();
+    assert!(!msgs.iter().any(|m| m.text.contains("tick")), "the unsaved partial reply is gone, as in the agent: {msgs:?}");
+    assert!(msgs.iter().any(|m| m.user && m.text.contains("marker-one")) && msgs.iter().any(|m| !m.user && m.text.contains("alpha")), "stored turn one kept: {msgs:?}");
+}
+
+#[test]
+fn busy_from_another_agent_holding_the_thread_is_shown() {
+    let (mut h, dir) = harness("busy");
+    let thread = h.state_mut().model().sessions[0].thread.clone();
+    let mut other = hydra_desktop::backend::Backend::spawn(|| {}).expect("second agent");
+    other.turn("t-other", "HANG hold the thread", &thread, Some(&dir.display().to_string()), Some("local"), Some("bypass"), None, &[]);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    say(&mut h, "mine now");
+    assert!(wait(&mut h, 20, |a| a.toast_text().is_some_and(|t| t.contains("running in another Hydra agent"))), "busy toast: {:?}", h.state_mut().toast_text());
+    assert!(!h.state_mut().model().any_busy(), "the turn is not left spinning");
+    let last = h.state_mut().model().sessions[0].messages.last().cloned().unwrap();
+    assert!(last.text.contains("Error") || !last.actions.is_empty(), "{last:?}");
+    other.cancel("t-other");
+    drop(other);
+}
+
 extern "C" {
     #[link_name = "kill"]
     fn libc_kill(pid: i32, sig: i32) -> i32;

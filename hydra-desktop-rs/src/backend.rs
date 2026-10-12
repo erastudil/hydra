@@ -18,6 +18,7 @@ pub enum Ev {
     TaskUpdate { task: Value },
     SkillList { id: String, skills: Vec<Value> },
     SessionList { id: String, sessions: Vec<Value> },
+    HistoryResult { id: String, thread: String, turns: Vec<Value> },
     TaskList { id: String, tasks: Vec<Value> },
     McpStatus { id: String, config: Option<String>, servers: Vec<Value> },
     ToolStart { turn: String, call: u64, tool: String, args: Value },
@@ -63,6 +64,7 @@ pub fn parse_line(line: &str) -> Option<Ev> {
         },
         "retry" => Ev::Retry { turn: s("turn"), attempt: n("attempt"), of: n("of"), wait: v.get("wait").and_then(|x| x.as_f64()).unwrap_or(0.0), reason: s("reason") },
         "task_update" => Ev::TaskUpdate { task: v.clone() },
+        "history_result" => Ev::HistoryResult { id: s("id"), thread: s("thread"), turns: arr(&v, "turns") },
         "session_list" => Ev::SessionList { id: s("id"), sessions: arr(&v, "sessions") },
         "skill_list" => Ev::SkillList { id: s("id"), skills: arr(&v, "skills") },
         "task_list" => Ev::TaskList { id: s("id"), tasks: arr(&v, "tasks") },
@@ -281,6 +283,13 @@ impl Backend {
             m["rule"] = json!(r);
         }
         self.send(m);
+        id
+    }
+
+    /// Stored turns of a thread. Reply: Ev::HistoryResult.
+    pub fn history(&mut self, thread: &str) -> String {
+        let id = self.req();
+        self.send(json!({"type": "history", "id": id, "thread": thread, "limit": 200}));
         id
     }
 

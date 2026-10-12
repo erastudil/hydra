@@ -252,6 +252,8 @@ pub struct Model {
     pub rules_stale: bool,
     /// Threads the current agent process has on disk (session_list), refreshed after every hello.
     pub agent_threads: Vec<Value>,
+    /// Threads whose turn a crash cut short; reloaded from the agent's history after the next hello.
+    pub reload: Vec<u32>,
     /// Prompt tokens of the last provider request, for the context meter.
     pub last_prompt: u64,
     pub notice: String,
@@ -291,6 +293,9 @@ pub fn state_dir() -> PathBuf {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".hydra").join("desktop")
 }
+
+pub const UNSAVED: &str = "Not saved: the agent stopped mid-turn, so this partial reply is not in the thread's history";
+pub const HELD_ELSEWHERE: &str = "This thread is running in another Hydra agent; wait for it to finish.";
 
 fn greeting() -> Msg {
     Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: "Ask anything, pick a model, and send.".into(), actions: vec![] }
@@ -341,6 +346,7 @@ impl Model {
             state_was_bad: false,
             rules_stale: false,
             agent_threads: vec![],
+            reload: vec![],
             last_prompt: 0,
             cp_pending: HashMap::new(),
             sent: HashMap::new(),
@@ -463,7 +469,10 @@ impl Model {
 
     pub fn new_session(&mut self) {
         self.counter += 1;
-        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        // seconds, then a per-process nonce: two windows started in the same second must not share thread ids,
+        // or the agents' one-turn-per-thread lock answers busy for a thread that is not really shared
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+        let stamp = format!("{}-{:x}", now.as_secs(), (now.subsec_nanos() ^ std::process::id().rotate_left(16)) & 0xffffff);
         let first = self.sessions.is_empty();
         let text = if first { greeting().text } else { format!("Session {} primed. Dispatch instruction or summon heads.", self.counter) };
         self.sessions.push(Session {
@@ -475,7 +484,7 @@ impl Model {
             unread: false,
             archived: false,
             pinned: false,
-            updated: stamp,
+            updated: now.as_secs(),
             diffs: vec![],
             permission: default_permission(),
             context: default_context(),
@@ -795,6 +804,44 @@ impl Model {
     pub fn toggle_mcp(&mut self, be: &mut Backend, cwd: &str, server: &str, enabled: bool) {
         let id = be.mcp_toggle(cwd, server, enabled);
         self.act(Pending::Query, id);
+    }
+
+    /// After a respawn: ask the agent for the stored turns of every thread a crash cut short.
+    pub fn reload_cut_threads(&mut self, be: &mut Backend) {
+        for sid in std::mem::take(&mut self.reload) {
+            if let Some(s) = self.sessions.iter().find(|s| s.id == sid) {
+                let id = be.history(&s.thread.clone());
+                self.act(Pending::Query, id);
+            }
+        }
+    }
+
+    /// Rebuild a thread's chat from what the agent stored, so the app and the agent transcripts agree.
+    pub fn reload_from_history(&mut self, thread: &str, turns: &[Value]) {
+        let Some(s) = self.sessions.iter_mut().find(|s| s.thread == thread) else { return };
+        let header = s.messages.iter().rev().find(|m| !m.user && m.header != "HYDRA").map(|m| m.header.clone()).unwrap_or_else(|| "HYDRA ORCHESTRATOR".into());
+        let text_of = |c: &Value| match c {
+            Value::String(t) => t.clone(),
+            Value::Array(parts) => parts.iter().filter_map(|p| p.get("text").and_then(|x| x.as_str())).collect::<Vec<_>>().join(""),
+            _ => String::new(),
+        };
+        let mut msgs = vec![s.messages.first().cloned().unwrap_or_else(greeting)];
+        for t in turns {
+            let role = t.get("role").and_then(|x| x.as_str()).unwrap_or("");
+            let text = text_of(t.get("content").unwrap_or(&Value::Null));
+            match role {
+                "user" => msgs.push(Msg { user: true, header: "YOU".into(), text, actions: vec![] }),
+                "assistant" if !text.is_empty() => msgs.push(Msg { user: false, header: header.clone(), text, actions: vec![] }),
+                _ => {}
+            }
+        }
+        msgs.push(Msg { user: false, header: "HYDRA".into(), text: "Reloaded from the agent after it restarted. The reply cut off by the crash was not saved.".into(), actions: vec![] });
+        let n = msgs.len();
+        s.messages = msgs;
+        s.checkpoints.retain(|c| c.at < n);
+        s.rewound_tail.clear();
+        let sid = s.id;
+        self.touch(sid, false);
     }
 
     pub fn list_sessions(&mut self, be: &mut Backend) {
@@ -1181,6 +1228,10 @@ impl Model {
                     self.tasks.insert(id, task);
                 }
             }
+            Ev::HistoryResult { id, thread, turns } => {
+                self.pending.remove(&id);
+                self.reload_from_history(&thread, &turns);
+            }
             Ev::SessionList { id, sessions } => {
                 self.pending.remove(&id);
                 self.agent_threads = sessions;
@@ -1207,8 +1258,12 @@ impl Model {
                 self.notice = why;
                 let sids: Vec<u32> = self.runs.values().copied().collect();
                 for sid in sids {
-                    self.fail_bubble(sid, "agent process ended");
+                    // the agent never stores a reply cut off by its death, so this text is not in the thread
+                    self.fail_bubble(sid, &format!("{UNSAVED} ({})", self.notice));
                     self.finish_sid(sid);
+                    if !self.reload.contains(&sid) {
+                        self.reload.push(sid);
+                    }
                 }
             }
             Ev::Token { turn, text } => {
@@ -1295,6 +1350,10 @@ impl Model {
                     self.fail_bubble(sid, &message);
                     if code == "bad_request" || code == "busy" {
                         self.finish_sid(sid);
+                    }
+                    if code == "busy" && message.contains("agent") {
+                        // one turn per thread across agents: another Hydra window holds this thread
+                        self.notice = format!("{HELD_ELSEWHERE} {message}");
                     }
                 }
             }

@@ -34,6 +34,9 @@ enum Cmd {
     EditInstructions,
 }
 
+/// Heartbeat repaint while nothing happens.
+pub const IDLE_REPAINT_MS: u64 = 30_000;
+
 /// Waits before each automatic agent restart inside one minute (seconds).
 pub const RESPAWN_BACKOFF: &[f64] = &[0.5, 2.0, 5.0];
 
@@ -3037,6 +3040,7 @@ impl HydraApp {
             if let Some(be) = &mut self.be {
                 self.m.pending_tasks(be);
                 self.m.list_sessions(be);
+                self.m.reload_cut_threads(be);
             }
             self.skills_asked = false;
             self.mcp_asked = false;
@@ -3065,7 +3069,7 @@ impl HydraApp {
         // D21: a frame caused by input or an agent event is followed by one more, so a swap chain that lags a frame
         // (software GL on Xvfb) still presents the current state without waiting for the next pointer move
         let woke = ctx.input(|i| !i.events.is_empty()) || std::mem::take(&mut self.had_events);
-        ctx.request_repaint_after(std::time::Duration::from_millis(if animating { 50 } else if woke { 120 } else { 30_000 }));
+        ctx.request_repaint_after(std::time::Duration::from_millis(if animating { 50 } else if woke { 120 } else { IDLE_REPAINT_MS }));
         if self.m.agent_ready && !self.m.any_busy() {
             if let Ok(p) = std::env::var("HYDRA_DEMO_PROMPT") {
                 std::env::remove_var("HYDRA_DEMO_PROMPT");
