@@ -1236,8 +1236,8 @@ class AstMockTestDetector:
 
 
 
-class AstPonytailAnalyzer:
-    """AST visitor evaluating code indirection, ceremonial wrappers, and ponytail wu wei compliance."""
+class AstWuweiAnalyzer:
+    """AST visitor evaluating code indirection, ceremonial wrappers, and wuwei wu wei compliance."""
 
     def __init__(self, max_chain_depth: int = 4):
         self.max_chain_depth = max_chain_depth
@@ -1355,7 +1355,7 @@ class AstPonytailAnalyzer:
             "total_functions": total_functions,
             "total_classes": total_classes,
             "violations_count": len(unique_violations),
-            "ponytail_score": score,
+            "wuwei_score": score,
             "violations": unique_violations,
             "clean": len(unique_violations) == 0,
         }
@@ -2307,9 +2307,9 @@ class NativeToolRegistry:
             "ban_mock_tests": self.ban_mock_tests,
             "check_mock_tests": self.ban_mock_tests,
             "detect_mock_tests": self.ban_mock_tests,
-            "analyze_ponytail": self.analyze_ponytail,
-            "ponytail_analyzer": self.analyze_ponytail,
-            "check_ponytail": self.analyze_ponytail,
+            "analyze_wuwei": self.analyze_wuwei,
+            "wuwei_analyzer": self.analyze_wuwei,
+            "check_wuwei": self.analyze_wuwei,
             "detect_p014": self.detect_p014,
             "ban_p014_metaphors": self.detect_p014,
             "check_p014": self.detect_p014,
@@ -3831,17 +3831,17 @@ class NativeToolRegistry:
             "clean": total_violations == 0,
         }
 
-    def analyze_ponytail(
+    def analyze_wuwei(
         self,
         path: Optional[str] = None,
         source: Optional[str] = None,
         max_chain_depth: int = 4,
     ) -> Dict[str, Any]:
         """
-        Evaluate code indirection, ceremonial wrappers, and ponytail wu wei compliance.
+        Evaluate code indirection, ceremonial wrappers, and wuwei wu wei compliance.
         Flags pass-through forwarders, redundant assignments, and sprawling chains.
         """
-        analyzer = AstPonytailAnalyzer(max_chain_depth=max_chain_depth)
+        analyzer = AstWuweiAnalyzer(max_chain_depth=max_chain_depth)
 
         if source is not None:
             return analyzer.analyze_source(source)
@@ -5072,8 +5072,8 @@ class NativeToolRegistry:
             {
                 "type": "function",
                 "function": {
-                    "name": "analyze_ponytail",
-                    "description": "Evaluate code indirection, ceremonial wrappers, and ponytail wu wei compliance.",
+                    "name": "analyze_wuwei",
+                    "description": "Evaluate code indirection, ceremonial wrappers, and wuwei wu wei compliance.",
                     "parameters": {
                         "type": "object",
                         "properties": {

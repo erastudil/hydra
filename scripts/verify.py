@@ -922,7 +922,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "summon" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and "browser_fill_form" in names and "computer_find_window" in names and len(names) == 46
+        assert "read_file" in names and "summon" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_wuwei" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and "browser_fill_form" in names and "computer_find_window" in names and len(names) == 46
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -3409,11 +3409,11 @@ def ast_mock_test_banning_contracts():
 
 
 @check
-def ast_ponytail_analyzer_contracts():
+def ast_wuwei_analyzer_contracts():
     import os, tempfile
-    from hydra_cli.native_tools import AstPonytailAnalyzer, NativeToolRegistry
+    from hydra_cli.native_tools import AstWuweiAnalyzer, NativeToolRegistry
 
-    analyzer = AstPonytailAnalyzer(max_chain_depth=4)
+    analyzer = AstWuweiAnalyzer(max_chain_depth=4)
 
     sample = (
         "class Formatter:\n"
@@ -3445,22 +3445,22 @@ def ast_ponytail_analyzer_contracts():
     assert not clean_res["isError"]
     assert clean_res["violations_count"] == 0
     assert clean_res["clean"] is True
-    assert clean_res["ponytail_score"] == 100.0
+    assert clean_res["wuwei_score"] == 100.0
 
     reg = NativeToolRegistry()
-    assert reg.has_tool("analyze_ponytail")
-    assert reg.has_tool("ponytail_analyzer")
-    assert reg.has_tool("check_ponytail")
+    assert reg.has_tool("analyze_wuwei")
+    assert reg.has_tool("wuwei_analyzer")
+    assert reg.has_tool("check_wuwei")
 
     openai_tools = reg.get_openai_tools()
     tool_names = [t["function"]["name"] for t in openai_tools]
-    assert "analyze_ponytail" in tool_names
+    assert "analyze_wuwei" in tool_names
 
     with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as f:
         f.write(clean_sample)
         tmp_file = f.name
     try:
-        f_res = reg.dispatch("analyze_ponytail", {"path": tmp_file})
+        f_res = reg.dispatch("analyze_wuwei", {"path": tmp_file})
         assert not f_res["isError"]
         assert f_res["violations_count"] == 0
         assert f_res["clean"] is True

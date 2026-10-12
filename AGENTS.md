@@ -1,6 +1,6 @@
 ﻿---
 title: "hydra — execution genome"
-summary: "sovereign multi-headed model summoning engine and router domain contract. commit discipline, verification gates, and ponytail invariants."
+summary: "sovereign multi-headed model summoning engine and router domain contract. commit discipline, verification gates, and wuwei invariants."
 version: "2.0.0"
 layer: genome
 home: hydra/AGENTS.md
@@ -41,7 +41,7 @@ interactive repl : python REPL in hydra_cli/repl.py triggered via hydra, hydra c
 manifest sync : install.sh and install.ps1 must enumerate every runtime file under hydra_cli/ (.py, .json, .jsonl and skills/*.md) plus bin/hydra and bin/hydra.js; drift triggers verification failure.
 
 
-## verification and ponytail doctrine
+## verification and wuwei doctrine
 
 verification command : python scripts/verify.py.
 
@@ -51,7 +51,7 @@ exit condition : gate exits 0 only when every check passes; unsupported platform
 
 extension rule : define checks as functions in scripts/verify.py decorated with @check; execute real code or real subprocesses; never add files under tests/.
 
-ponytail wu wei : pull all verification complexity into single-grip deterministic runner scripts/verify.py; reject sprawling mock catalogs and multi-file test suites.
+wuwei wu wei : pull all verification complexity into single-grip deterministic runner scripts/verify.py; reject sprawling mock catalogs and multi-file test suites.
 
 zero fake tests : synthetic mocks asserting mocked return values denote zero truth value; banned universally; verification requires real runnable execution gates.
 

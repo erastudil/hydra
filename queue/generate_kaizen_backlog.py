@@ -126,7 +126,7 @@ DOMAINS = [
         "p018_linter", "dead_code_elim", "import_sorter", "progen_rewriter",
         "p001_detector", "p013_detector", "complexity_meter", "type_annotations",
         "unused_var_cleaner", "docstring_linter", "constant_folding", "ban_mock_tests",
-        "ponytail_analyzer", "p014_metaphor_ban", "state_vector_linter", "function_length",
+        "wuwei_analyzer", "p014_metaphor_ban", "state_vector_linter", "function_length",
         "arg_count_guard", "structural_dedup", "narrow_exceptions", "fstring_modernizer",
         "walrus_simplify", "with_statement", "generator_expr", "dataclass_transform",
         "immutable_dict", "enum_validator", "lambda_to_def", "return_consistency",

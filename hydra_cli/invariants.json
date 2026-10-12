@@ -46,7 +46,7 @@
       "id": "INV-CODE-001",
       "scope": "repo",
       "rule": "no stubs, placeholders or work markers in tracked source",
-      "source": "doc:AGENTS.md#verification-and-ponytail-doctrine",
+      "source": "doc:AGENTS.md#verification-and-wuwei-doctrine",
       "supersedes": null,
       "probe": "no_todo_markers",
       "contradiction_reason": "contradicted_by_user",
