@@ -438,7 +438,7 @@ fn rewind_puts_the_conversation_back_and_undo_restores_it() {
     // the agent's history agrees: the next request carries turn one but not turn two
     assert!(r.m.submit(&mut r.be, "third marker-three"));
     done(&mut r);
-    let users = common::USERS.lock().unwrap().last().cloned().unwrap();
+    let users = common::USERS.lock().unwrap().iter().rev().find(|u| u.iter().any(|x| x.contains("marker-three"))).cloned().unwrap(); // other tests share the stub
     assert!(users.iter().any(|u| u.contains("marker-one")) && !users.iter().any(|u| u.contains("marker-two")), "{users:?}");
     // undo: rewinding to the backup brings turn two back, in the agent and in the thread
     let mut r2 = r;
