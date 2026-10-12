@@ -23,7 +23,7 @@ DECISIONS = {"allow": "y", "allow_always": "y", "skip": "n", "abort": "q"}
 PERMISSIONS = ("manual", "accept_edits", "plan", "bypass")
 READ_ONLY_TOOLS = frozenset({"read_file", "list_dir", "grep_search", "find_files", "search_files", "compact_context", "retrieve_context"})
 EDIT_TOOLS = frozenset({"write_file", "edit_file"})
-CAPABILITIES = ["turn", "cancel", "approval", "permission", "sessions", "history", "action"]
+CAPABILITIES = ["turn", "cancel", "approval", "permission", "rules", "sessions", "history", "action"]
 EXIT_OK = 0
 EXIT_VERSION = 2
 EXIT_FATAL = 70
@@ -59,7 +59,7 @@ class Adapter:
         self._busy_threads: Dict[str, str] = {}  # thread -> turn id
         self._requests: Dict[str, _Turn] = {}  # approval id -> the turn waiting on it
         self._approvals = 0
-        self._always: set = set()  # (thread, tool) pairs the app allowed for good
+        self._rules_lock = threading.Lock()
         self._calls = 0
         self._ledgers: Dict[str, Any] = {}
         self.exit_code = EXIT_OK
@@ -149,7 +149,7 @@ class Adapter:
         handler = {
             "hello": self._on_hello, "turn": self._on_turn, "cancel": self._on_cancel,
             "approval": self._on_approval, "shutdown": lambda m: False, "sessions": self._on_sessions,
-            "history": self._on_history, "action": self._on_action,
+            "history": self._on_history, "action": self._on_action, "rules": self._on_rules,
         }.get(kind)
         if handler is None:
             self.error(f"unknown message type {kind!r}", "unknown_type", req=_text(msg.get("id")))
@@ -237,8 +237,95 @@ class Adapter:
                 return self.error(f"no pending approval {req!r}", "unknown_approval", req=req)
             t.pending = None
             if msg.get("decision") == "allow_always" and t.asked is not None:
-                self._always.add(t.asked)
+                problem = self._add_rule(t.asked, msg.get("prefix"), msg.get("scope", "thread"))
+                if problem:
+                    self.error(problem, "bad_request", turn=t.id, req=req)
             t.release(decision)
+
+    # approval rules
+
+    def _rule_files(self, thread: str) -> Dict[str, str]:
+        import hashlib
+        from pathlib import Path
+
+        home = Path.home() / ".hydra"
+        files = {"thread": str(home / "sessions" / thread / "rules.json")}
+        cwd = _load_meta(thread).get("cwd")
+        if cwd:
+            digest = hashlib.sha1(os.path.realpath(cwd).encode("utf-8")).hexdigest()[:16]
+            files["project"] = str(home / "projects" / digest / "rules.json")
+        return files
+
+    def _read_rules(self, thread: str) -> List[Dict[str, Any]]:
+        found: List[Dict[str, Any]] = []
+        for scope, path in self._rule_files(thread).items():
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    data = json.load(handle)
+            except (OSError, ValueError):
+                continue
+            found.extend({**r, "scope": scope} for r in data if isinstance(r, dict) and r.get("id") and r.get("tool"))
+        return found
+
+    def _write_rules(self, thread: str, scope: str, rules: List[Dict[str, Any]]) -> None:
+        path = self._rule_files(thread)[scope]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump([{k: v for k, v in r.items() if k != "scope"} for r in rules], handle)
+        os.replace(tmp, path)
+
+    def _match_rule(self, thread: str, tool: str, args_json: str) -> Optional[Dict[str, Any]]:
+        command = ""
+        if tool == "run_command":
+            args = _args(args_json)
+            command = str(args.get("command", "")) if isinstance(args, dict) else ""
+        with self._rules_lock:
+            rules = self._read_rules(thread)
+        for rule in rules:
+            if rule["tool"] != tool:
+                continue
+            prefix = rule.get("prefix")
+            if prefix is None:
+                return rule
+            if tool == "run_command" and _command_has_prefix(command, prefix):
+                return rule
+        return None
+
+    def _add_rule(self, asked: tuple, prefix: Any, scope: Any) -> Optional[str]:
+        import uuid
+
+        thread, tool, args_json = asked
+        if scope not in ("thread", "project"):
+            return "scope must be thread or project"
+        if prefix is not None and (not isinstance(prefix, str) or not prefix.strip() or tool != "run_command"):
+            return "prefix must be a non-empty string and only applies to run_command"
+        if prefix is not None:
+            args = _args(args_json)
+            if not isinstance(args, dict) or not _command_has_prefix(str(args.get("command", "")), prefix):
+                return "prefix must match the command being approved"
+        if scope not in self._rule_files(thread):
+            return "this thread has no project yet"
+        with self._rules_lock:
+            mine = [r for r in self._read_rules(thread) if r["scope"] == scope]
+            mine.append({"id": uuid.uuid4().hex[:8], "tool": tool, "prefix": prefix.strip() if prefix else None})
+            self._write_rules(thread, scope, mine)
+        return None
+
+    def _on_rules(self, msg: Dict[str, Any]) -> None:
+        req = _text(msg.get("id"))
+        thread = "".join(c for c in str(msg.get("thread") or "") if c.isalnum() or c in "-_.")
+        op = msg.get("op", "list")
+        if not thread or op not in ("list", "remove"):
+            return self.error("thread must be set and op must be list or remove", "bad_request", req=req)
+        with self._rules_lock:
+            if op == "remove":
+                rid = _text(msg.get("rule"))
+                for scope in self._rule_files(thread):
+                    kept = [r for r in self._read_rules(thread) if r["scope"] == scope and r["id"] != rid]
+                    self._write_rules(thread, scope, kept)
+            rules = self._read_rules(thread)
+        self.emit({"type": "rules_result", "id": req, "thread": thread, "rules": rules})
 
     def _on_sessions(self, msg: Dict[str, Any]) -> None:
         from pathlib import Path
@@ -298,19 +385,23 @@ class Adapter:
     def _approve(self, t: _Turn, tool: str, args_json: str) -> str:
         """Decide one tool call. Plan and accept_edits decide on their own for some tools, the rest ask the app."""
         turn, thread, permission = t.id, t.thread, t.permission
+        rule: Optional[Dict[str, Any]] = None
         if permission == "plan":
             decision, reason = ("y", "plan mode allows read only tools") if tool in READ_ONLY_TOOLS else ("n", "plan mode allows read only tools")
         elif tool in READ_ONLY_TOOLS and permission != "manual":
             decision, reason = "y", f"{permission} mode"
         elif permission == "accept_edits" and tool in EDIT_TOOLS:
             decision, reason = "y", "accept_edits mode"
-        elif (thread, tool) in self._always:
-            decision, reason = "y", "allowed always for this thread"
+        elif (rule := self._match_rule(thread, tool, args_json)) is not None:
+            decision, reason = "y", f"rule {rule['id']}"
         else:
             decision, reason = "", ""
         if decision:
-            self.emit({"type": "auto_decision", "turn": turn, "tool": tool,
-                       "decision": "allow" if decision == "y" else "skip", "reason": reason})
+            out = {"type": "auto_decision", "turn": turn, "tool": tool,
+                   "decision": "allow" if decision == "y" else "skip", "reason": reason}
+            if rule is not None:
+                out["rule"] = rule["id"]
+            self.emit(out)
             return decision
         with self._state:
             if t.cancel.is_set():
@@ -318,7 +409,7 @@ class Adapter:
             self._approvals += 1
             req = f"a{self._approvals}"
             t.pending = req
-            t.asked = (thread, tool)
+            t.asked = (thread, tool, args_json)
             self._requests[req] = t
             t.gate.clear()
         self.emit({"type": "approval_request", "turn": turn, "id": req, "tool": tool, "arguments": _args(args_json)})
@@ -443,6 +534,17 @@ def _save_meta(thread: str, meta: Dict[str, Any]) -> None:
     with open(tmp, "w", encoding="utf-8") as handle:
         json.dump(meta, handle)
     os.replace(tmp, path)
+
+
+_SHELL_CONTROL = ("&&", "||", ";", "|", "`", "$(", "\n", ">", "<", "&")
+
+
+def _command_has_prefix(command: str, prefix: str) -> bool:
+    """True when the command starts with the prefix at a word boundary and chains nothing else after it."""
+    command, prefix = command.strip(), prefix.strip()
+    if not prefix or any(token in command for token in _SHELL_CONTROL):
+        return False
+    return command == prefix or command.startswith(prefix + " ")
 
 
 def _text(value: Any) -> Optional[str]:

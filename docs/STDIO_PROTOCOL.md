@@ -55,7 +55,7 @@ agent hello : `{"type":"hello","protocol":1,"agent":"hydra","capabilities":[...]
 
 app hello : `{"type":"hello","protocol":1}`
 
-capabilities : turn, cancel, approval, permission, sessions, history, action.
+capabilities : turn, cancel, approval, permission, rules, sessions, history, action.
 
 
 ## messages from the app to the agent
@@ -79,11 +79,17 @@ cancel : stop a turn. fields turn. the turn ends with `done` cancelled true. a p
 
 approval : answer an `approval_request`. fields id, decision. decision is allow, allow_always, skip or abort.
 - allow runs the tool.
-- allow_always runs the tool and lets that tool run unasked for the rest of the process, in that thread only.
+- allow_always runs the tool and saves a rule so the same call runs unasked from then on. optional fields prefix and scope.
+  - scope : thread, the default, or project. a thread rule holds for that thread. a project rule holds for every thread whose cwd is the same directory. rules are saved on disk, in rules.json next to the thread ledger for thread scope and under ~/.hydra/projects for project scope, so they survive restarts.
+  - prefix : a command prefix, only for run_command. the rule then covers commands that start with the prefix at a word boundary. a command that chains, redirects or substitutes, with any of && || ; | & < > a backtick, $( or a newline, never matches a prefix rule. the prefix must match the command being approved, else the adapter answers `error` code bad_request, still applies the decision and saves no rule.
+  - without prefix the rule covers every call of that tool.
+  - plan mode ignores rules.
 - skip does not run it, the turn continues and the model sees that it was skipped.
 - abort ends the turn. `done` has ok false and cancelled false.
 
 shutdown : finish cleanly. a running turn is cancelled and awaited, then the process exits 0.
+
+rules : list or remove the approval rules that apply to a thread. fields id, thread, op, rule. op is list, the default, or remove, which also needs rule, the rule id. reply `rules_result`.
 
 sessions : list threads on disk. fields id, optional. reply `session_list`.
 
@@ -102,7 +108,7 @@ tool_start : fields turn, call, tool, arguments. arguments is the parsed object,
 
 tool_result : fields turn, call, tool, is_error, output, truncated. output is cut at 4000 characters and truncated says so. always follows its `tool_start`.
 
-auto_decision : fields turn, tool, decision, reason. decision is allow or skip. sent instead of an `approval_request` when the permission mode or an earlier allow_always settled the call. comes before the matching `tool_start`.
+auto_decision : fields turn, tool, decision, reason, and rule when a saved rule settled the call. decision is allow or skip. sent instead of an `approval_request` when the permission mode or a saved rule settled the call. comes before the matching `tool_start`.
 
 diff : fields turn, path, diff. the unified diff of a file change made by write_file or edit_file. sent after the write and before the matching `tool_result`.
 
@@ -113,6 +119,8 @@ approval_request : fields turn, id, tool, arguments. sent only when the permissi
 done : fields turn, text, ok, cancelled. exactly one per turn and always the last message of that turn. text is the final answer, or the cancel marker text when cancelled. ok is false on cancel, abort and failure.
 
 error : fields code, message, redacted, and turn or id when the failure belongs to one. redacted is true when secrets or url paths were scrubbed from message. a failure inside a turn writes `error` with turn, then `done` with ok false.
+
+rules_result : fields id, thread, rules. each rule has id, tool, prefix or null, and scope.
 
 session_list : fields id, sessions. each session has thread, updated in epoch seconds, and cwd, mode, model, permission and title as last saved, null when unknown.
 

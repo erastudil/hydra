@@ -12096,6 +12096,8 @@ def stdio_permission_modes():
         auto = [m for m in replies if m["type"] == "auto_decision"]
         assert auto and auto[0]["decision"] == "allow" and "approval_request" not in kinds(replies) and os.path.exists(target), replies
         os.remove(target)
+        replies = child.run_turn("m2p", "write", thread="p4", permission="plan", model="local")  # plan mode ignores the saved rule
+        assert [m["decision"] for m in replies if m["type"] == "auto_decision"] == ["skip"] and not os.path.exists(target), replies
         child.turn("m3", "write", thread="p5", permission="manual", model="local")  # another thread still asks
         req = child.until("approval_request")[-1]
         child.send(type="approval", id=req["id"], decision="skip")
@@ -12133,14 +12135,18 @@ def _marker_model(seen):
         seen.append(body)
         users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
         prompt = users[-1] if users else ""
-        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "PLAIN"))] or ["PLAIN"])[-1]
+        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "RUN_", "PLAIN"))] or ["PLAIN"])[-1]
         if word.startswith("SLOW"):
             return _sse(handler, [f"{word}-{n} " for n in range(200)], 0.05, [])
-        if word.startswith(("WRITE_", "EDIT_")) and not any(m.get("role") == "tool" for m in body["messages"]):
+        if word.startswith(("WRITE_", "EDIT_", "RUN_")) and not any(m.get("role") == "tool" for m in body["messages"]):
             name = word.split("_", 1)[1]
-            args = json.dumps({"path": name + ".txt", "content": f"content of {name}\n"})
+            commands = {"status": "echo hello", "chain": "echo hello && echo bye", "other": "echo other", "near": "echo hellothere"}
+            if word.startswith("RUN_"):
+                tool_name, args = "run_command", json.dumps({"command": commands[name]})
+            else:
+                tool_name, args = "write_file", json.dumps({"path": name + ".txt", "content": f"content of {name}\n"})
             chunks = [
-                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": ""}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": tool_name, "arguments": ""}}]}}]},
                 {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]},
             ]
             handler.send_response(200)
@@ -12339,6 +12345,82 @@ def stdio_thread_resumes_after_restart():
             err = second.until("error")[-1]
             assert err["code"] == "bad_request" and "cwd" in err["message"], err
             assert second.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_approval_rules_with_command_prefixes():
+    """allow_always can name a command prefix and a scope, chained commands never match, rules list and remove, and they survive a restart."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home)
+            child.next()
+            proj, other = _project(child, "rp"), _project(child, "rq")
+            counter = [0]
+
+            def run(thread, key, answer=None, cwd=proj, **fields):
+                """Run one RUN_<key> turn. Returns (asked, auto_decisions, tool_output) and answers a request with `answer`."""
+                counter[0] += 1
+                name = f"u{counter[0]}"
+                child.turn(name, f"RUN_{key} now", thread=thread, cwd=cwd, permission="manual", model="local")
+                asked, auto, errors = None, [], []
+                while True:
+                    msg = child.next()
+                    if msg["type"] == "approval_request":
+                        asked = msg
+                        child.send(type="approval", id=msg["id"], decision=answer or "skip", **fields)
+                    elif msg["type"] == "auto_decision":
+                        auto.append(msg)
+                    elif msg["type"] == "error":
+                        errors.append(msg)
+                    elif msg["type"] == "done" and msg["turn"] == name:
+                        return asked, auto, errors
+
+            asked, auto, errors = run("t1", "status", "allow_always", prefix="echo hello")
+            assert asked["tool"] == "run_command" and not auto and not errors
+            asked, auto, errors = run("t1", "status")
+            assert asked is None and len(auto) == 1 and auto[0]["decision"] == "allow" and auto[0]["rule"], (asked, auto)
+            rule_id = auto[0]["rule"]
+            asked, auto, errors = run("t1", "chain")
+            assert asked is not None and not auto, "a chained command matched a prefix rule"
+            asked, auto, errors = run("t1", "other")
+            assert asked is not None and not auto, "an unrelated command matched"
+            asked, auto, errors = run("t1", "near")
+            assert asked is not None and not auto, "a prefix matched in the middle of a word"
+            asked, auto, errors = run("t2", "status")
+            assert asked is not None and not auto, "a thread rule leaked to another thread"
+            asked, auto, errors = run("t1", "other", "allow_always", prefix="rm")
+            assert len(errors) == 1 and errors[0]["code"] == "bad_request", errors
+            child.send(type="rules", id="r1", thread="t1")
+            rules = child.until("rules_result")[-1]["rules"]
+            assert [(r["id"], r["tool"], r["prefix"], r["scope"]) for r in rules] == [(rule_id, "run_command", "echo hello", "thread")], rules
+
+            asked, auto, errors = run("t1", "other", "allow_always", scope="project", prefix="echo other")
+            assert not errors
+            asked, auto, errors = run("t3", "other")  # same project, other thread
+            assert asked is None and auto and auto[0]["decision"] == "allow", (asked, auto)
+            asked, auto, errors = run("t4", "other", cwd=other)  # other project asks
+            assert asked is not None
+            child.send(type="rules", id="r2", thread="t3")
+            rules = child.until("rules_result")[-1]["rules"]
+            assert [(r["prefix"], r["scope"]) for r in rules] == [("echo other", "project")], rules
+            assert child.close() == 0
+
+            again = _StdioChild(base, home)
+            again.next()
+            again.send(type="turn", turn="z1", prompt="RUN_other now", thread="t3", permission="manual", model="local")
+            kinds = [m["type"] for m in again.until("done", turn="z1")]
+            assert "auto_decision" in kinds and "approval_request" not in kinds, kinds
+            again.send(type="rules", id="r3", thread="t1", op="remove", rule=rule_id)
+            assert [r["scope"] for r in again.until("rules_result")[-1]["rules"]] == ["project"]
+            again.send(type="turn", turn="z2", prompt="RUN_status now", thread="t1", permission="manual", model="local")
+            req = again.until("approval_request")[-1]  # the removed rule no longer lets it through
+            again.send(type="approval", id=req["id"], decision="skip")
+            again.until("done", turn="z2")
+            assert again.close() == 0
     finally:
         httpd.shutdown()
 
