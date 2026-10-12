@@ -12598,6 +12598,10 @@ def stdio_two_hundred_runs_of_four_parallel_turns():
                         assert open(target, encoding="utf-8").read() == word + "\n"
                     assert [m["path"] for m in msgs if m["type"] == "diff"] == ([word + ".txt"] if wrote else []), (run, turn)
                     assert ("approval_request" in types) == (kind in ("write", "skip")), (run, turn)
+                    starts = [m["arguments"]["path"] for m in msgs if m["type"] == "tool_start"]
+                    results = [m["output"] for m in msgs if m["type"] == "tool_result"]
+                    assert starts == ([word + ".txt"] if wrote else []), (run, turn, starts)
+                    assert len(results) == len(starts) and all(word in r for r in results), (run, turn, results)
             assert child.close() == 0
     finally:
         httpd.shutdown()
