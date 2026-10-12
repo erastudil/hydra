@@ -12519,6 +12519,90 @@ def stdio_checkpoint_and_rewind():
         httpd.shutdown()
 
 
+@check
+def stdio_two_hundred_runs_of_four_parallel_turns():
+    """200 runs of four overlapping turns each: plain, approved write, skipped write, bypass write with diff. No message strays, every file, diff, usage number and approval lands with its own turn."""
+    import random
+
+    seen = []
+
+    def script(handler, body):
+        seen.append(1)
+        users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        word = [w for w in users[-1].replace("\n", " ").split() if w.startswith("T")][-1]
+        run, slot, kind = word[1:].split("_")
+        usage = {"choices": [], "usage": {"prompt_tokens": int(run) * 4 + int(slot) + 1, "completion_tokens": int(slot) + 1}}
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.end_headers()
+        if kind in ("write", "skip", "bypass") and not any(m.get("role") == "tool" for m in body["messages"]):
+            args = json.dumps({"path": word + ".txt", "content": word + "\n"})
+            chunks = [
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": ""}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]},
+                usage,
+            ]
+        else:
+            chunks = [{"choices": [{"delta": {"content": "ok-"}}]}, {"choices": [{"delta": {"content": word}}]}, usage]
+        for chunk in chunks:
+            handler.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        handler.wfile.write(b"data: [DONE]\n\n")
+        handler.wfile.flush()
+
+    httpd, base = _scripted_model(script)
+    rng = random.Random(20261011)
+    kinds = ("plain", "write", "skip", "bypass")
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home)
+            child.next()
+            for run in range(200):
+                names = {}
+                for slot, kind in enumerate(kinds):
+                    word = f"T{run}_{slot}_{kind}"
+                    folder = _project(child, f"r{run}s{slot}")
+                    names[f"x{run}_{slot}"] = (word, kind, folder, slot)
+                    child.turn(f"x{run}_{slot}", word, thread=f"th{run}_{slot}", cwd=folder, model="local", checkpoint=False,
+                               permission="manual" if kind in ("write", "skip") else "bypass")
+                got = {turn: [] for turn in names}
+                waiting = []
+                done = 0
+                deadline = time.time() + 60
+                while done < 4:
+                    assert time.time() < deadline, (run, got)
+                    msg = child.next(30)
+                    turn = msg.get("turn")
+                    assert turn in names, (run, "message for no turn of this run", msg)
+                    got[turn].append(msg)
+                    if msg["type"] == "approval_request":
+                        waiting.append(msg)
+                        if len(waiting) == 2:
+                            rng.shuffle(waiting)
+                            for req in waiting:
+                                kind = names[req["turn"]][1]
+                                child.send(type="approval", id=req["id"], decision="allow" if kind == "write" else "skip")
+                    if msg["type"] == "done":
+                        done += 1
+                assert len({m["id"] for m in waiting}) == 2
+                for turn, (word, kind, folder, slot) in names.items():
+                    msgs = got[turn]
+                    types = [m["type"] for m in msgs]
+                    assert types.count("done") == 1 and types[-1] == "done" and msgs[-1]["ok"] is True, (run, turn, msgs)
+                    assert "".join(m["text"] for m in msgs if m["type"] == "token") .endswith("ok-" + word), (run, turn, msgs)
+                    use = [m for m in msgs if m["type"] == "usage"]
+                    assert [(u["prompt_tokens"], u["completion_tokens"]) for u in use] == [(run * 4 + slot + 1, slot + 1)] * len(use) and use, (run, turn, use)
+                    target = os.path.join(folder, word + ".txt")
+                    wrote = kind in ("write", "bypass")
+                    assert os.path.exists(target) == wrote, (run, turn, kind)
+                    if wrote:
+                        assert open(target, encoding="utf-8").read() == word + "\n"
+                    assert [m["path"] for m in msgs if m["type"] == "diff"] == ([word + ".txt"] if wrote else []), (run, turn)
+                    assert ("approval_request" in types) == (kind in ("write", "skip")), (run, turn)
+            assert child.close() == 0
+    finally:
+        httpd.shutdown()
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")
