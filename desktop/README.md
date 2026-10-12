@@ -1,29 +1,15 @@
 ﻿# hydra desktop
 
-scope : sovereign desktop application and local web desk server for hydra.
+scope : native PySide6 desktop app for hydra. no browser, no web view, no local server.
 
-subsystem : fastapi application, websocket duplex streaming, spa interface, and computer use controller.
-
-dialect : progen syntax.
-
-
-## architecture
-
-server engine : asynchronous fastapi application running on uvicorn.
-
-default port : 7778 for desktop interface; preserves port 7777 for openai compatible gateway.
-
-web desk ui : self-contained single-page html5 application with zero external cdn dependencies.
-
-multimodal workspace : real-time streaming chat, autonomous agent react loops, three-headed swarm consensus, and terminal sandbox.
-
-computer use visualizer : live screen preview, coordinate tracking, click dispatch, and active window monitoring.
-
-
-## launch interface
-
-cli command : `hydra desktop` or `python -m hydra_cli.desktop`.
-
-programmatic runner : `from desktop import run_desktop_app; server = run_desktop_app(port=7778)`.
-
-browser launch : opens designated sovereign web desk window automatically upon startup unless --no-browser supplied.
+launch : `python -m hydra_cli.gui`, `hydra desktop`, or the Desktop shortcut made by `scripts/create_desktop_shortcut.py`.
+exe : `python scripts/build_exe.py` writes `dist/Hydra/Hydra.exe` with PyInstaller, QtWebEngine excluded.
+code : `hydra_cli/gui/` holds the window, panes, store, worker and theme.
+agent : the composer runs `hydra_cli.agent.run_agent_loop` in a worker thread. tokens stream into the transcript through a 33 ms flush.
+state : projects, threads, messages and diffs persist in `~/.hydra/desktop/state.json`.
+panes : project sidebar, thread sidebar, transcript, composer, changes (diff), approval.
+context : composer selector picks dynamic threading (`recall`) or compaction (`compact`).
+stop : `hydra_cli.ui.request_cancel` raises `TurnCancelled` inside the running turn.
+theme : `hydra_cli/gui/theme.py` owns palette, fonts and the stylesheet.
+core : `hydra_cli/desktop_core.py` keeps token accounting, command palette actions and provider fallback.
+modules : the other files in this package are standalone libraries with no UI of their own.

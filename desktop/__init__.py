@@ -1,17 +1,10 @@
 ﻿"""
 Hydra Sovereign Desktop Application package.
-Exposes FastAPI application, WebSocket streaming, sovereign Web Desk SPA,
-background DesktopServer runner, session playback engine, multi-workspace manager,
+Session playback engine, multi-workspace manager,
 browser storage persistence, model performance evaluator, command registry,
 audio transcriber, notification hub, extension plugin system, and dynamic theme engine.
 """
 
-from hydra_cli.desktop import (
-    create_desktop_app,
-    DesktopServer,
-    run_desktop_app,
-    get_desktop_html,
-)
 from desktop.session_player import (
     SessionTracePlayer,
     ActionTracer,
@@ -382,10 +375,6 @@ __all__ = [
     "get_checkpoint_manager",
     "reset_checkpoint_manager",
 
-    "create_desktop_app",
-    "DesktopServer",
-    "run_desktop_app",
-    "get_desktop_html",
     "SessionTracePlayer",
     "ActionTracer",
     "create_player_from_runner",

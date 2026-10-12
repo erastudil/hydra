@@ -266,7 +266,7 @@ class CommandRegistry:
 
         # Check if desktop command palette actions can handle it
         try:
-            from hydra_cli.desktop import COMMAND_PALETTE_ACTIONS, dispatch_command_palette_action
+            from hydra_cli.desktop_core import COMMAND_PALETTE_ACTIONS, dispatch_command_palette_action
             if command_id in COMMAND_PALETTE_ACTIONS:
                 return dispatch_command_palette_action(command_id, p)
         except Exception:
@@ -349,9 +349,9 @@ class CommandRegistry:
         return [item for _, item in scored[:limit]]
 
     def import_default_palette_actions(self) -> int:
-        """Ingest built-in actions from hydra_cli.desktop.COMMAND_PALETTE_ACTIONS."""
+        """Ingest built-in actions from hydra_cli.desktop_core.COMMAND_PALETTE_ACTIONS."""
         try:
-            from hydra_cli.desktop import COMMAND_PALETTE_ACTIONS
+            from hydra_cli.desktop_core import COMMAND_PALETTE_ACTIONS
         except Exception:
             return 0
 

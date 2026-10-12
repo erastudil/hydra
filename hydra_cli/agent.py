@@ -10,7 +10,7 @@ from hydra_cli.context import (
     register_label,
     resolve_context_mode,
 )
-from hydra_cli.ui import StreamWrap, clean_pasted_text, drain_steering, prompt_input, render_prompt_box, wrap_text
+from hydra_cli.ui import StreamWrap, clean_pasted_text, approve_tool, diff_sink, drain_steering, prompt_input, tool_sink, render_prompt_box, wrap_text
 from hydra_cli._version import __version__
 
 from datetime import datetime, timezone
@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
@@ -79,7 +80,18 @@ from hydra_cli.ui import (
 
 
 def print_unified_diff(path: str, old_content: str, new_content: str, raw_diff: bool = False) -> None:
-    """Print colorized unified diff of file mutations to stderr."""
+    """Print colorized unified diff of file mutations to stderr, or hand it to the GUI diff sink."""
+    sink = diff_sink()
+    if sink is not None:
+        if raw_diff:
+            text = new_content
+        else:
+            text = "".join(difflib.unified_diff(
+                old_content.splitlines(keepends=True), new_content.splitlines(keepends=True),
+                fromfile=f"a/{path}", tofile=f"b/{path}"))
+        if text:
+            sink(path, text)
+        return
     color_on = supports_color()
     RED = "\033[31m" if color_on else ""
     GREEN = "\033[32m" if color_on else ""
@@ -2669,12 +2681,26 @@ def _empty_stream_state() -> Dict[str, Any]:
     return {"content": [], "reasoning": [], "tools": {}}
 
 
-def _consume_completion_body(resp: Any, on_token: Optional[Callable[[str], None]], where: str) -> Dict[str, Any]:
+CANCELLED_TEXT = "[Turn cancelled by user]"
+
+
+class TurnCancelled(Exception):
+    """Raised inside a model call when the caller set the cancel event."""
+
+
+def _consume_completion_body(
+    resp: Any,
+    on_token: Optional[Callable[[str], None]],
+    where: str,
+    cancel: Optional[threading.Event] = None,
+) -> Dict[str, Any]:
     """Read an SSE stream, or one JSON body, and return an OpenAI chat completion object."""
     state = _empty_stream_state()
     saw_done = False
     buffered: List[str] = []
     for raw_line in resp:
+        if cancel is not None and cancel.is_set():
+            raise TurnCancelled()
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line or line.startswith(":"):
             continue
@@ -2742,6 +2768,7 @@ def _fetch_streaming_completion(
     payload: Dict[str, Any],
     timeout: int = 120,
     on_token: Optional[Callable[[str], None]] = None,
+    cancel: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     """Stream one chat completion and return the assembled message JSON."""
     body = dict(payload)
@@ -2751,7 +2778,7 @@ def _fetch_streaming_completion(
     where = describe_endpoint(url)
     try:
         with urlopen(req, timeout=timeout) as resp:
-            return _consume_completion_body(resp, on_token, where)
+            return _consume_completion_body(resp, on_token, where, cancel)
     except HTTPError as e:
         error_body = ""
         try:
@@ -2819,6 +2846,7 @@ def _run_agent_loop(
     strategy: Optional[str] = None,
     on_token: Optional[Callable[[str], None]] = None,
     max_context_chars: Optional[int] = None,
+    cancel: Optional[threading.Event] = None,
 ) -> str:
     """
     Execute autonomous agent loop with native coding tools and MCP tool invocation until completion or max turns.
@@ -3022,12 +3050,13 @@ def _run_agent_loop(
                             payload,
                             timeout=timeout,
                             on_token=on_token,
+                            cancel=cancel,
                         )
                     else:
                         res_json = _fetch_raw_completion(provider["url"], provider["headers"], payload, timeout=timeout)
                     if not res_json.get("choices"):
                         raise ProviderError(f"{provider.get('name', 'Provider')} returned an empty choices array.")
-                except UsageError:
+                except (UsageError, TurnCancelled):
                     raise
                 except Exception as exc:
                     last_error = exc
@@ -3079,7 +3108,18 @@ def _run_agent_loop(
     turn_idx = 0
     active_skip_next = skip_next_tool
 
+    def cancelled() -> bool:
+        return cancel is not None and cancel.is_set()
+
+    def finish_cancelled() -> str:
+        checkpointer.transition("COMPLETED")
+        checkpointer.final_response = CANCELLED_TEXT
+        checkpointer.save()
+        return CANCELLED_TEXT
+
     while turn_idx < max_turns:
+        if cancelled():
+            return finish_cancelled()
         for directive in drain_steering():
             directive_msg = {
                 "role": "user",
@@ -3103,6 +3143,8 @@ def _run_agent_loop(
                 ],
             ):
                 res_json = complete_turn()
+        except TurnCancelled:
+            return finish_cancelled()
         except KeyboardInterrupt:
             try:
                 steer_input = prompt_input(
@@ -3193,8 +3235,10 @@ def _run_agent_loop(
             except Exception:
                 args = {}
 
+            if cancelled() and not skip_remaining_tools:
+                skip_remaining_tools = True
             if skip_remaining_tools:
-                obs_text = "[Tool execution skipped by developer for steering]"
+                obs_text = "[Tool execution cancelled by user]" if cancelled() else "[Tool execution skipped by developer for steering]"
                 if use_prompt_tool_adapter:
                     tool_msg = {
                         "role": "user",
@@ -3227,8 +3271,7 @@ def _run_agent_loop(
 
             if steer_mode and not tool_skipped:
                 try:
-                    c_prompt = f"[HYDRA STEER] Tool: {fn_name}({args_str}). Execute? [y/n/s(teer)/q]: "
-                    steer_choice = prompt_input(c_prompt).strip()
+                    steer_choice = approve_tool(fn_name, args_str).strip()
                 except KeyboardInterrupt:
                     try:
                         steer_input = prompt_input(
@@ -3543,6 +3586,11 @@ def _run_agent_loop(
                             print_unified_diff(diff_path, orig_file_content or "", new_file_content)
                     except Exception:
                         pass
+
+            _tsink = tool_sink()
+            if _tsink is not None:
+                _tsink(fn_name, args_str, bool(is_error),
+                       result_content if isinstance(result_content, str) else json.dumps(result_content, default=str))
 
             if fn_name == "run_command":
                 exit_code = 0

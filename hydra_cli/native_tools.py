@@ -2458,7 +2458,7 @@ class NativeToolRegistry:
         try:
             os.makedirs(parent, exist_ok=True)
             temp_path = os.path.join(parent, f".tmp_write_{uuid.uuid4().hex}")
-            with open(temp_path, "w", encoding="utf-8") as f:
+            with open(temp_path, "w", encoding="utf-8", newline="") as f:
                 f.write(content)
             os.replace(temp_path, abs_path)
             return f"Successfully wrote {len(content)} characters to {path}"
@@ -2476,10 +2476,12 @@ class NativeToolRegistry:
             return {"isError": True, "error": f"Path is a directory: {path}"}
 
         try:
-            with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
-                current = f.read()
+            with open(abs_path, "r", encoding="utf-8", errors="replace", newline="") as f:
+                raw = f.read()
         except Exception as exc:
             return {"isError": True, "error": f"Failed to read {path}: {exc}"}
+        crlf = "\r\n" in raw
+        current = raw.replace("\r\n", "\n")
 
         count = current.count(old_text)
         if count == 0:
@@ -2488,6 +2490,8 @@ class NativeToolRegistry:
             return {"isError": True, "error": f"old_text occurs {count} times in {path}; exact search-and-replace requires unique match"}
 
         new_content = current.replace(old_text, new_text, 1)
+        if crlf:
+            new_content = new_content.replace("\n", "\r\n")
         res = self.write_file(path, new_content)
         if isinstance(res, dict) and res.get("isError"):
             return res

@@ -631,6 +631,44 @@ def set_prompt_handler(handler: Optional[Callable[[str], str]]) -> None:
     _PROMPT_HANDLER = handler
 
 
+_APPROVAL_HANDLER: Optional[Callable[[str, str], str]] = None
+_DIFF_SINK: Optional[Callable[[str, str], None]] = None
+_TOOL_SINK: Optional[Callable[[str, str, bool, str], None]] = None
+
+
+def set_approval_handler(handler: Optional[Callable[[str, str], str]]) -> None:
+    """Route tool approvals (tool name, args json) to a GUI. Handler returns y, n, s or q."""
+    global _APPROVAL_HANDLER
+    _APPROVAL_HANDLER = handler
+
+
+def set_diff_sink(sink: Optional[Callable[[str, str], None]]) -> None:
+    """Receive (path, unified diff text) for each file change instead of stderr."""
+    global _DIFF_SINK
+    _DIFF_SINK = sink
+
+
+def set_tool_sink(sink: Optional[Callable[[str, str, bool, str], None]]) -> None:
+    """Receive (tool, args json, is_error, result text) after each tool call."""
+    global _TOOL_SINK
+    _TOOL_SINK = sink
+
+
+def diff_sink() -> Optional[Callable[[str, str], None]]:
+    return _DIFF_SINK
+
+
+def tool_sink() -> Optional[Callable[[str, str, bool, str], None]]:
+    return _TOOL_SINK
+
+
+def approve_tool(tool: str, args_json: str) -> str:
+    """Ask for tool approval through the GUI handler, else the terminal prompt."""
+    if _APPROVAL_HANDLER is not None:
+        return _APPROVAL_HANDLER(tool, args_json)
+    return prompt_input(f"[HYDRA STEER] Tool: {tool}({args_json}). Execute? [y/n/s(teer)/q]: ")
+
+
 def prompt_input(prompt: str = "") -> str:
     """input() replacement that answers through the TUI composer when one is active."""
     if _PROMPT_HANDLER is not None:

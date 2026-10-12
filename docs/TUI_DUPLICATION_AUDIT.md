@@ -8,3 +8,5 @@ desktop app : Hydra Desktop.lnk -> pythonw -m hydra_cli.desktop. crashed at star
 requested changes : the viewport/pin/spacer edits sit in main at bcdd284 inside tui.py, the file the sovereign terminal runs. nothing was left only in the parallel path. origin/main equals local main before this PR.
 fix : Hydra TUI.lnk now targets launch\bin\hydra-terminal.bat. desktop.py guards None stdio under pythonw. verify.py gains desktop_app_pythonw_launch.
 missing : Hydra Desktop is a local web server opened in the default browser tab. it is not a native window app. a Codex-replacement desktop app needs a native shell (pywebview, Tauri or Electron, or Edge --app window), a project/thread sidebar, a composer wired to agent_runner, diff and approval panes. none exist in the repo.
+
+update : the browser app and its web server are retired. Hydra Desktop.lnk now launches the native PySide6 app (hydra_cli.gui).
