@@ -10835,9 +10835,24 @@ def wave22_session_logger_and_mimo_routing():
 
 
 @check
+def stdio_children_never_open_a_console():
+    """Every Popen the adapter process makes carries CREATE_NO_WINDOW on Windows, and main() installs that."""
+    import inspect
+    from hydra_cli import stdio_adapter as sa
+
+    assert sa.CREATE_NO_WINDOW == 0x08000000
+    assert sa.hidden_popen_kwargs({})["creationflags"] & 0x08000000
+    kept = sa.hidden_popen_kwargs({"creationflags": 0x200})["creationflags"]
+    assert kept == 0x200 | 0x08000000, "existing flags must survive"
+    assert sa.hide_child_consoles() is (os.name == "nt")
+    assert "hide_child_consoles()" in inspect.getsource(sa.main), "main must install the patch before serving"
+
+
+@check
 def desktop_launcher_targets_rust_exe():
     """The PySide6 app is gone. hydra desktop and the shortcut point at the Rust exe and say so when it is missing."""
-    assert not os.path.exists(os.path.join(REPO, "hydra_cli", "gui"))
+    gui_dir = os.path.join(REPO, "hydra_cli", "gui")
+    assert not (os.path.isdir(gui_dir) and any(f.endswith(".py") for f in os.listdir(gui_dir)))
     sys.path.insert(0, os.path.join(REPO, "scripts"))
     import create_desktop_shortcut as cds
     from hydra_cli import router

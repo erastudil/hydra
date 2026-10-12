@@ -345,6 +345,34 @@ class Adapter:
             self.emit(final)
 
 
+CREATE_NO_WINDOW = 0x08000000
+
+
+def hidden_popen_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Popen kwargs with the no-window flag added. A console child of a windowless parent otherwise opens its own console."""
+    out = dict(kwargs)
+    out["creationflags"] = int(out.get("creationflags") or 0) | CREATE_NO_WINDOW
+    return out
+
+
+def hide_child_consoles() -> bool:
+    """On Windows make every subprocess this process starts (sandbox, git, tools) windowless. No-op elsewhere."""
+    if os.name != "nt":
+        return False
+    import subprocess
+
+    original = subprocess.Popen.__init__
+    if getattr(original, "_hydra_hidden", False):
+        return True
+
+    def init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        original(self, *args, **hidden_popen_kwargs(kwargs))
+
+    init._hydra_hidden = True  # type: ignore[attr-defined]
+    subprocess.Popen.__init__ = init  # type: ignore[method-assign]
+    return True
+
+
 def _text(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
@@ -358,6 +386,7 @@ def _args(args_json: str) -> Any:
 
 def main(argv: Optional[List[str]] = None) -> int:
     """Take over the process stdio, then serve until shutdown or EOF."""
+    hide_child_consoles()
     proto_out = io.TextIOWrapper(io.FileIO(os.dup(1), "wb"), encoding="utf-8", newline="\n", write_through=True)
     proto_in = io.BufferedReader(io.FileIO(os.dup(0), "rb"))
     os.dup2(2, 1)

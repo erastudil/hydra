@@ -1,8 +1,10 @@
+#![windows_subsystem = "windows"]
 mod app;
 mod theme;
 mod widgets;
 
 fn main() -> eframe::Result<()> {
+    hydra_desktop::crash::install();
     let size = std::env::var("HYDRA_SIZE").ok().and_then(|s| {
         let (w, h) = s.split_once('x')?;
         Some([w.parse::<f32>().ok()?, h.parse::<f32>().ok()?])

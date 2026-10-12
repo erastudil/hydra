@@ -2,7 +2,7 @@
 
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -58,10 +58,31 @@ pub struct Backend {
     next: u64,
 }
 
-/// The checkout that holds `hydra_cli`: HYDRA_REPO, else a parent of the exe or of the working directory.
+/// Folder that holds Hydra.exe (or HYDRA_BUNDLE_DIR for tests). A release folder carries `runtime/` and `app/` beside it.
+pub fn bundle_dir() -> Option<std::path::PathBuf> {
+    if let Ok(d) = std::env::var("HYDRA_BUNDLE_DIR") {
+        return Some(d.into());
+    }
+    std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf()))
+}
+
+/// Embedded interpreter path inside a release folder, if present.
+pub fn bundled_python(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let names: &[&str] = if cfg!(windows) { &["python.exe"] } else { &["python3", "python"] };
+    let rt = dir.join("runtime");
+    names.iter().map(|n| rt.join(n)).find(|p| p.is_file())
+}
+
+/// The checkout that holds `hydra_cli`: HYDRA_REPO, the release folder's `app/`, else a parent of the exe or cwd.
 pub fn repo_dir() -> Option<String> {
     if let Ok(r) = std::env::var("HYDRA_REPO") {
         return Some(r);
+    }
+    if let Some(b) = bundle_dir() {
+        let app = b.join("app");
+        if app.join("hydra_cli").join("__init__.py").is_file() {
+            return Some(app.display().to_string());
+        }
     }
     let mut starts = vec![];
     if let Ok(exe) = std::env::current_exe() {
@@ -80,16 +101,24 @@ pub fn repo_dir() -> Option<String> {
     None
 }
 
-/// Interpreters to try, in order, as (program, leading args).
+/// Interpreters to try, in order, as (program, leading args). The bundled runtime wins; system python is a dev fallback.
 pub fn python_candidates() -> Vec<(String, Vec<String>)> {
     if let Ok(p) = std::env::var("HYDRA_PYTHON") {
         return vec![(p, vec![])];
     }
-    if cfg!(windows) {
-        vec![("python".into(), vec![]), ("py".into(), vec!["-3".into()])]
-    } else {
-        vec![("python3".into(), vec![]), ("python".into(), vec![])]
+    let mut out = vec![];
+    if let Some(p) = bundle_dir().and_then(|d| bundled_python(&d)) {
+        out.push((p.display().to_string(), vec![]));
+        return out;
     }
+    if cfg!(windows) {
+        out.push(("python".into(), vec![]));
+        out.push(("py".into(), vec!["-3".into()]));
+    } else {
+        out.push(("python3".into(), vec![]));
+        out.push(("python".into(), vec![]));
+    }
+    out
 }
 
 impl Backend {
@@ -104,7 +133,7 @@ impl Backend {
         let mut spawned: Option<Child> = None;
         let mut last_err = String::from("no python interpreter found");
         for (py, lead) in python_candidates() {
-            let mut cmd = Command::new(&py);
+            let mut cmd = crate::proc::command(&py);
             cmd.args(&lead).args(["-m", "hydra_cli", "stdio"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
             if let Some(r) = &repo {
                 cmd.current_dir(r);
@@ -118,11 +147,6 @@ impl Backend {
             cmd.env("PYTHONIOENCODING", "utf-8");
             for (k, v) in envs {
                 cmd.env(k, v);
-            }
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
             }
             match cmd.spawn() {
                 Ok(c) => {
@@ -206,5 +230,33 @@ impl Drop for Backend {
         if !matches!(self.child.try_wait(), Ok(Some(_))) {
             self.shutdown();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_python_is_preferred_when_present() {
+        let dir = std::env::temp_dir().join(format!("hydra-bundle-{}", std::process::id()));
+        let rt = dir.join("runtime");
+        std::fs::create_dir_all(&rt).unwrap();
+        assert!(bundled_python(&dir).is_none());
+        let name = if cfg!(windows) { "python.exe" } else { "python3" };
+        std::fs::write(rt.join(name), b"").unwrap();
+        assert_eq!(bundled_python(&dir).unwrap(), rt.join(name));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn parse_known_lines() {
+        assert!(matches!(parse_line(r#"{"type":"hello","protocol":1}"#), Some(Ev::Hello)));
+        match parse_line(r#"{"type":"usage","model":"m","prompt_tokens":5,"completion_tokens":2,"cost_usd":0.5}"#) {
+            Some(Ev::Usage { prompt, completion, cost, .. }) => assert_eq!((prompt, completion, cost), (5, 2, 0.5)),
+            other => panic!("{other:?}"),
+        }
+        assert!(parse_line("not json").is_none());
+        assert!(parse_line(r#"{"type":"mystery"}"#).is_none());
     }
 }
