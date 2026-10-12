@@ -13465,6 +13465,40 @@ def stdio_rewind_takes_the_conversation_back_too():
         assert child.close() == 0
 
 
+@check
+def stdio_one_turn_per_thread_across_agents():
+    """A thread running a turn in one agent is busy for every other agent, for turns and rewinds. Finishing or dying frees it."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            a, b = _StdioChild(base, home), _StdioChild(base, home)
+            a.next()
+            b.next()
+            assert a.run_turn("a0", "PLAIN first", thread="sh", model="local")[-1]["ok"]
+            assert b.run_turn("b0", "PLAIN after a finished", thread="sh", model="local")[-1]["ok"], "a finished turn kept the thread"
+            a.send(type="checkpoints", id="c", thread="sh")
+            checkpoint = a.until("checkpoint_list")[-1]["checkpoints"][0]["id"]
+
+            a.turn("a1", "SLOW and long", thread="sh", model="local")
+            a.until("token", turn="a1")
+            b.turn("b1", "PLAIN", thread="sh", model="local")
+            err = b.until("error")[-1]
+            assert err["code"] == "busy" and err["turn"] == "b1" and "another agent" in err["message"], err
+            b.send(type="rewind", id="w", thread="sh", checkpoint=checkpoint)
+            err = b.until("error")[-1]
+            assert err["code"] == "busy" and err["id"] == "w", err
+            assert b.run_turn("b2", "PLAIN other thread", thread="other", model="local")[-1]["ok"]
+
+            a.proc.kill()
+            a.proc.wait(timeout=10)
+            replies = b.run_turn("b3", "PLAIN after the holder died", thread="sh", model="local")
+            assert replies[-1]["ok"], replies
+            assert b.close() == 0
+    finally:
+        httpd.shutdown()
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")

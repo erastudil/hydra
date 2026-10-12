@@ -2238,9 +2238,10 @@ class AstFstringModernizer:
 
 
 
-def file_lock(path: str) -> Any:
+def file_lock(path: str, wait: bool = True) -> Any:
     """Context manager for an exclusive lock on path across processes: fcntl.flock on POSIX, msvcrt.locking on
-    Windows. The OS drops it when its holder dies, so a crashed process never leaves it stuck."""
+    Windows. The OS drops it when its holder dies, so a crashed process never leaves it stuck. With wait false,
+    entering raises BlockingIOError at once when another holder has it."""
     import contextlib
 
     @contextlib.contextmanager
@@ -2255,9 +2256,11 @@ def file_lock(path: str) -> Any:
                 handle.seek(0)
                 while True:
                     try:
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
                         break
                     except OSError:
+                        if not wait:
+                            raise BlockingIOError(f"{path} is locked by another process")
                         _time.sleep(0.05)
                 try:
                     yield
@@ -2267,7 +2270,7 @@ def file_lock(path: str) -> Any:
             else:
                 import fcntl
 
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
                 try:
                     yield
                 finally:
