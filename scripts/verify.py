@@ -12135,14 +12135,16 @@ def _marker_model(seen):
         seen.append(body)
         users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
         prompt = users[-1] if users else ""
-        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "RUN_", "PLAIN"))] or ["PLAIN"])[-1]
+        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "RUN_", "MCP_", "PLAIN"))] or ["PLAIN"])[-1]
         if word.startswith("SLOW"):
             return _sse(handler, [f"{word}-{n} " for n in range(200)], 0.05, [])
-        if word.startswith(("WRITE_", "EDIT_", "RUN_")) and not any(m.get("role") == "tool" for m in body["messages"]):
+        if word.startswith(("WRITE_", "EDIT_", "RUN_", "MCP_")) and not any(m.get("role") == "tool" for m in body["messages"]):
             name = word.split("_", 1)[1]
             commands = {"status": "echo hello", "chain": "echo hello && echo bye", "other": "echo other", "near": "echo hellothere", "delete": "rm keep.txt"}
             if word.startswith("RUN_"):
                 tool_name, args = "run_command", json.dumps({"command": commands[name]})
+            elif word.startswith("MCP_"):
+                tool_name, args = "demo__" + name, json.dumps({"text": "ping"})
             else:
                 tool_name, args = "write_file", json.dumps({"path": name + ".txt", "content": f"content of {name}\n"})
             chunks = [
@@ -12634,6 +12636,79 @@ def stdio_rules_and_skills_reach_the_model():
         assert "MARKER_RULE_42" not in json.dumps(seen[-1]["messages"][0]["content"])
         child.send(type="turn", turn="s4", prompt="hi", thread="sk4", cwd=child.project, skills=["no-such-skill"])
         assert child.until("error")[-1]["code"] == "bad_request"
+        assert child.close() == 0
+
+
+_TINY_MCP_SERVER = r"""
+import json, sys
+log = sys.argv[1]
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    method = msg.get("method")
+    if method == "initialize":
+        result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "demo", "version": "1"}}
+    elif method == "tools/list":
+        result = {"tools": [{"name": "echo", "description": "Echo the text back.",
+                             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
+    elif method == "tools/call":
+        text = msg["params"]["arguments"]["text"]
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+        result = {"content": [{"type": "text", "text": "echo:" + text}], "isError": False}
+    else:
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": method}}) + "\n")
+        sys.stdout.flush()
+        continue
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}) + "\n")
+    sys.stdout.flush()
+"""
+
+
+@check
+def stdio_mcp_server_tools_reach_the_loop_behind_permissions():
+    """A stdio MCP server from the project config gives the model its tools. Calls run under bypass, are skipped under plan, and ask under manual."""
+    with _marker_session() as (child, seen):
+        child.send(type="mcp", id="m0", cwd=child.project)
+        empty = child.until("mcp_status")[-1]
+        assert empty["config"] is None and empty["servers"] == [], empty
+        server, log = os.path.join(child.home, "tiny_mcp.py"), os.path.join(child.home, "calls.log")
+        with open(server, "w", encoding="utf-8") as handle:
+            handle.write(_TINY_MCP_SERVER)
+        os.makedirs(os.path.join(child.project, ".hydra"), exist_ok=True)
+        with open(os.path.join(child.project, ".hydra", "mcp_servers.json"), "w", encoding="utf-8") as handle:
+            json.dump({"mcpServers": {"demo": {"command": sys.executable, "args": [server, log]},
+                                      "broken": {"command": os.path.join(child.home, "no-such-binary")}}}, handle)
+        child.send(type="mcp", id="m1", cwd=child.project)
+        status = child.until("mcp_status")[-1]
+        by_name = {x["name"]: x for x in status["servers"]}
+        assert status["id"] == "m1" and status["config"].endswith(os.path.join(".hydra", "mcp_servers.json")), status
+        assert by_name["demo"]["ok"] and by_name["demo"]["tools"] == ["demo__echo"] and by_name["demo"]["error"] is None
+        assert not by_name["broken"]["ok"] and by_name["broken"]["error"] and by_name["broken"]["tools"] == []
+
+        replies = child.run_turn("m2", "MCP_echo", thread="mcp1", model="local")
+        ctx = [m for m in replies if m["type"] == "context"][0]
+        assert ctx["mcp_tools"] == ["demo__echo"] and "broken" in ctx["mcp_errors"], ctx
+        starts = [m for m in replies if m["type"] == "tool_start"]
+        results = [m for m in replies if m["type"] == "tool_result"]
+        assert [m["tool"] for m in starts] == ["demo__echo"] and starts[0]["arguments"] == {"text": "ping"}, replies
+        assert "echo:ping" in results[0]["output"] and not results[0]["is_error"], results
+        assert any(t["function"]["name"] == "demo__echo" for t in seen[0].get("tools", [])), "model never saw the MCP tool"
+        assert "echo:ping" in json.dumps(seen[-1]["messages"])
+        with open(log, encoding="utf-8") as handle:
+            assert handle.read().split() == ["ping"]
+
+        replies = child.run_turn("m3", "MCP_echo", thread="mcp2", model="local", permission="plan")
+        assert not [m for m in replies if m["type"] == "tool_start"], replies
+        child.turn("m4", "MCP_echo", thread="mcp3", model="local", permission="manual")
+        ask = child.until("approval_request", turn="m4")[-1]
+        assert ask["tool"] == "demo__echo", ask
+        child.send(type="approval", id=ask["id"], decision="skip")
+        replies = child.until("done", turn="m4")
+        assert not [m for m in replies if m["type"] == "tool_start"], replies
+        with open(log, encoding="utf-8") as handle:
+            assert handle.read().split() == ["ping"], "a skipped or denied MCP call still ran"
         assert child.close() == 0
 
 

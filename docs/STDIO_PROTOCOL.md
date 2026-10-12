@@ -55,7 +55,7 @@ agent hello : `{"type":"hello","protocol":1,"agent":"hydra","capabilities":[...]
 
 app hello : `{"type":"hello","protocol":1}`
 
-capabilities : turn, cancel, approval, permission, rules, checkpoint, skills, sessions, history, action.
+capabilities : turn, cancel, approval, permission, rules, checkpoint, skills, mcp, sessions, history, action.
 
 
 ## messages from the app to the agent
@@ -97,6 +97,8 @@ rewind : put the project files back to a checkpoint. fields id, thread, checkpoi
 
 skills : list the skills a turn may pick. field id. reply `skill_list`.
 
+mcp : show the MCP servers a project gets. fields id, cwd, refresh. refresh true asks every server for its tools again. reply `mcp_status`.
+
 rules : list or remove the approval rules that apply to a thread. fields id, thread, op, rule. op is list, the default, or remove, which also needs rule, the rule id. reply `rules_result`.
 
 sessions : list threads on disk. fields id, optional. reply `session_list`.
@@ -112,7 +114,7 @@ hello : see handshake.
 
 token : fields turn, text. streamed answer text in arrival order. concatenated they are the model reply of the current round.
 
-context : fields turn, rules, skills. sent once per turn after `checkpoint` and before the model runs. rules is the path of the AGENTS.md, .cursorrules or CLAUDE.md file found in cwd or up to five parents above it, or null. its text goes into the system prompt. skills is the list of skill ids added to this turn.
+context : fields turn, rules, skills. sent once per turn after `checkpoint` and before the model runs. rules is the path of the AGENTS.md, .cursorrules or CLAUDE.md file found in cwd or up to five parents above it, or null. its text goes into the system prompt. skills is the list of skill ids added to this turn. mcp_tools lists the MCP tools the model gets this turn. mcp_errors maps each server that failed to start or list its tools to the reason.
 
 tool_start : fields turn, call, tool, arguments. arguments is the parsed object, or the raw string if it was not JSON. sent after approval, just before the tool runs. skipped tools never produce it.
 
@@ -137,6 +139,8 @@ done : fields turn, text, ok, cancelled. exactly one per turn and always the las
 error : fields code, message, redacted, and turn or id when the failure belongs to one. redacted is true when secrets or url paths were scrubbed from message. a failure inside a turn writes `error` with turn, then `done` with ok false.
 
 skill_list : fields id, skills. each skill has id, keys, the words it is about, and title, the first line of its body.
+
+mcp_status : fields id, config, servers. config is the config file in use or null. each server has name, ok, error and tools. error is null when ok is true. tools lists the tool names the model sees.
 
 rules_result : fields id, thread, rules. each rule has id, tool, prefix or null, and scope.
 
@@ -195,3 +199,15 @@ kill : the app should send `shutdown` and wait before it kills the child.
 store : a bare git repository under ~/.hydra/shadow, one per project directory, using the project as work tree. the project's own repository, branches, stashes and files are never written. the project's .gitignore rules apply, so ignored files are neither saved nor restored. .git and .hydra directories are always skipped. git must be on the path, else every checkpoint reports ok false.
 
 limits : a rewind restores and removes files only. it does not undo commands run outside the project directory and it does not rewind the conversation ledger.
+
+## mcp servers
+
+config : the agent reads `.hydra/mcp_servers.json` in the turn cwd, else `~/.hydra/mcp_servers.json`. the file maps server names to command, args and env, under `mcpServers` or at the top level.
+
+transport : each server is a child process that speaks newline JSON-RPC 2.0 on its stdio. it starts on the first turn or `mcp` request of its project and stays up until the agent exits. a change to the config file restarts the servers of that config.
+
+names : a tool `echo` of server `demo` reaches the model as `demo__echo`.
+
+permission : MCP tools are never read only. manual asks for each call, accept_edits asks too, plan skips them, and bypass runs them. approval rules apply to them like to any other tool.
+
+failure : a server that fails to start leaves its tools out and shows in `mcp_errors`. the turn runs with the rest.
