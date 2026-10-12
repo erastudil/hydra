@@ -5,6 +5,7 @@ use crate::widgets::{self, Kind, Part};
 use eframe::egui::{self, vec2, Align, Color32, CornerRadius, Key, Layout, Margin, Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind};
 use hydra_desktop::backend::Backend;
 use hydra_desktop::health::{self, Check};
+use hydra_desktop::model::Status;
 use hydra_desktop::model::*;
 
 const DRAWER_TABS: &[(&str, &str)] = &[("screen", "Live Screen"), ("term", "Terminal Logs"), ("diff", "Diffs & Code"), ("agent", "Agent Runner")];
@@ -71,6 +72,8 @@ pub struct HydraApp {
     panel_dismissed: bool,
     started: f64,
     start_error: Option<String>,
+    open_folder: Option<(String, String)>, // (typed path, error)
+    rename: Option<(usize, String)>,
 }
 
 struct ShotPlan {
@@ -128,6 +131,8 @@ impl HydraApp {
             panel_dismissed: false,
             started: -1.0,
             start_error,
+            open_folder: if std::env::var("HYDRA_OPEN").as_deref() == Ok("folder") { Some((std::env::var("HYDRA_CWD").unwrap_or_default(), String::new())) } else { None },
+            rename: None,
         }
     }
 
@@ -203,10 +208,6 @@ impl HydraApp {
             self.m.notice = "agent process is not running".into();
             return;
         };
-        if self.m.nav == "agent" {
-            // Agent ReAct Loop chat goes through the real tool loop (run_agent_loop) with steering on
-            self.m.approve_tools = false;
-        }
         if self.m.submit(be, &text) {
             self.input.clear();
         }
@@ -305,19 +306,27 @@ impl HydraApp {
     fn session_bar(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
         let (mut close, mut select, mut add) = (None, None, false);
+        let (mut rename, mut pin) = (None, None);
+        let visible = self.m.visible();
         ui.horizontal_centered(|ui| {
-            for (i, s) in self.m.sessions.iter().enumerate() {
+            for &i in &visible {
+                let s = &self.m.sessions[i];
+                let status = self.m.status(i);
                 let active = i == self.m.active;
                 let w = ui.fonts_mut(|f| f.layout_no_wrap(s.name.clone(), egui::FontId::new(12.0, egui::FontFamily::Proportional), TEXT).size().x);
-                let (rect, resp) = ui.allocate_exact_size(vec2(14.0 * 2.0 + w + 16.0, 29.0), Sense::click());
+                let dot_w = if status == Status::Idle && !s.pinned { 0.0 } else { 14.0 };
+                let (rect, resp) = ui.allocate_exact_size(vec2(14.0 * 2.0 + w + 16.0 + dot_w, 29.0), Sense::click());
                 let hover = resp.hovered();
                 if active {
                     widgets::shadow(ui, rect, 12, SHADOW_TAB_ACTIVE_GLOW);
                 }
                 ui.painter().rect_filled(rect, cr(12), if active { ACCENT_DIM } else { BG2 });
                 ui.painter().rect_stroke(rect, cr(12), Stroke::new(1.0, if active { ACCENT } else if hover { ACCENT_BORDER_HOVER } else { BORDER }), StrokeKind::Inside);
+                if dot_w > 0.0 {
+                    status_dot(ui, rect.left_center() + vec2(15.0, 0.0), status, 4.0);
+                }
                 let fam = if active { egui::FontFamily::Name(BOLD.into()) } else { egui::FontFamily::Proportional };
-                ui.painter().text(rect.left_center() + vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, &s.name, egui::FontId::new(TYPE_SESSION_TAB, fam), if active { ACCENT } else if hover { TEXT } else { MUTED });
+                ui.painter().text(rect.left_center() + vec2(14.0 + dot_w, 0.0), egui::Align2::LEFT_CENTER, &s.name, egui::FontId::new(TYPE_SESSION_TAB, fam), if active { ACCENT } else if hover { TEXT } else { MUTED });
                 let xr = egui::Rect::from_center_size(rect.right_center() - vec2(18.0, 0.0), vec2(14.0, 20.0));
                 let xhover = ui.rect_contains_pointer(xr);
                 ui.painter().text(xr.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::new(14.0, egui::FontFamily::Proportional), if xhover { ERROR } else if active { ACCENT } else { MUTED });
@@ -328,6 +337,23 @@ impl HydraApp {
                         select = Some(i)
                     }
                 }
+                if resp.double_clicked() {
+                    rename = Some((i, s.name.clone()));
+                }
+                resp.context_menu(|ui| {
+                    if ui.button("Rename").clicked() {
+                        rename = Some((i, s.name.clone()));
+                        ui.close();
+                    }
+                    if ui.button(if s.pinned { "Unpin" } else { "Pin" }).clicked() {
+                        pin = Some(i);
+                        ui.close();
+                    }
+                    if ui.button("Archive").clicked() {
+                        close = Some(i);
+                        ui.close();
+                    }
+                });
             }
             let gw = ui.fonts_mut(|f| f.layout_no_wrap("+ New Session".into(), egui::FontId::new(12.0, egui::FontFamily::Proportional), TEXT).size().x);
             let (rect, resp) = ui.allocate_exact_size(vec2(gw + 26.0, 29.0), Sense::click());
@@ -341,17 +367,88 @@ impl HydraApp {
             add = resp.clicked();
         });
         if let Some(i) = select {
-            self.m.active = i;
+            self.m.select(i);
             self.m.save();
         }
         if let Some(i) = close {
-            // a running turn belongs to its session, so closing that one is refused
-            if self.m.busy.as_ref().map(|b| b.1) != Some(self.m.sessions[i].id) {
-                self.m.close_session(i);
-            }
+            self.m.close_session(i);
+        }
+        if let Some(i) = pin {
+            self.m.sessions[i].pinned = !self.m.sessions[i].pinned;
+            self.m.save();
+        }
+        if rename.is_some() {
+            self.rename = rename;
         }
         if add {
             self.m.new_session();
+        }
+    }
+
+    // ---------------------------------------------------------------- projects (left sidebar, under the mode list)
+    fn projects(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(14.0);
+        ui.label(rt("PROJECTS", 10.0, MUTED).extra_letter_spacing(1.0));
+        ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+        let (mut pick_project, mut pick_thread, mut open) = (None, None, false);
+        let projects: Vec<_> = self.m.projects.iter().map(|p| (p.id, p.name.clone(), p.path.clone())).collect();
+        for (id, name, path) in projects {
+            let active = id == self.m.active_project;
+            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+            if active {
+                ui.painter().rect_filled(rect, cr(8), BG3);
+            } else if resp.hovered() {
+                ui.painter().rect_filled(rect, cr(8), Color32::from_white_alpha(6));
+            }
+            ui.painter().text(rect.left_center() + vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, if active { "▾" } else { "▸" }, egui::FontId::new(11.0, egui::FontFamily::Proportional), MUTED);
+            let mut label = name.clone();
+            while label.chars().count() > 17 {
+                label.pop();
+            }
+            ui.painter().text(rect.left_center() + vec2(24.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::new(12.0, if active { egui::FontFamily::Name(BOLD.into()) } else { egui::FontFamily::Proportional }), if active { TEXT } else { TEXT2 });
+            let resp = resp.on_hover_text(path);
+            if resp.clicked() {
+                pick_project = Some(id);
+            }
+            if active {
+                for i in self.m.thread_indices(id) {
+                    let t = &self.m.sessions[i];
+                    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+                    if i == self.m.active {
+                        ui.painter().rect_filled(rect, cr(8), ACCENT_DIM);
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(rect, cr(8), Color32::from_white_alpha(6));
+                    }
+                    status_dot(ui, rect.left_center() + vec2(22.0, 0.0), self.m.status(i), 3.5);
+                    let mut label = t.name.clone();
+                    while label.chars().count() > 16 {
+                        label.pop();
+                    }
+                    ui.painter().text(rect.left_center() + vec2(36.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::new(11.5, egui::FontFamily::Proportional), if i == self.m.active { ACCENT } else { MUTED });
+                    if resp.clicked() {
+                        pick_thread = Some(i);
+                    }
+                }
+            }
+        }
+        ui.add_space(6.0);
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::click());
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, cr(8), ACCENT_DIM);
+        } else {
+            widgets::dashed_rounded(ui, rect.shrink(0.5), 8.0, Stroke::new(1.0, ACCENT_BORDER_DASHED));
+        }
+        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "+ Open Folder", egui::FontId::new(12.0, egui::FontFamily::Proportional), ACCENT);
+        open = open || resp.clicked();
+        if let Some(id) = pick_project {
+            self.m.set_project(id);
+            self.m.save();
+        }
+        if let Some(i) = pick_thread {
+            self.m.select(i);
+        }
+        if open {
+            self.open_folder = Some((self.m.project_path(), String::new()));
         }
     }
 
@@ -455,7 +552,7 @@ impl HydraApp {
             }
             self.composer_rect = resp.response.rect;
             ui.with_layout(Layout::bottom_up(Align::Max), |ui| {
-                if self.m.busy.is_some() {
+                if self.m.active_busy() {
                     if widgets::button(ui, "Stop", Kind::Danger, 13.0, (16.0, 8.0), Some(send_w)).clicked() {
                         do_stop = true;
                     }
@@ -608,11 +705,12 @@ impl HydraApp {
     }
 
     fn diff_tab(&mut self, ui: &mut egui::Ui) {
-        if self.m.diffs.is_empty() {
+        let diffs = self.m.sessions[self.m.active].diffs.clone();
+        if diffs.is_empty() {
             ui.label(rt("No file changes recorded in this session yet.", 11.0, MUTED));
             return;
         }
-        for d in self.m.diffs.iter().rev() {
+        for d in diffs.iter().rev() {
             egui::Frame::new().fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(12)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 egui::Frame::new().fill(ELEV).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
@@ -763,7 +861,7 @@ impl HydraApp {
         if self.startup_panel(ctx) {
             return;
         }
-        if let Some(a) = self.m.approval.clone() {
+        if let Some(a) = self.m.approval_for_active().cloned() {
             let mut decision: Option<&str> = None;
             modal_frame(ctx, "approval", 520.0, |ui| {
                 ui.label(rtb("APPROVAL REQUIRED", 13.0, ACCENT));
@@ -776,6 +874,9 @@ impl HydraApp {
                     if widgets::button(ui, "Allow", Kind::Primary, 13.0, (16.0, 8.0), None).clicked() {
                         decision = Some("allow");
                     }
+                    if widgets::button(ui, "Always allow", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+                        decision = Some("allow_always");
+                    }
                     if widgets::button(ui, "Skip", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
                         decision = Some("skip");
                     }
@@ -787,6 +888,93 @@ impl HydraApp {
             if let (Some(d), Some(be)) = (decision, &mut self.be) {
                 self.m.answer_approval(be, d);
             }
+            return;
+        }
+        if let Some((path, err)) = self.open_folder.clone() {
+            let (mut path, mut err) = (path, err);
+            let (mut open, mut close, mut go): (bool, bool, Option<String>) = (false, false, None);
+            modal_frame(ctx, "openfolder", 560.0, |ui| {
+                ui.label(rtb("OPEN FOLDER AS A PROJECT", 13.0, ACCENT));
+                let r = ui.add(egui::TextEdit::singleline(&mut path).desired_width(f32::INFINITY).font(egui::FontId::monospace(13.0)));
+                r.request_focus();
+                if r.changed() {
+                    err.clear();
+                }
+                if ui.input(|i| i.key_pressed(Key::Enter)) {
+                    open = true;
+                }
+                let here = std::path::Path::new(path.trim());
+                let base = if here.is_dir() { here.to_path_buf() } else { here.parent().map(|p| p.to_path_buf()).unwrap_or_default() };
+                let prefix = if here.is_dir() { String::new() } else { here.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default() };
+                ScrollArea::vertical().max_height(260.0).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    if let Some(parent) = base.parent() {
+                        if ui.add(egui::Label::new(rt("..", 12.0, MUTED)).sense(Sense::click())).clicked() {
+                            go = Some(parent.display().to_string());
+                        }
+                    }
+                    let mut dirs: Vec<_> = std::fs::read_dir(&base).map(|rd| rd.flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| !n.starts_with('.') && n.to_lowercase().starts_with(&prefix)).collect()).unwrap_or_default();
+                    dirs.sort_by_key(|d| d.to_lowercase());
+                    for d in dirs.into_iter().take(300) {
+                        if ui.add(egui::Label::new(rt(format!("▸ {d}"), 12.0, TEXT)).sense(Sense::click())).clicked() {
+                            go = Some(base.join(&d).display().to_string());
+                        }
+                    }
+                });
+                if !err.is_empty() {
+                    ui.label(rt(&err, 11.0, ERROR));
+                }
+                ui.horizontal(|ui| {
+                    if widgets::button(ui, "Open", Kind::Primary, 13.0, (16.0, 8.0), None).clicked() {
+                        open = true;
+                    }
+                    if widgets::button(ui, "Cancel", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                close = true;
+            }
+            if let Some(g) = go {
+                path = if g.ends_with(std::path::MAIN_SEPARATOR) { g } else { format!("{g}{}", std::path::MAIN_SEPARATOR) };
+            }
+            if open {
+                match self.m.open_project(&path) {
+                    Ok(_) => close = true,
+                    Err(e) => err = e,
+                }
+            }
+            self.open_folder = if close { None } else { Some((path, err)) };
+            return;
+        }
+        if let Some((idx, name)) = self.rename.clone() {
+            let mut name = name;
+            let (mut ok, mut cancel) = (false, false);
+            modal_frame(ctx, "rename", 420.0, |ui| {
+                ui.label(rtb("RENAME THREAD", 13.0, ACCENT));
+                let r = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY));
+                r.request_focus();
+                if ui.input(|i| i.key_pressed(Key::Enter)) {
+                    ok = true;
+                }
+                ui.horizontal(|ui| {
+                    if widgets::button(ui, "Rename", Kind::Primary, 13.0, (16.0, 8.0), None).clicked() {
+                        ok = true;
+                    }
+                    if widgets::button(ui, "Cancel", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                cancel = true;
+            }
+            if ok && !name.trim().is_empty() && idx < self.m.sessions.len() {
+                self.m.sessions[idx].name = name.trim().to_string();
+                self.m.save();
+            }
+            self.rename = if ok || cancel { None } else { Some((idx, name)) };
             return;
         }
         if let Some((q, sel)) = self.palette.clone() {
@@ -936,6 +1124,9 @@ impl HydraApp {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
             self.palette = if self.palette.is_some() { None } else { Some((String::new(), 0)) };
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::O)) {
+            self.open_folder = Some((self.m.project_path(), String::new()));
+        }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::T)) {
             self.m.new_session();
         }
@@ -956,6 +1147,26 @@ fn style_combo(ui: &mut egui::Ui) {
         w.corner_radius = cr(12);
     }
     v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT);
+}
+
+/// Sidebar and tab marker: pulsing dot while running, amber when it needs an answer, ring when unread.
+fn status_dot(ui: &egui::Ui, c: egui::Pos2, status: Status, r: f32) {
+    let p = ui.painter();
+    match status {
+        Status::Running => {
+            let t = ui.input(|i| i.time) as f32;
+            p.circle_filled(c, r - 1.0 + (t * 4.0).sin().abs(), ACCENT);
+        }
+        Status::NeedsApproval => {
+            p.circle_filled(c, r, WARN);
+        }
+        Status::Unread => {
+            p.circle_stroke(c, r - 0.5, Stroke::new(1.5, ACCENT));
+        }
+        Status::Idle => {
+            p.circle_filled(c, 1.5, MUTED);
+        }
+    }
 }
 
 fn modal_frame(ctx: &egui::Context, id: &str, width: f32, add: impl FnOnce(&mut egui::Ui)) {
@@ -993,7 +1204,7 @@ impl eframe::App for HydraApp {
         if self.started < 0.0 {
             self.started = time;
         }
-        if self.m.agent_ready && self.m.busy.is_none() {
+        if self.m.agent_ready && !self.m.any_busy() {
             if let Ok(p) = std::env::var("HYDRA_DEMO_PROMPT") {
                 std::env::remove_var("HYDRA_DEMO_PROMPT");
                 self.input = p;
@@ -1035,6 +1246,7 @@ impl eframe::App for HydraApp {
             .frame(egui::Frame::new().fill(BG2).inner_margin(Margin::symmetric(10, 16)))
             .show(root, |ui| {
                 self.nav(ui);
+                self.projects(ui);
                 let r = ui.max_rect();
                 ui.painter().vline(r.right() + 10.0 - 0.5, r.y_range(), border);
             });
