@@ -46,9 +46,56 @@ pub struct Session {
     pub thread: String,
     pub name: String,
     pub messages: Vec<Msg>,
+    #[serde(default)]
+    pub project: u32,
+    #[serde(default)]
+    pub unread: bool,
+    #[serde(default)]
+    pub archived: bool,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default)]
+    pub updated: u64,
+    #[serde(default)]
+    pub diffs: Vec<DiffItem>,
+    #[serde(default = "default_permission")]
+    pub permission: String,
 }
 
-#[derive(Clone, Debug)]
+pub const PERMISSIONS: &[(&str, &str)] = &[
+    ("manual", "Ask every time"),
+    ("accept_edits", "Accept edits"),
+    ("plan", "Plan (read only)"),
+    ("bypass", "Bypass approvals"),
+];
+
+fn default_permission() -> String {
+    "accept_edits".into()
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct Project {
+    pub id: u32,
+    pub name: String,
+    pub path: String,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+/// What a thread is doing right now, for the sidebar dot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Status {
+    Idle,
+    Running,
+    NeedsApproval,
+    Unread,
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct DiffItem {
     pub path: String,
     pub diff: String,
@@ -56,6 +103,8 @@ pub struct DiffItem {
 
 #[derive(Clone, Debug)]
 pub struct Approval {
+    pub sid: u32,
+    pub turn: String,
     pub id: String,
     pub tool: String,
     pub args: Value,
@@ -81,6 +130,10 @@ pub enum Pending {
 
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
+    #[serde(default)]
+    projects: Vec<Project>,
+    #[serde(default)]
+    active_project: u32,
     sessions: Vec<Session>,
     active: usize,
     counter: u32,
@@ -100,10 +153,10 @@ pub struct Model {
     pub tokens: u64,
     pub cost: f64,
     pub term: String,
-    pub diffs: Vec<DiffItem>,
-    pub busy: Option<(String, u32)>, // turn id, session id
-    pub approval: Option<Approval>,
-    pub approve_tools: bool,
+    pub projects: Vec<Project>,
+    pub active_project: u32,
+    pub runs: HashMap<String, u32>, // turn id or action id -> session id; at most one run per thread
+    pub approvals: Vec<Approval>,
     pub agent_ready: bool,
     pub notice: String,
     pub turn_counter: u64,
@@ -175,10 +228,10 @@ impl Model {
             tokens: 0,
             cost: 0.0,
             term: "> Hydra Terminal Sandbox ready.".into(),
-            diffs: vec![],
-            busy: None,
-            approval: None,
-            approve_tools: false,
+            projects: vec![],
+            active_project: 0,
+            runs: HashMap::new(),
+            approvals: vec![],
             agent_ready: false,
             notice: String::new(),
             turn_counter: 0,
@@ -199,6 +252,8 @@ impl Model {
             let loaded = try_load(p).or_else(|| try_load(&p.with_extension("bak")));
             if let Some(saved) = loaded {
                 if !saved.sessions.is_empty() {
+                    m.projects = saved.projects;
+                    m.active_project = saved.active_project;
                     m.active = saved.active.min(saved.sessions.len() - 1);
                     m.sessions = saved.sessions;
                     m.counter = saved.counter;
@@ -209,15 +264,31 @@ impl Model {
                 }
             }
         }
+        if m.projects.is_empty() {
+            let id = m.add_project_unchecked(&m.cwd.clone());
+            m.active_project = id;
+        }
+        let first_project = m.projects[0].id;
+        for sess in &mut m.sessions {
+            if !m.projects.iter().any(|p| p.id == sess.project) {
+                sess.project = first_project;
+            }
+        }
+        if !m.projects.iter().any(|p| p.id == m.active_project) {
+            m.active_project = first_project;
+        }
         if m.sessions.is_empty() {
             m.new_session();
         }
+        m.focus_project_thread();
         m
     }
 
     pub fn save(&self) {
         let Some(p) = &self.state_path else { return };
         let saved = Saved {
+            projects: self.projects.clone(),
+            active_project: self.active_project,
             sessions: self.sessions.clone(),
             active: self.active,
             counter: self.counter,
@@ -244,16 +315,157 @@ impl Model {
             thread: format!("desk-{stamp}-{}", self.counter),
             name: format!("Session {}", self.counter),
             messages: vec![Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text, actions: vec![] }],
+            project: self.active_project,
+            unread: false,
+            archived: false,
+            pinned: false,
+            updated: stamp,
+            diffs: vec![],
+            permission: default_permission(),
         });
         self.active = self.sessions.len() - 1;
         self.save();
     }
 
+    /// Close (archive) a thread. A project always keeps one visible thread; a running thread cannot be closed.
     pub fn close_session(&mut self, i: usize) {
-        if self.sessions.len() > 1 && i < self.sessions.len() {
-            self.sessions.remove(i);
-            self.active = self.active.min(self.sessions.len() - 1);
-            self.save();
+        if i >= self.sessions.len() || self.is_running(self.sessions[i].id) {
+            return;
+        }
+        if self.visible().len() <= 1 && self.sessions[i].project == self.active_project {
+            return;
+        }
+        self.sessions[i].archived = true;
+        if self.active == i {
+            self.focus_project_thread();
+        }
+        self.save();
+    }
+
+    /// Indices of the threads shown in the tab bar: the active project's, not archived, pinned first.
+    pub fn visible(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..self.sessions.len()).filter(|&i| self.sessions[i].project == self.active_project && !self.sessions[i].archived).collect();
+        v.sort_by_key(|&i| (!self.sessions[i].pinned, i));
+        v
+    }
+
+    pub fn thread_indices(&self, project: u32) -> Vec<usize> {
+        (0..self.sessions.len()).filter(|&i| self.sessions[i].project == project && !self.sessions[i].archived).collect()
+    }
+
+    fn add_project_unchecked(&mut self, path: &str) -> u32 {
+        let id = self.projects.iter().map(|p| p.id).max().unwrap_or(0) + 1;
+        let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| path.to_string());
+        self.projects.push(Project { id, name, path: path.to_string(), pinned: false });
+        id
+    }
+
+    /// Open a folder as a project (or switch to it if it is already open) and give it a first thread.
+    pub fn open_project(&mut self, path: &str) -> Result<u32, String> {
+        let p = std::path::Path::new(path.trim());
+        if !p.is_dir() {
+            return Err(format!("not a folder: {}", path.trim()));
+        }
+        let canon = std::fs::canonicalize(p).map(|c| c.display().to_string()).unwrap_or_else(|_| path.trim().to_string());
+        let canon = canon.strip_prefix(r"\\?\").unwrap_or(&canon).to_string();
+        let id = match self.projects.iter().find(|q| q.path == canon) {
+            Some(q) => q.id,
+            None => self.add_project_unchecked(&canon),
+        };
+        self.set_project(id);
+        if self.thread_indices(id).is_empty() {
+            self.new_session();
+        }
+        self.save();
+        Ok(id)
+    }
+
+    pub fn set_project(&mut self, id: u32) {
+        if self.projects.iter().any(|p| p.id == id) {
+            self.active_project = id;
+            self.focus_project_thread();
+        }
+    }
+
+    /// Make `active` point at a visible thread of the active project (creating one if there is none).
+    pub fn focus_project_thread(&mut self) {
+        if self.sessions.get(self.active).map(|s| s.project == self.active_project && !s.archived).unwrap_or(false) {
+            return;
+        }
+        match self.visible().last().copied() {
+            Some(i) => self.active = i,
+            None => {
+                if !self.sessions.is_empty() || self.projects.is_empty() {
+                    self.new_session();
+                }
+            }
+        }
+        if let Some(s) = self.sessions.get_mut(self.active) {
+            s.unread = false;
+        }
+    }
+
+    pub fn select(&mut self, i: usize) {
+        if i < self.sessions.len() {
+            self.active_project = self.sessions[i].project;
+            self.active = i;
+            self.sessions[i].unread = false;
+        }
+    }
+
+    pub fn project_path(&self) -> String {
+        self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.path.clone()).unwrap_or_else(|| self.cwd.clone())
+    }
+
+    pub fn is_running(&self, sid: u32) -> bool {
+        self.runs.values().any(|&s| s == sid)
+    }
+
+    pub fn active_busy(&self) -> bool {
+        self.is_running(self.sessions[self.active].id)
+    }
+
+    pub fn any_busy(&self) -> bool {
+        !self.runs.is_empty()
+    }
+
+    pub fn status(&self, i: usize) -> Status {
+        let s = &self.sessions[i];
+        if self.approvals.iter().any(|a| a.sid == s.id) {
+            Status::NeedsApproval
+        } else if self.is_running(s.id) {
+            Status::Running
+        } else if s.unread {
+            Status::Unread
+        } else {
+            Status::Idle
+        }
+    }
+
+    pub fn approval_for_active(&self) -> Option<&Approval> {
+        let sid = self.sessions[self.active].id;
+        self.approvals.iter().find(|a| a.sid == sid)
+    }
+
+    pub fn run_session(&self, turn: &str) -> Option<u32> {
+        self.runs.get(turn).copied()
+    }
+
+    pub fn cycle_permission(&mut self) {
+        let cur = self.sessions[self.active].permission.clone();
+        let i = PERMISSIONS.iter().position(|p| p.0 == cur).unwrap_or(0);
+        self.sessions[self.active].permission = PERMISSIONS[(i + 1) % PERMISSIONS.len()].0.into();
+        self.save();
+    }
+
+    fn touch(&mut self, sid: u32, background: bool) {
+        let active_id = self.sessions[self.active].id;
+        let t = now();
+        if let Some(s) = self.session_mut(sid) {
+            s.updated = t;
+            if background && sid != active_id {
+                s.unread = true;
+            }
         }
     }
 
@@ -288,13 +500,14 @@ impl Model {
     /// Send the composer text according to the nav mode. Returns false if it was not accepted.
     pub fn submit(&mut self, be: &mut Backend, text: &str) -> bool {
         let text = text.trim();
-        if text.is_empty() || self.busy.is_some() {
+        if text.is_empty() || self.active_busy() {
             return false;
         }
         let (sid, thread) = {
             let s = &self.sessions[self.active];
             (s.id, s.thread.clone())
         };
+        let cwd = self.project_path();
         let model = MODELS[self.model].0;
         let header = MODELS[self.model].1.to_uppercase();
         {
@@ -307,18 +520,19 @@ impl Model {
         match self.nav {
             "terminal" => {
                 self.term.push_str(&format!("\n$ {text}"));
-                let id = be.action("terminal:run", json!({"command": text, "cwd": self.cwd}));
-                self.act(Pending::Terminal(sid), id);
-                self.busy = Some((turn, sid));
+                let id = be.action("terminal:run", json!({"command": text, "cwd": cwd}));
+                self.act(Pending::Terminal(sid), id.clone());
+                self.runs.insert(id, sid);
             }
             "swarm" => {
                 let id = be.action("swarm:run", json!({"task": text, "model": model}));
-                self.act(Pending::Swarm(sid), id);
-                self.busy = Some((turn, sid));
+                self.act(Pending::Swarm(sid), id.clone());
+                self.runs.insert(id, sid);
             }
             _ => {
-                be.turn(&turn, text, &thread, &self.cwd, model, self.approve_tools);
-                self.busy = Some((turn, sid));
+                let permission = self.sessions[self.active].permission.clone();
+                be.turn(&turn, text, &thread, &cwd, model, &permission);
+                self.runs.insert(turn, sid);
             }
         }
         self.save();
@@ -327,13 +541,17 @@ impl Model {
 
     /// Stop the running turn. Turns go through the adapter cancel; actions are not interruptible.
     pub fn stop(&mut self, be: &mut Backend) {
-        if let Some((turn, _)) = &self.busy {
-            be.cancel(turn);
+        let sid = self.sessions[self.active].id;
+        let turns: Vec<String> = self.runs.iter().filter(|(_, &s)| s == sid).map(|(t, _)| t.clone()).collect();
+        for t in turns {
+            be.cancel(&t);
         }
     }
 
     pub fn answer_approval(&mut self, be: &mut Backend, decision: &str) {
-        if let Some(a) = self.approval.take() {
+        let sid = self.sessions[self.active].id;
+        if let Some(pos) = self.approvals.iter().position(|a| a.sid == sid) {
+            let a = self.approvals.remove(pos);
             be.approve(&a.id, decision);
         }
     }
@@ -399,8 +617,10 @@ impl Model {
         self.act(Pending::Type, id);
     }
 
-    fn finish_busy(&mut self) {
-        self.busy = None;
+    fn finish_sid(&mut self, sid: u32) {
+        self.runs.retain(|_, s| *s != sid);
+        self.approvals.retain(|a| a.sid != sid);
+        self.touch(sid, true);
         self.save();
     }
 
@@ -421,69 +641,79 @@ impl Model {
             Ev::Exited(why) => {
                 self.agent_ready = false;
                 self.notice = why;
-                if let Some((_, sid)) = self.busy.clone() {
+                let sids: Vec<u32> = self.runs.values().copied().collect();
+                for sid in sids {
                     self.fail_bubble(sid, "agent process ended");
-                    self.finish_busy();
+                    self.finish_sid(sid);
                 }
             }
             Ev::Token { turn, text } => {
-                if let Some((t, sid)) = self.busy.clone() {
-                    if t == turn {
-                        if let Some(m) = self.last_assistant(sid) {
-                            m.actions.retain(|a| a != "◐ Thinking");
-                            m.text.push_str(&text);
-                        }
+                if let Some(sid) = self.run_session(&turn) {
+                    if let Some(m) = self.last_assistant(sid) {
+                        m.actions.retain(|a| a != "◐ Thinking");
+                        m.text.push_str(&text);
                     }
+                    self.touch(sid, false);
                 }
             }
             Ev::ToolStart { turn, tool, args, .. } => {
-                if let Some((t, sid)) = self.busy.clone() {
-                    if t == turn {
-                        if let Some(m) = self.last_assistant(sid) {
-                            m.actions.retain(|a| a != "◐ Thinking");
-                            m.actions.push(format!("▸ {tool}  {}", short(&args)));
-                        }
+                if let Some(sid) = self.run_session(&turn) {
+                    if let Some(m) = self.last_assistant(sid) {
+                        m.actions.retain(|a| a != "◐ Thinking");
+                        m.actions.push(format!("▸ {tool}  {}", short(&args)));
                     }
                 }
                 self.term.push_str(&format!("\n$ {tool} {}", short(&args)));
             }
             Ev::ToolResult { turn, tool, is_error, output } => {
-                if let Some((t, sid)) = self.busy.clone() {
-                    if t == turn {
-                        let first = output.lines().next().unwrap_or("").chars().take(100).collect::<String>();
-                        if let Some(m) = self.last_assistant(sid) {
-                            m.actions.push(format!("{} {tool}: {first}", if is_error { "×" } else { "✓" }));
-                        }
+                if let Some(sid) = self.run_session(&turn) {
+                    let first = output.lines().next().unwrap_or("").chars().take(100).collect::<String>();
+                    if let Some(m) = self.last_assistant(sid) {
+                        m.actions.push(format!("{} {tool}: {first}", if is_error { "×" } else { "✓" }));
                     }
                 }
                 self.term.push_str(&format!("\n{}{output}", if is_error { "[error] " } else { "" }));
             }
-            Ev::Diff { path, diff, .. } => {
-                self.diffs.push(DiffItem { path, diff });
-                self.drawer_tab = "diff";
+            Ev::Diff { turn, path, diff } => {
+                if let Some(sid) = self.run_session(&turn) {
+                    if let Some(s) = self.session_mut(sid) {
+                        s.diffs.push(DiffItem { path, diff });
+                    }
+                    if self.sessions[self.active].id == sid {
+                        self.drawer_tab = "diff";
+                    }
+                }
             }
             Ev::Usage { prompt, completion, cost, .. } => {
                 self.tokens += prompt + completion;
                 self.cost += cost;
                 self.save();
             }
-            Ev::Approval { id, tool, args, .. } => self.approval = Some(Approval { id, tool, args }),
-            Ev::Done { turn, text, ok, cancelled } => {
-                if let Some((t, sid)) = self.busy.clone() {
-                    if t == turn {
-                        if let Some(m) = self.last_assistant(sid) {
-                            m.actions.retain(|a| a != "◐ Thinking");
-                            if cancelled {
-                                m.actions.push("■ turn cancelled".into());
-                            } else if !text.is_empty() {
-                                m.text = text.clone();
-                            } else if !ok && m.text.is_empty() {
-                                m.text = "Turn failed.".into();
-                            }
-                        }
-                        self.approval = None;
-                        self.finish_busy();
+            Ev::AutoDecision { turn, tool, allow, reason } => {
+                if let Some(sid) = self.run_session(&turn) {
+                    if let Some(msg) = self.last_assistant(sid) {
+                        msg.actions.push(format!("{} {tool} {} ({reason})", if allow { "·" } else { "–" }, if allow { "auto-allowed" } else { "skipped" }));
                     }
+                }
+            }
+            Ev::Approval { turn, id, tool, args } => {
+                if let Some(sid) = self.run_session(&turn) {
+                    self.approvals.push(Approval { sid, turn, id, tool, args });
+                }
+            }
+            Ev::Done { turn, text, ok, cancelled } => {
+                if let Some(sid) = self.run_session(&turn) {
+                    if let Some(m) = self.last_assistant(sid) {
+                        m.actions.retain(|a| a != "◐ Thinking");
+                        if cancelled {
+                            m.actions.push("■ turn cancelled".into());
+                        } else if !text.is_empty() {
+                            m.text = text.clone();
+                        } else if !ok && m.text.is_empty() {
+                            m.text = "Turn failed.".into();
+                        }
+                    }
+                    self.finish_sid(sid);
                 }
             }
             Ev::Error { code, message, turn, id } => {
@@ -493,19 +723,11 @@ impl Model {
                         return;
                     }
                 }
-                let line = format!("\n[{code}] {message}");
-                self.term.push_str(&line);
-                if let Some((t, sid)) = self.busy.clone() {
-                    if turn.as_deref() == Some(t.as_str()) {
-                        self.fail_bubble(sid, &message);
-                    }
-                }
-                if code == "bad_request" || code == "busy" {
-                    if let Some((_, sid)) = self.busy.clone() {
-                        if turn.is_some() {
-                            self.fail_bubble(sid, &message);
-                            self.finish_busy();
-                        }
+                self.term.push_str(&format!("\n[{code}] {message}"));
+                if let Some(sid) = turn.as_deref().and_then(|t| self.run_session(t)) {
+                    self.fail_bubble(sid, &message);
+                    if code == "bad_request" || code == "busy" {
+                        self.finish_sid(sid);
                     }
                 }
             }
@@ -521,7 +743,7 @@ impl Model {
         match kind {
             Pending::Swarm(sid) | Pending::Terminal(sid) => {
                 self.fail_bubble(sid, message);
-                self.finish_busy();
+                self.finish_sid(sid);
             }
             _ => self.term.push_str(&format!("\n[error] {message}")),
         }
@@ -547,14 +769,16 @@ impl Model {
                     self.term.push_str(&format!("\n[BLOCKED] {v}"));
                 }
                 if let Some(d) = res["diff"].as_str().filter(|d| !d.is_empty()) {
-                    self.diffs.push(DiffItem { path: "sandbox".into(), diff: d.into() });
+                    if let Some(sess) = self.session_mut(sid) {
+                        sess.diffs.push(DiffItem { path: "sandbox".into(), diff: d.into() });
+                    }
                 }
                 if let Some(m) = self.last_assistant(sid) {
                     m.actions.retain(|a| a != "◐ Thinking");
                     m.text = if body.is_empty() { format!("(no output) exit {code}") } else { body };
                     m.actions.push(format!("{status} exit {code}"));
                 }
-                self.finish_busy();
+                self.finish_sid(sid);
             }
             Pending::Swarm(sid) => {
                 if is_err {
@@ -582,7 +806,7 @@ impl Model {
                     });
                     s.messages.push(synth);
                 }
-                self.finish_busy();
+                self.finish_sid(sid);
             }
             Pending::Screen => {
                 if is_err {
@@ -696,7 +920,7 @@ mod tests {
     #[test]
     fn events_fold_into_the_bubble_and_the_tally() {
         let mut m = Model::new(None, ".".into());
-        m.busy = Some(("t1".into(), m.sessions[0].id));
+        m.runs.insert("t1".into(), m.sessions[0].id);
         m.sessions[0].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["◐ Thinking".into()] });
         m.apply(Ev::Token { turn: "t1".into(), text: "ab".into() });
         m.apply(Ev::Token { turn: "t1".into(), text: "cd".into() });
@@ -704,7 +928,102 @@ mod tests {
         m.apply(Ev::Usage { model: "x".into(), prompt: 900, completion: 100, cost: 0.0312 });
         assert_eq!(m.tally(), ("1,000".to_string(), "$0.0312".to_string()));
         m.apply(Ev::Done { turn: "t1".into(), text: "abcd!".into(), ok: true, cancelled: false });
-        assert!(m.busy.is_none());
+        assert!(!m.any_busy());
         assert_eq!(m.sessions[0].messages.last().unwrap().text, "abcd!");
+    }
+
+    fn running_thread(m: &mut Model, idx: usize, turn: &str) {
+        let sid = m.sessions[idx].id;
+        m.sessions[idx].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["◐ Thinking".into()] });
+        m.runs.insert(turn.into(), sid);
+    }
+
+    #[test]
+    fn overlapping_turns_never_cross_talk() {
+        let mut m = Model::new(None, ".".into());
+        m.new_session();
+        running_thread(&mut m, 0, "t1");
+        running_thread(&mut m, 1, "t2");
+        for i in 0..50 {
+            m.apply(Ev::Token { turn: "t1".into(), text: "a".into() });
+            m.apply(Ev::Token { turn: "t2".into(), text: format!("{}", i % 10) });
+        }
+        m.apply(Ev::Diff { turn: "t2".into(), path: "f.txt".into(), diff: "+x".into() });
+        m.apply(Ev::Approval { turn: "t1".into(), id: "a1".into(), tool: "bash".into(), args: Value::Null });
+        assert_eq!(m.sessions[0].messages.last().unwrap().text, "a".repeat(50));
+        assert!(!m.sessions[1].messages.last().unwrap().text.contains('a'));
+        assert_eq!(m.sessions[0].diffs.len(), 0);
+        assert_eq!(m.sessions[1].diffs.len(), 1);
+        assert_eq!(m.status(0), Status::NeedsApproval);
+        assert_eq!(m.status(1), Status::Running);
+        m.apply(Ev::Done { turn: "t2".into(), text: "".into(), ok: true, cancelled: false });
+        assert_eq!(m.status(1), Status::Idle);
+        assert!(m.is_running(m.sessions[0].id));
+        m.apply(Ev::Done { turn: "t1".into(), text: "".into(), ok: false, cancelled: true });
+        assert!(!m.any_busy());
+        assert!(m.approvals.is_empty());
+    }
+
+    #[test]
+    fn background_finish_marks_unread_and_selecting_clears_it() {
+        let mut m = Model::new(None, ".".into());
+        m.new_session();
+        running_thread(&mut m, 0, "t1");
+        m.apply(Ev::Done { turn: "t1".into(), text: "done".into(), ok: true, cancelled: false });
+        assert_eq!(m.status(0), Status::Unread);
+        m.select(0);
+        assert_eq!(m.status(0), Status::Idle);
+    }
+
+    #[test]
+    fn projects_scope_threads_and_dedupe() {
+        let dir = std::env::temp_dir().join(format!("hydra-proj-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut m = Model::new(None, ".".into());
+        let first = m.active_project;
+        let id = m.open_project(dir.to_str().unwrap()).unwrap();
+        assert_ne!(id, first);
+        assert_eq!(m.visible().len(), 1);
+        assert_eq!(m.project_path(), std::fs::canonicalize(&dir).unwrap().display().to_string());
+        assert_eq!(m.open_project(dir.to_str().unwrap()).unwrap(), id, "same folder is the same project");
+        assert_eq!(m.projects.len(), 2);
+        assert!(m.open_project("/definitely/not/here").is_err());
+        m.new_session();
+        assert_eq!(m.visible().len(), 2);
+        m.set_project(first);
+        assert!(m.visible().iter().all(|&i| m.sessions[i].project == first));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn closing_keeps_one_thread_and_never_closes_a_running_one() {
+        let mut m = Model::new(None, ".".into());
+        m.close_session(0);
+        assert_eq!(m.visible().len(), 1, "last thread stays");
+        m.new_session();
+        running_thread(&mut m, 0, "t1");
+        m.close_session(0);
+        assert!(!m.sessions[0].archived, "running thread is not closed");
+        m.close_session(1);
+        assert!(m.sessions[1].archived);
+        assert_eq!(m.active, 0);
+    }
+
+    #[test]
+    fn projects_and_thread_ownership_persist() {
+        let dir = std::env::temp_dir().join(format!("hydra-persist-{}", std::process::id()));
+        let proj = dir.join("repo");
+        std::fs::create_dir_all(&proj).unwrap();
+        let path = dir.join("state.json");
+        let mut a = Model::new(Some(path.clone()), ".".into());
+        a.open_project(proj.to_str().unwrap()).unwrap();
+        a.sessions[a.active].name = "feature thread".into();
+        a.save();
+        let b = Model::new(Some(path), ".".into());
+        assert_eq!(b.projects.len(), 2);
+        assert_eq!(b.active_project, a.active_project);
+        assert_eq!(b.sessions[b.active].name, "feature thread");
+        assert_eq!(b.project_path(), a.project_path());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

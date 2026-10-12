@@ -115,7 +115,7 @@ fn pump(r: &mut Rig, secs: u64, mut until: impl FnMut(&Model) -> bool) -> Vec<Ev
 }
 
 fn done(r: &mut Rig) -> Vec<Ev> {
-    pump(r, 60, |m| m.busy.is_none())
+    pump(r, 60, |m| !m.any_busy())
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn stop_cancels_a_running_turn() {
     pump(&mut r, 30, |m| m.sessions[0].messages.last().map(|x| !x.text.is_empty()).unwrap_or(false));
     r.m.stop(&mut r.be);
     done(&mut r);
-    assert!(r.m.busy.is_none());
+    assert!(!r.m.any_busy());
     let last = r.m.sessions[0].messages.last().unwrap();
     assert!(last.actions.iter().any(|a| a.contains("cancelled")), "{:?}", last);
     assert!(last.text.matches("tick").count() < 60);
@@ -151,16 +151,16 @@ fn stop_cancels_a_running_turn() {
 #[test]
 fn approval_gates_a_write_and_the_diff_event_lands() {
     let Some(mut r) = rig("approve") else { return };
-    r.m.approve_tools = true;
+    r.m.sessions[0].permission = "manual".into();
     assert!(r.m.submit(&mut r.be, "WRITE the file"));
-    pump(&mut r, 40, |m| m.approval.is_some());
-    let a = r.m.approval.clone().expect("approval request arrives");
+    pump(&mut r, 40, |m| !m.approvals.is_empty());
+    let a = r.m.approvals.first().cloned().expect("approval request arrives");
     assert_eq!(a.tool, "write_file");
     assert!(!std::path::Path::new(&r.m.cwd).join("hello.txt").exists(), "nothing written before approval");
     r.m.answer_approval(&mut r.be, "allow");
     done(&mut r);
     assert!(std::path::Path::new(&r.m.cwd).join("hello.txt").exists());
-    assert!(r.m.diffs.iter().any(|d| d.path.ends_with("hello.txt") && d.diff.contains("+hi")), "{:?}", r.m.diffs);
+    assert!(r.m.sessions[0].diffs.iter().any(|d| d.path.ends_with("hello.txt") && d.diff.contains("+hi")), "{:?}", r.m.sessions[0].diffs);
     assert!(r.m.term.contains("write_file"), "terminal log shows the tool");
     assert_eq!(r.m.sessions[0].messages.last().unwrap().text, "finished");
     let _ = std::fs::remove_dir_all(&r.dir);
@@ -169,9 +169,9 @@ fn approval_gates_a_write_and_the_diff_event_lands() {
 #[test]
 fn skipping_an_approval_writes_nothing() {
     let Some(mut r) = rig("skip") else { return };
-    r.m.approve_tools = true;
+    r.m.sessions[0].permission = "manual".into();
     assert!(r.m.submit(&mut r.be, "WRITE the file"));
-    pump(&mut r, 40, |m| m.approval.is_some());
+    pump(&mut r, 40, |m| !m.approvals.is_empty());
     r.m.answer_approval(&mut r.be, "skip");
     done(&mut r);
     assert!(!std::path::Path::new(&r.m.cwd).join("hello.txt").exists());
@@ -198,7 +198,7 @@ fn swarm_returns_heads_and_synthesis() {
     let Some(mut r) = rig("swarm") else { return };
     r.m.set_nav("swarm");
     assert!(r.m.submit(&mut r.be, "compare two designs"));
-    pump(&mut r, 90, |m| m.busy.is_none());
+    pump(&mut r, 90, |m| !m.any_busy());
     let msgs = &r.m.sessions[0].messages;
     let last = msgs.last().unwrap();
     assert_eq!(last.header, "SWARM SYNTHESIS");

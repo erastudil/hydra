@@ -25,6 +25,9 @@ pub fn accent_dim() -> Color32 {
     ACCENT_DIM
 }
 
+/// Amber for "needs you" markers; not part of the retired page's tokens.
+pub const WARN: Color32 = Color32::from_rgb(255, 196, 64);
+
 pub const BOLD: &str = "mono_bold";
 
 pub fn cr(r: u8) -> CornerRadius {
