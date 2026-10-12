@@ -500,6 +500,7 @@ class AutonomousAgentRunner:
             self._pause_event.set()
             self.state = AgentState.RUNNING
             self.current_task = task_description
+            self._run_max = effective_max
             self.current_step = 0
             self.history = []
             self._last_error = None
@@ -911,7 +912,7 @@ class AutonomousAgentRunner:
                 "available_profiles": list(TOOL_PROFILES.keys()),
                 "step_count": self.current_step,
                 "current_step": self.current_step,
-                "max_steps": self.max_steps,
+                "max_steps": getattr(self, "_run_max", self.max_steps),
                 "is_running": is_running,
                 "is_aborted": self._abort_event.is_set(),
                 "start_time": self._start_time,
@@ -980,7 +981,7 @@ class AutonomousAgentRunner:
                 "state": self.state,
                 "tool_profile": getattr(self, "tool_profile", "full"),
                 "step_count": self.current_step,
-                "max_steps": self.max_steps,
+                "max_steps": getattr(self, "_run_max", self.max_steps),
                 "duration_ms": round(duration_ms, 2),
                 "start_time": self._start_time,
                 "stop_time": self._stop_time,

@@ -5,6 +5,7 @@ use crate::widgets::{self, Kind, Part};
 use eframe::egui::{self, vec2, Align, Color32, CornerRadius, Key, Layout, Margin, Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind};
 use crate::backend::Backend;
 use crate::health::{self, Check};
+use crate::secrets;
 use crate::model::Status;
 use crate::workspace::Work;
 use std::collections::HashMap;
@@ -24,6 +25,95 @@ enum Cmd {
     Clear,
     Templates,
     Jobs,
+    Settings,
+}
+
+/// Provider-key form state. Inputs start empty: stored values are never shown, only a masked hint.
+pub struct SettingsState {
+    inputs: Vec<String>,
+    message: String,
+    ok: bool,
+}
+
+/// One displayed diff row with its line numbers.
+pub struct DLine {
+    pub kind: u8,
+    pub old: Option<u32>,
+    pub new: Option<u32>,
+    pub text: String,
+}
+
+/// Turn a unified diff into numbered rows. File headers are dropped; hunk headers stay as separators.
+pub fn parse_diff(diff: &str) -> Vec<DLine> {
+    let (mut o, mut n) = (0u32, 0u32);
+    let mut out = Vec::new();
+    for line in diff.lines() {
+        if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff ") || line.starts_with("index ") {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("@@") {
+            let nums = |tag: char| rest.split_whitespace().find(|t| t.starts_with(tag)).and_then(|t| t[1..].split(',').next()).and_then(|v| v.parse::<u32>().ok()).unwrap_or(1);
+            o = nums('-');
+            n = nums('+');
+            out.push(DLine { kind: b'@', old: None, new: None, text: line.to_string() });
+        } else if let Some(t) = line.strip_prefix('+') {
+            out.push(DLine { kind: b'+', old: None, new: Some(n), text: t.to_string() });
+            n += 1;
+        } else if let Some(t) = line.strip_prefix('-') {
+            out.push(DLine { kind: b'-', old: Some(o), new: None, text: t.to_string() });
+            o += 1;
+        } else {
+            let t = line.strip_prefix(' ').unwrap_or(line);
+            out.push(DLine { kind: b' ', old: Some(o), new: Some(n), text: t.to_string() });
+            o += 1;
+            n += 1;
+        }
+    }
+    out
+}
+
+fn mode_greeting(nav: &str) -> &'static str {
+    match nav {
+        "agent" => "Describe a task and send. The agent works through it step by step and shows each tool call.",
+        "swarm" => "Send a question. Three heads answer in parallel and a synthesis follows.",
+        "computer" => "Capture the screen, then tell the agent what to do on it.",
+        "terminal" => "Type a command and send. It runs in the project folder.",
+        _ => "Ask anything, pick a model, and send.",
+    }
+}
+
+/// Long text collapses to a short preview with a "show more" link; returns the shown text and how many lines are hidden.
+fn clip_text(text: &str, expanded: bool) -> (&str, usize) {
+    const KEEP_LINES: usize = 14;
+    const MAX_LINES: usize = 30;
+    const KEEP_BYTES: usize = 6000;
+    let lines = text.bytes().filter(|b| *b == b'\n').count() + 1;
+    if expanded {
+        return (text, 0);
+    }
+    if lines > MAX_LINES {
+        let mut end = 0;
+        for (i, (idx, _)) in text.match_indices('\n').enumerate() {
+            if i + 1 == KEEP_LINES {
+                end = idx;
+                break;
+            }
+        }
+        let end = floor_boundary(text, end.min(KEEP_BYTES));
+        return (&text[..end], lines - KEEP_LINES);
+    }
+    if text.len() > KEEP_BYTES * 2 {
+        let end = floor_boundary(text, KEEP_BYTES);
+        return (&text[..end], 1);
+    }
+    (text, 0)
+}
+
+fn floor_boundary(s: &str, mut i: usize) -> usize {
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 fn palette_entries() -> Vec<(&'static str, &'static str, Cmd)> {
@@ -45,6 +135,7 @@ fn palette_entries() -> Vec<(&'static str, &'static str, Cmd)> {
         ("Export Session Trace (Markdown)", "", Cmd::Export(true)),
         ("Workflow Templates", "", Cmd::Templates),
         ("Scheduled Jobs", "", Cmd::Jobs),
+        ("Settings: provider keys", "Ctrl+,", Cmd::Settings),
         ("New Session", "Ctrl+T", Cmd::NewSession),
         ("Clear Chat", "", Cmd::Clear),
     ]
@@ -61,6 +152,12 @@ pub struct HydraApp {
     job_form: (String, String, String, String), // name, interval, profile, task
     agent_task: String,
     agent_steps: u32,
+    heights: HashMap<(u32, usize), f32>,
+    heights_width: i32,
+    settings: Option<SettingsState>,
+    settings_auto: bool,
+    diff_cache: HashMap<String, (usize, std::sync::Arc<Vec<DLine>>)>,
+    expanded: std::collections::HashSet<(u32, usize)>,
     agent_profile: usize,
     type_text: String,
     bounds: bool,
@@ -139,6 +236,12 @@ impl HydraApp {
             job_form: ("".into(), "60".into(), "full_automation".into(), "".into()),
             agent_task: String::new(),
             agent_steps: 30,
+            heights: HashMap::new(),
+            heights_width: 0,
+            settings: None,
+            settings_auto: false,
+            diff_cache: HashMap::new(),
+            expanded: Default::default(),
             agent_profile: 0,
             type_text: String::new(),
             bounds: false,
@@ -210,6 +313,7 @@ impl HydraApp {
                     self.m.load_templates(be);
                 }
             }
+            Cmd::Settings => self.open_settings(),
             Cmd::Jobs => {
                 self.jobs_open = true;
                 if let Some(be) = &mut self.be {
@@ -227,6 +331,46 @@ impl HydraApp {
         }
         if let Some(be) = &mut self.be {
             self.m.agent_start(be, &task, self.agent_steps, PROFILES[self.agent_profile]);
+        }
+    }
+
+    fn open_settings(&mut self) {
+        self.settings = Some(SettingsState { inputs: vec![String::new(); secrets::PROVIDERS.len()], message: String::new(), ok: true });
+    }
+
+    /// Write every filled-in field to the env file, then restart the agent so it picks the keys up.
+    fn save_settings(&mut self, ctx: &egui::Context) {
+        let Some(st) = &mut self.settings else { return };
+        let path = secrets::env_path();
+        let mut saved = 0;
+        for (i, (name, label, _)) in secrets::PROVIDERS.iter().enumerate() {
+            let v = st.inputs[i].trim().to_string();
+            if v.is_empty() {
+                continue;
+            }
+            match secrets::set_in(&path, name, &v) {
+                Ok(()) => {
+                    saved += 1;
+                    st.inputs[i].clear();
+                }
+                Err(e) => {
+                    st.message = format!("{label}: {e}");
+                    st.ok = false;
+                    return;
+                }
+            }
+        }
+        if saved == 0 {
+            st.message = "Nothing to save. Paste a key into a field first.".into();
+            st.ok = false;
+            return;
+        }
+        st.ok = true;
+        st.message = format!("Saved {saved} to {}. Agent restarted.", path.display());
+        if self.m.any_busy() {
+            st.message = format!("Saved {saved}. Running threads keep the old keys; the agent restarts when you press Retry or relaunch.");
+        } else {
+            self.retry_backend(ctx);
         }
     }
 
@@ -289,7 +433,7 @@ impl HydraApp {
         });
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)), |ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
-            if widgets::button(ui, if narrow { "Palette" } else { "⌘K Palette" }, Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+            if widgets::button(ui, if narrow { "Palette" } else { "Ctrl+K Palette" }, Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
                 self.palette = Some((String::new(), 0));
             }
             if widgets::button(ui, "Clear", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
@@ -530,42 +674,137 @@ impl HydraApp {
     }
 
     // ---------------------------------------------------------------- chat
+    /// One line under the session bar that says what the current mode does and shows its live state.
+    fn mode_banner(&mut self, ui: &mut egui::Ui) {
+        let (title, blurb) = match self.m.nav {
+            "agent" => ("AGENT REACT LOOP", "Give it a task. It plans, calls tools and reports every step in this thread. Stop ends it."),
+            "swarm" => ("3-HEADED SWARM", "Three models answer the same prompt in parallel, then a fourth merges them into one reply."),
+            "computer" => ("COMPUTER USE", "The agent looks at the screen, then clicks and types. Capture a frame to see what it sees."),
+            "terminal" => ("TERMINAL SANDBOX", "Every message is a shell command run in the project folder. Output comes back here."),
+            _ => return,
+        };
+        let mut capture = false;
+        egui::Frame::new().fill(BG2).inner_margin(Margin::symmetric(24, 8)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(rtb(title, 11.0, ACCENT));
+                ui.label(rt(blurb, 11.0, MUTED));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| match self.m.nav {
+                    "agent" => {
+                        let st = &self.m.agent_status;
+                        let state = st["status"].as_str().unwrap_or("IDLE").to_uppercase();
+                        let step = st["current_step"].as_u64().unwrap_or(0);
+                        let max = st["max_steps"].as_u64().unwrap_or(self.agent_steps as u64);
+                        ui.label(rt(format!("{state}  step {step}/{max}"), 11.0, if state == "RUNNING" { ACCENT } else { MUTED }));
+                    }
+                    "computer" => {
+                        if widgets::button(ui, "Capture Screen", Kind::Secondary, 11.0, (10.0, 3.0), None).clicked() {
+                            capture = true;
+                        }
+                        ui.label(rt(format!("Active window: {}", self.m.window_title), 11.0, TEXT2));
+                    }
+                    "terminal" => {
+                        ui.label(rt(self.m.work_path(), 11.0, TEXT2));
+                    }
+                    _ => {}
+                });
+            });
+        });
+        if capture {
+            if let Some(be) = &mut self.be {
+                self.m.capture(be);
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- chat
     fn chat(&mut self, ui: &mut egui::Ui) {
+        self.mode_banner(ui);
         let mut rewind_pick: Option<usize> = None;
+        let mut toggle: Option<(u32, usize)> = None;
         let max_w = (ui.available_width() - 48.0).min(760.0).max(150.0);
-        ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
-            ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
+        let sid = self.m.sessions[self.m.active].id;
+        let nav = self.m.nav;
+        let terminal = nav == "terminal";
+        let busy = self.m.active_busy();
+        if self.heights_width != max_w as i32 {
+            self.heights.clear();
+            self.heights_width = max_w as i32;
+        }
+        ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show_viewport(ui, |ui, viewport| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             egui::Frame::new().inner_margin(Margin::same(24)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                for (mi, m) in self.m.sessions[self.m.active].messages.iter().enumerate() {
+                let mut y = 24.0f32;
+                let msgs = &self.m.sessions[self.m.active].messages;
+                let n = msgs.len();
+                for (mi, m) in msgs.iter().enumerate() {
+                    // Only what is near the viewport is laid out; everything else is a spacer of its measured height.
+                    let known = self.heights.get(&(sid, mi)).copied();
+                    let guess = known.unwrap_or(96.0);
+                    let near = y + guess >= viewport.min.y - 500.0 && y <= viewport.max.y + 500.0;
+                    if !near || (mi + 1 < n && known.is_none() && y > viewport.max.y + 500.0) {
+                        ui.add_space(guess);
+                        y += guess;
+                        continue;
+                    }
+                    let start = ui.cursor().top();
                     let layout = if m.user { Layout::top_down(Align::Max) } else { Layout::top_down(Align::Min) };
                     ui.with_layout(layout, |ui| {
                         ui.spacing_mut().item_spacing = vec2(0.0, 8.0);
                         ui.label(rt(m.header.to_uppercase(), TYPE_MSG_HEADER, MUTED).extra_letter_spacing(0.3));
-                        let (fill, stroke, radius) = if m.user {
+                        let (fill, stroke, radius) = if m.user && !terminal {
                             (USER_BUBBLE, Stroke::new(1.0, USER_BUBBLE_BORDER), CornerRadius { nw: 16, ne: 16, sw: 16, se: 4 })
+                        } else if terminal {
+                            (BG, Stroke::new(1.0, TERMINAL_BORDER), cr(10))
                         } else {
                             (BG2, Stroke::new(1.0, BORDER), CornerRadius { nw: 16, ne: 16, sw: 4, se: 16 })
                         };
-                        if !m.text.is_empty() || m.actions.is_empty() {
+                        let greeting = nav != "chat" && !m.user && m.text == "Ask anything, pick a model, and send.";
+                        let raw: &str = if greeting { mode_greeting(nav) } else { &m.text };
+                        if !raw.is_empty() || m.actions.is_empty() {
+                            let expanded = self.expanded.contains(&(sid, mi));
+                            let (shown, hidden) = clip_text(raw, expanded);
                             egui::Frame::new().fill(fill).stroke(stroke).corner_radius(radius).inner_margin(Margin::symmetric(18, 14)).show(ui, |ui| {
                                 ui.set_max_width(max_w - 36.0);
-                                ui.add(egui::Label::new(rt(&m.text, TYPE_MESSAGE_BODY, TEXT)).wrap());
+                                let text = if terminal {
+                                    let t = if m.user { format!("$ {shown}") } else { shown.to_string() };
+                                    RichText::new(t).size(TYPE_TERMINAL).family(egui::FontFamily::Monospace).color(if m.user { ACCENT } else { TEXT })
+                                } else {
+                                    rt(shown, TYPE_MESSAGE_BODY, TEXT)
+                                };
+                                ui.add(egui::Label::new(text).wrap());
+                                if hidden > 0 || expanded {
+                                    let label = if expanded { "Show less".to_string() } else { format!("Show {hidden} more lines") };
+                                    if ui.add(egui::Label::new(rt(label, 11.0, ACCENT)).sense(Sense::click())).clicked() {
+                                        toggle = Some((sid, mi));
+                                    }
+                                }
                             });
                         }
                         for a in &m.actions {
                             let c = if a.starts_with('×') { ERROR } else if a.starts_with('✓') { ACCENT } else { MUTED };
                             ui.add(egui::Label::new(rt(a, 12.0, c)).wrap());
                         }
-                        if m.user && self.m.checkpoint_for(mi).is_some() && !self.m.active_busy() {
+                        if m.user && !busy && self.m.checkpoint_for(mi).is_some() {
                             if ui.add(egui::Label::new(rt("‹ Rewind files to before this message", 11.0, MUTED)).sense(Sense::click())).on_hover_text("Restore the project to how it was before this message").clicked() {
                                 rewind_pick = self.m.checkpoint_for(mi);
                             }
                         }
                     });
+                    ui.add_space(20.0);
+                    let h = ui.cursor().top() - start;
+                    self.heights.insert((sid, mi), h);
+                    y += h;
                 }
             });
         });
+        if let Some(k) = toggle {
+            if !self.expanded.remove(&k) {
+                self.expanded.insert(k);
+            }
+            self.heights.remove(&k);
+        }
         if rewind_pick.is_some() {
             self.rewind_confirm = rewind_pick;
         }
@@ -627,12 +866,17 @@ impl HydraApp {
             });
         });
         // meta row: permission mode, queue, undo rewind, hints
-        let (mut cycle, mut undo) = (false, false);
+        let (mut cycle, mut undo, mut cycle_ctx) = (false, false, false);
         ui.horizontal(|ui| {
             let perm = self.m.sessions[self.m.active].permission.clone();
             let label = PERMISSIONS.iter().find(|p| p.0 == perm).map(|p| p.1).unwrap_or("Ask every time");
             if widgets::button(ui, &format!("Permissions: {label}"), Kind::Secondary, 11.0, (10.0, 3.0), None).on_hover_text("Click to change what the agent may do without asking").clicked() {
                 cycle = true;
+            }
+            let ctxm = self.m.sessions[self.m.active].context.clone();
+            let (clabel, cnote) = CONTEXT_MODES.iter().find(|c| c.0 == ctxm).map(|c| (c.0, c.1)).unwrap_or(("recall", ""));
+            if widgets::button(ui, &format!("Context: {}", clabel), Kind::Secondary, 11.0, (10.0, 3.0), None).on_hover_text(format!("{cnote}\nClick to change how earlier turns are carried forward")).clicked() {
+                cycle_ctx = true;
             }
             let q = self.queue.get(&self.m.sessions[self.m.active].id).map(|q| q.len()).unwrap_or(0);
             if q > 0 {
@@ -650,6 +894,9 @@ impl HydraApp {
         });
         if cycle {
             self.m.cycle_permission();
+        }
+        if cycle_ctx {
+            self.m.cycle_context();
         }
         if undo {
             if let Err(e) = self.m.undo_rewind() {
@@ -1025,9 +1272,12 @@ impl HydraApp {
             ui.set_width(width - 17.0);
             ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
             ui.horizontal(|ui| {
-                for (key, label) in [("files", "Files"), ("git", "Changes")] {
+                for (key, label) in [("files", "Files"), ("git", "Changes"), ("approvals", "Approvals")] {
                     let active = self.m.drawer_tab == key;
                     let mut text = label.to_string();
+                    if key == "approvals" && !self.m.approvals.is_empty() {
+                        text = format!("Approvals ({})", self.m.approvals.len());
+                    }
                     if key == "git" {
                         if let Some(st) = &self.work.status {
                             if !st.changes.is_empty() {
@@ -1035,7 +1285,7 @@ impl HydraApp {
                             }
                         }
                     }
-                    let (rect, resp) = ui.allocate_exact_size(vec2((width - 17.0 - 4.0) / 2.0 - 4.0, 26.0), Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(vec2((width - 17.0 - 8.0) / 3.0 - 4.0, 26.0), Sense::click());
                     if active {
                         ui.painter().rect_filled(rect, cr(10), ACCENT_DIM);
                     } else if resp.hovered() {
@@ -1061,6 +1311,7 @@ impl HydraApp {
                     "diff" => self.diff_tab(ui),
                     "files" => self.files_tab(ui),
                     "git" => self.git_tab(ui),
+                    "approvals" => self.approvals_tab(ui),
                     _ => self.agent_tab(ui, width - 33.0),
                 }
             });
@@ -1144,34 +1395,118 @@ impl HydraApp {
         });
     }
 
-    fn diff_tab(&mut self, ui: &mut egui::Ui) {
-        let diffs = self.m.sessions[self.m.active].diffs.clone();
-        if diffs.is_empty() {
-            ui.label(rt("No file changes recorded in this session yet.", 11.0, MUTED));
+    fn approvals_tab(&mut self, ui: &mut egui::Ui) {
+        if self.m.approvals.is_empty() {
+            ui.label(rt("Nothing is waiting for you. Tool calls that need a decision show up here from every thread, with the thread they belong to.", 11.0, MUTED));
             return;
         }
-        for d in diffs.iter().rev() {
-            egui::Frame::new().fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(12)).show(ui, |ui| {
+        let mut answer: Option<(String, &'static str)> = None;
+        let mut go_to: Option<u32> = None;
+        for a in self.m.approvals.clone() {
+            let thread = self.m.sessions.iter().find(|s| s.id == a.sid).map(|s| s.name.clone()).unwrap_or_default();
+            egui::Frame::new().fill(BG3).stroke(Stroke::new(1.0, WARN)).corner_radius(cr(12)).inner_margin(Margin::same(12)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                egui::Frame::new().fill(ELEV).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(rtb(&d.path, TYPE_DIFF, TEXT2));
+                ui.horizontal(|ui| {
+                    ui.label(rtb(&a.tool, 13.0, TEXT));
+                    if ui.add(egui::Label::new(rt(format!("in {thread}"), 11.0, ACCENT)).sense(Sense::click())).clicked() {
+                        go_to = Some(a.sid);
+                    }
                 });
-                ui.spacing_mut().item_spacing.y = 0.0;
-                for line in d.diff.lines() {
-                    let (bg, fg) = if line.starts_with('+') && !line.starts_with("+++") {
-                        (DIFF_ADD, DIFF_ADD_TEXT)
-                    } else if line.starts_with('-') && !line.starts_with("---") {
-                        (DIFF_DEL, DIFF_DEL_TEXT)
-                    } else {
-                        (Color32::TRANSPARENT, MUTED)
-                    };
-                    egui::Frame::new().fill(bg).inner_margin(Margin::symmetric(12, 1)).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.add(egui::Label::new(RichText::new(line).size(TYPE_DIFF).color(fg)).wrap());
-                    });
+                let mut args = serde_json::to_string_pretty(&a.args).unwrap_or_default();
+                if args.len() > 600 {
+                    let mut end = 600;
+                    while !args.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    args.truncate(end);
+                    args.push_str("\n…");
                 }
+                ui.add(egui::Label::new(RichText::new(args).size(11.0).family(egui::FontFamily::Monospace).color(TEXT2)).wrap());
+                ui.horizontal_wrapped(|ui| {
+                    for (label, key, kind) in [("Allow", "allow", Kind::Primary), ("Always", "allow_always", Kind::Secondary), ("Skip", "skip", Kind::Secondary), ("Abort", "abort", Kind::Danger)] {
+                        if widgets::button(ui, label, kind, 12.0, (12.0, 5.0), None).clicked() {
+                            answer = Some((a.id.clone(), key));
+                        }
+                    }
+                });
             });
+        }
+        if let (Some((id, d)), Some(be)) = (answer, &mut self.be) {
+            self.m.answer_approval_id(be, &id, d);
+        }
+        if let Some(sid) = go_to {
+            if let Some(i) = self.m.sessions.iter().position(|s| s.id == sid) {
+                self.m.select(i);
+            }
+        }
+    }
+
+    fn diff_tab(&mut self, ui: &mut egui::Ui) {
+        let sid = self.m.sessions[self.m.active].id;
+        let n = self.m.sessions[self.m.active].diffs.len();
+        if n == 0 {
+            ui.label(rt("No file changes recorded in this thread yet. Edits the agent makes show up here, file by file.", 11.0, MUTED));
+            return;
+        }
+        for di in (0..n).rev() {
+            let (path, len) = {
+                let d = &self.m.sessions[self.m.active].diffs[di];
+                (d.path.clone(), d.diff.len())
+            };
+            let key = format!("{sid}:{di}");
+            if self.diff_cache.get(&key).map(|c| c.0) != Some(len) {
+                let lines = parse_diff(&self.m.sessions[self.m.active].diffs[di].diff);
+                self.diff_cache.insert(key.clone(), (len, std::sync::Arc::new(lines)));
+            }
+            let lines = self.diff_cache[&key].1.clone();
+            let (add, del) = lines.iter().fold((0, 0), |(a, d), l| (a + (l.kind == b'+') as usize, d + (l.kind == b'-') as usize));
+            let id = ui.make_persistent_id(("diff", &key));
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, di + 1 == n);
+            let mut copy = false;
+            let header = ui.horizontal(|ui| {
+                state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
+                ui.label(rtb(path.rsplit(['/', '\\']).next().unwrap_or(&path), TYPE_DIFF, TEXT));
+                ui.label(rt(format!("+{add}"), TYPE_DIFF, DIFF_ADD_TEXT));
+                ui.label(rt(format!("−{del}"), TYPE_DIFF, DIFF_DEL_TEXT));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if widgets::button(ui, "Copy", Kind::Secondary, 11.0, (8.0, 2.0), None).clicked() {
+                        copy = true;
+                    }
+                });
+            });
+            if header.response.clicked() {
+                state.toggle(ui);
+            }
+            ui.label(rt(&path, 10.0, MUTED));
+            if copy {
+                let text = self.m.sessions[self.m.active].diffs[di].diff.clone();
+                ui.ctx().copy_text(text);
+            }
+            state.show_body_unindented(ui, |ui| {
+                let row_h = TYPE_DIFF + 5.0;
+                egui::Frame::new().fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(10)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ScrollArea::vertical().id_salt(("diffrows", &key)).max_height(460.0).auto_shrink([false, true]).show_rows(ui, row_h, lines.len(), |ui, range| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        for l in &lines[range] {
+                            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
+                            let (bg, fg) = match l.kind {
+                                b'+' => (DIFF_ADD, DIFF_ADD_TEXT),
+                                b'-' => (DIFF_DEL, DIFF_DEL_TEXT),
+                                b'@' => (ELEV, ACCENT),
+                                _ => (Color32::TRANSPARENT, MUTED),
+                            };
+                            let p = ui.painter().with_clip_rect(rect);
+                            p.rect_filled(rect, 0.0, bg);
+                            let f = egui::FontId::new(TYPE_DIFF, egui::FontFamily::Monospace);
+                            let num = |n: Option<u32>| n.map(|n| format!("{n:>5}")).unwrap_or_else(|| "     ".into());
+                            p.text(rect.left_center() + vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, format!("{} {}", num(l.old), num(l.new)), f.clone(), MUTED);
+                            p.text(rect.left_center() + vec2(92.0, 0.0), egui::Align2::LEFT_CENTER, format!("{} {}", l.kind as char, l.text), f, fg);
+                        }
+                    });
+                });
+            });
+            state.store(ui.ctx());
         }
     }
 
@@ -1327,6 +1662,44 @@ impl HydraApp {
             });
             if let (Some(d), Some(be)) = (decision, &mut self.be) {
                 self.m.answer_approval(be, d);
+            }
+            return;
+        }
+        if self.settings.is_some() {
+            let file = secrets::env_path();
+            let (mut save, mut close) = (false, ctx.input(|i| i.key_pressed(Key::Escape)));
+            let stored = secrets::read_from(&file);
+            if let Some(st) = &mut self.settings {
+                modal_frame(ctx, "settings", 560.0, |ui| {
+                    ui.label(rtb("SETTINGS: MODEL ACCESS", 13.0, ACCENT));
+                    ui.add(egui::Label::new(rt(format!("Keys are stored in {} (readable only by you) and never shown again. Leave a field empty to keep what is stored.", file.display()), 11.0, MUTED)).wrap());
+                    for (i, (name, label, secret)) in secrets::PROVIDERS.iter().enumerate() {
+                        ui.label(rt(*label, 12.0, TEXT2));
+                        let have = stored.get(*name).filter(|v| !v.is_empty()).map(|v| if *secret { secrets::mask(v) } else { v.clone() });
+                        let hint = match &have {
+                            Some(h) => format!("saved: {h}"),
+                            None => "not set".into(),
+                        };
+                        ui.add(egui::TextEdit::singleline(&mut st.inputs[i]).password(*secret).hint_text(rt(hint, 12.0, MUTED)).desired_width(f32::INFINITY));
+                    }
+                    if !st.message.is_empty() {
+                        ui.add(egui::Label::new(rt(&st.message, 11.0, if st.ok { ACCENT } else { ERROR })).wrap());
+                    }
+                    ui.horizontal(|ui| {
+                        if widgets::button(ui, "Save", Kind::Primary, 13.0, (16.0, 8.0), None).clicked() {
+                            save = true;
+                        }
+                        if widgets::button(ui, "Close", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            }
+            if save {
+                self.save_settings(ctx);
+            }
+            if close {
+                self.settings = None;
             }
             return;
         }
@@ -1639,6 +2012,9 @@ impl HydraApp {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
             self.palette = if self.palette.is_some() { None } else { Some((String::new(), 0)) };
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma)) {
+            self.open_settings();
+        }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::P)) {
             self.finder = Some((String::new(), 0));
         }
@@ -1743,6 +2119,11 @@ impl HydraApp {
         self.drain();
         if let Ok(c) = self.health_rx.try_recv() {
             self.checks = c;
+            // first run without any key: take the user straight to the place where one is entered
+            if !self.settings_auto && self.checks.iter().any(|c| c.name == "Model access" && !c.ok) {
+                self.settings_auto = true;
+                self.open_settings();
+            }
         }
         if self.started < 0.0 {
             self.started = time;
@@ -1845,13 +2226,15 @@ impl HydraApp {
             });
         let dw = (total * 0.34).min(420.0);
         egui::Panel::right("drawer")
-            .exact_size(dw)
-            .resizable(false)
+            .default_size(dw)
+            .size_range(dw.min(300.0)..=(total * 0.62).max(dw))
+            .resizable(true)
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(BG2))
             .show(root, |ui| {
                 ui.painter().vline(ui.max_rect().left() + 0.5, ui.max_rect().y_range(), border);
-                self.drawer(ui, dw);
+                let live_w = ui.max_rect().width();
+                self.drawer(ui, live_w);
             });
         egui::Panel::bottom("composer")
             .show_separator_line(false)

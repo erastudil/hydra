@@ -10,6 +10,7 @@ fn harness(name: &str) -> Harness<'static, HydraApp> {
     std::fs::create_dir_all(&dir).unwrap();
     let cwd = dir.display().to_string();
     // the fake agent speaks the real stdio protocol; a missing python fails these tests loudly
+    std::env::set_var("LOCAL_AI_BASE", "http://127.0.0.1:9"); // counts as a configured model, so first-run Settings stays closed
     std::env::set_var("HYDRA_REPO", format!("{}/tests/fake_agent", env!("CARGO_MANIFEST_DIR")));
     Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_eframe(move |cc| HydraApp::build(&cc.egui_ctx, None, cwd, true))
 }

@@ -10,3 +10,4 @@ pub mod workspace;
 pub mod app;
 pub mod theme;
 pub mod widgets;
+pub mod secrets;

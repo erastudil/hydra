@@ -60,6 +60,8 @@ pub struct Session {
     pub diffs: Vec<DiffItem>,
     #[serde(default = "default_permission")]
     pub permission: String,
+    #[serde(default = "default_context")]
+    pub context: String,
     #[serde(default)]
     pub checkpoints: Vec<Checkpoint>,
     /// Checkpoint taken just before the last rewind, so a rewind can be undone.
@@ -86,6 +88,16 @@ pub const PERMISSIONS: &[(&str, &str)] = &[
     ("plan", "Plan (read only)"),
     ("bypass", "Bypass approvals"),
 ];
+
+pub const CONTEXT_MODES: &[(&str, &str)] = &[
+    ("recall", "Recall: keep every turn, reload only what matches"),
+    ("compact", "Compact: summarize older turns near the limit"),
+    ("sliding", "Sliding: keep the last few turns whole"),
+];
+
+fn default_context() -> String {
+    "recall".into()
+}
 
 fn default_permission() -> String {
     // a new thread asks before anything that changes files or runs a command; the chip next to the prompt changes it
@@ -228,6 +240,7 @@ fn short(v: &Value) -> String {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     };
+    let s = s.replace('\n', " ⏎ ");
     if s.chars().count() > 90 {
         format!("{}…", s.chars().take(90).collect::<String>())
     } else {
@@ -341,6 +354,7 @@ impl Model {
             updated: stamp,
             diffs: vec![],
             permission: default_permission(),
+            context: default_context(),
             checkpoints: vec![],
             pre_rewind: None,
             worktree: None,
@@ -587,7 +601,6 @@ impl Model {
 
     pub fn set_nav(&mut self, key: &str) {
         self.nav = nav_key(key);
-        self.term.push_str(&format!("\n[MODE] Switched to mode: {}", self.nav));
         match self.nav {
             "agent" => self.drawer_tab = "agent",
             "computer" => self.drawer_tab = "screen",
@@ -629,13 +642,13 @@ impl Model {
         {
             let s = &mut self.sessions[self.active];
             s.messages.push(Msg { user: true, header: "YOU".into(), text: text.into(), actions: attached.iter().map(|a| format!("attached {a}")).collect() });
-            s.messages.push(Msg { user: false, header, text: String::new(), actions: vec!["◐ Thinking".into()] });
+            s.messages.push(Msg { user: false, header, text: String::new(), actions: vec!["Thinking…".into()] });
         }
         self.turn_counter += 1;
         let turn = format!("t{}", self.turn_counter);
         match self.nav {
             "terminal" => {
-                self.term.push_str(&format!("\n$ {text}"));
+                self.log(&format!("\n$ {text}"));
                 let id = be.action("terminal:run", json!({"command": text, "cwd": cwd}));
                 self.act(Pending::Terminal(sid), id.clone());
                 self.runs.insert(id, sid);
@@ -647,7 +660,8 @@ impl Model {
             }
             _ => {
                 let permission = self.sessions[self.active].permission.clone();
-                be.turn(&turn, &prompt, &thread, &cwd, model, &permission);
+                let context = self.sessions[self.active].context.clone();
+                be.turn(&turn, &prompt, &thread, &cwd, model, &permission, &context);
                 self.runs.insert(turn, sid);
             }
         }
@@ -662,6 +676,25 @@ impl Model {
         for t in turns {
             be.cancel(&t);
         }
+    }
+
+    /// Answer one specific pending approval, whichever thread it belongs to (the Approvals tab lists all of them).
+    pub fn answer_approval_id(&mut self, be: &mut Backend, id: &str, decision: &str) -> bool {
+        match self.approvals.iter().position(|a| a.id == id) {
+            Some(pos) => {
+                let a = self.approvals.remove(pos);
+                be.approve(&a.id, decision);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn cycle_context(&mut self) {
+        let cur = self.sessions[self.active].context.clone();
+        let i = CONTEXT_MODES.iter().position(|p| p.0 == cur).unwrap_or(0);
+        self.sessions[self.active].context = CONTEXT_MODES[(i + 1) % CONTEXT_MODES.len()].0.into();
+        self.save();
     }
 
     pub fn answer_approval(&mut self, be: &mut Backend, decision: &str) {
@@ -722,13 +755,13 @@ impl Model {
     }
 
     pub fn click(&mut self, be: &mut Backend, x: i64, y: i64) {
-        self.term.push_str(&format!("\n[CLICK] mouse_click x={x} y={y}"));
+        self.log(&format!("\n[CLICK] mouse_click x={x} y={y}"));
         let id = be.action("computer:click", json!({"x": x, "y": y}));
         self.act(Pending::Click, id);
     }
 
     pub fn type_text(&mut self, be: &mut Backend, text: &str) {
-        self.term.push_str(&format!("\n[TYPE] {text}"));
+        self.log(&format!("\n[TYPE] {text}"));
         let id = be.action("computer:type", json!({"text": text}));
         self.act(Pending::Type, id);
     }
@@ -740,9 +773,41 @@ impl Model {
         self.save();
     }
 
+    /// Append to the terminal log, keeping it bounded so a huge tool result cannot make the window sluggish.
+    fn log(&mut self, s: &str) {
+        const CAP: usize = 200_000;
+        const ONE: usize = 20_000;
+        if s.len() > ONE {
+            let mut end = ONE;
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.term.push_str(&s[..end]);
+            self.term.push_str(&format!("\n… {} more bytes not shown", s.len() - end));
+        } else {
+            self.term.push_str(s);
+        }
+        if self.term.len() > CAP {
+            let mut cut = self.term.len() - CAP / 2;
+            while !self.term.is_char_boundary(cut) {
+                cut += 1;
+            }
+            let rest = self.term[cut..].to_string();
+            self.term = format!("… earlier output trimmed\n{rest}");
+        }
+    }
+
     fn fail_bubble(&mut self, sid: u32, msg: &str) {
+        let msg = msg.strip_prefix("ProviderError:").unwrap_or(msg).trim();
+        let hinted;
+        let msg = if msg.to_lowercase().contains("credentials") {
+            hinted = format!("{msg} Open Settings (Ctrl+,) to add a key.");
+            hinted.as_str()
+        } else {
+            msg
+        };
         if let Some(m) = self.last_assistant(sid) {
-            m.actions.retain(|a| a != "◐ Thinking");
+            m.actions.retain(|a| a != "Thinking…");
             if m.text.is_empty() {
                 m.text = format!("Error: {msg}");
             } else {
@@ -766,7 +831,7 @@ impl Model {
             Ev::Token { turn, text } => {
                 if let Some(sid) = self.run_session(&turn) {
                     if let Some(m) = self.last_assistant(sid) {
-                        m.actions.retain(|a| a != "◐ Thinking");
+                        m.actions.retain(|a| a != "Thinking…");
                         m.text.push_str(&text);
                     }
                     self.touch(sid, false);
@@ -775,11 +840,11 @@ impl Model {
             Ev::ToolStart { turn, tool, args, .. } => {
                 if let Some(sid) = self.run_session(&turn) {
                     if let Some(m) = self.last_assistant(sid) {
-                        m.actions.retain(|a| a != "◐ Thinking");
+                        m.actions.retain(|a| a != "Thinking…");
                         m.actions.push(format!("▸ {tool}  {}", short(&args)));
                     }
                 }
-                self.term.push_str(&format!("\n$ {tool} {}", short(&args)));
+                self.log(&format!("\n$ {tool} {}", short(&args)));
             }
             Ev::ToolResult { turn, tool, is_error, output } => {
                 if let Some(sid) = self.run_session(&turn) {
@@ -788,7 +853,7 @@ impl Model {
                         m.actions.push(format!("{} {tool}: {first}", if is_error { "×" } else { "✓" }));
                     }
                 }
-                self.term.push_str(&format!("\n{}{output}", if is_error { "[error] " } else { "" }));
+                self.log(&format!("\n{}{output}", if is_error { "[error] " } else { "" }));
             }
             Ev::Diff { turn, path, diff } => {
                 if let Some(sid) = self.run_session(&turn) {
@@ -820,7 +885,7 @@ impl Model {
             Ev::Done { turn, text, ok, cancelled } => {
                 if let Some(sid) = self.run_session(&turn) {
                     if let Some(m) = self.last_assistant(sid) {
-                        m.actions.retain(|a| a != "◐ Thinking");
+                        m.actions.retain(|a| a != "Thinking…");
                         if cancelled {
                             m.actions.push("■ turn cancelled".into());
                         } else if !text.is_empty() {
@@ -839,7 +904,7 @@ impl Model {
                         return;
                     }
                 }
-                self.term.push_str(&format!("\n[{code}] {message}"));
+                self.log(&format!("\n[{code}] {message}"));
                 if let Some(sid) = turn.as_deref().and_then(|t| self.run_session(t)) {
                     self.fail_bubble(sid, &message);
                     if code == "bad_request" || code == "busy" {
@@ -861,7 +926,7 @@ impl Model {
                 self.fail_bubble(sid, message);
                 self.finish_sid(sid);
             }
-            _ => self.term.push_str(&format!("\n[error] {message}")),
+            _ => self.log(&format!("\n[error] {message}")),
         }
     }
 
@@ -878,11 +943,11 @@ impl Model {
                 let err = res["stderr"].as_str().unwrap_or("");
                 let status = res["status"].as_str().unwrap_or("");
                 let code = res["exit_code"].as_i64().unwrap_or(0);
-                self.term.push_str(&format!("\n{out}{err}"));
+                self.log(&format!("\n{out}{err}"));
                 let mut body = format!("{out}{err}").trim_end().to_string();
                 if let Some(v) = res["violation"].as_str().filter(|v| !v.is_empty()) {
                     body = format!("Blocked: {v}");
-                    self.term.push_str(&format!("\n[BLOCKED] {v}"));
+                    self.log(&format!("\n[BLOCKED] {v}"));
                 }
                 if let Some(d) = res["diff"].as_str().filter(|d| !d.is_empty()) {
                     if let Some(sess) = self.session_mut(sid) {
@@ -890,7 +955,7 @@ impl Model {
                     }
                 }
                 if let Some(m) = self.last_assistant(sid) {
-                    m.actions.retain(|a| a != "◐ Thinking");
+                    m.actions.retain(|a| a != "Thinking…");
                     m.text = if body.is_empty() { format!("(no output) exit {code}") } else { body };
                     m.actions.push(format!("{status} exit {code}"));
                 }
@@ -915,7 +980,7 @@ impl Model {
                         });
                     }
                     let mut synth = placeholder.unwrap_or_default();
-                    synth.actions.retain(|a| a != "◐ Thinking");
+                    synth.actions.retain(|a| a != "Thinking…");
                     synth.header = "SWARM SYNTHESIS".into();
                     synth.text = r["synthesis"].as_str().filter(|t| !t.is_empty()).map(String::from).unwrap_or_else(|| {
                         format!("Error: {}", r["synthesis_error"].as_str().unwrap_or("no synthesis returned"))
@@ -926,12 +991,12 @@ impl Model {
             }
             Pending::Screen => {
                 if is_err {
-                    self.term.push_str(&format!("\n[error] capture: {err_text}"));
+                    self.log(&format!("\n[error] capture: {err_text}"));
                 } else if let Some(b) = r["png_base64"].as_str().filter(|b| !b.is_empty()) {
                     self.screen_b64 = b.into();
                     self.screen_seq += 1;
                     if r["simulated"].as_bool().unwrap_or(false) {
-                        self.term.push_str("\n[note] screen capture is simulated on this platform");
+                        self.log("\n[note] screen capture is simulated on this platform");
                     }
                 }
             }
@@ -942,15 +1007,15 @@ impl Model {
             }
             Pending::Click | Pending::Type => {
                 if is_err {
-                    self.term.push_str(&format!("\n[error] {err_text}"));
+                    self.log(&format!("\n[error] {err_text}"));
                 }
             }
             Pending::AgentStart => {
                 if is_err {
-                    self.term.push_str(&format!("\n[error] agent: {err_text}"));
+                    self.log(&format!("\n[error] agent: {err_text}"));
                 } else {
                     self.agent_running = true;
-                    self.term.push_str("\n[AGENT] task started");
+                    self.log("\n[AGENT] task started");
                 }
             }
             Pending::AgentStatus => {
@@ -959,7 +1024,7 @@ impl Model {
                 self.agent_running = state == "RUNNING" || state == "PAUSED";
                 self.agent_status = st;
             }
-            Pending::AgentCtl(which) => self.term.push_str(&format!("\n[AGENT] {which}: {}", if is_err { err_text } else { "ok".into() })),
+            Pending::AgentCtl(which) => self.log(&format!("\n[AGENT] {which}: {}", if is_err { err_text } else { "ok".into() })),
             Pending::Export(ext) => {
                 let body = if ext == "md" { r["markdown"].as_str().unwrap_or("").to_string() } else { serde_json::to_string_pretty(&r["result"]).unwrap_or_default() };
                 let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
@@ -970,18 +1035,18 @@ impl Model {
                             let _ = std::fs::create_dir_all(d);
                         }
                         match std::fs::write(&p, body) {
-                            Ok(_) => self.term.push_str(&format!("\n[EXPORT] wrote {}", p.display())),
-                            Err(e) => self.term.push_str(&format!("\n[EXPORT] failed: {e}")),
+                            Ok(_) => self.log(&format!("\n[EXPORT] wrote {}", p.display())),
+                            Err(e) => self.log(&format!("\n[EXPORT] failed: {e}")),
                         }
                     }
-                    None => self.term.push_str("\n[EXPORT] no export directory"),
+                    None => self.log("\n[EXPORT] no export directory"),
                 }
             }
             Pending::Templates => self.templates = r["templates"].as_array().cloned().unwrap_or_default(),
             Pending::JobsList => self.jobs = r["jobs"].as_array().cloned().unwrap_or_default(),
             Pending::JobCreate | Pending::JobOp => {
                 if is_err {
-                    self.term.push_str(&format!("\n[error] jobs: {err_text}"));
+                    self.log(&format!("\n[error] jobs: {err_text}"));
                 }
                 self.notice = "jobs-changed".into();
             }
@@ -1037,7 +1102,7 @@ mod tests {
     fn events_fold_into_the_bubble_and_the_tally() {
         let mut m = Model::new(None, ".".into());
         m.runs.insert("t1".into(), m.sessions[0].id);
-        m.sessions[0].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["◐ Thinking".into()] });
+        m.sessions[0].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["Thinking…".into()] });
         m.apply(Ev::Token { turn: "t1".into(), text: "ab".into() });
         m.apply(Ev::Token { turn: "t1".into(), text: "cd".into() });
         assert_eq!(m.sessions[0].messages.last().unwrap().text, "abcd");
@@ -1050,7 +1115,7 @@ mod tests {
 
     fn running_thread(m: &mut Model, idx: usize, turn: &str) {
         let sid = m.sessions[idx].id;
-        m.sessions[idx].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["◐ Thinking".into()] });
+        m.sessions[idx].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["Thinking…".into()] });
         m.runs.insert(turn.into(), sid);
     }
 

@@ -195,8 +195,8 @@ impl Backend {
         }
     }
 
-    pub fn turn(&mut self, turn: &str, prompt: &str, thread: &str, cwd: &str, model: &str, permission: &str) {
-        self.send(json!({"type": "turn", "turn": turn, "prompt": prompt, "thread": thread, "cwd": cwd, "model": model, "permission": permission}));
+    pub fn turn(&mut self, turn: &str, prompt: &str, thread: &str, cwd: &str, model: &str, permission: &str, context: &str) {
+        self.send(json!({"type": "turn", "turn": turn, "prompt": prompt, "thread": thread, "cwd": cwd, "model": model, "permission": permission, "mode": context}));
     }
 
     pub fn cancel(&mut self, turn: &str) {
