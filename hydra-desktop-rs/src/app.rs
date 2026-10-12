@@ -63,6 +63,7 @@ pub struct HydraApp {
     last_poll: f64,
     shot: Option<ShotPlan>,
     focus_input: bool,
+    composer_rect: egui::Rect,
     start_error: Option<String>,
 }
 
@@ -90,11 +91,17 @@ impl HydraApp {
         if let Some(e) = &start_error {
             m.notice = e.clone();
         }
+        if let Ok(t) = std::env::var("HYDRA_TAB") {
+            if let Some(k) = DRAWER_TABS.iter().find(|d| d.0 == t) {
+                m.drawer_tab = k.0;
+            }
+        }
+        let palette = if std::env::var("HYDRA_OPEN").as_deref() == Ok("palette") { Some((String::new(), 0)) } else { None };
         Self {
             m,
             be,
             input: String::new(),
-            palette: None,
+            palette,
             templates_open: false,
             templates_q: String::new(),
             jobs_open: false,
@@ -108,6 +115,7 @@ impl HydraApp {
             last_poll: 0.0,
             shot,
             focus_input: true,
+            composer_rect: egui::Rect::NOTHING,
             start_error,
         }
     }
@@ -212,34 +220,38 @@ impl HydraApp {
         });
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)), |ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
-            if widgets::button(ui, "⌘K Palette", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+            if widgets::button(ui, if narrow { "Palette" } else { "⌘K Palette" }, Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
                 self.palette = Some((String::new(), 0));
             }
             if widgets::button(ui, "Clear", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
                 self.m.clear_active();
             }
-            self.model_select(ui, if narrow { 230.0 } else { 300.0 });
-            let (dot_live, label) = if self.m.agent_ready { (true, "Agent : ready") } else { (false, "Agent : offline") };
+            self.model_select(ui, if narrow { 120.0 } else { 300.0 });
+            let (dot_live, label) = match (self.m.agent_ready, narrow) {
+                (true, false) => (true, "Agent : ready"),
+                (false, false) => (false, "Agent : offline"),
+                (true, true) => (true, "ready"),
+                (false, true) => (false, "offline"),
+            };
             widgets::chip_parts(ui, (12.0, 6.0), 8.0, &[Part::Dot(dot_live), Part::Text(label.into(), TYPE_STATUS_PILL, false, TEXT2)], time);
             let (tok, cost) = self.m.tally();
-            widgets::chip_parts(
-                ui,
-                (14.0, 6.0),
-                8.0,
-                &[
+            let parts = if narrow {
+                vec![Part::Text(tok, TYPE_TOKEN_TALLY, true, TEXT), Part::Text("•".into(), TYPE_TOKEN_TALLY, false, BORDER), Part::Text(cost, TYPE_TOKEN_TALLY, true, ACCENT)]
+            } else {
+                vec![
                     Part::Text("Tokens:".into(), TYPE_TOKEN_TALLY, false, TEXT2),
                     Part::Text(tok, TYPE_TOKEN_TALLY, true, TEXT),
                     Part::Text("•".into(), TYPE_TOKEN_TALLY, false, BORDER),
                     Part::Text("Cost:".into(), TYPE_TOKEN_TALLY, false, TEXT2),
                     Part::Text(cost, TYPE_TOKEN_TALLY, true, ACCENT),
-                ],
-                time,
-            );
+                ]
+            };
+            widgets::chip_parts(ui, (14.0, 6.0), 8.0, &parts, time);
         });
     }
 
     fn model_select(&mut self, ui: &mut egui::Ui, width: f32) {
-        let label = MODELS[self.m.model].1;
+        let label = if width < 200.0 { MODELS[self.m.model].0 } else { MODELS[self.m.model].1 };
         ui.scope(|ui| {
             ui.spacing_mut().button_padding = vec2(14.0, 8.0);
             style_combo(ui);
@@ -377,6 +389,9 @@ impl HydraApp {
             if focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
                 do_send = true;
             }
+            if focused && self.composer_rect.is_positive() {
+                widgets::shadow(ui, self.composer_rect, 16, SHADOW_GLOW);
+            }
             let resp = egui::Frame::new()
                 .fill(BG3)
                 .corner_radius(cr(16))
@@ -404,9 +419,7 @@ impl HydraApp {
                 resp.inner.request_focus();
                 self.focus_input = false;
             }
-            if focused {
-                widgets::shadow(ui, resp.response.rect, 16, SHADOW_GLOW);
-            }
+            self.composer_rect = resp.response.rect;
             ui.with_layout(Layout::bottom_up(Align::Max), |ui| {
                 if self.m.busy.is_some() {
                     if widgets::button(ui, "Stop", Kind::Danger, 13.0, (16.0, 8.0), Some(send_w)).clicked() {
@@ -887,6 +900,13 @@ impl eframe::App for HydraApp {
         let time = ctx.input(|i| i.time);
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
         self.drain();
+        if self.m.agent_ready && self.m.busy.is_none() {
+            if let Ok(p) = std::env::var("HYDRA_DEMO_PROMPT") {
+                std::env::remove_var("HYDRA_DEMO_PROMPT");
+                self.input = p;
+                self.send();
+            }
+        }
         self.shortcuts(ctx);
         if self.be.is_some() && (self.m.agent_running || self.m.drawer_tab == "agent") && time - self.last_poll > 0.5 && !self.m.pending.values().any(|p| matches!(p, Pending::AgentStatus)) {
             self.last_poll = time;
@@ -950,7 +970,7 @@ impl eframe::App for HydraApp {
 
         if let Some(plan) = &mut self.shot {
             plan.frames += 1;
-            if plan.frames == 20 && !plan.requested {
+            if plan.frames >= std::env::var("HYDRA_SHOT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(20) && !plan.requested {
                 plan.requested = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
             }
