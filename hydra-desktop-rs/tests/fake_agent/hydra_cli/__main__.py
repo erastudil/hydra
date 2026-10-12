@@ -38,6 +38,14 @@ def turn(msg):
             return
         emit({"type": "tool_start", "turn": t, "call": 1, "tool": "bash", "arguments": {"command": "echo " + thread}})
         emit({"type": "tool_result", "turn": t, "call": 1, "tool": "bash", "is_error": False, "output": thread + "\n", "truncated": False})
+    if "TOUCH" in prompt:
+        import os
+        with open(os.path.join(cwd, "a.txt"), "w") as fh:
+            fh.write("agent was here\n")
+        with open(os.path.join(cwd, "touched.txt"), "w") as fh:
+            fh.write("new\n")
+    if "ECHO" in prompt:
+        emit({"type": "token", "turn": t, "text": "PROMPT<" + prompt + ">"})
     if "WRITE" in prompt:
         emit({"type": "diff", "turn": t, "path": f"{thread}.txt", "diff": f"--- a\n+++ b\n+{thread}\n"})
     if "FAIL" in prompt:

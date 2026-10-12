@@ -114,3 +114,54 @@ fn stress_200_rounds_of_four_overlapping_turns_never_cross_talk() {
     assert!(m.approvals.is_empty());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+fn git_repo(dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    for a in [&["init", "-q", "-b", "w"][..], &["config", "user.email", "t@t"], &["config", "user.name", "t"], &["config", "commit.gpgsign", "false"]] {
+        assert!(std::process::Command::new("git").args(a).current_dir(dir).output().unwrap().status.success());
+    }
+    std::fs::write(dir.join("a.txt"), "original\n").unwrap();
+    for a in [&["add", "."][..], &["commit", "-q", "-m", "init"]] {
+        assert!(std::process::Command::new("git").args(a).current_dir(dir).output().unwrap().status.success());
+    }
+}
+
+#[test]
+fn rewind_restores_files_changed_by_a_turn_and_can_be_undone() {
+    let (mut m, mut be, dir) = setup("rewind", 1);
+    let repo = dir.join("p0");
+    git_repo(&repo);
+    assert!(pump(&mut m, &be, 10, |m| m.agent_ready));
+    assert!(m.submit(&mut be, "TOUCH the files"));
+    assert!(m.sessions[m.active].checkpoints.len() == 1, "a checkpoint is taken before the turn");
+    assert!(m.rewind_code(0).unwrap_err().contains("stop the running turn"));
+    assert!(pump(&mut m, &be, 10, |m| !m.any_busy()));
+    assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "agent was here\n");
+    assert!(repo.join("touched.txt").exists());
+    let at = m.sessions[m.active].checkpoints[0].at;
+    assert_eq!(m.checkpoint_for(at), Some(0));
+    assert!(m.sessions[m.active].messages[at].user, "the checkpoint sits before the user message");
+    m.rewind_code(0).unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "original\n");
+    assert!(!repo.join("touched.txt").exists());
+    m.undo_rewind().unwrap();
+    assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "agent was here\n");
+    assert!(repo.join("touched.txt").exists());
+    assert!(m.undo_rewind().is_err(), "only one level of undo");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn at_mentions_attach_file_text_to_the_prompt_but_not_to_the_bubble() {
+    let (mut m, mut be, dir) = setup("mention", 1);
+    std::fs::write(dir.join("p0/notes.txt"), "remember the milk").unwrap();
+    assert!(pump(&mut m, &be, 10, |m| m.agent_ready));
+    assert!(m.submit(&mut be, "ECHO see @notes.txt please"));
+    assert!(pump(&mut m, &be, 10, |m| !m.any_busy()));
+    let msgs = &m.sessions[m.active].messages;
+    let user = &msgs[msgs.len() - 2];
+    assert_eq!(user.text, "ECHO see @notes.txt please");
+    assert!(user.actions.iter().any(|a| a == "attached notes.txt"));
+    assert!(msgs.last().unwrap().text.contains("remember the milk"), "the agent got the file text: {}", msgs.last().unwrap().text);
+    let _ = std::fs::remove_dir_all(dir);
+}

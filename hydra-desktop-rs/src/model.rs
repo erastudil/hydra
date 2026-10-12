@@ -60,6 +60,21 @@ pub struct Session {
     pub diffs: Vec<DiffItem>,
     #[serde(default = "default_permission")]
     pub permission: String,
+    #[serde(default)]
+    pub checkpoints: Vec<Checkpoint>,
+    /// Checkpoint taken just before the last rewind, so a rewind can be undone.
+    #[serde(default)]
+    pub pre_rewind: Option<String>,
+}
+
+/// A snapshot of the project taken before a message was sent.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct Checkpoint {
+    pub sha: String,
+    pub label: String,
+    /// Index into `messages` of the user message this checkpoint precedes.
+    pub at: usize,
+    pub ts: u64,
 }
 
 pub const PERMISSIONS: &[(&str, &str)] = &[
@@ -322,6 +337,8 @@ impl Model {
             updated: stamp,
             diffs: vec![],
             permission: default_permission(),
+            checkpoints: vec![],
+            pre_rewind: None,
         });
         self.active = self.sessions.len() - 1;
         self.save();
@@ -451,6 +468,60 @@ impl Model {
         self.runs.get(turn).copied()
     }
 
+    fn take_checkpoint(&mut self, cwd: &str, label: &str) {
+        let root = std::path::Path::new(cwd);
+        if !crate::git::is_repo(root) {
+            return;
+        }
+        let (thread, n) = {
+            let s = &self.sessions[self.active];
+            (s.thread.clone(), s.checkpoints.len() + 1)
+        };
+        if let Ok(sha) = crate::git::checkpoint(root, &format!("{thread}/{n}")) {
+            let s = &mut self.sessions[self.active];
+            let at = s.messages.len();
+            s.checkpoints.push(Checkpoint { sha, label: label.chars().take(60).collect(), at, ts: now() });
+        }
+    }
+
+    /// The checkpoint that precedes the user message at `msg_index`, if one was taken.
+    pub fn checkpoint_for(&self, msg_index: usize) -> Option<usize> {
+        self.sessions[self.active].checkpoints.iter().position(|c| c.at == msg_index)
+    }
+
+    /// Put the project's files back to how they were before checkpoint `i`. The state just before the rewind is saved
+    /// first so it can be undone. Refused while the thread is running.
+    pub fn rewind_code(&mut self, i: usize) -> Result<String, String> {
+        let sid = self.sessions[self.active].id;
+        if self.is_running(sid) {
+            return Err("stop the running turn before rewinding".into());
+        }
+        let cp = self.sessions[self.active].checkpoints.get(i).cloned().ok_or("no such checkpoint")?;
+        let cwd = self.project_path();
+        let root = std::path::Path::new(&cwd);
+        let thread = self.sessions[self.active].thread.clone();
+        let pre = crate::git::checkpoint(root, &format!("{thread}/pre-rewind"))?;
+        crate::git::restore(root, &cp.sha)?;
+        let s = &mut self.sessions[self.active];
+        s.pre_rewind = Some(pre);
+        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: format!("Rewound files to before: {}", cp.label), actions: vec!["Undo rewind is available".into()] });
+        self.save();
+        Ok(cp.label)
+    }
+
+    pub fn undo_rewind(&mut self) -> Result<(), String> {
+        let sid = self.sessions[self.active].id;
+        if self.is_running(sid) {
+            return Err("stop the running turn first".into());
+        }
+        let pre = self.sessions[self.active].pre_rewind.take().ok_or("nothing to undo")?;
+        let cwd = self.project_path();
+        crate::git::restore(std::path::Path::new(&cwd), &pre)?;
+        self.sessions[self.active].messages.push(Msg { user: false, header: "HYDRA".into(), text: "Rewind undone: files are back as they were.".into(), actions: vec![] });
+        self.save();
+        Ok(())
+    }
+
     pub fn cycle_permission(&mut self) {
         let cur = self.sessions[self.active].permission.clone();
         let i = PERMISSIONS.iter().position(|p| p.0 == cur).unwrap_or(0);
@@ -510,9 +581,14 @@ impl Model {
         let cwd = self.project_path();
         let model = MODELS[self.model].0;
         let header = MODELS[self.model].1.to_uppercase();
+        let chat_like = !matches!(self.nav, "terminal" | "swarm");
+        let (prompt, attached) = if chat_like { crate::fsx::expand_mentions(text, std::path::Path::new(&cwd)) } else { (text.to_string(), vec![]) };
+        if chat_like {
+            self.take_checkpoint(&cwd, text);
+        }
         {
             let s = &mut self.sessions[self.active];
-            s.messages.push(Msg { user: true, header: "YOU".into(), text: text.into(), actions: vec![] });
+            s.messages.push(Msg { user: true, header: "YOU".into(), text: text.into(), actions: attached.iter().map(|a| format!("attached {a}")).collect() });
             s.messages.push(Msg { user: false, header, text: String::new(), actions: vec!["◐ Thinking".into()] });
         }
         self.turn_counter += 1;
@@ -531,7 +607,7 @@ impl Model {
             }
             _ => {
                 let permission = self.sessions[self.active].permission.clone();
-                be.turn(&turn, text, &thread, &cwd, model, &permission);
+                be.turn(&turn, &prompt, &thread, &cwd, model, &permission);
                 self.runs.insert(turn, sid);
             }
         }
