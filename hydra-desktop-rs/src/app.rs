@@ -1,10 +1,13 @@
 //! The web desk layout in egui: header, session bar, nav, chat, composer, inspection drawer, modals.
 
+use crate::layout;
+use crate::motion;
 use crate::theme::*;
 use crate::widgets::{self, Kind, Part};
 use eframe::egui::{self, vec2, Align, Color32, CornerRadius, Key, Layout, Margin, Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind};
 use hydra_desktop::backend::Backend;
 use hydra_desktop::model::*;
+use std::collections::HashMap;
 
 const DRAWER_TABS: &[(&str, &str)] = &[("screen", "Live Screen"), ("term", "Terminal Logs"), ("diff", "Diffs & Code"), ("agent", "Agent Runner")];
 
@@ -65,6 +68,19 @@ pub struct HydraApp {
     focus_input: bool,
     composer_rect: egui::Rect,
     start_error: Option<String>,
+    nav_open: bool,
+    last_overlay: Option<bool>,
+    births: HashMap<(u32, usize), f64>,
+    births_seen: bool,
+    probe: Option<Probe>,
+}
+
+/// Frame-time probe for the motion check: HYDRA_PROBE=<file> runs a scripted toggle/arrival/palette sequence and writes one CSV row per frame.
+struct Probe {
+    path: String,
+    rows: Vec<(f64, f64, &'static str)>,
+    last: f64,
+    stage: u8,
 }
 
 struct ShotPlan {
@@ -76,6 +92,7 @@ struct ShotPlan {
 impl HydraApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply(&cc.egui_ctx);
+        motion::install(&cc.egui_ctx);
         let shot = std::env::var("HYDRA_SHOT").ok().map(|path| ShotPlan { path, frames: 0, requested: false });
         let cwd = std::env::var("HYDRA_CWD").unwrap_or_else(|_| std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into()));
         let state = if std::env::var("HYDRA_NO_STATE").is_ok() { None } else { Some(state_dir().join("state.json")) };
@@ -114,9 +131,14 @@ impl HydraApp {
             tex: None,
             last_poll: 0.0,
             shot,
-            focus_input: true,
+            focus_input: std::env::var("HYDRA_SHOT").is_err(),
             composer_rect: egui::Rect::NOTHING,
             start_error,
+            nav_open: true,
+            last_overlay: None,
+            births: HashMap::new(),
+            births_seen: false,
+            probe: std::env::var("HYDRA_PROBE").ok().map(|path| Probe { path, rows: vec![], last: 0.0, stage: 0 }),
         }
     }
 
@@ -226,7 +248,7 @@ impl HydraApp {
             if widgets::button(ui, "Clear", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
                 self.m.clear_active();
             }
-            self.model_select(ui, if narrow { 120.0 } else { 300.0 });
+            self.model_select(ui, if narrow { 120.0 } else { 309.0 });
             let (dot_live, label) = match (self.m.agent_ready, narrow) {
                 (true, false) => (true, "Agent : ready"),
                 (false, false) => (false, "Agent : offline"),
@@ -271,19 +293,24 @@ impl HydraApp {
     fn session_bar(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
         let (mut close, mut select, mut add) = (None, None, false);
+        let mut toggle_nav = false;
         ui.horizontal_centered(|ui| {
+            if self.last_overlay == Some(true) && widgets::button(ui, "Menu", Kind::Secondary, 12.0, (12.0, 5.0), None).clicked() {
+                toggle_nav = true;
+            }
             for (i, s) in self.m.sessions.iter().enumerate() {
                 let active = i == self.m.active;
                 let w = ui.fonts_mut(|f| f.layout_no_wrap(s.name.clone(), egui::FontId::new(12.0, egui::FontFamily::Proportional), TEXT).size().x);
                 let (rect, resp) = ui.allocate_exact_size(vec2(14.0 * 2.0 + w + 16.0, 29.0), Sense::click());
-                let hover = resp.hovered();
+                let t = motion::toggle(ui.ctx(), resp.id.with("hv"), resp.hovered() && !active);
+                let rect = rect.translate(vec2(0.0, -t));
                 if active {
                     widgets::shadow(ui, rect, 12, SHADOW_TAB_ACTIVE_GLOW);
                 }
                 ui.painter().rect_filled(rect, cr(12), if active { ACCENT_DIM } else { BG2 });
-                ui.painter().rect_stroke(rect, cr(12), Stroke::new(1.0, if active { ACCENT } else if hover { ACCENT_BORDER_HOVER } else { BORDER }), StrokeKind::Inside);
+                ui.painter().rect_stroke(rect, cr(12), Stroke::new(1.0, if active { ACCENT } else { motion::mix(BORDER, ACCENT_BORDER_HOVER, t) }), StrokeKind::Inside);
                 let fam = if active { egui::FontFamily::Name(BOLD.into()) } else { egui::FontFamily::Proportional };
-                ui.painter().text(rect.left_center() + vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, &s.name, egui::FontId::new(TYPE_SESSION_TAB, fam), if active { ACCENT } else if hover { TEXT } else { MUTED });
+                ui.painter().text(rect.left_center() + vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, &s.name, egui::FontId::new(TYPE_SESSION_TAB, fam), if active { ACCENT } else { motion::mix(MUTED, TEXT, t) });
                 let xr = egui::Rect::from_center_size(rect.right_center() - vec2(18.0, 0.0), vec2(14.0, 20.0));
                 let xhover = ui.rect_contains_pointer(xr);
                 ui.painter().text(xr.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::new(14.0, egui::FontFamily::Proportional), if xhover { ERROR } else if active { ACCENT } else { MUTED });
@@ -306,6 +333,9 @@ impl HydraApp {
             ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "+ New Session", egui::FontId::new(12.0, egui::FontFamily::Proportional), ACCENT);
             add = resp.clicked();
         });
+        if toggle_nav {
+            self.nav_open = !self.nav_open;
+        }
         if let Some(i) = select {
             self.m.active = i;
             self.m.save();
@@ -327,52 +357,141 @@ impl HydraApp {
         for (key, label) in NAV {
             let active = self.m.nav == *key;
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 35.5), Sense::click());
-            let hover = resp.hovered();
-            let rect = rect.translate(vec2(if hover && !active { 3.0 } else { 0.0 }, 0.0));
+            let t = motion::toggle(ui.ctx(), resp.id.with("hv"), resp.hovered() && !active);
+            let rect = rect.translate(vec2(3.0 * t, 0.0));
             if active {
                 ui.painter().rect_filled(rect, cr(12), ACCENT_DIM);
                 ui.painter().rect_filled(egui::Rect::from_min_size(rect.min + vec2(0.0, 6.0), vec2(3.0, rect.height() - 12.0)), cr(1), ACCENT);
-            } else if hover {
-                ui.painter().rect_filled(rect, cr(12), BG3);
+            } else if t > 0.0 {
+                ui.painter().rect_filled(rect, cr(12), BG3.gamma_multiply(t));
             }
             let family = if active { egui::FontFamily::Name(BOLD.into()) } else { egui::FontFamily::Proportional };
-            ui.painter().text(rect.left_center() + vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::new(TYPE_NAV_ITEM, family), if active { ACCENT } else if hover { TEXT } else { MUTED });
+            let color = if active { ACCENT } else { motion::mix(MUTED, TEXT, t) };
+            ui.painter().text(rect.left_center() + vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::new(TYPE_NAV_ITEM, family), color);
             if resp.clicked() {
                 self.m.set_nav(key);
+                if self.last_overlay == Some(true) {
+                    self.nav_open = false;
+                }
             }
+        }
+    }
+
+    /// Slide-over nav for narrow windows. Opens from the Menu chip or Ctrl+B, closes on pick or outside click.
+    fn nav_overlay(&mut self, ctx: &egui::Context, fr: layout::Frame, t: f32) {
+        if !fr.overlay_nav || t <= 0.001 {
+            return;
+        }
+        let top = fr.header_height + LAYOUT_SESSION_BAR_HEIGHT;
+        let h = ctx.content_rect().height() - top;
+        let x = -LAYOUT_SIDEBAR_WIDTH * (1.0 - t);
+        let area = egui::Area::new(egui::Id::new("nav-overlay")).order(egui::Order::Foreground).fixed_pos(egui::pos2(x, top)).show(ctx, |ui| {
+            let rect = egui::Rect::from_min_size(ui.max_rect().min, vec2(LAYOUT_SIDEBAR_WIDTH, h));
+            widgets::shadow(ui, rect, 0, SHADOW_CARD);
+            ui.painter().rect_filled(rect, 0, BG2);
+            ui.painter().vline(rect.right() - 0.5, rect.y_range(), Stroke::new(1.0, BORDER));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 16.0))), |ui| self.nav(ui));
+            rect
+        });
+        let clicked_out = ctx.input(|i| i.pointer.any_click()) && ctx.pointer_interact_pos().map(|p| !area.inner.contains(p)).unwrap_or(false);
+        if clicked_out && self.nav_open {
+            self.nav_open = false;
         }
     }
 
     // ---------------------------------------------------------------- chat
     fn chat(&mut self, ui: &mut egui::Ui) {
-        let max_w = (ui.available_width() - 48.0).min(760.0).max(150.0);
+        self.error_banner(ui);
+        let now = ui.input(|i| i.time);
+        let sid = self.m.sessions[self.m.active].id;
+        let count = self.m.sessions[self.m.active].messages.len();
+        // messages present when a session is first drawn appear at once; later ones fade in
+        for i in 0..count {
+            let first_view = !self.births_seen;
+            self.births.entry((sid, i)).or_insert(if first_view || motion::reduced_motion() { -1.0 } else { now });
+        }
+        self.births_seen = true;
+        if count == 0 {
+            self.empty_state(ui, "No messages yet", "Ask anything, pick a model, and send. Ctrl+K opens the command palette.");
+            return;
+        }
         ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             egui::Frame::new().inner_margin(Margin::same(24)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                for m in &self.m.sessions[self.m.active].messages {
-                    let layout = if m.user { Layout::top_down(Align::Max) } else { Layout::top_down(Align::Min) };
-                    ui.with_layout(layout, |ui| {
-                        ui.spacing_mut().item_spacing = vec2(0.0, 8.0);
-                        ui.label(rt(m.header.to_uppercase(), TYPE_MSG_HEADER, MUTED).extra_letter_spacing(0.3));
-                        let (fill, stroke, radius) = if m.user {
-                            (USER_BUBBLE, Stroke::new(1.0, USER_BUBBLE_BORDER), CornerRadius { nw: 16, ne: 16, sw: 16, se: 4 })
-                        } else {
-                            (BG2, Stroke::new(1.0, BORDER), CornerRadius { nw: 16, ne: 16, sw: 4, se: 16 })
-                        };
-                        if !m.text.is_empty() || m.actions.is_empty() {
-                            egui::Frame::new().fill(fill).stroke(stroke).corner_radius(radius).inner_margin(Margin::symmetric(18, 14)).show(ui, |ui| {
-                                ui.set_max_width(max_w - 36.0);
-                                ui.add(egui::Label::new(rt(&m.text, TYPE_MESSAGE_BODY, TEXT)).wrap());
-                            });
-                        }
-                        for a in &m.actions {
-                            let c = if a.starts_with('✗') { ERROR } else if a.starts_with('✓') { ACCENT } else { MUTED };
-                            ui.add(egui::Label::new(rt(a, 12.0, c)).wrap());
-                        }
+                let content_w = ui.available_width();
+                let max_w = (content_w * RESP_MESSAGE_MAX_PCT).floor();
+                for (idx, m) in self.m.sessions[self.m.active].messages.iter().enumerate() {
+                    let born = self.births.get(&(sid, idx)).copied().unwrap_or(-1.0);
+                    let p = motion::arrival(now, born);
+                    if p < 1.0 {
+                        ui.ctx().request_repaint();
+                    }
+                    ui.scope(|ui| {
+                        ui.set_opacity(p);
+                        ui.add_space(MOTION_FADE_FROM_Y * (1.0 - p));
+                        let layout = if m.user { Layout::top_down(Align::Max) } else { Layout::top_down(Align::Min) };
+                        ui.with_layout(layout, |ui| {
+                            ui.spacing_mut().item_spacing = vec2(0.0, 8.0);
+                            let has_body = !m.text.is_empty() || m.actions.is_empty();
+                            if has_body {
+                                ui.scope(|ui| {
+                                    ui.set_max_width(max_w);
+                                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                                        ui.spacing_mut().item_spacing = vec2(0.0, 8.0);
+                                        ui.label(rt(m.header.to_uppercase(), TYPE_MSG_HEADER, MUTED).extra_letter_spacing(0.3));
+                                        let (fill, stroke, radius) = if m.user {
+                                            (USER_BUBBLE, Stroke::new(1.0, USER_BUBBLE_BORDER), CornerRadius { nw: 16, ne: 16, sw: 16, se: 4 })
+                                        } else {
+                                            (BG2, Stroke::new(1.0, BORDER), CornerRadius { nw: 16, ne: 16, sw: 4, se: 16 })
+                                        };
+                                        let slot = ui.painter().add(egui::Shape::Noop);
+                                        let r = egui::Frame::new().fill(fill).stroke(stroke).corner_radius(radius).inner_margin(Margin::symmetric(18, 14)).show(ui, |ui| {
+                                            ui.set_max_width(max_w - 38.0);
+                                            ui.add(egui::Label::new(rt(&m.text, TYPE_MESSAGE_BODY, TEXT).line_height(Some(TYPE_MESSAGE_BODY * 1.6))).wrap());
+                                        });
+                                        ui.painter().set(slot, widgets::shadow_shape(r.response.rect, 16, SHADOW_CARD));
+                                    });
+                                });
+                            }
+                            for a in &m.actions {
+                                action_row(ui, a, content_w);
+                            }
+                        });
                     });
                 }
             });
+        });
+    }
+
+    /// Shown while the agent process is not running (it failed to start or has exited), never for a deliberate HYDRA_NO_BACKEND run.
+    fn error_banner(&self, ui: &mut egui::Ui) {
+        let Some(err) = self.start_error.as_ref().filter(|e| self.be.is_none() && e.as_str() != "backend disabled") else { return };
+        egui::Frame::new().inner_margin(Margin { left: 24, right: 24, top: 16, bottom: 0 }).show(ui, |ui| {
+            let w = ui.available_width();
+            let slot = ui.painter().add(egui::Shape::Noop);
+            let r = egui::Frame::new().fill(ERROR_DIM).stroke(Stroke::new(1.0, ERROR)).corner_radius(cr(12)).inner_margin(Margin::symmetric(16, 12)).show(ui, |ui| {
+                ui.set_width(w - 34.0);
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.label(rtb("Agent offline", TYPE_TOOL_TITLE, ERROR));
+                ui.add(egui::Label::new(rt(format!("{err}. Messages are kept, but nothing answers until the agent process starts."), TYPE_TOOL_CARD, TEXT)).wrap());
+            });
+            let rr = r.response.rect;
+            ui.painter().set(slot, widgets::shadow_shape(rr, 12, SHADOW_TOOL_CARD));
+            ui.painter().rect_filled(egui::Rect::from_min_size(rr.min + vec2(0.0, 6.0), vec2(3.0, rr.height() - 12.0)), cr(1), ERROR);
+        });
+    }
+
+    /// Dashed placeholder panel with a title and one line of guidance.
+    fn empty_state(&self, ui: &mut egui::Ui, title: &str, hint: &str) {
+        let avail = ui.available_rect_before_wrap();
+        let w = (avail.width() - 48.0).clamp(160.0, 420.0);
+        let rect = egui::Rect::from_center_size(avail.center() - vec2(0.0, 20.0), vec2(w, 108.0));
+        widgets::dashed_rounded(ui, rect.shrink(0.5), RADIUS_LG as f32, Stroke::new(1.0, BORDER));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink(24.0)).layout(Layout::top_down(Align::Center)), |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.label(rtb(title, 13.0, TEXT2));
+            ui.add(egui::Label::new(rt(hint, 12.0, MUTED)).wrap());
         });
     }
 
@@ -442,14 +561,13 @@ impl HydraApp {
 
     // ---------------------------------------------------------------- drawer
     fn drawer(&mut self, ui: &mut egui::Ui, width: f32) {
+        ui.spacing_mut().item_spacing.y = 0.0;
         egui::Frame::new().inner_margin(Margin::symmetric(20, 14)).show(ui, |ui| {
             ui.set_width(width - 41.0);
-            ui.horizontal(|ui| {
-                ui.label(rtb("INSPECTION & AUTOMATION", TYPE_DRAWER_HEADER, TEXT2).extra_letter_spacing(0.3));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(rt("X: - | Y: -", TYPE_COORD_READOUT, MUTED));
-                });
-            });
+            let (rect, _) = ui.allocate_exact_size(vec2(width - 41.0, 14.0), Sense::hover());
+            let bold = egui::FontId::new(TYPE_DRAWER_HEADER, egui::FontFamily::Name(BOLD.into()));
+            ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, "INSPECTION & AUTOMATION", bold, TEXT2);
+            ui.painter().text(rect.right_center(), egui::Align2::RIGHT_CENTER, "X: - | Y: -", egui::FontId::new(TYPE_COORD_READOUT, egui::FontFamily::Proportional), MUTED);
         });
         let y = ui.cursor().top();
         ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, BORDER));
@@ -463,17 +581,17 @@ impl HydraApp {
                     let w = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), egui::FontId::new(12.0, egui::FontFamily::Proportional), TEXT).size().x);
                     let wrapped = w + 12.0 > cell;
                     let text = if wrapped { label.replacen(' ', "\n", 1) } else { label.to_string() };
-                    let h: f32 = if wrapped { 17.0 * 2.0 + 16.0 } else { 17.0 + 16.0 };
-                    let (rect, resp) = ui.allocate_exact_size(vec2(cell, h.max(33.0)), Sense::click());
-                    let hover = resp.hovered();
+                    let h: f32 = if wrapped { 17.0 * 2.0 + 16.0 } else { 30.0 };
+                    let (rect, resp) = ui.allocate_exact_size(vec2(cell, h), Sense::click());
+                    let t = motion::toggle(ui.ctx(), resp.id.with("hv"), resp.hovered() && !active);
                     if active {
                         widgets::shadow(ui, rect, 10, SHADOW_DRAWER_TAB_GLOW);
                         ui.painter().rect_filled(rect, cr(10), ACCENT_DIM);
-                    } else if hover {
-                        ui.painter().rect_filled(rect, cr(10), BG3);
+                    } else if t > 0.0 {
+                        ui.painter().rect_filled(rect, cr(10), BG3.gamma_multiply(t));
                     }
                     let fam = if active { egui::FontFamily::Name(BOLD.into()) } else { egui::FontFamily::Proportional };
-                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::new(TYPE_DRAWER_TAB, fam), if active { ACCENT } else if hover { TEXT } else { MUTED });
+                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::new(TYPE_DRAWER_TAB, fam), if active { ACCENT } else { motion::mix(MUTED, TEXT, t) });
                     if resp.clicked() {
                         self.m.drawer_tab = key;
                     }
@@ -575,31 +693,49 @@ impl HydraApp {
 
     fn diff_tab(&mut self, ui: &mut egui::Ui) {
         if self.m.diffs.is_empty() {
-            ui.label(rt("No file changes recorded in this session yet.", 11.0, MUTED));
+            ui.add_space(8.0);
+            self.empty_state(ui, "No file changes yet", "Edits the agent makes in this session appear here as diffs.");
+            ui.add_space(120.0);
             return;
         }
         for d in self.m.diffs.iter().rev() {
-            egui::Frame::new().fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(12)).show(ui, |ui| {
+            let slot = ui.painter().add(egui::Shape::Noop);
+            let card = egui::Frame::new().fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(16)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                egui::Frame::new().fill(ELEV).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.label(rtb(&d.path, TYPE_DIFF, TEXT2));
-                });
                 ui.spacing_mut().item_spacing.y = 0.0;
-                for line in d.diff.lines() {
-                    let (bg, fg) = if line.starts_with('+') && !line.starts_with("+++") {
-                        (DIFF_ADD, DIFF_ADD_TEXT)
-                    } else if line.starts_with('-') && !line.starts_with("---") {
-                        (DIFF_DEL, DIFF_DEL_TEXT)
-                    } else {
-                        (Color32::TRANSPARENT, MUTED)
-                    };
-                    egui::Frame::new().fill(bg).inner_margin(Margin::symmetric(12, 1)).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.add(egui::Label::new(RichText::new(line).size(TYPE_DIFF).color(fg)).wrap());
+                egui::Frame::new().fill(ELEV).inner_margin(Margin::symmetric(16, 10)).corner_radius(CornerRadius { nw: 15, ne: 15, sw: 0, se: 0 }).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(rtb(&d.path, TYPE_DIFF, ACCENT));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(rtb("MODIFIED", TYPE_DIFF, ACCENT));
+                        });
                     });
-                }
+                });
+                let y = ui.cursor().top();
+                ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, BORDER));
+                ui.add_space(10.0);
+                ScrollArea::horizontal().id_salt(&d.path).auto_shrink([false, true]).show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    let widest = d.diff.lines().map(|l| l.chars().count()).max().unwrap_or(0) as f32 * 7.2 + 28.0;
+                    let w = widest.max(ui.available_width());
+                    for line in d.diff.lines() {
+                        let (bg, fg) = if line.starts_with('+') && !line.starts_with("+++") {
+                            (DIFF_ADD, DIFF_ADD_TEXT)
+                        } else if line.starts_with('-') && !line.starts_with("---") {
+                            (DIFF_DEL, DIFF_DEL_TEXT)
+                        } else {
+                            (Color32::TRANSPARENT, MUTED)
+                        };
+                        egui::Frame::new().fill(bg).inner_margin(Margin::symmetric(14, 2)).show(ui, |ui| {
+                            ui.set_width(w - 28.0);
+                            ui.add(egui::Label::new(RichText::new(line).size(TYPE_DIFF).color(fg)).extend());
+                        });
+                    }
+                });
+                ui.add_space(10.0);
             });
+            ui.painter().set(slot, widgets::shadow_shape(card.response.rect, 16, SHADOW_DIFF_CARD));
         }
     }
 
@@ -849,6 +985,9 @@ impl HydraApp {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
             self.palette = if self.palette.is_some() { None } else { Some((String::new(), 0)) };
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::B)) {
+            self.nav_open = !self.nav_open;
+        }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::T)) {
             self.m.new_session();
         }
@@ -857,6 +996,34 @@ impl HydraApp {
                 self.m.set_nav(nav);
             }
         }
+    }
+}
+
+/// One agent action line: tool calls and failures render as the page's tool card, results as colored text.
+fn action_row(ui: &mut egui::Ui, a: &str, width: f32) {
+    let card = |ui: &mut egui::Ui, bar: Color32, fill: Color32, title: &str, body: &str, title_color: Color32| {
+        let slot = ui.painter().add(egui::Shape::Noop);
+        let r = egui::Frame::new().fill(fill).stroke(Stroke::new(1.0, if bar == ERROR { ERROR } else { BORDER })).corner_radius(cr(12)).inner_margin(Margin { left: 16, right: 16, top: 12, bottom: 12 }).show(ui, |ui| {
+            ui.set_width(width - 34.0);
+            ui.spacing_mut().item_spacing.y = 6.0;
+            ui.label(rtb(title, TYPE_TOOL_TITLE, title_color));
+            if !body.is_empty() {
+                ui.add(egui::Label::new(rt(body, TYPE_TOOL_CARD, TEXT)).wrap());
+            }
+        });
+        let rr = r.response.rect;
+        ui.painter().set(slot, widgets::shadow_shape(rr, 12, SHADOW_TOOL_CARD));
+        ui.painter().rect_filled(egui::Rect::from_min_size(rr.min + vec2(0.0, 6.0), vec2(3.0, rr.height() - 12.0)), cr(1), bar);
+    };
+    if let Some(rest) = a.strip_prefix("▸ ") {
+        let (tool, args) = rest.split_once("  ").unwrap_or((rest, ""));
+        card(ui, ACCENT, BG2, tool, args, ACCENT);
+    } else if let Some(rest) = a.strip_prefix("✗ ") {
+        let (tool, msg) = rest.split_once(": ").unwrap_or(("error", rest));
+        card(ui, ERROR, ERROR_DIM, tool, msg, ERROR);
+    } else {
+        let c = if a.starts_with('✓') { ACCENT } else { MUTED };
+        ui.add(egui::Label::new(rt(a, 12.0, c)).wrap());
     }
 }
 
@@ -895,6 +1062,51 @@ fn paint_logo(ui: &egui::Ui, rect: egui::Rect) {
 
 impl eframe::App for HydraApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let started = std::time::Instant::now();
+        self.frame(root);
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        let ctx = root.ctx().clone();
+        let t = ctx.input(|i| i.time);
+        self.probe_step(&ctx, t, ms);
+    }
+}
+
+impl HydraApp {
+    /// Scripted motion check: idle, then sidebar toggle, message arrival and palette open, one second apart.
+    fn probe_step(&mut self, ctx: &egui::Context, t: f64, ms: f64) {
+        let Some(p) = &mut self.probe else { return };
+        if p.stage == 0 {
+            p.last = t;
+            p.stage = 1;
+        }
+        if t - p.last > 1.0 {
+            p.last = t;
+            p.stage += 1;
+            match p.stage {
+                2 => self.nav_open = !self.nav_open,
+                3 => self.m.sessions[self.m.active].messages.push(Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: "Probe message arriving with the fade.".into(), actions: vec![] }),
+                4 => self.palette = Some((String::new(), 0)),
+                _ => {}
+            }
+        }
+        let tag = match p.stage {
+            1 => "idle",
+            2 => "nav",
+            3 => "msg",
+            4 => "palette",
+            _ => "end",
+        };
+        p.rows.push((t, ms, tag));
+        if p.stage >= 5 {
+            let csv: String = p.rows.iter().map(|(t, ms, tag)| format!("{t:.4},{ms:.3},{tag}\n")).collect();
+            let _ = std::fs::write(&p.path, csv);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else {
+            ctx.request_repaint();
+        }
+    }
+
+    fn frame(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
         let ctx = &ctx;
         let time = ctx.input(|i| i.time);
@@ -915,9 +1127,15 @@ impl eframe::App for HydraApp {
             }
         }
         let total = ctx.content_rect().width();
-        let narrow = total < 1180.0;
+        let fr = layout::frame(total);
+        let narrow = fr.narrow;
         let border = Stroke::new(1.0, BORDER);
-        let header_h = if narrow { 73.0 } else { LAYOUT_HEADER_HEIGHT };
+        let header_h = fr.header_height;
+        if self.last_overlay != Some(fr.overlay_nav) {
+            self.nav_open = !fr.overlay_nav || std::env::var("HYDRA_OPEN").as_deref() == Ok("nav");
+            self.last_overlay = Some(fr.overlay_nav);
+        }
+        let nav_t = motion::toggle(ctx, egui::Id::new("nav-open"), self.nav_open);
 
         egui::Panel::top("header")
             .exact_size(header_h)
@@ -935,17 +1153,21 @@ impl eframe::App for HydraApp {
                 self.session_bar(ui);
                 ui.painter().hline(ui.max_rect().x_range().expand(20.0), ui.max_rect().bottom() - 0.5, border);
             });
-        egui::Panel::left("nav")
-            .exact_size(LAYOUT_SIDEBAR_WIDTH)
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(egui::Frame::new().fill(BG2).inner_margin(Margin::symmetric(10, 16)))
-            .show(root, |ui| {
-                self.nav(ui);
-                let r = ui.max_rect();
-                ui.painter().vline(r.right() + 10.0 - 0.5, r.y_range(), border);
-            });
-        let dw = (total * 0.34).min(420.0);
+        if !fr.overlay_nav && nav_t > 0.001 {
+            egui::Panel::left("nav")
+                .exact_size(LAYOUT_SIDEBAR_WIDTH * nav_t)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(egui::Frame::new().fill(BG2).inner_margin(Margin::symmetric(10, 16)))
+                .show(root, |ui| {
+                    let r = ui.max_rect();
+                    ui.set_clip_rect(r.expand2(vec2(10.0, 16.0)).intersect(ui.clip_rect()));
+                    let full = egui::Rect::from_min_size(r.min, vec2(LAYOUT_SIDEBAR_WIDTH - 20.0, r.height()));
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(full), |ui| self.nav(ui));
+                    ui.painter().vline(r.right() + 10.0 - 0.5, r.y_range(), border);
+                });
+        }
+        let dw = fr.drawer_width;
         egui::Panel::right("drawer")
             .exact_size(dw)
             .resizable(false)
@@ -965,6 +1187,7 @@ impl eframe::App for HydraApp {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(root, |ui| {
             self.chat(ui);
         });
+        self.nav_overlay(ctx, fr, nav_t);
         self.modals(ctx);
         let _ = &self.start_error;
 

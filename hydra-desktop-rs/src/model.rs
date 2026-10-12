@@ -48,7 +48,7 @@ pub struct Session {
     pub messages: Vec<Msg>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DiffItem {
     pub path: String,
     pub diff: String,
@@ -88,6 +88,8 @@ struct Saved {
     model: usize,
     tokens: u64,
     cost: f64,
+    #[serde(default)]
+    diffs: Vec<DiffItem>,
 }
 
 pub struct Model {
@@ -190,6 +192,7 @@ impl Model {
                     m.model = saved.model.min(MODELS.len() - 1);
                     m.tokens = saved.tokens;
                     m.cost = saved.cost;
+                    m.diffs = saved.diffs;
                 }
             }
         }
@@ -209,6 +212,7 @@ impl Model {
             model: self.model,
             tokens: self.tokens,
             cost: self.cost,
+            diffs: self.diffs.clone(),
         };
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -645,6 +649,20 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diffs_survive_a_restart() {
+        let dir = std::env::temp_dir().join(format!("hydra-diffs-{}", std::process::id()));
+        let path = dir.join("state.json");
+        let mut a = Model::new(Some(path.clone()), ".".into());
+        a.diffs.push(DiffItem { path: "src/a.py".into(), diff: "@@ -1 +1 @@\n-old\n+new".into() });
+        a.save();
+        let b = Model::new(Some(path), ".".into());
+        assert_eq!(b.diffs.len(), 1);
+        assert_eq!(b.diffs[0].path, "src/a.py");
+        assert!(b.diffs[0].diff.contains("+new"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn state_round_trips_through_disk() {
