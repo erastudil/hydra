@@ -2933,7 +2933,8 @@ def _run_cancellable(work: Callable[[Any], Dict[str, Any]], on_token: Any, on_ac
         except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
             box["error"] = exc
 
-    worker = threading.Thread(target=run, daemon=True, name="hydra-provider-read")
+    ctx = contextvars.copy_context()  # the read reports usage to this turn's sink, so it must see this thread's hooks
+    worker = threading.Thread(target=lambda: ctx.run(run), daemon=True, name="hydra-provider-read")
     worker.start()
     while worker.is_alive():
         worker.join(0.1)
