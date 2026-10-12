@@ -82,6 +82,7 @@ $Files = @(
     'hydra_cli/skills/logic.md',
     'hydra_cli/skills/stack.md',
     'hydra_cli/speculative.py',
+    'hydra_cli/stdio_adapter.py',
     'hydra_cli/swarm.py',
     'hydra_cli/tool_adapter.py',
     'hydra_cli/tui.py',

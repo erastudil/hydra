@@ -61,6 +61,7 @@ USAGE:
     hydra free "<prompt>"                # Zero-cost Free Forge routing
     hydra hf "<prompt>"                  # Hugging Face Serverless / Inference API routing
     hydra local "<prompt>"               # Offline local inference (Ollama/llama.cpp/EasyLM)
+    hydra stdio                          # JSON lines agent for native apps, see docs/STDIO_PROTOCOL.md
     hydra swarm "<task>"                 # Multi-agent swarm fan-out (Architect, Coder, Auditor)
     hydra hands "<prompt>"               # Local answer: stacks, calc, units, clock, memory
     hydra agent                          # Launch interactive coding agent REPL (Cursor & Antigravity style)
@@ -347,6 +348,9 @@ def route_command(argv: List[str]) -> int:
         return execute_hands_command(argv[1:])
     if argv and argv[0] in ("sandbox", "--sandbox"):
         return execute_sandbox_command(argv[1:])
+    if argv and argv[0] in ("stdio", "--stdio"):
+        from hydra_cli.stdio_adapter import main as stdio_main
+        return stdio_main(argv[1:])
     if argv and argv[0] in ("desktop", "--desktop"):
         from hydra_cli.gui.app import main as desktop_main
         return desktop_main(argv[1:])

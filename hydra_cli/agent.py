@@ -10,7 +10,7 @@ from hydra_cli.context import (
     register_label,
     resolve_context_mode,
 )
-from hydra_cli.ui import StreamWrap, clean_pasted_text, approve_tool, diff_sink, drain_steering, prompt_input, tool_sink, render_prompt_box, wrap_text
+from hydra_cli.ui import StreamWrap, clean_pasted_text, approve_tool, diff_sink, drain_steering, prompt_input, tool_sink, tool_start_sink, render_prompt_box, wrap_text
 from hydra_cli._version import __version__
 
 from datetime import datetime, timezone
@@ -3583,6 +3583,10 @@ def _run_agent_loop(
                             orig_file_content = f_orig.read()
                     except Exception:
                         orig_file_content = None
+
+            _start_sink = tool_start_sink()
+            if _start_sink is not None:
+                _start_sink(fn_name, args_str)
 
             result_content: Any = None
             interrupted_during_tool = False
