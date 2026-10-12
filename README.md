@@ -235,5 +235,5 @@ Apache-2.0. Source and issues: https://github.com/erastudil/hydra
 
 ## Desktop app
 
-Native PySide6 app, no browser. Install with `pip install -e .[desktop]`, run `python -m hydra_cli.gui` or `hydra desktop`. Build the exe with `pip install -e .[build]` then `python scripts/build_exe.py` (writes `dist/Hydra/Hydra.exe`). `python scripts/create_desktop_shortcut.py` makes the Desktop shortcut.
+Native Rust app (`hydra-desktop-rs/`), no browser, no web view, no local server. It spawns `python -m hydra_cli stdio` and talks JSON lines over pipes (docs/STDIO_PROTOCOL.md). Build with `scripts/check_rust.sh` (cargo test, release build, Windows GNU cross build), copy `hydra-desktop-rs/target/release/Hydra.exe` to `dist/Hydra/Hydra.exe`, run `hydra desktop`, or make the Desktop shortcut with `python scripts/create_desktop_shortcut.py`.
 
