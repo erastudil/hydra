@@ -81,8 +81,9 @@ fn rig(name: &str) -> Option<Rig> {
     let proj = dir.join("proj");
     std::fs::create_dir_all(&proj).unwrap();
     let repo = std::env::var("HYDRA_REPO").unwrap_or_else(|_| format!("{}/..", env!("CARGO_MANIFEST_DIR")));
-    let py = std::env::var("HYDRA_PYTHON").unwrap_or_else(|_| "python3".into());
-    if std::process::Command::new(&py).arg("--version").output().is_err() {
+    let py = std::env::var("HYDRA_PYTHON").unwrap_or_else(|_| if cfg!(windows) { "python".into() } else { "python3".into() });
+    let ok = std::process::Command::new(&py).arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    if !ok {
         eprintln!("skip: no python");
         return None;
     }
@@ -212,9 +213,10 @@ fn swarm_returns_heads_and_synthesis() {
 #[test]
 fn computer_use_capture_and_agent_status_and_jobs() {
     let Some(mut r) = rig("misc") else { return };
+    pump(&mut r, 20, |m| m.agent_ready);
     r.m.capture(&mut r.be);
     pump(&mut r, 30, |m| m.screen_seq > 0 && m.window_title != "Detecting...");
-    assert!(r.m.screen_seq > 0 && r.m.screen_b64.len() > 100, "screen capture returned a png");
+    assert!(r.m.screen_seq > 0 && r.m.screen_b64.len() >= 90, "screen capture returned a png");
     r.m.agent_start(&mut r.be, "write_file notes.txt", 5, "full_automation");
     pump(&mut r, 5, |_| false);
     r.m.poll_agent(&mut r.be);

@@ -1,4 +1,4 @@
-﻿import json
+import json
 import re
 import sqlite3
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -29,6 +29,9 @@ SYNONYMS: Dict[str, Tuple[str, ...]] = {
     "recall": ("context", "ledger"),
     "code": ("source",),
     "source": ("code",),
+    "pool": ("number", "beaufort", "notes"),
+    "number": ("pool", "integer"),
+    "rust": ("cargo", "code"),
 }
 
 STOPWORDS = frozenset({
@@ -187,11 +190,8 @@ class SessionContextLedger:
         found.extend(_PASCAL.findall(text))
         found.extend(_SNAKE.findall(text))
         found.extend(_TICK.findall(text))
-        for word in _WORD.findall(text):
+        for word in re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{2,}\b", text):
             if word.lower() not in STOPWORDS:
-                found.append(word)
-        for word in re.findall(r"\b[a-zA-Z]{3,4}\b", text):
-            if word.lower() in SYNONYMS:
                 found.append(word)
         return list(dict.fromkeys(found))
 

@@ -79,6 +79,61 @@ pub enum Pending {
     JobOp,
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+pub struct AgentRow {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub task: String,
+    pub step: u32,
+    pub max_steps: u32,
+    pub elapsed_sec: f64,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, Default)]
+pub struct MemoryEntry {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub seq: u64,
+    #[serde(default)]
+    pub prev: String,
+    #[serde(default)]
+    pub hash: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub subject: String,
+    #[serde(default)]
+    pub actor: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub ts: String,
+    #[serde(default)]
+    pub repo: Option<String>,
+}
+
+pub fn default_context_window() -> u64 {
+    1_048_576
+}
+
+pub fn default_local_model() -> String {
+    "qwen2.5-coder:14b".into()
+}
+
+pub fn default_ollama_host() -> String {
+    "http://127.0.0.1:11434".into()
+}
+
+pub fn default_llamacpp_host() -> String {
+    "http://127.0.0.1:8080".into()
+}
+
+pub fn default_local_ai_base() -> String {
+    "http://localhost:8080/v1".into()
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct Saved {
     sessions: Vec<Session>,
@@ -88,6 +143,22 @@ struct Saved {
     model: usize,
     tokens: u64,
     cost: f64,
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default = "default_context_window")]
+    context_window: u64,
+    #[serde(default = "default_local_model")]
+    local_model_alias: String,
+    #[serde(default = "default_ollama_host")]
+    ollama_host: String,
+    #[serde(default = "default_llamacpp_host")]
+    llamacpp_host: String,
+    #[serde(default = "default_local_ai_base")]
+    local_ai_base: String,
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 pub struct Model {
@@ -99,6 +170,14 @@ pub struct Model {
     pub model: usize,
     pub tokens: u64,
     pub cost: f64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub context_window: u64,
+    pub local_model_alias: String,
+    pub ollama_host: String,
+    pub llamacpp_host: String,
+    pub local_ai_base: String,
+    pub agents: Vec<AgentRow>,
     pub term: String,
     pub diffs: Vec<DiffItem>,
     pub busy: Option<(String, u32)>, // turn id, session id
@@ -151,6 +230,15 @@ fn short(v: &Value) -> String {
 
 impl Model {
     pub fn new(state_path: Option<PathBuf>, cwd: String) -> Model {
+        let local_model_alias = std::env::var("HYDRA_LOCAL_MODEL").unwrap_or_else(|_| default_local_model());
+        let ollama_host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| default_ollama_host());
+        let llamacpp_host = std::env::var("LLAMACPP_HOST").unwrap_or_else(|_| default_llamacpp_host());
+        let local_ai_base = std::env::var("LOCAL_AI_BASE").unwrap_or_else(|_| default_local_ai_base());
+        let context_window = std::env::var("HYDRA_CONTEXT_WINDOW")
+            .ok()
+            .and_then(|w| w.parse().ok())
+            .unwrap_or_else(default_context_window);
+
         let mut m = Model {
             sessions: vec![],
             active: 0,
@@ -160,6 +248,14 @@ impl Model {
             model: 0,
             tokens: 0,
             cost: 0.0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            context_window,
+            local_model_alias,
+            ollama_host,
+            llamacpp_host,
+            local_ai_base,
+            agents: vec![],
             term: "> Hydra Terminal Sandbox ready.".into(),
             diffs: vec![],
             busy: None,
@@ -190,6 +286,28 @@ impl Model {
                     m.model = saved.model.min(MODELS.len() - 1);
                     m.tokens = saved.tokens;
                     m.cost = saved.cost;
+                    m.prompt_tokens = saved.prompt_tokens;
+                    m.completion_tokens = saved.completion_tokens;
+                    if saved.context_window > 0 {
+                        m.context_window = saved.context_window;
+                    }
+                    if !saved.local_model_alias.is_empty() {
+                        m.local_model_alias = saved.local_model_alias;
+                    }
+                    if !saved.ollama_host.is_empty() {
+                        m.ollama_host = saved.ollama_host;
+                    }
+                    if !saved.llamacpp_host.is_empty() {
+                        m.llamacpp_host = saved.llamacpp_host;
+                    }
+                    if !saved.local_ai_base.is_empty() {
+                        m.local_ai_base = saved.local_ai_base;
+                    }
+                    if let Some(c) = saved.cwd {
+                        if !c.trim().is_empty() {
+                            m.cwd = c;
+                        }
+                    }
                 }
             }
         }
@@ -209,6 +327,14 @@ impl Model {
             model: self.model,
             tokens: self.tokens,
             cost: self.cost,
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+            context_window: self.context_window,
+            local_model_alias: self.local_model_alias.clone(),
+            ollama_host: self.ollama_host.clone(),
+            llamacpp_host: self.llamacpp_host.clone(),
+            local_ai_base: self.local_ai_base.clone(),
+            cwd: Some(self.cwd.clone()),
         };
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -219,6 +345,32 @@ impl Model {
                 let _ = std::fs::rename(&tmp, p);
             }
         }
+    }
+
+    pub fn telemetry(&self) -> (u64, u64, u64, f64) {
+        let win = if self.context_window > 0 { self.context_window } else { default_context_window() };
+        let total = self.prompt_tokens + self.completion_tokens;
+        let pct = (total as f64 / win as f64) * 100.0;
+        (self.prompt_tokens, self.completion_tokens, win, pct)
+    }
+
+    pub fn apply_options(&mut self, alias: &str, ollama: &str, llamacpp: &str, local_ai: &str, ctx_win: u64, cwd: &str) {
+        self.local_model_alias = alias.trim().to_string();
+        self.ollama_host = ollama.trim().to_string();
+        self.llamacpp_host = llamacpp.trim().to_string();
+        self.local_ai_base = local_ai.trim().to_string();
+        self.context_window = if ctx_win > 0 { ctx_win } else { default_context_window() };
+        let clean_cwd = cwd.trim();
+        if !clean_cwd.is_empty() {
+            self.cwd = clean_cwd.to_string();
+        }
+        std::env::set_var("HYDRA_LOCAL_MODEL", &self.local_model_alias);
+        std::env::set_var("OLLAMA_HOST", &self.ollama_host);
+        std::env::set_var("LLAMACPP_HOST", &self.llamacpp_host);
+        std::env::set_var("LOCAL_AI_BASE", &self.local_ai_base);
+        std::env::set_var("HYDRA_CONTEXT_WINDOW", self.context_window.to_string());
+        std::env::set_var("HYDRA_CWD", &self.cwd);
+        self.save();
     }
 
     pub fn new_session(&mut self) {
@@ -329,6 +481,19 @@ impl Model {
         let id = be.action("agent:run", json!({"task": task, "max_steps": max_steps, "profile": profile}));
         self.act(Pending::AgentStart, id);
         self.drawer_tab = "agent";
+        self.agents.retain(|a| a.id != "react-primary");
+        self.agents.insert(
+            0,
+            AgentRow {
+                id: "react-primary".into(),
+                name: "Primary ReAct Runner".into(),
+                status: "RUNNING".into(),
+                task: task.to_string(),
+                step: 0,
+                max_steps,
+                elapsed_sec: 0.0,
+            },
+        );
     }
 
     pub fn agent_ctl(&mut self, be: &mut Backend, which: &str) {
@@ -432,6 +597,21 @@ impl Model {
                         }
                     }
                 }
+                if tool == "invoke_subagent" {
+                    let sub_task = args.get("prompt").or_else(|| args.get("task")).and_then(|v| v.as_str()).unwrap_or("Child task").to_string();
+                    let sub_id = format!("sub-{}", self.turn_counter);
+                    if !self.agents.iter().any(|a| a.id == sub_id) {
+                        self.agents.push(AgentRow {
+                            id: sub_id,
+                            name: "Child Subagent".into(),
+                            status: "RUNNING".into(),
+                            task: sub_task,
+                            step: 1,
+                            max_steps: 10,
+                            elapsed_sec: 0.0,
+                        });
+                    }
+                }
                 self.term.push_str(&format!("\n$ {tool} {}", short(&args)));
             }
             Ev::ToolResult { turn, tool, is_error, output } => {
@@ -443,6 +623,12 @@ impl Model {
                         }
                     }
                 }
+                if tool == "invoke_subagent" {
+                    let sub_id = format!("sub-{}", self.turn_counter);
+                    if let Some(sub) = self.agents.iter_mut().find(|a| a.id == sub_id) {
+                        sub.status = if is_error { "FAILED".into() } else { "COMPLETED".into() };
+                    }
+                }
                 self.term.push_str(&format!("\n{}{output}", if is_error { "[error] " } else { "" }));
             }
             Ev::Diff { path, diff, .. } => {
@@ -450,6 +636,8 @@ impl Model {
                 self.drawer_tab = "diff";
             }
             Ev::Usage { prompt, completion, cost, .. } => {
+                self.prompt_tokens += prompt;
+                self.completion_tokens += completion;
                 self.tokens += prompt + completion;
                 self.cost += cost;
                 self.save();
@@ -604,7 +792,54 @@ impl Model {
                 let st = r["status"].clone();
                 let state = st["status"].as_str().unwrap_or("").to_uppercase();
                 self.agent_running = state == "RUNNING" || state == "PAUSED";
-                self.agent_status = st;
+                self.agent_status = st.clone();
+
+                let mut lineup = Vec::new();
+                if !state.is_empty() {
+                    let task = st["current_task"].as_str().unwrap_or("").to_string();
+                    let step = st["current_step"].as_u64().unwrap_or(0) as u32;
+                    let max_steps = st["max_steps"].as_u64().unwrap_or(30) as u32;
+                    let elapsed = st["elapsed_sec"].as_f64().unwrap_or(0.0);
+                    lineup.push(AgentRow {
+                        id: "react-primary".into(),
+                        name: "Primary ReAct Runner".into(),
+                        status: state,
+                        task: if task.is_empty() { "Idle".into() } else { task },
+                        step,
+                        max_steps,
+                        elapsed_sec: elapsed,
+                    });
+                }
+                if let Some(list) = st["subagents"].as_array().or_else(|| r["agents"].as_array()) {
+                    for a in list {
+                        lineup.push(AgentRow {
+                            id: a["id"].as_str().unwrap_or("subagent").to_string(),
+                            name: a["name"].as_str().unwrap_or("Subagent").to_string(),
+                            status: a["status"].as_str().unwrap_or("RUNNING").to_uppercase(),
+                            task: a["task"].as_str().unwrap_or("").to_string(),
+                            step: a["step"].as_u64().unwrap_or(0) as u32,
+                            max_steps: a["max_steps"].as_u64().unwrap_or(10) as u32,
+                            elapsed_sec: a["elapsed_sec"].as_f64().unwrap_or(0.0),
+                        });
+                    }
+                }
+                if lineup.is_empty() && self.agent_running {
+                    lineup.push(AgentRow {
+                        id: "react-primary".into(),
+                        name: "Primary ReAct Runner".into(),
+                        status: "RUNNING".into(),
+                        task: "Active execution".into(),
+                        step: 1,
+                        max_steps: 30,
+                        elapsed_sec: 0.0,
+                    });
+                }
+                for existing in &self.agents {
+                    if existing.id.starts_with("sub-") && !lineup.iter().any(|a| a.id == existing.id) {
+                        lineup.push(existing.clone());
+                    }
+                }
+                self.agents = lineup;
             }
             Pending::AgentCtl(which) => self.term.push_str(&format!("\n[AGENT] {which}: {}", if is_err { err_text } else { "ok".into() })),
             Pending::Export(ext) => {
@@ -642,9 +877,251 @@ impl Model {
     }
 }
 
+pub fn memory_dir() -> PathBuf {
+    if let Ok(d) = std::env::var("HYDRA_HOME") {
+        return PathBuf::from(d).join("memory");
+    }
+    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| ".".into());
+    PathBuf::from(home).join(".hydra").join("memory")
+}
+
+pub fn memory_ledger_path() -> PathBuf {
+    memory_dir().join("ledger.jsonl")
+}
+
+pub fn read_memory_ledger(path: &std::path::Path) -> Vec<MemoryEntry> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<MemoryEntry>(line).ok())
+        .collect()
+}
+
+pub fn append_memory_fact(path: &std::path::Path, subject: &str, body: &str, actor: &str) -> Result<MemoryEntry, String> {
+    let entries = read_memory_ledger(path);
+    let seq = (entries.len() as u64) + 1;
+    let prev = entries.last().map(|e| e.hash.clone()).unwrap_or_else(|| "0".repeat(64));
+    let id = format!("L{seq}");
+    let ts = current_iso_timestamp();
+
+    let mut map = serde_json::Map::new();
+    map.insert("actor".into(), json!(actor));
+    map.insert("body".into(), json!(body));
+    map.insert("id".into(), json!(id));
+    map.insert("kind".into(), json!("fact"));
+    map.insert("prev".into(), json!(prev));
+    map.insert("seq".into(), json!(seq));
+    map.insert("subject".into(), json!(subject));
+    map.insert("ts".into(), json!(ts));
+
+    let canonical = serde_json::to_string(&Value::Object(map.clone())).map_err(|e| e.to_string())?;
+    let hash = sha256_hex(canonical.as_bytes());
+    map.insert("hash".into(), json!(hash));
+
+    let entry_val = Value::Object(map);
+    let line = serde_json::to_string(&entry_val).map_err(|e| e.to_string())?;
+
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| e.to_string())?;
+    writeln!(f, "{line}").map_err(|e| e.to_string())?;
+
+    let entry: MemoryEntry = serde_json::from_value(entry_val).map_err(|e| e.to_string())?;
+    Ok(entry)
+}
+
+fn days_to_ymd(days: u64) -> (u32, u32, u32) {
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as u32, m as u32, d as u32)
+}
+
+pub fn current_iso_timestamp() -> String {
+    let now = std::time::SystemTime::now();
+    let dur = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs();
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400;
+    let (year, month, day) = days_to_ymd(days);
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+pub fn sha256_hex(data: &[u8]) -> String {
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ];
+    let k: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ];
+    let bit_len = (data.len() as u64) * 8;
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while (msg.len() % 64) != 56 {
+        msg.push(0x00);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in msg.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([chunk[4 * i], chunk[4 * i + 1], chunk[4 * i + 2], chunk[4 * i + 3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+        }
+        let mut a = h[0];
+        let mut b = h[1];
+        let mut c = h[2];
+        let mut d = h[3];
+        let mut e = h[4];
+        let mut f = h[5];
+        let mut g = h[6];
+        let mut hh = h[7];
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let temp1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(k[i]).wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let temp2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temp1);
+            d = c;
+            c = b;
+            b = a;
+            a = temp1.wrapping_add(temp2);
+        }
+        h[0] = h[0].wrapping_add(a);
+        h[1] = h[1].wrapping_add(b);
+        h[2] = h[2].wrapping_add(c);
+        h[3] = h[3].wrapping_add(d);
+        h[4] = h[4].wrapping_add(e);
+        h[5] = h[5].wrapping_add(f);
+        h[6] = h[6].wrapping_add(g);
+        h[7] = h[7].wrapping_add(hh);
+    }
+    format!("{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}{:08x}", h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sha256_known_vectors() {
+        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(sha256_hex(b"hello"), "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+    }
+
+    #[test]
+    fn test_memory_ledger_read_and_append() {
+        let tmp = std::env::temp_dir().join(format!("hydra-mem-test-{}", std::process::id()));
+        let ledger = tmp.join("ledger.jsonl");
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let initial = read_memory_ledger(&ledger);
+        assert!(initial.is_empty());
+
+        let f1 = append_memory_fact(&ledger, "user_preference", "Dark theme preferred", "user:1").unwrap();
+        assert_eq!(f1.seq, 1);
+        assert_eq!(f1.prev, "0".repeat(64));
+        assert!(!f1.hash.is_empty());
+
+        let f2 = append_memory_fact(&ledger, "compiler_target", "x86_64-pc-windows-msvc", "agent:hydra").unwrap();
+        assert_eq!(f2.seq, 2);
+        assert_eq!(f2.prev, f1.hash);
+
+        let read_back = read_memory_ledger(&ledger);
+        assert_eq!(read_back.len(), 2);
+        assert_eq!(read_back[0].subject, "user_preference");
+        assert_eq!(read_back[1].body, "x86_64-pc-windows-msvc");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_telemetry_and_options_persistence() {
+        let dir = std::env::temp_dir().join(format!("hydra-opts-{}", std::process::id()));
+        let path = dir.join("state.json");
+        let mut m = Model::new(Some(path.clone()), ".".into());
+
+        m.apply_options("codellama:34b", "http://localhost:11434", "http://localhost:8080", "http://localhost:9000/v1", 2_000_000, "C:\\Users\\jpm05\\Documents");
+        assert_eq!(m.local_model_alias, "codellama:34b");
+        assert_eq!(m.context_window, 2_000_000);
+        assert_eq!(m.cwd, "C:\\Users\\jpm05\\Documents");
+
+        m.apply(Ev::Usage {
+            model: "mimo".into(),
+            prompt: 10_000,
+            completion: 2_000,
+            cost: 0.05,
+        });
+
+        let (p, c, win, pct) = m.telemetry();
+        assert_eq!((p, c, win), (10_000, 2_000, 2_000_000));
+        assert!((pct - 0.6).abs() < 1e-4);
+
+        let reloaded = Model::new(Some(path), ".".into());
+        assert_eq!(reloaded.local_model_alias, "codellama:34b");
+        assert_eq!(reloaded.context_window, 2_000_000);
+        assert_eq!(reloaded.cwd, "C:\\Users\\jpm05\\Documents");
+        assert_eq!(reloaded.prompt_tokens, 10_000);
+        assert_eq!(reloaded.completion_tokens, 2_000);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_agent_roster_lineup() {
+        let mut m = Model::new(None, ".".into());
+        assert!(m.agents.is_empty());
+
+        m.apply(Ev::ToolStart {
+            turn: "t1".into(),
+            call: 1,
+            tool: "invoke_subagent".into(),
+            args: json!({"prompt": "Audit memory leaks"}),
+        });
+        assert_eq!(m.agents.len(), 1);
+        assert_eq!(m.agents[0].name, "Child Subagent");
+        assert_eq!(m.agents[0].task, "Audit memory leaks");
+        assert_eq!(m.agents[0].status, "RUNNING");
+
+        m.apply(Ev::ToolResult {
+            turn: "t1".into(),
+            tool: "invoke_subagent".into(),
+            is_error: false,
+            output: "Passed".into(),
+        });
+        assert_eq!(m.agents[0].status, "COMPLETED");
+    }
 
     #[test]
     fn state_round_trips_through_disk() {

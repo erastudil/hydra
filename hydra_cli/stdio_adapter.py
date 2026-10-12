@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 
 PROTOCOL_VERSION = 1
 MAX_LINE_BYTES = 1 << 20
-TOOL_OUTPUT_CHARS = 4000
+TOOL_OUTPUT_CHARS = 32000
 CONTEXT_MODES = ("recall", "compact", "sliding")
 DECISIONS = {"allow": "y", "skip": "n", "abort": "q"}
 CAPABILITIES = ["turn", "cancel", "approval", "sessions", "history", "action"]

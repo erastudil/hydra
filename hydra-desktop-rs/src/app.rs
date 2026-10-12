@@ -5,6 +5,54 @@ use crate::widgets::{self, Kind, Part};
 use eframe::egui::{self, vec2, Align, Color32, CornerRadius, Key, Layout, Margin, Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind};
 use hydra_desktop::backend::Backend;
 use hydra_desktop::model::*;
+use std::path::{Path, PathBuf};
+
+pub fn is_supported_attachment(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) else {
+        return false;
+    };
+    matches!(
+        ext.as_str(),
+        // image
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "tiff"
+        // audio
+        | "mp3" | "wav" | "ogg" | "m4a" | "flac" | "aac"
+        // video
+        | "mp4" | "mkv" | "webm" | "avi" | "mov"
+        // pdf
+        | "pdf"
+        // text
+        | "txt" | "md" | "rs" | "py" | "js" | "ts" | "json" | "toml" | "yaml" | "yml"
+        | "c" | "cpp" | "h" | "hpp" | "sh" | "bat" | "ps1" | "html" | "css" | "csv" | "log" | "prg"
+    )
+}
+
+pub fn format_prompt_with_attachments(input: &str, attachments: &[PathBuf]) -> String {
+    let base = if input.trim().is_empty() && !attachments.is_empty() {
+        "Inspect attached files."
+    } else {
+        input.trim()
+    };
+    if attachments.is_empty() {
+        return base.to_string();
+    }
+    let mut out = base.to_string();
+    out.push_str("\n\n[Attachments]");
+    for path in attachments {
+        out.push_str(&format!("\n- {}", path.display()));
+    }
+    out
+}
+
+pub fn fmt_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.0}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
 
 const DRAWER_TABS: &[(&str, &str)] = &[("screen", "Live Screen"), ("term", "Terminal Logs"), ("diff", "Diffs & Code"), ("agent", "Agent Runner")];
 
@@ -19,6 +67,8 @@ enum Cmd {
     Clear,
     Templates,
     Jobs,
+    Options,
+    Memories,
 }
 
 fn palette_entries() -> Vec<(&'static str, &'static str, Cmd)> {
@@ -40,6 +90,8 @@ fn palette_entries() -> Vec<(&'static str, &'static str, Cmd)> {
         ("Export Session Trace (Markdown)", "", Cmd::Export(true)),
         ("Workflow Templates", "", Cmd::Templates),
         ("Scheduled Jobs", "", Cmd::Jobs),
+        ("Desktop Options & Local Models", "Ctrl+,", Cmd::Options),
+        ("Memory Ledger & Facts", "", Cmd::Memories),
         ("New Session", "Ctrl+T", Cmd::NewSession),
         ("Clear Chat", "", Cmd::Clear),
     ]
@@ -65,6 +117,14 @@ pub struct HydraApp {
     focus_input: bool,
     composer_rect: egui::Rect,
     start_error: Option<String>,
+    pub attachments: Vec<PathBuf>,
+    pub options_open: bool,
+    pub options_form: (String, String, String, String, String, String), // alias, ollama, llamacpp, local_ai, ctx_win, cwd
+    pub memories_open: bool,
+    pub memories_entries: Vec<MemoryEntry>,
+    pub memories_filter: String,
+    pub memories_new_fact: (String, String),
+    pub memories_status: Option<String>,
 }
 
 struct ShotPlan {
@@ -77,7 +137,17 @@ impl HydraApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply(&cc.egui_ctx);
         let shot = std::env::var("HYDRA_SHOT").ok().map(|path| ShotPlan { path, frames: 0, requested: false });
-        let cwd = std::env::var("HYDRA_CWD").unwrap_or_else(|_| std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into()));
+        let default_cwd = std::env::var("USERPROFILE")
+            .map(|u| std::path::PathBuf::from(u).join("Documents").display().to_string())
+            .unwrap_or_else(|_| ".".into());
+        let cwd = std::env::var("HYDRA_CWD").unwrap_or_else(|_| {
+            let current = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into());
+            if current.to_lowercase().ends_with("\\hydra") {
+                default_cwd
+            } else {
+                current
+            }
+        });
         let state = if std::env::var("HYDRA_NO_STATE").is_ok() { None } else { Some(state_dir().join("state.json")) };
         let mut m = Model::new(state, cwd);
         let ctx = cc.egui_ctx.clone();
@@ -97,6 +167,14 @@ impl HydraApp {
             }
         }
         let palette = if std::env::var("HYDRA_OPEN").as_deref() == Ok("palette") { Some((String::new(), 0)) } else { None };
+        let options_form = (
+            m.local_model_alias.clone(),
+            m.ollama_host.clone(),
+            m.llamacpp_host.clone(),
+            m.local_ai_base.clone(),
+            m.context_window.to_string(),
+            m.cwd.clone(),
+        );
         Self {
             m,
             be,
@@ -117,6 +195,14 @@ impl HydraApp {
             focus_input: true,
             composer_rect: egui::Rect::NOTHING,
             start_error,
+            attachments: Vec::new(),
+            options_open: false,
+            options_form,
+            memories_open: false,
+            memories_entries: Vec::new(),
+            memories_filter: String::new(),
+            memories_new_fact: (String::new(), String::new()),
+            memories_status: None,
         }
     }
 
@@ -149,6 +235,21 @@ impl HydraApp {
                     self.m.load_jobs(be);
                 }
             }
+            Cmd::Options => {
+                self.options_form = (
+                    self.m.local_model_alias.clone(),
+                    self.m.ollama_host.clone(),
+                    self.m.llamacpp_host.clone(),
+                    self.m.local_ai_base.clone(),
+                    self.m.context_window.to_string(),
+                    self.m.cwd.clone(),
+                );
+                self.options_open = true;
+            }
+            Cmd::Memories => {
+                self.memories_entries = read_memory_ledger(&memory_ledger_path());
+                self.memories_open = true;
+            }
         }
     }
 
@@ -164,7 +265,7 @@ impl HydraApp {
     }
 
     fn send(&mut self) {
-        let text = self.input.clone();
+        let text = format_prompt_with_attachments(&self.input, &self.attachments);
         let Some(be) = &mut self.be else {
             self.m.notice = "agent process is not running".into();
             return;
@@ -175,6 +276,7 @@ impl HydraApp {
         }
         if self.m.submit(be, &text) {
             self.input.clear();
+            self.attachments.clear();
         }
     }
 
@@ -223,6 +325,9 @@ impl HydraApp {
             if widgets::button(ui, if narrow { "Palette" } else { "⌘K Palette" }, Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
                 self.palette = Some((String::new(), 0));
             }
+            if widgets::button(ui, if narrow { "Opts" } else { "Options" }, Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+                self.run(Cmd::Options);
+            }
             if widgets::button(ui, "Clear", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
                 self.m.clear_active();
             }
@@ -234,6 +339,13 @@ impl HydraApp {
                 (false, true) => (false, "offline"),
             };
             widgets::chip_parts(ui, (12.0, 6.0), 8.0, &[Part::Dot(dot_live), Part::Text(label.into(), TYPE_STATUS_PILL, false, TEXT2)], time);
+            let cwd_display = if self.m.cwd.len() > 28 {
+                let end = &self.m.cwd[self.m.cwd.len() - 25..];
+                format!("…{end}")
+            } else {
+                self.m.cwd.clone()
+            };
+            widgets::chip_parts(ui, (12.0, 6.0), 8.0, &[Part::Text(format!("cwd: {cwd_display}"), TYPE_STATUS_PILL, false, TEXT2)], time);
             let (tok, cost) = self.m.tally();
             let parts = if narrow {
                 vec![Part::Text(tok, TYPE_TOKEN_TALLY, true, TEXT), Part::Text("•".into(), TYPE_TOKEN_TALLY, false, BORDER), Part::Text(cost, TYPE_TOKEN_TALLY, true, ACCENT)]
@@ -247,6 +359,21 @@ impl HydraApp {
                 ]
             };
             widgets::chip_parts(ui, (14.0, 6.0), 8.0, &parts, time);
+
+            let (prompt, comp, win, pct) = self.m.telemetry();
+            let telem_parts = if narrow {
+                vec![
+                    Part::Text(format!("{pct:.1}%"), TYPE_TOKEN_TALLY, true, if pct > 80.0 { ERROR } else { ACCENT }),
+                ]
+            } else {
+                vec![
+                    Part::Text("Context:".into(), TYPE_TOKEN_TALLY, false, TEXT2),
+                    Part::Text(format!("{}+{}/{}", fmt_tokens(prompt), fmt_tokens(comp), fmt_tokens(win)), TYPE_TOKEN_TALLY, true, TEXT),
+                    Part::Text("•".into(), TYPE_TOKEN_TALLY, false, BORDER),
+                    Part::Text(format!("{pct:.1}%"), TYPE_TOKEN_TALLY, true, if pct > 80.0 { ERROR } else { ACCENT }),
+                ]
+            };
+            widgets::chip_parts(ui, (14.0, 6.0), 8.0, &telem_parts, time);
         });
     }
 
@@ -378,6 +505,31 @@ impl HydraApp {
 
     // ---------------------------------------------------------------- composer
     fn composer(&mut self, ui: &mut egui::Ui) {
+        if !self.attachments.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                let mut remove_idx = None;
+                for (i, p) in self.attachments.iter().enumerate() {
+                    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+                    let kind_icon = match p.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
+                        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg" | "ico" | "tiff") => "🖼",
+                        Some("mp3" | "wav" | "ogg" | "m4a" | "flac" | "aac") => "🎵",
+                        Some("mp4" | "mkv" | "webm" | "avi" | "mov") => "🎬",
+                        Some("pdf") => "📄",
+                        _ => "📝",
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(rt(&format!("{kind_icon} {name}"), 11.0, ACCENT));
+                        if ui.small_button("×").clicked() {
+                            remove_idx = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = remove_idx {
+                    self.attachments.remove(i);
+                }
+            });
+            ui.add_space(4.0);
+        }
         ui.spacing_mut().item_spacing.x = 12.0;
         let mut do_send = false;
         let mut do_stop = false;
@@ -604,7 +756,40 @@ impl HydraApp {
     }
 
     fn agent_tab(&mut self, ui: &mut egui::Ui, w: f32) {
-        ui.label(rtb("AUTONOMOUS AGENT RUNNER", 13.0, TEXT));
+        ui.horizontal(|ui| {
+            ui.label(rtb("AGENT ROSTER & LINEUP", 13.0, TEXT));
+            let active_count = self.m.agents.iter().filter(|a| a.status == "RUNNING").count();
+            let badge_text = format!("{} active", active_count);
+            let badge_color = if active_count > 0 { ACCENT } else { MUTED };
+            ui.label(rtb(&badge_text, 10.0, badge_color));
+        });
+        if self.m.agents.is_empty() {
+            ui.label(rt("No active agents in lineup. Start a task below or dispatch subagents.", 11.0, MUTED));
+        } else {
+            for agent in &self.m.agents {
+                egui::Frame::new().fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(10)).inner_margin(Margin::same(8)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.label(rtb(&agent.name, 12.0, TEXT));
+                        let c = match agent.status.as_str() {
+                            "RUNNING" => ACCENT,
+                            "PAUSED" => Color32::from_rgb(234, 179, 8),
+                            "FAILED" => ERROR,
+                            _ => MUTED,
+                        };
+                        ui.label(rtb(&agent.status, 10.0, c));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(rt(format!("step {}/{}  {:.1}s", agent.step, agent.max_steps, agent.elapsed_sec), 10.0, MUTED));
+                        });
+                    });
+                    if !agent.task.is_empty() {
+                        ui.add(egui::Label::new(rt(&agent.task, 11.0, TEXT2)).wrap());
+                    }
+                });
+            }
+        }
+        ui.add_space(4.0);
+        ui.label(rtb("PRIMARY RUNNER CONTROLS", 11.0, MUTED));
         let st = self.m.agent_status.clone();
         let state = st["status"].as_str().unwrap_or("IDLE").to_uppercase();
         ui.horizontal(|ui| {
@@ -842,12 +1027,154 @@ impl HydraApp {
             if close {
                 self.jobs_open = false;
             }
+            return;
         }
+        if self.options_open {
+            let mut close = ctx.input(|i| i.key_pressed(Key::Escape));
+            let mut save = false;
+            modal_frame(ctx, "options", 580.0, |ui| {
+                ui.label(rtb("DESKTOP OPTIONS & LOCAL MODELS", 13.0, ACCENT));
+                ui.label(rt("Configure local model routes, hosts, and active context window.", 11.0, MUTED));
+
+                ui.label(rtb("LOCAL MODEL ALIAS", 11.0, TEXT2));
+                ui.add(egui::TextEdit::singleline(&mut self.options_form.0).hint_text(rt("e.g. qwen2.5-coder:14b", 12.0, MUTED)).desired_width(f32::INFINITY));
+
+                ui.label(rtb("OLLAMA HOST", 11.0, TEXT2));
+                ui.add(egui::TextEdit::singleline(&mut self.options_form.1).hint_text(rt("http://127.0.0.1:11434", 12.0, MUTED)).desired_width(f32::INFINITY));
+
+                ui.label(rtb("LLAMACPP HOST", 11.0, TEXT2));
+                ui.add(egui::TextEdit::singleline(&mut self.options_form.2).hint_text(rt("http://127.0.0.1:8080", 12.0, MUTED)).desired_width(f32::INFINITY));
+
+                ui.label(rtb("LOCAL AI BASE", 11.0, TEXT2));
+                ui.add(egui::TextEdit::singleline(&mut self.options_form.3).hint_text(rt("http://localhost:8080/v1", 12.0, MUTED)).desired_width(f32::INFINITY));
+
+                ui.label(rtb("CONTEXT WINDOW (TOKENS)", 11.0, TEXT2));
+                ui.add(egui::TextEdit::singleline(&mut self.options_form.4).hint_text(rt("1048576", 12.0, MUTED)).desired_width(f32::INFINITY));
+
+                ui.label(rtb("WORKING DIRECTORY (CWD)", 11.0, TEXT2));
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.options_form.5).hint_text(rt("C:\\Users\\jpm05\\Documents", 12.0, MUTED)).desired_width(ui.available_width() - 85.0));
+                    if widgets::button(ui, "Browse...", Kind::Secondary, 12.0, (10.0, 4.0), None).clicked() {
+                        if let Some(folder) = pick_folder_dialog(&self.options_form.5) {
+                            self.options_form.5 = folder;
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    if widgets::button(ui, "Save Options", Kind::Primary, 13.0, (16.0, 8.0), None).clicked() {
+                        save = true;
+                    }
+                    if widgets::button(ui, "Close", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if save {
+                let win = self.options_form.4.trim().parse::<u64>().unwrap_or(1_048_576);
+                self.m.apply_options(
+                    &self.options_form.0,
+                    &self.options_form.1,
+                    &self.options_form.2,
+                    &self.options_form.3,
+                    win,
+                    &self.options_form.5,
+                );
+                self.options_open = false;
+            }
+            if close {
+                self.options_open = false;
+            }
+            return;
+        }
+        if self.memories_open {
+            let mut close = ctx.input(|i| i.key_pressed(Key::Escape));
+            let mut append = false;
+            modal_frame(ctx, "memories", 660.0, |ui| {
+                ui.label(rtb("MEMORY LEDGER (~/.hydra/memory/ledger.jsonl)", 13.0, ACCENT));
+                ui.add(egui::TextEdit::singleline(&mut self.memories_filter).hint_text(rt("Filter memory facts...", 12.0, MUTED)).desired_width(f32::INFINITY));
+
+                ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                    let q = self.memories_filter.to_lowercase();
+                    let filtered: Vec<_> = self.memories_entries.iter().filter(|e| {
+                        q.is_empty() || e.subject.to_lowercase().contains(&q) || e.body.to_lowercase().contains(&q) || e.actor.to_lowercase().contains(&q)
+                    }).collect();
+
+                    if filtered.is_empty() {
+                        ui.label(rt("No matching memory facts in ledger.", 11.0, MUTED));
+                    }
+                    for e in filtered.iter().rev() {
+                        egui::Frame::new().fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(10)).inner_margin(Margin::same(8)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.label(rtb(format!("#{} {}", e.seq, e.subject), 12.0, TEXT));
+                                ui.label(rtb(&e.kind, 10.0, ACCENT));
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(rt(format!("{} • {}", e.actor, e.ts), 10.0, MUTED));
+                                });
+                            });
+                            if !e.body.is_empty() {
+                                ui.add(egui::Label::new(rt(&e.body, 11.0, TEXT2)).wrap());
+                            }
+                        });
+                    }
+                });
+
+                ui.label(rtb("RECORD NEW FACT", 11.0, MUTED));
+                ui.add(egui::TextEdit::singleline(&mut self.memories_new_fact.0).hint_text(rt("Subject (e.g. user_preference, project_root)", 12.0, MUTED)).desired_width(f32::INFINITY));
+                ui.add(egui::TextEdit::multiline(&mut self.memories_new_fact.1).hint_text(rt("Fact body / content", 12.0, MUTED)).desired_rows(2).desired_width(f32::INFINITY));
+
+                if let Some(st) = &self.memories_status {
+                    ui.label(rt(st, 11.0, ACCENT));
+                }
+
+                ui.horizontal(|ui| {
+                    if widgets::button(ui, "Record Fact", Kind::Primary, 13.0, (16.0, 8.0), None).clicked() {
+                        append = true;
+                    }
+                    if widgets::button(ui, "Refresh", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+                        self.memories_entries = read_memory_ledger(&memory_ledger_path());
+                    }
+                    if widgets::button(ui, "Close", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+                        close = true;
+                    }
+                });
+            });
+            if append {
+                let subj = self.memories_new_fact.0.trim();
+                let body = self.memories_new_fact.1.trim();
+                if !subj.is_empty() && !body.is_empty() {
+                    match append_memory_fact(&memory_ledger_path(), subj, body, "user:desktop") {
+                        Ok(entry) => {
+                            self.memories_status = Some(format!("Recorded fact #{}", entry.seq));
+                            self.memories_new_fact = (String::new(), String::new());
+                            self.memories_entries = read_memory_ledger(&memory_ledger_path());
+                        }
+                        Err(e) => {
+                            self.memories_status = Some(format!("Error: {e}"));
+                        }
+                    }
+                }
+            }
+            if close {
+                self.memories_open = false;
+            }
+            return;
+        }
+    }
+
+    pub fn is_computer_use_active(&self) -> bool {
+        self.m.nav == "computer"
+            || self.m.pending.values().any(|p| matches!(p, Pending::Screen | Pending::Click | Pending::Type | Pending::Window))
+            || (self.m.drawer_tab == "screen" && self.m.busy.is_some())
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
             self.palette = if self.palette.is_some() { None } else { Some((String::new(), 0)) };
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma)) {
+            self.run(Cmd::Options);
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::T)) {
             self.m.new_session();
@@ -900,6 +1227,13 @@ impl eframe::App for HydraApp {
         let time = ctx.input(|i| i.time);
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
         self.drain();
+        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
+        for file in dropped_files {
+            let pbuf = file.path().to_path_buf();
+            if is_supported_attachment(&pbuf) && !self.attachments.contains(&pbuf) {
+                self.attachments.push(pbuf);
+            }
+        }
         if self.m.agent_ready && self.m.busy.is_none() {
             if let Ok(p) = std::env::var("HYDRA_DEMO_PROMPT") {
                 std::env::remove_var("HYDRA_DEMO_PROMPT");
@@ -968,6 +1302,16 @@ impl eframe::App for HydraApp {
         self.modals(ctx);
         let _ = &self.start_error;
 
+        if self.is_computer_use_active() {
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("computer_use_glow")));
+            let s_rect = ctx.content_rect();
+            let pulse = 0.75 + 0.25 * (time * 3.5).sin().abs() as f32;
+            let glow_c1 = Color32::from_rgba_premultiplied(0, 255, 102, (180.0 * pulse) as u8);
+            let glow_c2 = Color32::from_rgba_premultiplied(0, 255, 102, (60.0 * pulse) as u8);
+            painter.rect_stroke(s_rect, CornerRadius::ZERO, Stroke::new(4.0, glow_c1), StrokeKind::Inside);
+            painter.rect_stroke(s_rect.shrink(4.0), CornerRadius::ZERO, Stroke::new(4.0, glow_c2), StrokeKind::Inside);
+        }
+
         if let Some(plan) = &mut self.shot {
             plan.frames += 1;
             if plan.frames >= std::env::var("HYDRA_SHOT_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(20) && !plan.requested {
@@ -984,5 +1328,74 @@ impl eframe::App for HydraApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
+    }
+}
+
+fn pick_folder_dialog(initial: &str) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let escaped = initial.replace('\'', "''");
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; if ('{}' -ne '') {{ $d.SelectedPath = '{}' }}; if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output $d.SelectedPath }}",
+            escaped, escaped
+        );
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let res = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !res.is_empty() && std::path::Path::new(&res).is_dir() {
+                return Some(res);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = initial;
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_drag_and_drop_attachments_and_prompt_formatting() {
+        let img = PathBuf::from("diagram.png");
+        let aud = PathBuf::from("voice.wav");
+        let vid = PathBuf::from("recording.mp4");
+        let doc = PathBuf::from("report.pdf");
+        let src = PathBuf::from("app.rs");
+        let bin = PathBuf::from("binary.iso");
+
+        assert!(is_supported_attachment(&img));
+        assert!(is_supported_attachment(&aud));
+        assert!(is_supported_attachment(&vid));
+        assert!(is_supported_attachment(&doc));
+        assert!(is_supported_attachment(&src));
+        assert!(!is_supported_attachment(&bin));
+
+        let formatted = format_prompt_with_attachments("Please review this code", &[img.clone(), doc.clone()]);
+        assert!(formatted.contains("Please review this code"));
+        assert!(formatted.contains("[Attachments]"));
+        assert!(formatted.contains("diagram.png"));
+        assert!(formatted.contains("report.pdf"));
+
+        let empty = format_prompt_with_attachments("", &[vid]);
+        assert!(empty.starts_with("Inspect attached files."));
+        assert!(empty.contains("recording.mp4"));
+    }
+
+    #[test]
+    fn test_fmt_tokens_and_palette_commands() {
+        assert_eq!(fmt_tokens(500), "500");
+        assert_eq!(fmt_tokens(10_000), "10k");
+        assert_eq!(fmt_tokens(1_048_576), "1.0M");
+
+        let entries = palette_entries();
+        assert!(entries.iter().any(|e| e.0.contains("Options")));
+        assert!(entries.iter().any(|e| e.0.contains("Memory")));
     }
 }

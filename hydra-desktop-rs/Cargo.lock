@@ -921,8 +921,16 @@ version = "1.2.2"
 dependencies = [
  "base64",
  "eframe",
+ "hydra-stdio",
  "image",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "hydra-stdio"
+version = "1.2.2"
+dependencies = [
  "serde_json",
 ]
 

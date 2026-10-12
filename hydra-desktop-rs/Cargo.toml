@@ -14,6 +14,7 @@ name = "Hydra"
 path = "src/main.rs"
 
 [dependencies]
+hydra-stdio = { path = "../hydra-stdio" }
 eframe = { version = "0.36", default-features = false, features = ["glow", "x11", "wayland", "default_fonts"] }
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
 serde = { version = "1", features = ["derive"] }
