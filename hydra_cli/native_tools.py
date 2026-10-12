@@ -2238,22 +2238,101 @@ class AstFstringModernizer:
 
 
 
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_NO_WINDOW = 0x08000000
+# the shell runs the command in a subshell, so `exit` inside it still lets the wrapper write the exit code
+_TASK_WRAPPER = '(eval "$HYDRA_TASK_CMD"); c=$?; printf %s "$c" > "$HYDRA_TASK_EXIT"; exit $c'
+
+
+def task_spawn_options(platform: str) -> Dict[str, Any]:
+    """Popen options that put a task in a process group of its own, so a stop reaches every process it started."""
+    if platform == "nt":
+        return {"creationflags": CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW}
+    return {"start_new_session": True}
+
+
+def task_launch(command: str, exit_file: str, platform: str) -> Tuple[Any, bool, Dict[str, str]]:
+    """Program, shell flag and extra environment for a task. POSIX tasks record their exit code in exit_file."""
+    if platform == "nt":
+        return command, True, {}
+    return ["/bin/sh", "-c", _TASK_WRAPPER], False, {"HYDRA_TASK_CMD": command, "HYDRA_TASK_EXIT": exit_file}
+
+
+def task_kill_commands(pid: int) -> List[List[str]]:
+    """Windows stop: taskkill of the whole tree, then the same with /F when the polite one did not end it."""
+    return [["taskkill", "/PID", str(int(pid)), "/T"], ["taskkill", "/PID", str(int(pid)), "/T", "/F"]]
+
+
+def process_identity(pid: int, platform: Optional[str] = None) -> Optional[str]:
+    """A string that names this process and no later process with the same pid. None when it is gone."""
+    platform = platform or os.name
+    if platform == "nt":
+        return _windows_process_identity(pid)
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{int(pid)}/stat", "rb") as handle:
+                stat = handle.read().decode("ascii", "replace")
+        except OSError:
+            return None
+        fields = stat[stat.rindex(")") + 2:].split()
+        if fields[0] in ("Z", "X"):
+            return None
+        return "linux:" + fields[19]
+    import subprocess
+
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return "ps:" + out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else None
+
+
+def _windows_process_identity(pid: int) -> Optional[str]:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:  # STILL_ACTIVE
+            return None
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel32.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]):
+            return None
+        return f"nt:{times[0].dwHighDateTime}:{times[0].dwLowDateTime}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 class BackgroundTasks:
-    """Shell commands the agent leaves running between tool calls. Output goes to a log file under ~/.hydra/tasks.
-    Listeners hear every start and exit. Tasks die with the process that started them."""
+    """Shell commands the agent leaves running between tool calls. Each task has a record under ~/.hydra/tasks, so a
+    new agent process can adopt the tasks a killed one left running. Listeners hear every start, adoption and end."""
 
     TAIL_CHARS = 4000
+    POLL_SECONDS = 0.2
 
-    def __init__(self) -> None:
+    def __init__(self, platform: Optional[str] = None, runner: Optional[Callable[..., Any]] = None) -> None:
         import contextvars
+        import subprocess
         import threading
 
+        self.platform = platform or os.name
+        self._runner = runner or subprocess.run
         self._lock = threading.Lock()
         self._tasks: Dict[str, Dict[str, Any]] = {}
         self._procs: Dict[str, Any] = {}
+        self._ended: Dict[str, Any] = {}
         self._listeners: List[Callable[[Dict[str, Any]], None]] = []
-        self._count = 0
         self.owner: "contextvars.ContextVar[Dict[str, Any]]" = contextvars.ContextVar("hydra_task_owner", default={})
+
+    @staticmethod
+    def folder() -> str:
+        path = os.path.join(os.path.expanduser("~"), ".hydra", "tasks")
+        os.makedirs(path, exist_ok=True)
+        return path
 
     def add_listener(self, listener: Callable[[Dict[str, Any]], None]) -> None:
         with self._lock:
@@ -2266,6 +2345,20 @@ class BackgroundTasks:
             except Exception:
                 pass
 
+    def _save(self, info: Dict[str, Any]) -> None:
+        path = os.path.join(self.folder(), info["task"] + ".json")
+        with open(path + ".tmp", "w", encoding="utf-8") as handle:
+            json.dump(info, handle)
+        os.replace(path + ".tmp", path)
+
+    @staticmethod
+    def _exit_code(info: Dict[str, Any]) -> Optional[int]:
+        try:
+            with open(info.get("exit_file") or "", "r", encoding="utf-8") as handle:
+                return int(handle.read().strip())
+        except (OSError, ValueError):
+            return None
+
     def start(self, command: str, cwd: str) -> Dict[str, Any]:
         import subprocess
         import threading
@@ -2273,42 +2366,87 @@ class BackgroundTasks:
 
         if not isinstance(command, str) or not command.strip():
             return {"isError": True, "error": "command required"}
-        folder = os.path.join(os.path.expanduser("~"), ".hydra", "tasks")
-        os.makedirs(folder, exist_ok=True)
-        with self._lock:
-            self._count += 1
-            task = f"t{self._count}-{uuid.uuid4().hex[:6]}"
-        log = os.path.join(folder, task + ".log")
-        posix = os.name != "nt"
+        folder = self.folder()
+        task = f"t{_time.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        log, exit_file = os.path.join(folder, task + ".log"), os.path.join(folder, task + ".exit")
+        program, shell, extra = task_launch(command, exit_file, self.platform)
         try:
             with open(log, "wb") as out:
-                proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
-                                        stderr=subprocess.STDOUT, start_new_session=posix,
-                                        creationflags=0 if posix else 0x08000000 | 0x00000200)
+                proc = subprocess.Popen(program, shell=shell, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
+                                        stderr=subprocess.STDOUT, env={**os.environ, **extra},
+                                        **task_spawn_options(self.platform))
         except OSError as exc:
             return {"isError": True, "error": f"could not start: {exc}"}
         owner = self.owner.get()
-        info = {"task": task, "command": command, "cwd": cwd, "pid": proc.pid, "state": "running", "exit_code": None,
-                "started": _time.time(), "ended": None, "thread": owner.get("thread"), "turn": owner.get("turn"), "log": log}
+        info = {"task": task, "command": command, "cwd": cwd, "pid": proc.pid, "pgid": proc.pid,
+                "identity": process_identity(proc.pid, self.platform), "state": "running", "exit_code": None,
+                "started": _time.time(), "ended": None, "thread": owner.get("thread"), "turn": owner.get("turn"),
+                "adopted": False, "log": log, "exit_file": exit_file}
         with self._lock:
             self._tasks[task] = info
             self._procs[task] = proc
+            self._ended[task] = threading.Event()
+            self._save(info)
         self._tell(info)
         threading.Thread(target=self._watch, args=(task, proc), daemon=True, name=f"hydra-task-{task}").start()
         return {"isError": False, "task": task, "state": "running", "pid": proc.pid}
 
-    def _watch(self, task: str, proc: Any) -> None:
+    def adopt(self) -> List[Dict[str, Any]]:
+        """Take over the running tasks a dead agent left on disk. Tasks whose process is gone are marked ended."""
+        import glob
+        import threading
         import time as _time
 
-        code = proc.wait()
+        found = []
+        for path in sorted(glob.glob(os.path.join(self.folder(), "*.json"))):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    info = json.load(handle)
+            except (OSError, ValueError):
+                continue
+            with self._lock:
+                if info.get("state") != "running" or info.get("task") in self._tasks:
+                    continue
+                info["adopted"] = True
+                alive = info.get("identity") and process_identity(info["pid"], self.platform) == info["identity"]
+                if not alive:
+                    info["state"], info["exit_code"], info["ended"] = "exited", self._exit_code(info), _time.time()
+                self._tasks[info["task"]] = info
+                self._ended[info["task"]] = threading.Event()
+                if not alive:
+                    self._ended[info["task"]].set()
+                self._save(info)
+            found.append(dict(info))
+            self._tell(info)
+            if alive:
+                threading.Thread(target=self._poll, args=(info["task"],), daemon=True,
+                                 name=f"hydra-task-{info['task']}").start()
+        return found
+
+    def _finish(self, task: str, code: Optional[int]) -> None:
+        import time as _time
+
         with self._lock:
             info = self._tasks[task]
             info["exit_code"] = code
             info["ended"] = _time.time()
             if info["state"] == "running":
                 info["state"] = "exited"
+            self._save(info)
             snapshot = dict(info)
+        self._ended[task].set()
         self._tell(snapshot)
+
+    def _watch(self, task: str, proc: Any) -> None:
+        self._finish(task, proc.wait())
+
+    def _poll(self, task: str) -> None:
+        import time as _time
+
+        info = self._tasks[task]
+        while process_identity(info["pid"], self.platform) == info["identity"]:
+            _time.sleep(self.POLL_SECONDS)
+        self._finish(task, self._exit_code(info))
 
     def list(self) -> List[Dict[str, Any]]:
         with self._lock:
@@ -2327,32 +2465,27 @@ class BackgroundTasks:
 
     def stop(self, task: str, grace: float = 3.0) -> Dict[str, Any]:
         import signal
-        import subprocess
 
         with self._lock:
-            proc = self._procs.get(task)
             info = self._tasks.get(task)
             if info is None:
                 return {"isError": True, "error": f"no task {task!r}"}
             if info["state"] != "running":
                 return {"isError": False, "task": task, "state": info["state"], "exit_code": info["exit_code"]}
             info["state"] = "stopped"
-        try:
-            if os.name != "nt":
-                os.killpg(proc.pid, signal.SIGTERM)
-            else:
-                proc.terminate()
+        ended = self._ended[task]
+        for force in (False, True):
             try:
-                proc.wait(timeout=grace)
-            except subprocess.TimeoutExpired:
-                if os.name != "nt":
-                    os.killpg(proc.pid, signal.SIGKILL)
+                if self.platform == "nt":
+                    self._runner(task_kill_commands(info["pid"])[int(force)], capture_output=True, timeout=30)
                 else:
-                    proc.kill()
-                proc.wait(timeout=grace)
-        except (ProcessLookupError, PermissionError):
-            pass
-        return {"isError": False, "task": task, "state": "stopped", "exit_code": proc.returncode}
+                    os.killpg(info["pgid"], signal.SIGKILL if force else signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            if ended.wait(grace):
+                break
+        with self._lock:
+            return {"isError": False, "task": task, "state": "stopped", "exit_code": info["exit_code"]}
 
     def stop_all(self) -> None:
         for info in self.list():

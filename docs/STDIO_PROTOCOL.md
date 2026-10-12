@@ -103,6 +103,8 @@ skills : list the skills a turn may pick. field id. reply `skill_list`.
 
 mcp : show the MCP servers a project gets. fields id, cwd, refresh. refresh true asks every server for its tools again. reply `mcp_status`.
 
+mcp_toggle : turn one MCP server on or off for one project. fields id, cwd, server, enabled. enabled is true or false. the choice is saved per project and survives a restart. a server missing from the project's config, or enabled that is not a boolean, gets `error` code bad_request. reply `mcp_status`.
+
 rules : list or remove the approval rules that apply to a thread. fields id, thread, op, rule. op is list, the default, or remove, which also needs rule, the rule id. reply `rules_result`.
 
 sessions : list threads on disk. fields id, optional. reply `session_list`.
@@ -120,7 +122,7 @@ token : fields turn, text. streamed answer text in arrival order. concatenated t
 
 context : fields turn, rules, skills. sent once per turn after `checkpoint` and before the model runs. rules is the path of the AGENTS.md, .cursorrules or CLAUDE.md file found in cwd or up to five parents above it, or null. its text goes into the system prompt. skills is the list of skill ids added to this turn. mcp_tools lists the MCP tools the model gets this turn. mcp_errors maps each server that failed to start or list its tools to the reason.
 
-task_update : fields task, thread, turn, command, cwd, pid, state, exit_code, started, ended. sent when a task starts and once more when it ends. thread and turn name the turn that started it. state is running, exited or stopped. exit_code and ended are null while it runs. times are epoch seconds. it can arrive between turns.
+task_update : fields task, thread, turn, command, cwd, pid, state, exit_code, started, ended, adopted. sent when a task starts, when a new agent adopts it after `hello`, and once more when it ends. adopted is true for a task an earlier agent process started. thread and turn name the turn that started it. state is running, exited or stopped. exit_code and ended are null while it runs. times are epoch seconds. it can arrive between turns.
 
 retry : fields turn, attempt, of, wait, reason. the provider request of this turn failed before its first token and is sent again after wait seconds. attempt counts from 1 up to of. reason is `HTTP <code>` for 429, 500, 502, 503 and 504, or `connection lost: <kind>` for a reset or dropped connection. any other failure, or any failure after a token, is not retried and ends the turn with `error` code turn_failed. HYDRA_PROVIDER_RETRIES sets of, default 2. HYDRA_BACKOFF_BASE sets the first wait, default 0.5, which doubles on each attempt up to 4 seconds. cancel during a wait ends the turn at once.
 
@@ -150,7 +152,7 @@ skill_list : fields id, skills. each skill has id, keys, the words it is about, 
 
 task_list : fields id, tasks. each task has the fields of `task_update`.
 
-mcp_status : fields id, config, servers. config is the config file in use or null. each server has name, ok, error and tools. error is null when ok is true. tools lists the tool names the model sees.
+mcp_status : fields id, config, servers. config is the config file in use or null. each server has name, enabled, ok, error and tools. a server turned off with `mcp_toggle` has enabled false, ok false, error null and no tools, and it is not started. error is null when ok is true. tools lists the tool names the model sees.
 
 rules_result : fields id, thread, rules. each rule has id, tool, prefix or null, and scope.
 
@@ -235,6 +237,8 @@ names : a tool `echo` of server `demo` reaches the model as `demo__echo`.
 
 permission : MCP tools are never read only. manual asks for each call, accept_edits asks too, plan skips them, and bypass runs them. approval rules apply to them like to any other tool.
 
+off : `mcp_toggle` writes ~/.hydra/projects/<id>/mcp.json, where id is the first 16 hex digits of the sha1 of the project's real path. a server turned off there gives that project no tools and no `mcp_errors` entry. other projects that share the same config keep it.
+
 failure : a server that fails to start leaves its tools out and shows in `mcp_errors`. the turn runs with the rest.
 
 ## git tools
@@ -256,6 +260,14 @@ tools : start_background_task takes a shell command and returns task and pid at 
 
 permission : start_background_task asks like run_command and plan skips it. task_output is read only. stop_background_task asks under manual.
 
-output : each task writes stdout and stderr to ~/.hydra/tasks/<task>.log.
+output : each task writes stdout and stderr to ~/.hydra/tasks/<task>.log. its record is ~/.hydra/tasks/<task>.json. on POSIX the exit code also goes to <task>.exit, so it is known after the agent that started the task is gone.
 
-lifetime : a task keeps running after its turn ends. stop sends SIGTERM to its process group, then SIGKILL after 3 seconds. on Windows it terminates the process. shutdown or EOF stops every task. a killed agent leaves them running, and a respawned agent does not know them.
+lifetime : a task keeps running after its turn ends. shutdown or EOF stops every task. a killed agent leaves its tasks running.
+
+adoption : right after `hello` a new agent reads every record still marked running. a task whose process is alive is adopted. it shows in `task_list`, sends `task_update` with adopted true, and `task_stop` and shutdown reach it. a task whose process is gone is marked exited, with the exit code from its .exit file or null, and sends `task_update`. records already ended are not loaded again.
+
+identity : a record holds pid, pgid and the process start time, from /proc on Linux, from `ps` on other POSIX hosts and from GetProcessTimes on Windows. a pid that now names a process with another start time counts as gone, so a reused pid is never adopted or killed.
+
+posix stop : SIGTERM to the process group, then SIGKILL after 3 seconds.
+
+windows stop : each task starts with CREATE_NEW_PROCESS_GROUP. stop runs `taskkill /PID <pid> /T`, then the same with /F after 3 seconds. this branch has only been checked on Linux, by the commands it builds and sends. it has not run on Windows yet.

@@ -11704,6 +11704,7 @@ class _StdioChild:
         import queue
 
         self.home = home
+        self.base = base
         self.project = os.path.join(home, "proj")
         os.makedirs(self.project, exist_ok=True)
         env = {**os.environ, "LOCAL_AI_BASE": base, "HOME": home, "USERPROFILE": home, "PYTHONPATH": REPO,
@@ -12148,7 +12149,7 @@ def _marker_model(seen):
                              "branch": ("git_branch", {"op": "create", "name": "feat/x"}), "master": ("git_branch", {"op": "create", "name": "master"})}
                 tool_name, args = git_calls[name][0], json.dumps(git_calls[name][1])
             elif word.startswith("TASK_"):
-                task_commands = {"start": "echo started; sleep 60", "quick": "echo quick-done; exit 3"}
+                task_commands = {"start": "echo started; sleep 60", "quick": "echo quick-done; exit 3", "short": "sleep 1; exit 4"}
                 tool_name, args = "start_background_task", json.dumps({"command": task_commands[name]})
             elif word.startswith("MCP_"):
                 tool_name, args = "demo__" + name, json.dumps({"text": "ping"})
@@ -12974,7 +12975,7 @@ def stdio_background_tasks_outlive_the_turn_and_stop_on_request():
 
     from hydra_cli.native_tools import BackgroundTasks
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, _env(HOME=tmp, USERPROFILE=tmp):
         tasks = BackgroundTasks()
         heard = []
         tasks.add_listener(heard.append)
@@ -12986,6 +12987,180 @@ def stdio_background_tasks_outlive_the_turn_and_stop_on_request():
         assert out["output"] == "ghij" and out["truncated"] and out["exit_code"] == 0, out
         assert [h["state"] for h in heard] == ["running", "exited"], heard
         assert tasks.output("nope")["isError"] and tasks.start("  ", tmp)["isError"]
+
+
+@contextmanager
+def _env(**values):
+    saved = {k: os.environ.get(k) for k in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+@check
+def stdio_background_tasks_are_adopted_after_a_kill():
+    """A task left running by a killed agent is adopted by the next one, listed, reported and stoppable. Tasks that ended meanwhile are marked ended with their exit code, and a record whose pid now names another process is never adopted."""
+    if os.name == "nt":
+        raise Skip("background task check uses POSIX process groups")
+    stranger = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        with _marker_session() as (first, seen):
+            longer = json.loads([m for m in first.run_turn("a1", "TASK_start", thread="ad", model="local", permission="bypass")
+                                 if m["type"] == "tool_result"][0]["output"])
+            short = json.loads([m for m in first.run_turn("a2", "TASK_short", thread="ad", model="local", permission="bypass")
+                                if m["type"] == "tool_result"][0]["output"])
+            folder = os.path.join(first.home, ".hydra", "tasks")
+            with open(os.path.join(folder, longer["task"] + ".json"), encoding="utf-8") as handle:
+                record = json.load(handle)
+            assert record["pid"] == longer["pid"] and record["identity"] and record["state"] == "running", record
+            forged = dict(record, task="t-forged", pid=stranger.pid, pgid=stranger.pid, identity="linux:1")
+            with open(os.path.join(folder, "t-forged.json"), "w", encoding="utf-8") as handle:
+                json.dump(forged, handle)
+            first.proc.kill()
+            first.proc.wait(timeout=10)
+            assert _group_alive(longer["pid"]), "the task died with the agent"
+            deadline = time.time() + 5
+            while _group_alive(short["pid"]) and time.time() < deadline:
+                time.sleep(0.05)
+
+            second = _StdioChild(first.base, first.home)
+            assert second.next()["type"] == "hello"
+            updates = {}
+            while len(updates) < 3:
+                msg = second.next()
+                assert msg["type"] == "task_update", msg
+                updates[msg["task"]] = msg
+            live, done, fake = updates[longer["task"]], updates[short["task"]], updates["t-forged"]
+            assert live["state"] == "running" and live["adopted"] and live["pid"] == longer["pid"] and live["thread"] == "ad", live
+            assert done["state"] == "exited" and done["exit_code"] == 4 and done["ended"] and done["adopted"], done
+            assert fake["state"] == "exited" and fake["exit_code"] is None, fake
+            assert not [m for m in second.log if m.get("task") == "t-forged" and m["state"] == "running"], "a reused pid was adopted"
+            second.send(type="tasks", id="l")
+            listed = {x["task"]: x for x in second.until("task_list")[-1]["tasks"]}
+            assert listed[longer["task"]]["state"] == "running" and listed[short["task"]]["state"] == "exited"
+            second.send(type="task_stop", id="s", task=longer["task"])
+            replies = second.until("task_list")
+            assert {x["task"]: x for x in replies[-1]["tasks"]}[longer["task"]]["state"] == "stopped"
+            ended = [m for m in replies if m["type"] == "task_update" and m["task"] == longer["task"]]
+            assert ended and ended[-1]["state"] == "stopped" and ended[-1]["ended"], replies
+            assert not _group_alive(longer["pid"]), "task_stop did not reach the adopted task"
+            with open(os.path.join(folder, longer["task"] + ".json"), encoding="utf-8") as handle:
+                assert json.load(handle)["state"] == "stopped"
+            assert second.close() == 0
+            assert stranger.poll() is None, "the agent killed a process that only reused a task pid"
+
+            third = _StdioChild(first.base, first.home)
+            assert third.next()["type"] == "hello"
+            third.send(type="tasks", id="l3")
+            assert third.until("task_list")[-1]["tasks"] == [], "ended tasks were adopted again"
+            assert third.close() == 0
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+@check
+def background_task_platform_paths():
+    """Windows tasks get a new process group and are stopped by taskkill of the tree, polite first and then /F. POSIX tasks get a new session. This host runs only the POSIX processes; the Windows branch is checked by the commands it builds and sends."""
+    from hydra_cli.native_tools import (CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, BackgroundTasks, process_identity,
+                                        task_kill_commands, task_launch, task_spawn_options)
+
+    assert task_spawn_options("nt") == {"creationflags": CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW}
+    assert (CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW) == (0x200, 0x08000000)
+    assert task_spawn_options("posix") == {"start_new_session": True}
+    assert task_launch("npm run dev", "x.exit", "nt") == ("npm run dev", True, {})
+    argv, shell, extra = task_launch("exit 5", "x.exit", "posix")
+    assert argv[:2] == ["/bin/sh", "-c"] and shell is False and extra == {"HYDRA_TASK_CMD": "exit 5", "HYDRA_TASK_EXIT": "x.exit"}
+    assert task_kill_commands(4321) == [["taskkill", "/PID", "4321", "/T"], ["taskkill", "/PID", "4321", "/T", "/F"]]
+
+    me = process_identity(os.getpid())
+    assert me and me == process_identity(os.getpid())
+    gone = subprocess.Popen(["true"])
+    deadline = time.time() + 5
+    while process_identity(gone.pid) is not None and time.time() < deadline:
+        time.sleep(0.02)
+    assert process_identity(gone.pid) is None, "an exited but unreaped child still counts as alive"
+    gone.wait()
+    assert process_identity(gone.pid) is None
+
+    with tempfile.TemporaryDirectory() as tmp, _env(HOME=tmp, USERPROFILE=tmp):
+        posix = BackgroundTasks(platform="posix")
+        made = posix.start("exit 5", tmp)
+        deadline = time.time() + 5
+        while posix.output(made["task"])["state"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+        with open(os.path.join(tmp, ".hydra", "tasks", made["task"] + ".exit"), encoding="utf-8") as handle:
+            assert handle.read() == "5" and posix.output(made["task"])["exit_code"] == 5
+
+        sent = []
+        windows = BackgroundTasks(platform="nt", runner=lambda argv, **kw: sent.append(argv) or (len(sent) == 2 and windows._finish("w1", 1)))
+        windows._tasks["w1"] = {"task": "w1", "pid": 4321, "pgid": 4321, "state": "running", "exit_code": None, "ended": None,
+                                "identity": "nt:1:2", "log": os.path.join(tmp, "w1.log"), "exit_file": ""}
+        windows._ended["w1"] = threading.Event()
+        result = windows.stop("w1", grace=0.2)
+        assert sent == task_kill_commands(4321) and result["state"] == "stopped", (sent, result)
+        sent.clear()
+        windows._tasks["w2"] = dict(windows._tasks["w1"], task="w2", state="running", ended=None)
+        windows._ended["w2"] = threading.Event()
+        windows._runner = lambda argv, **kw: sent.append(argv) or windows._finish("w2", 0)
+        windows.stop("w2", grace=5)
+        assert sent == task_kill_commands(4321)[:1], "a stop that ended the tree still sent /F"
+
+
+@check
+def stdio_mcp_servers_toggle_per_project():
+    """The app turns an MCP server off for one project. Its tools leave that project's turns only, and the choice survives a restart."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            server, log = os.path.join(home, "tiny_mcp.py"), os.path.join(home, "calls.log")
+            with open(server, "w", encoding="utf-8") as handle:
+                handle.write(_TINY_MCP_SERVER)
+            os.makedirs(os.path.join(home, ".hydra"), exist_ok=True)
+            with open(os.path.join(home, ".hydra", "mcp_servers.json"), "w", encoding="utf-8") as handle:
+                json.dump({"mcpServers": {"demo": {"command": sys.executable, "args": [server, log]}}}, handle)
+            calls = lambda: open(log, encoding="utf-8").read().split() if os.path.exists(log) else []
+
+            child = _StdioChild(base, home)
+            child.next()
+            pa, pb = _project(child, "pa"), _project(child, "pb")
+            child.send(type="mcp_toggle", id="x1", cwd=pa, server="demo", enabled=False)
+            status = child.until("mcp_status")[-1]
+            assert status["id"] == "x1" and status["servers"] == [{"name": "demo", "enabled": False, "ok": False, "error": None, "tools": []}], status
+            replies = child.run_turn("p1", "MCP_echo", thread="pa", cwd=pa, model="local", permission="bypass")
+            assert [m["mcp_tools"] for m in replies if m["type"] == "context"] == [[]], replies
+            assert not any(t["function"]["name"] == "demo__echo" for t in seen[0].get("tools", [])), "a disabled server's tool reached the model"
+            assert calls() == [], "a disabled server ran a tool"
+            replies = child.run_turn("p2", "MCP_echo", thread="pb", cwd=pb, model="local", permission="bypass")
+            assert [m["mcp_tools"] for m in replies if m["type"] == "context"] == [["demo__echo"]], replies
+            assert calls() == ["ping"]
+            child.send(type="mcp", id="x2", cwd=pb)
+            assert child.until("mcp_status")[-1]["servers"][0]["enabled"] is True
+            child.send(type="mcp_toggle", id="x3", cwd=pa, server="nope", enabled=False)
+            assert child.until("error")[-1]["code"] == "bad_request"
+            child.send(type="mcp_toggle", id="x4", cwd=pa, server="demo", enabled="no")
+            assert child.until("error")[-1]["code"] == "bad_request"
+            assert child.close() == 0
+
+            again = _StdioChild(base, home)
+            again.next()
+            again.send(type="mcp", id="y1", cwd=pa)
+            assert again.until("mcp_status")[-1]["servers"][0]["enabled"] is False, "the choice did not survive a restart"
+            again.send(type="mcp_toggle", id="y2", cwd=pa, server="demo", enabled=True)
+            status = again.until("mcp_status")[-1]
+            assert status["servers"] == [{"name": "demo", "enabled": True, "ok": True, "error": None, "tools": ["demo__echo"]}], status
+            again.run_turn("p3", "MCP_echo", thread="pa", model="local", permission="bypass")
+            assert calls() == ["ping", "ping"]
+            assert again.close() == 0
+    finally:
+        httpd.shutdown()
 
 
 def main() -> int:
