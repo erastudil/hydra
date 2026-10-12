@@ -4,3 +4,5 @@ pub mod model;
 pub mod proc;
 pub mod crash;
 pub mod health;
+pub mod fsx;
+pub mod git;

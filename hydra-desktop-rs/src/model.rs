@@ -948,6 +948,7 @@ mod tests {
             m.apply(Ev::Token { turn: "t1".into(), text: "a".into() });
             m.apply(Ev::Token { turn: "t2".into(), text: format!("{}", i % 10) });
         }
+        m.select(0); // the user is looking at the other thread while t2 reports a diff
         m.apply(Ev::Diff { turn: "t2".into(), path: "f.txt".into(), diff: "+x".into() });
         m.apply(Ev::Approval { turn: "t1".into(), id: "a1".into(), tool: "bash".into(), args: Value::Null });
         assert_eq!(m.sessions[0].messages.last().unwrap().text, "a".repeat(50));
@@ -957,7 +958,7 @@ mod tests {
         assert_eq!(m.status(0), Status::NeedsApproval);
         assert_eq!(m.status(1), Status::Running);
         m.apply(Ev::Done { turn: "t2".into(), text: "".into(), ok: true, cancelled: false });
-        assert_eq!(m.status(1), Status::Idle);
+        assert_eq!(m.status(1), Status::Unread, "finished in the background while the user looked elsewhere");
         assert!(m.is_running(m.sessions[0].id));
         m.apply(Ev::Done { turn: "t1".into(), text: "".into(), ok: false, cancelled: true });
         assert!(!m.any_busy());
