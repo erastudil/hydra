@@ -302,3 +302,19 @@ fn agent_checkpoints_rewind_undo_and_scoped_always_rules() {
     assert!(r.m.rules.1.is_empty());
     let _ = std::fs::remove_dir_all(&r.dir);
 }
+
+#[test]
+fn a_pinned_drawer_tab_is_not_switched_by_an_incoming_diff() {
+    for pinned in [false, true] {
+        let mut r = rig(if pinned { "pin1" } else { "pin0" }).expect("rig");
+        r.m.drawer_tab = "rules";
+        r.m.tab_pinned = pinned;
+        assert!(r.m.submit(&mut r.be, "WRITE the file"));
+        pump(&mut r, 40, |m| !m.approvals.is_empty());
+        r.m.answer_approval(&mut r.be, "allow");
+        done(&mut r);
+        assert!(!r.m.sessions[0].diffs.is_empty(), "diff arrived");
+        assert_eq!(r.m.drawer_tab, if pinned { "rules" } else { "diff" });
+        let _ = std::fs::remove_dir_all(&r.dir);
+    }
+}

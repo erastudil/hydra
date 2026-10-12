@@ -198,6 +198,7 @@ struct Probe {
     rows: Vec<(f64, f64, &'static str)>,
     last: f64,
     stage: u8,
+    scroll: Option<f32>,
 }
 
 struct ShotPlan {
@@ -247,6 +248,7 @@ impl HydraApp {
         if let Ok(t) = std::env::var("HYDRA_TAB") {
             if let Some(k) = DRAWER_TABS.iter().chain([("files", ""), ("git", ""), ("approvals", ""), ("rules", "")].iter()).find(|d| d.0 == t) {
                 m.drawer_tab = k.0;
+                m.tab_pinned = true;
             }
         }
         if let Ok(f) = std::env::var("HYDRA_FILE") {
@@ -294,7 +296,7 @@ impl HydraApp {
             last_overlay: None,
             births: HashMap::new(),
             births_seen: false,
-            probe: std::env::var("HYDRA_PROBE").ok().map(|path| Probe { path, rows: vec![], last: 0.0, stage: 0 }),
+            probe: std::env::var("HYDRA_PROBE").ok().map(|path| Probe { path, rows: vec![], last: 0.0, stage: 0, scroll: None }),
             open_folder: if std::env::var("HYDRA_OPEN").as_deref() == Ok("folder") { Some((std::env::var("HYDRA_CWD").unwrap_or_default(), String::new())) } else { None },
             rename: None,
             work,
@@ -847,7 +849,11 @@ impl HydraApp {
             self.heights.clear();
             self.heights_width = width_key;
         }
-        ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show_viewport(ui, |ui, viewport| {
+        let mut sa = ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true);
+        if let Some(y) = self.probe.as_ref().and_then(|p| p.scroll) {
+            sa = sa.vertical_scroll_offset(y);
+        }
+        sa.show_viewport(ui, |ui, viewport| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             egui::Frame::new().inner_margin(Margin::same(24)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -2412,10 +2418,30 @@ fn paint_logo(ui: &egui::Ui, rect: egui::Rect) {
     }
 }
 
+/// HYDRA_TIMING=<file>: append "<event> <unix ms>" once per event, for the cold-start measurement.
+pub fn timing_mark(event: &str) {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let Ok(path) = std::env::var("HYDRA_TIMING") else { return };
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.iter().any(|e| e == event) {
+        return;
+    }
+    seen.push(event.to_string());
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{event} {ms}");
+    }
+}
+
 impl eframe::App for HydraApp {
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let started = std::time::Instant::now();
         self.draw(root);
+        if fonts_ready(root.ctx()) {
+            timing_mark("first_frame");
+        }
         let ms = started.elapsed().as_secs_f64() * 1000.0;
         let ctx = root.ctx().clone();
         let t = ctx.input(|i| i.time);
@@ -2438,19 +2464,52 @@ impl HydraApp {
                 2 => self.nav_open = !self.nav_open,
                 3 => self.m.sessions[self.m.active].messages.push(Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: "Probe message arriving with the fade.".into(), actions: vec![] }),
                 4 => self.palette = Some((String::new(), 0)),
+                5 => {
+                    // release bar 4: a 2,000 message transcript, then stream into it and scroll it
+                    self.palette = None;
+                    let msgs = &mut self.m.sessions[self.m.active].messages;
+                    for i in 0..2000 {
+                        let text = match i % 4 {
+                            0 => format!("Question {i}: what does module {i} do?"),
+                            1 => format!("Module {i} parses the config.\n\n```rust\nfn m{i}() -> u32 {{ {i} }}\n```\nIt returns its index."),
+                            2 => format!("{} done.", "Line of a longer answer that wraps across the width of the chat column. ".repeat(3)),
+                            _ => format!("- item a{i}\n- item b{i}\n- item c{i}"),
+                        };
+                        msgs.push(Msg { user: i % 4 == 0, header: if i % 4 == 0 { String::new() } else { "HYDRA ORCHESTRATOR".into() }, text, actions: vec![] });
+                    }
+                    msgs.push(Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: String::new(), actions: vec![] });
+                }
+                7 => p.scroll = Some(0.0),
                 _ => {}
             }
+        }
+        if p.stage == 6 || p.stage == 7 {
+            if let Some(last) = self.m.sessions[self.m.active].messages.last_mut() {
+                last.text.push_str(" token");
+            }
+        }
+        if p.stage == 7 {
+            let k = ((t - p.last) * 4.0).fract() as f32;
+            p.scroll = Some(200_000.0 * if k < 0.5 { k * 2.0 } else { 2.0 - k * 2.0 });
         }
         let tag = match p.stage {
             1 => "idle",
             2 => "nav",
             3 => "msg",
             4 => "palette",
+            5 => "load2000",
+            6 => "stream",
+            7 => "stream_scroll",
             _ => "end",
         };
         p.rows.push((t, ms, tag));
-        if p.stage >= 5 {
-            let csv: String = p.rows.iter().map(|(t, ms, tag)| format!("{t:.4},{ms:.3},{tag}\n")).collect();
+        if p.stage >= 8 {
+            let mut csv: String = p.rows.iter().map(|(t, ms, tag)| format!("{t:.4},{ms:.3},{tag}\n")).collect();
+            if let Ok(st) = std::fs::read_to_string("/proc/self/status") {
+                if let Some(l) = st.lines().find(|l| l.starts_with("VmRSS:")) {
+                    csv.push_str(&format!("# rss_2000_msgs {}\n", l.split_whitespace().nth(1).unwrap_or("0")));
+                }
+            }
             let _ = std::fs::write(&p.path, csv);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         } else {

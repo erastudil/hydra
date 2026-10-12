@@ -186,6 +186,8 @@ pub struct Model {
     pub counter: u32,
     pub nav: &'static str,
     pub drawer_tab: &'static str,
+    /// Set by HYDRA_TAB: incoming diffs must not switch the drawer away.
+    pub tab_pinned: bool,
     pub model: usize,
     pub tokens: u64,
     pub cost: f64,
@@ -269,6 +271,7 @@ impl Model {
             counter: 0,
             nav: "chat",
             drawer_tab: "screen",
+            tab_pinned: false,
             model: 0,
             tokens: 0,
             cost: 0.0,
@@ -892,6 +895,7 @@ impl Model {
     pub fn apply(&mut self, ev: Ev) {
         match ev {
             Ev::Hello { caps } => {
+                crate::app::timing_mark("hello");
                 self.agent_ready = true;
                 self.sent.clear(); // a new agent process: send every field again on each thread's next turn
                 self.agent_checkpoints = caps.iter().any(|c| c == "checkpoint");
@@ -969,7 +973,7 @@ impl Model {
                     if let Some(s) = self.session_mut(sid) {
                         s.diffs.push(DiffItem { path, diff });
                     }
-                    if self.sessions[self.active].id == sid {
+                    if self.sessions[self.active].id == sid && !self.tab_pinned {
                         self.drawer_tab = "diff";
                     }
                 }

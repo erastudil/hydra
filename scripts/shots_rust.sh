@@ -26,4 +26,11 @@ shot cut_off_stream 1280x800 100000 HYDRA_SHOT_SECS=9 HYDRA_DEMO_PROMPT="CUT tes
 shot narrow_820 820x560 60
 shot narrow_900 900x700 60
 shot rules_tab 1280x800 100000 HYDRA_SHOT_SECS=10 HYDRA_TAB=rules HYDRA_DEMO_PROMPT="WRITE the file" HYDRA_PERMISSION=accept_edits
+
+# every drawer tab at both release-bar sizes (pinned via HYDRA_TAB; a diff never yanks the drawer)
+for sz in 1280x800 900x700; do
+  for t in screen term diff agent files git approvals rules; do
+    shot "tab_${t}_${sz}" $sz 100000 HYDRA_SHOT_SECS=9 HYDRA_TAB=$t HYDRA_DEMO_PROMPT="WRITE the file" HYDRA_PERMISSION=accept_edits
+  done
+done
 ls -1 "$OUT"
