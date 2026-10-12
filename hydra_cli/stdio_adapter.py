@@ -229,10 +229,13 @@ class Adapter:
             return self.error("action must be a string and params an object", "bad_request", req=req)
 
         def run() -> None:
+            from hydra_cli import desk_actions
             from hydra_cli.desktop_core import dispatch_command_palette_action
 
             try:
-                result = dispatch_command_palette_action(name, params)
+                result = desk_actions.run(name, params)
+                if result is None:
+                    result = dispatch_command_palette_action(name, params)
             except Exception as exc:
                 return self.error(f"{type(exc).__name__}: {exc}", "action_failed", req=req)
             self.emit({"type": "action_result", "id": req, "action": name, "result": result})
@@ -274,8 +277,12 @@ class Adapter:
                        "output": output[:TOOL_OUTPUT_CHARS], "truncated": len(output) > TOOL_OUTPUT_CHARS})
 
         def usage(u: Dict[str, Any]) -> None:
-            self.emit({"type": "usage", "turn": turn, "model": alias, "prompt_tokens": int(u.get("prompt_tokens") or 0),
-                       "completion_tokens": int(u.get("completion_tokens") or 0)})
+            from hydra_cli.desktop_core import get_token_accounting
+
+            pt, ct = int(u.get("prompt_tokens") or 0), int(u.get("completion_tokens") or 0)
+            rec = get_token_accounting().record_usage(alias, pt, ct)
+            self.emit({"type": "usage", "turn": turn, "model": alias, "prompt_tokens": pt, "completion_tokens": ct,
+                       "cost_usd": rec["total_cost_usd"]})
 
         set_usage_sink(usage)
         set_approval_handler(lambda tool, args_json: self._approve(turn, tool, args_json))
