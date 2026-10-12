@@ -71,7 +71,7 @@ USAGE:
     hydra agent --local "<prompt>"       # Offline local agent loop (Ollama/llama.cpp)
     hydra <alias> --mcp "<prompt>"       # Tool-augmented execution loop
     hydra serve [--port 7777]            # Sovereign OpenAI Gateway for Hermes and Pi
-    hydra desktop [--port 7778]          # Sovereign Desktop App & local Web Desk UI
+    hydra desktop                        # Native desktop app (PySide6 window, no browser)
     hydra mcp list                       # List configured community MCP servers & tools
     hydra sandbox run "<cmd>"            # Isolated zero-trust command execution
     hydra banner                         # Display 3-head TUI Hydra + title wordmark
