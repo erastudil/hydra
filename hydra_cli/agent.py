@@ -10,7 +10,7 @@ from hydra_cli.context import (
     register_label,
     resolve_context_mode,
 )
-from hydra_cli.ui import StreamWrap, clean_pasted_text, approve_tool, diff_sink, drain_steering, prompt_input, tool_sink, render_prompt_box, wrap_text
+from hydra_cli.ui import StreamWrap, clean_pasted_text, approve_tool, diff_sink, drain_steering, prompt_input, tool_sink, tool_start_sink, render_prompt_box, wrap_text
 from hydra_cli._version import __version__
 
 from datetime import datetime, timezone
@@ -232,7 +232,14 @@ DEFAULT_AGENT_SYSTEM_PROMPT = os.environ.get(
         "- Use write_file for creating new files or complete rewrites.\n"
         "- Use run_command to execute test suites, linters, and verification scripts.\n"
         "- Drive tasks to verifiable completion. Do not halt prematurely, do not leave placeholders, stubs, or TODO comments.\n"
-        "- If an execution step fails, analyze the error output and iteratively fix the issue until all tests pass."
+        "- If an execution step fails, analyze the error output and iteratively fix the issue until all tests pass.\n\n"
+        "HARDWIRED AGENT INVARIANTS & SOVEREIGN GENOME:\n"
+        "- Truth Gate: Target software either executes successfully with exit code 0 against real interfaces or target is rejected. Synthetic mocks carry zero truth value.\n"
+        "- Ponytail Wu Wei: Consolidate runnable verification into single-grip deterministic runners; select shortest deterministic transform path.\n"
+        "- Git Discipline: Local work carries zero persistence value until pushed to remote origin. Require trunk convergence and remote synchronization.\n"
+        "- Live Intelligence: For tasks involving AI tools, models, harnesses, or ML, search live web/documentation first; zero reliance on obsolete training weights.\n"
+        "- Software Implementation Language: Require all new software authoring execute in Rust and only Rust until further notice.\n"
+        "- Pool Number Invariant: If asked about the pool number, read kb/reference/beaufort-force-notes.md from the documents root (C:\\Users\\jpm05\\Documents). When speaking or outputting the pool number, speak pool number as integer formatted per active dialect (e.g., 'pool number : 125.' in Progen syntax, or '125' in plain text)."
     ),
 )
 
@@ -308,6 +315,34 @@ def detect_project_rules(cwd: Optional[str] = None) -> Optional[str]:
         if parent == curr:
             break
         curr = parent
+
+    # Fallback to sovereign documents root and global ~/.hydra
+    fallback_targets = [
+        os.path.join(os.path.expanduser("~"), "Documents", "AGENTS.md"),
+        os.path.join(os.path.expanduser("~"), ".hydra", "AGENTS.md"),
+    ]
+    for target in fallback_targets:
+        if not os.path.isfile(target):
+            continue
+        try:
+            with open(target, "r", encoding="utf-8", errors="replace") as handle:
+                content = handle.read()
+            if not content.strip():
+                continue
+            paths = progen_paths(content)
+            chunks = []
+            for path in paths:
+                try:
+                    body = _read_capped(path).strip()
+                    if body:
+                        chunks.append(f"[PROGEN READ FIRST: {os.path.basename(path)}]\n{body}")
+                except OSError:
+                    continue
+            chunks.append(f"[SOVEREIGN CONTEXT & RULES: {os.path.basename(target)}]\n{content}")
+            return "\n\n".join(chunks)
+        except OSError:
+            continue
+
     return None
 
 
@@ -448,15 +483,20 @@ def format_model_picker(active_alias: str, active_summon: str) -> str:
 
 def dialect_instruction(name: str) -> str:
     """Session register block appended after project rules."""
-    key = (name or "progen").strip().lower()
+    key = (name or "slack").strip().lower()
     if key == "syntax":
         key = "progen"
     blocks = {
         "progen": (
             "[REGISTER: progen]\n"
-            "Every unit is topic : comment.\n"
-            "One blank line between units.\n"
-            "Zero leading copula."
+            "Every output statement must strictly follow topic : comment syntax.\n"
+            "Unit structure: exactly one topic : comment per line.\n"
+            "Blank line delimiter: exactly one blank line between each topic : comment statement.\n"
+            "Zero leading copula: never emit leading is, are, was, were in comments; assert raw predicates directly.\n"
+            "Never emit bare numbers, unformatted single words, or raw tokens without topic : comment structure.\n"
+            "Example direct answer query:\n"
+            "pool number : 125.\n\n"
+            "status : operation successful."
         ),
         "instruct": (
             "[REGISTER: instruct]\n"
@@ -468,10 +508,47 @@ def dialect_instruction(name: str) -> str:
         ),
         "slack": (
             "[REGISTER: slack]\n"
-            "Conversational prose permitted."
+            "Standard conversational prose and markdown permitted."
         ),
     }
-    return blocks.get(key, blocks["progen"])
+    return blocks.get(key, blocks["slack"])
+
+
+def _enforce_progen_answer(answer: str, prompt: str = "") -> str:
+    """Format and normalize answer into valid Progen syntax when active."""
+    raw = (answer or "").strip()
+    if not raw:
+        return raw
+
+    m_num = re.fullmatch(r"(\d+(?:\.\d+)?)[\.\s]*", raw)
+    if m_num:
+        val = m_num.group(1)
+        p_lower = prompt.lower()
+        if "pool" in p_lower:
+            return f"pool number : {val}.\n"
+        return f"result : {val}.\n"
+
+    m_pool = re.match(r"(?i)^(?:the\s+)?pool\s+number\s+(?:is\s+|:\s*)(\d+)\.?$", raw)
+    if m_pool:
+        return f"pool number : {m_pool.group(1)}.\n"
+
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    all_topic_comment = True
+    for ln in lines:
+        if not re.match(r"^[^:]+\s*:\s*.+$", ln):
+            all_topic_comment = False
+            break
+
+    if all_topic_comment and lines:
+        normalized = []
+        for ln in lines:
+            top, com = ln.split(":", 1)
+            c_str = com.strip()
+            c_str = re.sub(r"^(?:is|are|was|were)\s+", "", c_str, flags=re.IGNORECASE)
+            normalized.append(f"{top.strip()} : {c_str}")
+        return "\n\n".join(normalized) + "\n"
+
+    return raw
 
 
 def parse_heat(arg: str) -> Optional[float]:
@@ -2804,6 +2881,24 @@ class TurnCancelled(Exception):
     """Raised inside a model call when the caller set the cancel event."""
 
 
+_USAGE_SINK: Optional[Callable[[Dict[str, Any]], None]] = None
+
+
+def set_usage_sink(sink: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+    """Receive the provider usage object (prompt_tokens, completion_tokens) of each completion round."""
+    global _USAGE_SINK
+    _USAGE_SINK = sink
+
+
+def _report_usage(usage: Any) -> None:
+    sink = _USAGE_SINK
+    if sink is not None and isinstance(usage, dict) and usage:
+        try:
+            sink(usage)
+        except Exception:
+            pass
+
+
 def _consume_completion_body(
     resp: Any,
     on_token: Optional[Callable[[str], None]],
@@ -2836,6 +2931,7 @@ def _consume_completion_body(
                 raise ProviderError(f"Empty completion from {where}")
             message = choices[0].get("message") or {}
             _emit_message_content(message, on_token, state)
+            _report_usage(parsed.get("usage"))
             return parsed
         if line.startswith("data:"):
             data = line[5:].strip()
@@ -2850,6 +2946,8 @@ def _consume_completion_body(
                 err = chunk["error"]
                 message = err.get("message") if isinstance(err, dict) else str(err)
                 raise ProviderError(redact(f"Provider error from {where}: {message}"))
+            if isinstance(chunk, dict) and chunk.get("usage"):
+                state["usage"] = chunk["usage"]
             choices = chunk.get("choices") or []
             if not choices:
                 continue
@@ -2880,6 +2978,7 @@ def _consume_completion_body(
     if not saw_done and not state["content"] and not state["tools"] and not state["reasoning"] and not state.get("reasoning_details"):
         raise ProviderError(f"Stream from {where} ended before data: [DONE]")
     finish = "tool_calls" if state["tools"] else "stop"
+    _report_usage(state.get("usage"))
     return {"choices": [{"message": _message_from_stream_state(state), "finish_reason": finish}]}
 
 
@@ -2896,6 +2995,8 @@ def _fetch_streaming_completion(
     """Stream one chat completion and return the assembled message JSON."""
     body = dict(payload)
     body["stream"] = True
+    if os.environ.get("HYDRA_STREAM_USAGE", "1") != "0":
+        body.setdefault("stream_options", {"include_usage": True})
     data = json.dumps(body).encode("utf-8")
     req = Request(url, data=data, headers=headers, method="POST")
     where = describe_endpoint(url)
@@ -3124,6 +3225,14 @@ def _run_agent_loop(
         effective_sys = f"{base_sys}\n\n{rules_context}"
     else:
         effective_sys = base_sys
+    if dialect is None:
+        env_d = os.environ.get("HYDRA_DIALECT", "").lower().strip()
+        if env_d in DIALECTS or env_d == "syntax":
+            dialect = "progen" if env_d in ("syntax", "progen") else env_d
+        elif rules_context and ("dialect : progen" in rules_context.lower() or "dialect: progen" in rules_context.lower() or "default register : progen" in rules_context.lower()):
+            dialect = "progen"
+        else:
+            dialect = "slack"
     register = dialect_instruction(dialect) if dialect else ""
     if register and register not in effective_sys:
         effective_sys = f"{effective_sys}\n\n{register}"
@@ -3422,6 +3531,8 @@ def _run_agent_loop(
         if not tool_calls:
             # Model emitted final answer -> statechart transition to COMPLETED
             final_content = message.get("content", "") or ""
+            if dialect == "progen":
+                final_content = _enforce_progen_answer(final_content, original_prompt)
             checkpointer.final_response = final_content
             checkpointer.transition("COMPLETED")
             ledger.append_turn(
@@ -3583,6 +3694,10 @@ def _run_agent_loop(
                             orig_file_content = f_orig.read()
                     except Exception:
                         orig_file_content = None
+
+            _start_sink = tool_start_sink()
+            if _start_sink is not None:
+                _start_sink(fn_name, args_str)
 
             result_content: Any = None
             interrupted_during_tool = False
@@ -3795,6 +3910,8 @@ def _run_agent_loop(
     sys.stderr.write(f"\n{c_tool_head} Reached maximum iterations ({max_turns}).\n")
     checkpointer.transition("MAX_TURNS")
     last_content = messages[-1].get("content", "Agent loop reached maximum turns without termination.")
+    if dialect == "progen":
+        last_content = _enforce_progen_answer(last_content, original_prompt)
     checkpointer.final_response = last_content
     checkpointer.save()
     return last_content
@@ -3829,6 +3946,11 @@ class HydraReplCompleter:
         "/stack",
         "/skills",
         "/route",
+        "/endpoints",
+        "/budgets",
+        "/credits",
+        "/usage",
+        "/dialect",
         "/help",
         "/exit",
         "/quit",
@@ -4018,11 +4140,21 @@ def run_interactive_agent(
     c_reset = RESET if color_on else ""
 
     target_cwd = os.path.abspath(cwd or os.getcwd())
+    rules_msg = detect_project_rules(target_cwd)
+    rules_label = "Detected (AGENTS.md / .cursorrules / CLAUDE.md)" if rules_msg else "None"
+
+    env_dialect = os.environ.get("HYDRA_DIALECT", "").lower().strip()
+    if env_dialect in DIALECTS or env_dialect == "syntax":
+        active_dialect = "progen" if env_dialect in ("syntax", "progen") else env_dialect
+    elif rules_msg and ("dialect : progen" in rules_msg.lower() or "dialect: progen" in rules_msg.lower() or "default register : progen" in rules_msg.lower()):
+        active_dialect = "progen"
+    else:
+        active_dialect = "slack"
+
     active_alias = DEFAULT_ORCHESTRATOR_MODEL if alias in ("agent", "auto", "orchestrator") else alias
     active_tier = tier
     active_session_id = session_id or f"session_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     active_steer_mode = steer_mode
-    active_dialect = "progen"
     active_effort: Optional[str] = None
     boot_route = resolve_route(active_alias)
     active_runner = boot_route.get("runner")
@@ -4044,9 +4176,6 @@ def run_interactive_agent(
     skip_next_tool = False
     turns_history: List[Tuple[str, str]] = []
     active_ledger = SessionContextLedger(session_id=active_session_id)
-
-    rules_msg = detect_project_rules(target_cwd)
-    rules_label = "Detected (AGENTS.md / .cursorrules / CLAUDE.md)" if rules_msg else "None"
 
     tui = _create_tui()
     if tui is not None:
@@ -4603,6 +4732,11 @@ def run_interactive_agent(
                     sys.stdout.write(f"{c_mid}[Invalid dialect '{arg}'. Valid: {', '.join(DIALECTS)}]{c_reset}\n")
                 sys.stdout.flush()
 
+            elif cmd in ("/endpoints", "/budgets", "/credits", "/usage"):
+                from hydra_cli.endpoints_report import generate_endpoints_report
+                sys.stdout.write(generate_endpoints_report(active_dialect) + "\n")
+                sys.stdout.flush()
+
             elif cmd == "/effort":
                 if not arg:
                     sys.stdout.write(format_effort_picker(active_effort) + "\n")
@@ -4705,6 +4839,10 @@ def run_interactive_agent(
   /skills          Written skill index
   /route           Last gate action, brain, and summon target
   /tier [tier]     Display or switch active tier (free, local, paid, frontier, none)
+  /dialect [name]  Display or set response dialect (progen, slack, instruct, gfc)
+  /endpoints       Query all local endpoints, free quota usage, and credit balances
+  /budgets         Query inference credit balances and rate limits
+  /usage           Display free endpoint quota usage remaining
   /steer [opts]    Toggle or set step-by-step confirmation mode (on/off/status)
   /skip            Skip the next tool call in the next agent turn
   /retry [guide]   Retry the previous turn with optional additional guidance

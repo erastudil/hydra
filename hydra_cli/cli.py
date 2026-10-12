@@ -9,6 +9,8 @@ from hydra_cli.router import route_command
 
 def main():
     from hydra_cli.memory import GateError, launch_sweep
+    if sys.argv[1:2] == ["stdio"]:
+        sys.exit(route_command(sys.argv[1:]))  # the app owns the project dir, no sweep on spawn
     try:
         swept = launch_sweep(os.getcwd())
         if swept and swept["moved"]:

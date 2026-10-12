@@ -1,4 +1,4 @@
-﻿import json
+import json
 import re
 import sqlite3
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -29,6 +29,9 @@ SYNONYMS: Dict[str, Tuple[str, ...]] = {
     "recall": ("context", "ledger"),
     "code": ("source",),
     "source": ("code",),
+    "pool": ("number", "beaufort", "notes"),
+    "number": ("pool", "integer"),
+    "rust": ("cargo", "code"),
 }
 
 STOPWORDS = frozenset({
@@ -187,12 +190,12 @@ class SessionContextLedger:
         found.extend(_PASCAL.findall(text))
         found.extend(_SNAKE.findall(text))
         found.extend(_TICK.findall(text))
-        for word in _WORD.findall(text):
+        for word in re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{2,}\b", text):
             if word.lower() not in STOPWORDS:
                 found.append(word)
-        for word in re.findall(r"\b[a-zA-Z]{3,4}\b", text):
-            if word.lower() in SYNONYMS:
-                found.append(word)
+            for sub in re.findall(r"[a-zA-Z]{3,}", word):
+                if sub.lower() not in STOPWORDS and sub.lower() != word.lower():
+                    found.append(sub)
         return list(dict.fromkeys(found))
 
     def _terms_for(self, keyword: str) -> List[str]:
@@ -212,6 +215,16 @@ class SessionContextLedger:
         )
         conn.execute("INSERT INTO kw (rowid, terms) VALUES (?, ?)", (cur.lastrowid, " ".join(_enc(k) for k in keywords)))
         conn.commit()
+
+    def close_unanswered(self, text: str) -> bool:
+        """Answer a prompt that never got its final reply with an assistant marker, so roles keep alternating.
+        Returns True when it wrote one. The last user, assistant or tool row decides: only an assistant reply without
+        tool calls counts as an answer."""
+        rows = self._select("WHERE role IN ('user', 'assistant', 'tool')", order="id DESC LIMIT 1")
+        if not rows or (rows[0]["role"] == "assistant" and not rows[0].get("tool_calls")):
+            return False
+        self.append_turn(role="assistant", content=text)
+        return True
 
     def categories(self) -> Dict[str, int]:
         return dict(self._conn.execute("SELECT category, COUNT(*) FROM turns GROUP BY category").fetchall())
