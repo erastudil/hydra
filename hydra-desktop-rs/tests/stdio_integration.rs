@@ -416,3 +416,38 @@ fn stopping_a_task_another_live_agent_owns_is_refused_and_shown() {
     drop(other);
     let _ = std::fs::remove_dir_all(&r.dir);
 }
+
+#[test]
+fn rewind_puts_the_conversation_back_and_undo_restores_it() {
+    let mut r = rig("convrewind").expect("rig");
+    pump(&mut r, 20, |m| m.agent_ready);
+    for p in ["first marker-one", "second marker-two"] {
+        assert!(r.m.submit(&mut r.be, p));
+        done(&mut r);
+    }
+    let cps = r.m.sessions[0].checkpoints.clone();
+    assert_eq!(cps.len(), 2);
+    let before = r.m.sessions[0].messages.len();
+    r.m.rewind_code(Some(&mut r.be), 1).unwrap();
+    pump(&mut r, 10, |m| m.sessions[0].pre_rewind.is_some());
+    let texts: Vec<String> = r.m.sessions[0].messages.iter().map(|m| m.text.clone()).collect();
+    let said: Vec<&String> = r.m.sessions[0].messages.iter().filter(|m| m.header != "HYDRA").map(|m| &m.text).collect();
+    assert!(!said.iter().any(|t| t.contains("marker-two")), "the rewound turn is gone from the thread: {said:?}");
+    assert!(texts.iter().any(|t| t.contains("marker-one")));
+    assert!(texts.last().unwrap().contains("files and conversation"), "{texts:?}");
+    // the agent's history agrees: the next request carries turn one but not turn two
+    assert!(r.m.submit(&mut r.be, "third marker-three"));
+    done(&mut r);
+    let users = common::USERS.lock().unwrap().last().cloned().unwrap();
+    assert!(users.iter().any(|u| u.contains("marker-one")) && !users.iter().any(|u| u.contains("marker-two")), "{users:?}");
+    // undo: rewinding to the backup brings turn two back, in the agent and in the thread
+    let mut r2 = r;
+    r2.m.sessions[0].pre_rewind.as_ref().expect("undo point");
+    r2.m.undo_rewind(Some(&mut r2.be)).unwrap();
+    pump(&mut r2, 10, |m| m.sessions[0].messages.last().map(|x| x.text.contains("undone")).unwrap_or(false));
+    let texts: Vec<String> = r2.m.sessions[0].messages.iter().map(|m| m.text.clone()).collect();
+    let said: Vec<&String> = r2.m.sessions[0].messages.iter().filter(|m| m.header != "HYDRA").map(|m| &m.text).collect();
+    assert!(said.iter().any(|t| t.as_str() == "second marker-two"), "undo restored the turn: {texts:?}");
+    assert!(r2.m.sessions[0].messages.len() >= before, "{texts:?}");
+    let _ = std::fs::remove_dir_all(&r2.dir);
+}

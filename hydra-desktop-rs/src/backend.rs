@@ -10,13 +10,14 @@ use std::sync::{Arc, Mutex};
 pub enum Ev {
     Hello { caps: Vec<String> },
     Checkpoint { turn: String, ok: bool, id: Option<String>, reason: String },
-    RewindResult { id: String, backup: String, restored: Vec<String>, removed: Vec<String> },
+    RewindResult { id: String, backup: String, restored: Vec<String>, removed: Vec<String>, conversation: bool, turns: Option<u64> },
     RulesResult { id: String, thread: String, rules: Vec<Value> },
     Token { turn: String, text: String },
     Context { turn: String, rules: Option<String>, skills: Vec<String>, mcp_tools: Vec<String>, mcp_errors: Value },
     Retry { turn: String, attempt: u64, of: u64, wait: f64, reason: String },
     TaskUpdate { task: Value },
     SkillList { id: String, skills: Vec<Value> },
+    SessionList { id: String, sessions: Vec<Value> },
     TaskList { id: String, tasks: Vec<Value> },
     McpStatus { id: String, config: Option<String>, servers: Vec<Value> },
     ToolStart { turn: String, call: u64, tool: String, args: Value },
@@ -49,7 +50,7 @@ pub fn parse_line(line: &str) -> Option<Ev> {
         "checkpoint" => Ev::Checkpoint { turn: s("turn"), ok: b("ok"), id: v.get("id").and_then(|x| x.as_str()).map(String::from), reason: s("reason") },
         "rewind_result" => {
             let list = |k: &str| v.get(k).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
-            Ev::RewindResult { id: s("id"), backup: s("backup"), restored: list("restored"), removed: list("removed") }
+            Ev::RewindResult { id: s("id"), backup: s("backup"), restored: list("restored"), removed: list("removed"), conversation: b("conversation"), turns: v.get("turns").and_then(|x| x.as_u64()) }
         }
         "rules_result" => Ev::RulesResult { id: s("id"), thread: s("thread"), rules: v.get("rules").and_then(|x| x.as_array()).cloned().unwrap_or_default() },
         "token" => Ev::Token { turn: s("turn"), text: s("text") },
@@ -62,6 +63,7 @@ pub fn parse_line(line: &str) -> Option<Ev> {
         },
         "retry" => Ev::Retry { turn: s("turn"), attempt: n("attempt"), of: n("of"), wait: v.get("wait").and_then(|x| x.as_f64()).unwrap_or(0.0), reason: s("reason") },
         "task_update" => Ev::TaskUpdate { task: v.clone() },
+        "session_list" => Ev::SessionList { id: s("id"), sessions: arr(&v, "sessions") },
         "skill_list" => Ev::SkillList { id: s("id"), skills: arr(&v, "skills") },
         "task_list" => Ev::TaskList { id: s("id"), tasks: arr(&v, "tasks") },
         "mcp_status" => Ev::McpStatus { id: s("id"), config: v.get("config").and_then(|x| x.as_str()).map(String::from), servers: arr(&v, "servers") },
@@ -279,6 +281,13 @@ impl Backend {
             m["rule"] = json!(r);
         }
         self.send(m);
+        id
+    }
+
+    /// Threads the agent has on disk. Reply: Ev::SessionList.
+    pub fn sessions(&mut self) -> String {
+        let id = self.req();
+        self.send(json!({"type": "sessions", "id": id}));
         id
     }
 

@@ -34,6 +34,9 @@ enum Cmd {
     EditInstructions,
 }
 
+/// Waits before each automatic agent restart inside one minute (seconds).
+pub const RESPAWN_BACKOFF: &[f64] = &[0.5, 2.0, 5.0];
+
 /// Slash commands typed at the start of the composer. Enter runs the command instead of sending a message.
 pub const SLASH: &[(&str, &str)] = &[
     ("/new", "New thread"),
@@ -295,6 +298,10 @@ pub struct HydraApp {
     probe: Option<Probe>,
     child_died: bool,
     deaths: Vec<f64>,
+    respawn_at: Option<std::time::Instant>,
+    hello_seen: bool,
+    last_exit: String,
+    be_started: f64,
     help_open: bool,
     had_events: bool,
     search: Option<String>,
@@ -409,6 +416,10 @@ impl HydraApp {
             births_seen: false,
             child_died: false,
             deaths: vec![],
+            respawn_at: None,
+            hello_seen: false,
+            last_exit: String::new(),
+            be_started: -1.0,
             had_events: false,
             help_open: std::env::var("HYDRA_OPEN").as_deref() == Ok("help"),
             search: if std::env::var("HYDRA_OPEN").as_deref() == Ok("search") { Some(std::env::var("HYDRA_SEARCH").unwrap_or_default()) } else { None },
@@ -428,6 +439,9 @@ impl HydraApp {
     }
 
     fn retry_backend(&mut self, ctx: &egui::Context) {
+        // the stall timer counts from this spawn, not from app start (a respawn is not "20 s without an answer")
+        self.be_started = ctx.input(|i| i.time);
+        self.m.agent_ready = false;
         let c = ctx.clone();
         match Backend::spawn(move || c.request_repaint()) {
             Ok(b) => {
@@ -608,8 +622,12 @@ impl HydraApp {
         }
         self.had_events |= !evs.is_empty();
         for e in evs {
-            if matches!(e, Ev::Exited(_)) {
+            if let Ev::Exited(why) = &e {
                 self.child_died = true;
+                self.last_exit = why.clone();
+            }
+            if matches!(e, Ev::Hello { .. }) {
+                self.hello_seen = true;
             }
             self.m.apply(e);
         }
@@ -2179,7 +2197,8 @@ impl HydraApp {
     // ---------------------------------------------------------------- modals
     fn startup_panel(&mut self, ctx: &egui::Context) -> bool {
         let fatal = health::fatal_problems(&self.checks).len();
-        let stalled = self.be.is_some() && !self.m.agent_ready && self.started >= 0.0 && ctx.input(|i| i.time) - self.started > 20.0;
+        let since = if self.be_started >= 0.0 { self.be_started } else { self.started };
+        let stalled = self.be.is_some() && !self.m.agent_ready && since >= 0.0 && ctx.input(|i| i.time) - since > 20.0;
         let down = self.be.is_none() && self.start_error.as_deref().is_some_and(|e| e != "backend disabled");
         let show = (fatal > 0 || stalled || down || self.crash_note.is_some()) && !self.panel_dismissed;
         if !show {
@@ -2967,6 +2986,11 @@ impl HydraApp {
         &mut self.m
     }
 
+    /// Process id of the live agent child, None while it is down.
+    pub fn backend_pid(&self) -> Option<u32> {
+        self.be.as_ref().map(|b| b.pid())
+    }
+
     pub fn toast_text(&self) -> Option<&str> {
         self.toast.as_ref().map(|t| t.0.as_str())
     }
@@ -2990,17 +3014,40 @@ impl HydraApp {
         let time = ctx.input(|i| i.time);
         self.drain();
         if std::mem::take(&mut self.child_died) {
-            // protocol "respawn": start a new child at once; three deaths inside a minute stop the loop and show the panel
+            // protocol "respawn": drop the dead handle at once (so the app knows the agent is down), then start a
+            // new child after a backoff of 0.5 s, 2 s, 5 s; a fourth death inside a minute stops and shows the panel
+            self.be = None;
             self.deaths.retain(|t| time - *t < 60.0);
             self.deaths.push(time);
-            if self.deaths.len() <= 3 {
-                self.retry_backend(ctx);
-                self.toast = Some(("Agent restarted after it stopped. The running turn was lost.".into(), f64::NAN));
-            } else {
-                self.be = None;
-                self.start_error = Some("The agent stopped three times in a minute. Press Retry to start it again.".into());
-                self.panel_dismissed = false;
+            let why = if self.last_exit.is_empty() { "agent process ended".to_string() } else { self.last_exit.clone() };
+            match RESPAWN_BACKOFF.get(self.deaths.len() - 1) {
+                Some(wait) => {
+                    self.respawn_at = Some(std::time::Instant::now() + std::time::Duration::from_secs_f64(*wait));
+                    self.toast = Some((format!("The agent stopped ({why}). Restarting in {wait:.1} s; the running turn was lost."), f64::NAN));
+                }
+                None => {
+                    self.respawn_at = None;
+                    self.start_error = Some(format!("the agent stopped {} times in a minute (last: {why}). Press Retry to start it again.", self.deaths.len()));
+                    self.panel_dismissed = false;
+                }
             }
+        }
+        if std::mem::take(&mut self.hello_seen) {
+            // a new agent (first start or respawn): ask again for what lives outside a turn, so adopted tasks show
+            if let Some(be) = &mut self.be {
+                self.m.pending_tasks(be);
+                self.m.list_sessions(be);
+            }
+            self.skills_asked = false;
+            self.mcp_asked = false;
+            self.m.rules.0.clear();
+        }
+        if self.respawn_at.is_some_and(|t| std::time::Instant::now() >= t) {
+            self.respawn_at = None;
+            self.retry_backend(ctx);
+        }
+        if self.respawn_at.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
         if let Ok(c) = self.health_rx.try_recv() {
             self.checks = c;

@@ -9,6 +9,8 @@ fn last_user(body: &Value) -> String {
     body["messages"].as_array().into_iter().flatten().rev().find(|m| m["role"] == "user").map(|m| m["content"].as_str().unwrap_or("").to_string()).unwrap_or_default()
 }
 
+/// User message texts of every request, newest last, so tests can see what history the agent sent.
+pub static USERS: std::sync::Mutex<Vec<Vec<String>>> = std::sync::Mutex::new(Vec::new());
 pub static SYSTEMS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 static FLAKY_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -38,6 +40,7 @@ pub fn handle(mut s: TcpStream) {
     let prompt = last_user(&body);
     let stream = body["stream"].as_bool().unwrap_or(false);
     let has_tool = body["messages"].as_array().into_iter().flatten().any(|m| m["role"] == "tool");
+    USERS.lock().unwrap().push(body["messages"].as_array().into_iter().flatten().filter(|m| m["role"] == "user").map(|m| m["content"].as_str().unwrap_or("").to_string()).collect());
     if let Some(sys) = body["messages"].get(0).filter(|m| m["role"] == "system") {
         SYSTEMS.lock().unwrap().push(sys["content"].to_string());
     }

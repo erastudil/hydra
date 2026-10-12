@@ -70,6 +70,9 @@ pub struct Session {
     /// Own git worktree for this thread. Tools run here instead of the project folder.
     #[serde(default)]
     pub worktree: Option<String>,
+    /// Messages a conversation rewind took away, kept so Undo rewind can put them back.
+    #[serde(default)]
+    pub rewound_tail: Vec<Msg>,
 }
 
 /// A snapshot of the project taken before a message was sent.
@@ -190,7 +193,7 @@ pub enum Pending {
     JobsList,
     JobCreate,
     JobOp,
-    Rewind(u32, String),
+    Rewind(u32, String, usize),
     UndoRewind(u32),
     Rules,
     Query,
@@ -247,6 +250,8 @@ pub struct Model {
     state_was_bad: bool,
     /// An always-rule was just added; reload the Rules list after the agent's next event for it.
     pub rules_stale: bool,
+    /// Threads the current agent process has on disk (session_list), refreshed after every hello.
+    pub agent_threads: Vec<Value>,
     /// Prompt tokens of the last provider request, for the context meter.
     pub last_prompt: u64,
     pub notice: String,
@@ -335,6 +340,7 @@ impl Model {
             caps: vec![],
             state_was_bad: false,
             rules_stale: false,
+            agent_threads: vec![],
             last_prompt: 0,
             cp_pending: HashMap::new(),
             sent: HashMap::new(),
@@ -476,6 +482,7 @@ impl Model {
             checkpoints: vec![],
             pre_rewind: None,
             worktree: None,
+            rewound_tail: vec![],
         });
         self.active = self.sessions.len() - 1;
         self.save();
@@ -674,7 +681,7 @@ impl Model {
             // the agent restores from its shadow repository and snapshots the current state first (the undo point)
             let be = be.ok_or("the agent is not running")?;
             let id = be.rewind(&thread, agent_id);
-            self.pending.insert(id, Pending::Rewind(sid, cp.label.clone()));
+            self.pending.insert(id, Pending::Rewind(sid, cp.label.clone(), cp.at));
             return Ok(cp.label);
         }
         let cwd = self.work_path();
@@ -787,6 +794,11 @@ impl Model {
 
     pub fn toggle_mcp(&mut self, be: &mut Backend, cwd: &str, server: &str, enabled: bool) {
         let id = be.mcp_toggle(cwd, server, enabled);
+        self.act(Pending::Query, id);
+    }
+
+    pub fn list_sessions(&mut self, be: &mut Backend) {
+        let id = be.sessions();
         self.act(Pending::Query, id);
     }
 
@@ -1099,17 +1111,33 @@ impl Model {
                     }
                 }
             }
-            Ev::RewindResult { id, backup, restored, removed } => match self.pending.remove(&id) {
-                Some(Pending::Rewind(sid, label)) => {
+            Ev::RewindResult { id, backup, restored, removed, conversation, turns } => match self.pending.remove(&id) {
+                Some(Pending::Rewind(sid, label, at)) => {
                     if let Some(s) = self.session_mut(sid) {
                         s.pre_rewind = Some(format!("agent:{backup}"));
-                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: format!("Rewound files to before: {label}\n{} restored, {} removed.", restored.len(), removed.len()), actions: vec!["Undo rewind is available".into()] });
+                        // 0cf3884: the agent put the conversation back too, so the thread shows what it had then
+                        let what = if conversation && at <= s.messages.len() {
+                            s.rewound_tail = s.messages.split_off(at);
+                            s.checkpoints.retain(|c| c.at <= at);
+                            format!("files and conversation ({} turns kept)", turns.unwrap_or(0))
+                        } else {
+                            s.rewound_tail.clear();
+                            "files only (this checkpoint kept no conversation)".to_string()
+                        };
+                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: format!("Rewound {what} to before: {label}\n{} restored, {} removed.", restored.len(), removed.len()), actions: vec!["Undo rewind is available".into()] });
                     }
                     self.save();
                 }
                 Some(Pending::UndoRewind(sid)) => {
                     if let Some(s) = self.session_mut(sid) {
-                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: "Rewind undone: files are back as they were.".into(), actions: vec![] });
+                        if conversation && !s.rewound_tail.is_empty() {
+                            // drop the rewind notice and anything said since, then put the rewound turns back
+                            let at = s.messages.iter().rposition(|m| m.header == "HYDRA" && m.text.starts_with("Rewound ")).unwrap_or(s.messages.len());
+                            s.messages.truncate(at);
+                            let tail = std::mem::take(&mut s.rewound_tail);
+                            s.messages.extend(tail);
+                        }
+                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: if conversation { "Rewind undone: files and conversation are back.".into() } else { "Rewind undone: files are back as they were.".into() }, actions: vec![] });
                     }
                     self.save();
                 }
@@ -1152,6 +1180,10 @@ impl Model {
                     self.log(&format!("\n[task {id}] {state} {cmd}{adopted}"));
                     self.tasks.insert(id, task);
                 }
+            }
+            Ev::SessionList { id, sessions } => {
+                self.pending.remove(&id);
+                self.agent_threads = sessions;
             }
             Ev::SkillList { id, skills } => {
                 self.pending.remove(&id);
@@ -1280,7 +1312,7 @@ impl Model {
                 self.fail_bubble(sid, message);
                 self.finish_sid(sid);
             }
-            Pending::Rewind(_, _) | Pending::UndoRewind(_) => self.notice = format!("Rewind failed: {message}"),
+            Pending::Rewind(..) | Pending::UndoRewind(_) => self.notice = format!("Rewind failed: {message}"),
             Pending::Query => self.notice = format!("Agent request failed: {message}"),
             // another live agent owns it (c28b966): only that agent may stop it
             Pending::TaskStop => self.notice = format!("Could not stop the task: {message}"),
@@ -1292,7 +1324,7 @@ impl Model {
         let is_err = r.get("isError").and_then(|x| x.as_bool()).unwrap_or(false);
         let err_text = r.get("error").and_then(|x| x.as_str()).unwrap_or("action failed").to_string();
         match kind {
-            Pending::Rewind(_, _) | Pending::UndoRewind(_) | Pending::Rules | Pending::Query | Pending::TaskStop => {}
+            Pending::Rewind(..) | Pending::UndoRewind(_) | Pending::Rules | Pending::Query | Pending::TaskStop => {}
             Pending::Terminal(sid) => {
                 if is_err {
                     return self.action_failed(Pending::Terminal(sid), &err_text);
