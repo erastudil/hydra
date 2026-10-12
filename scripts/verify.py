@@ -13499,6 +13499,52 @@ def stdio_one_turn_per_thread_across_agents():
         httpd.shutdown()
 
 
+@check
+def stdio_checkpoint_conversations_are_pruned():
+    """Conversation copies beyond the count or older than the age bound are deleted. The newest and the backup a rewind just took always stay, and a pruned checkpoint still rewinds its files."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home, env={"HYDRA_CHECKPOINT_KEEP": "3", "HYDRA_CHECKPOINT_KEEP_DAYS": "7"})
+            child.next()
+            folder = os.path.join(home, ".hydra", "sessions", "pr", "checkpoints")
+            ids = []
+            for n in range(5):
+                replies = child.run_turn(f"p{n}", f"WRITE_f{n} now", thread="pr", model="local")
+                ids.append([m for m in replies if m["type"] == "checkpoint"][0]["id"])
+                time.sleep(0.02)
+            kept = lambda: sorted(f[:-3] for f in os.listdir(folder))
+            assert kept() == sorted(ids[2:]), (kept(), ids)
+            child.send(type="checkpoints", id="l", thread="pr")
+            listed = {c["id"]: c["turns"] for c in child.until("checkpoint_list")[-1]["checkpoints"]}
+            assert [listed[i] is None for i in ids] == [True, True, False, False, False], listed
+
+            child.send(type="rewind", id="w", thread="pr", checkpoint=ids[1])
+            result = child.until("rewind_result")[-1]
+            assert result["conversation"] is False and result["turns"] is None, result
+            assert result["removed"] == ["f1.txt", "f2.txt", "f3.txt", "f4.txt"] and os.path.exists(os.path.join(child.project, "f0.txt"))
+            assert result["backup"] in kept() and len(kept()) == 3, kept()
+
+            old = time.time() - 8 * 86400
+            for sha in kept():
+                os.utime(os.path.join(folder, sha + ".db"), (old, old))
+            replies = child.run_turn("p9", "PLAIN", thread="pr", model="local")
+            newest = [m for m in replies if m["type"] == "checkpoint"][0]["id"]
+            assert kept() == [newest], kept()
+
+            child.send(type="rewind", id="w2", thread="pr", checkpoint=newest)
+            backup = child.until("rewind_result")[-1]["backup"]
+            for sha in kept():
+                os.utime(os.path.join(folder, sha + ".db"), (old, old))
+            child.send(type="rewind", id="w3", thread="pr", checkpoint=ids[4])
+            again = child.until("rewind_result")[-1]
+            assert again["backup"] in kept(), (again, kept())
+            assert child.close() == 0
+    finally:
+        httpd.shutdown()
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")

@@ -227,6 +227,8 @@ store : a bare git repository under ~/.hydra/shadow, one per project directory, 
 
 conversation : each checkpoint also keeps a copy of the thread's ledger.db under ~/.hydra/sessions/<thread>/checkpoints/<id>.db, made with the sqlite backup API. rewind copies it back the same way. the backup checkpoint keeps the conversation as it was before the rewind, so rewinding to the backup undoes both files and conversation. history and the next turn read the rewound conversation.
 
+pruning : each new checkpoint deletes that thread's conversation copies older than HYDRA_CHECKPOINT_KEEP_DAYS, default 7, then the oldest beyond HYDRA_CHECKPOINT_KEEP, default 200, at least 1. the copy just made, for a turn or for a rewind backup, is the newest and always stays. a pruned checkpoint still lists, with turns null, and still rewinds its files, with conversation false. the shadow git commits themselves are not pruned. they share objects, so old ones cost little.
+
 limits : a rewind restores and removes files only. it does not undo commands run outside the project directory and it does not rewind the conversation ledger.
 
 ## mcp servers

@@ -300,7 +300,9 @@ class Adapter:
                 if made.returncode:
                     return {"ok": False, "id": None, "reason": made.stderr.decode("utf-8", "replace").strip()[:300]}
                 sha = self._git(cwd, "rev-parse", "HEAD").stdout.decode().strip()
-            return {"ok": True, "id": sha, "reason": None, "turns": _save_conversation(thread, sha)}
+            turns = _save_conversation(thread, sha)
+            _prune_conversations(thread)
+            return {"ok": True, "id": sha, "reason": None, "turns": turns}
         except Exception as exc:  # git missing or unusable: the turn still runs, the app is told
             return {"ok": False, "id": None, "reason": f"{type(exc).__name__}: {exc}"[:300]}
 
@@ -798,6 +800,28 @@ def _save_conversation(thread: str, sha: str) -> int:
         db.commit()
         db.close()
     return _conversation_turns(copy) or 0
+
+
+def _prune_conversations(thread: str) -> List[str]:
+    """Delete the conversation copies of a thread's checkpoints older than HYDRA_CHECKPOINT_KEEP_DAYS, default 7, then
+    the oldest beyond HYDRA_CHECKPOINT_KEEP, default 200, at least 1. _snapshot prunes right after it makes a copy, for
+    a turn or for a rewind backup. That copy is the newest and was written just now, so neither bound reaches it. A pruned
+    checkpoint still rewinds its files, with conversation false."""
+    import glob
+    import time as _time
+
+    days = float(os.environ.get("HYDRA_CHECKPOINT_KEEP_DAYS", "7"))
+    cap = max(1, int(os.environ.get("HYDRA_CHECKPOINT_KEEP", "200")))
+    folder = os.path.dirname(_conversation_copy(thread, "x"))
+    copies = sorted(glob.glob(os.path.join(folder, "*.db")), key=os.path.getmtime, reverse=True)
+    now = _time.time()
+    gone = []
+    for i, path in enumerate(copies):
+        sha = os.path.basename(path)[:-3]
+        if i >= cap or os.path.getmtime(path) < now - days * 86400:
+            os.remove(path)
+            gone.append(sha)
+    return gone
 
 
 def _restore_conversation(thread: str, sha: str) -> Optional[int]:
