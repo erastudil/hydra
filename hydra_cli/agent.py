@@ -2804,6 +2804,24 @@ class TurnCancelled(Exception):
     """Raised inside a model call when the caller set the cancel event."""
 
 
+_USAGE_SINK: Optional[Callable[[Dict[str, Any]], None]] = None
+
+
+def set_usage_sink(sink: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+    """Receive the provider usage object (prompt_tokens, completion_tokens) of each completion round."""
+    global _USAGE_SINK
+    _USAGE_SINK = sink
+
+
+def _report_usage(usage: Any) -> None:
+    sink = _USAGE_SINK
+    if sink is not None and isinstance(usage, dict) and usage:
+        try:
+            sink(usage)
+        except Exception:
+            pass
+
+
 def _consume_completion_body(
     resp: Any,
     on_token: Optional[Callable[[str], None]],
@@ -2836,6 +2854,7 @@ def _consume_completion_body(
                 raise ProviderError(f"Empty completion from {where}")
             message = choices[0].get("message") or {}
             _emit_message_content(message, on_token, state)
+            _report_usage(parsed.get("usage"))
             return parsed
         if line.startswith("data:"):
             data = line[5:].strip()
@@ -2850,6 +2869,8 @@ def _consume_completion_body(
                 err = chunk["error"]
                 message = err.get("message") if isinstance(err, dict) else str(err)
                 raise ProviderError(redact(f"Provider error from {where}: {message}"))
+            if isinstance(chunk, dict) and chunk.get("usage"):
+                state["usage"] = chunk["usage"]
             choices = chunk.get("choices") or []
             if not choices:
                 continue
@@ -2880,6 +2901,7 @@ def _consume_completion_body(
     if not saw_done and not state["content"] and not state["tools"] and not state["reasoning"] and not state.get("reasoning_details"):
         raise ProviderError(f"Stream from {where} ended before data: [DONE]")
     finish = "tool_calls" if state["tools"] else "stop"
+    _report_usage(state.get("usage"))
     return {"choices": [{"message": _message_from_stream_state(state), "finish_reason": finish}]}
 
 
@@ -2896,6 +2918,8 @@ def _fetch_streaming_completion(
     """Stream one chat completion and return the assembled message JSON."""
     body = dict(payload)
     body["stream"] = True
+    if os.environ.get("HYDRA_STREAM_USAGE", "1") != "0":
+        body.setdefault("stream_options", {"include_usage": True})
     data = json.dumps(body).encode("utf-8")
     req = Request(url, data=data, headers=headers, method="POST")
     where = describe_endpoint(url)

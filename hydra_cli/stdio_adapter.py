@@ -254,7 +254,7 @@ class Adapter:
         return self._decision
 
     def _run_turn(self, turn: str, msg: Dict[str, Any], thread: str) -> None:
-        from hydra_cli.agent import CANCELLED_TEXT, run_agent_loop
+        from hydra_cli.agent import CANCELLED_TEXT, run_agent_loop, set_usage_sink
         from hydra_cli.config import DEFAULT_ORCHESTRATOR_MODEL, get_context_window
         from hydra_cli.context import SessionContextLedger
         from hydra_cli.ui import set_approval_handler, set_diff_sink, set_tool_sink, set_tool_start_sink
@@ -273,6 +273,11 @@ class Adapter:
             self.emit({"type": "tool_result", "turn": turn, "call": calls["n"], "tool": tool, "is_error": bool(is_error),
                        "output": output[:TOOL_OUTPUT_CHARS], "truncated": len(output) > TOOL_OUTPUT_CHARS})
 
+        def usage(u: Dict[str, Any]) -> None:
+            self.emit({"type": "usage", "turn": turn, "model": alias, "prompt_tokens": int(u.get("prompt_tokens") or 0),
+                       "completion_tokens": int(u.get("completion_tokens") or 0)})
+
+        set_usage_sink(usage)
         set_approval_handler(lambda tool, args_json: self._approve(turn, tool, args_json))
         set_diff_sink(lambda path, text: self.emit({"type": "diff", "turn": turn, "path": path, "diff": text}))
         set_tool_start_sink(start)
@@ -293,6 +298,7 @@ class Adapter:
             self.error(f"{type(exc).__name__}: {exc}", "turn_failed", turn=turn)
             self.emit({"type": "done", "turn": turn, "text": "", "ok": False, "cancelled": self._cancel.is_set()})
         finally:
+            set_usage_sink(None)
             set_approval_handler(None)
             set_diff_sink(None)
             set_tool_sink(None)

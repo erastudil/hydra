@@ -98,6 +98,8 @@ tool_result : fields turn, call, tool, is_error, output, truncated. output is cu
 
 diff : fields turn, path, diff. the unified diff of a file change made by write_file or edit_file. sent after the write and before the matching `tool_result`.
 
+usage : fields turn, model, prompt_tokens, completion_tokens. the provider's own usage numbers for one completion round, as reported by the endpoint. sent once per round, only when the provider reports usage. never estimated. the app sums them for the token and cost tally.
+
 approval_request : fields turn, id, tool, arguments. sent only when the turn has approve true. the turn is blocked until the matching `approval`, a `cancel`, `shutdown` or stdin EOF. the last three count as abort.
 
 done : fields turn, text, ok, cancelled. exactly one per turn and always the last message of that turn. text is the final answer, or the cancel marker text when cancelled. ok is false on cancel, abort and failure.
