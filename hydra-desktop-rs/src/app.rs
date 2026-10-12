@@ -99,7 +99,7 @@ impl HydraApp {
         let state = if std::env::var("HYDRA_NO_STATE").is_ok() { None } else { Some(state_dir().join("state.json")) };
         let mut m = Model::new(state, cwd);
         let wake_ctx = cc.egui_ctx.clone();
-        let mut work = Work::new(PathBuf::from(m.project_path()), move || wake_ctx.request_repaint());
+        let mut work = Work::new(PathBuf::from(m.work_path()), move || wake_ctx.request_repaint());
         let ctx = cc.egui_ctx.clone();
         let (be, start_error) = match std::env::var("HYDRA_NO_BACKEND") {
             Ok(_) => (None, Some("backend disabled".to_string())),
@@ -336,6 +336,7 @@ impl HydraApp {
         ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
         let (mut close, mut select, mut add) = (None, None, false);
         let (mut rename, mut pin) = (None, None);
+        let mut wt: Option<(usize, bool)> = None;
         let visible = self.m.visible();
         ui.horizontal_centered(|ui| {
             for &i in &visible {
@@ -378,6 +379,15 @@ impl HydraApp {
                         pin = Some(i);
                         ui.close();
                     }
+                    if s.worktree.is_some() {
+                        if ui.button("Remove worktree").clicked() {
+                            wt = Some((i, false));
+                            ui.close();
+                        }
+                    } else if ui.button("Work in its own git worktree").clicked() {
+                        wt = Some((i, true));
+                        ui.close();
+                    }
                     if ui.button("Archive").clicked() {
                         close = Some(i);
                         ui.close();
@@ -408,6 +418,17 @@ impl HydraApp {
         }
         if rename.is_some() {
             self.rename = rename;
+        }
+        if let Some((i, make)) = wt {
+            let keep = self.m.active;
+            self.m.active = i;
+            let r = if make { self.m.start_worktree().map(|p| format!("Thread now works in its own worktree: {p}")) } else { self.m.remove_worktree().map(|_| "Worktree removed".to_string()) };
+            self.m.active = keep;
+            self.work.note = match r {
+                Ok(t) => t,
+                Err(e) => format!("error: {e}"),
+            };
+            self.m.notice = self.work.note.clone();
         }
         if add {
             self.m.new_session();
@@ -1725,8 +1746,24 @@ impl eframe::App for HydraApp {
                 self.m.select(keep.min(self.m.sessions.len() - 1));
             }
         }
+        let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        for p in dropped {
+            let shown = match p.strip_prefix(&self.work.root) {
+                Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+                Err(_) => p.display().to_string(),
+            };
+            if shown.contains(' ') {
+                self.m.notice = format!("cannot attach a path with spaces: {shown}");
+                continue;
+            }
+            if !self.input.is_empty() && !self.input.ends_with(' ') {
+                self.input.push(' ');
+            }
+            self.input.push_str(&format!("@{shown} "));
+            self.focus_input = true;
+        }
         self.shortcuts(ctx);
-        self.work.set_root(PathBuf::from(self.m.project_path()));
+        self.work.set_root(PathBuf::from(self.m.work_path()));
         self.work.poll();
         if matches!(self.m.drawer_tab, "files" | "git") {
             self.work.refresh(false);

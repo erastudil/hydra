@@ -65,6 +65,9 @@ pub struct Session {
     /// Checkpoint taken just before the last rewind, so a rewind can be undone.
     #[serde(default)]
     pub pre_rewind: Option<String>,
+    /// Own git worktree for this thread. Tools run here instead of the project folder.
+    #[serde(default)]
+    pub worktree: Option<String>,
 }
 
 /// A snapshot of the project taken before a message was sent.
@@ -339,6 +342,7 @@ impl Model {
             permission: default_permission(),
             checkpoints: vec![],
             pre_rewind: None,
+            worktree: None,
         });
         self.active = self.sessions.len() - 1;
         self.save();
@@ -434,6 +438,41 @@ impl Model {
         self.projects.iter().find(|p| p.id == self.active_project).map(|p| p.path.clone()).unwrap_or_else(|| self.cwd.clone())
     }
 
+    /// Where the active thread works: its own worktree if it has one, else the project folder.
+    pub fn work_path(&self) -> String {
+        self.sessions[self.active].worktree.clone().unwrap_or_else(|| self.project_path())
+    }
+
+    /// Give the active thread its own git worktree on a new branch `hydra/<slug>`.
+    pub fn start_worktree(&mut self) -> Result<String, String> {
+        let sid = self.sessions[self.active].id;
+        if self.is_running(sid) {
+            return Err("stop the running turn first".into());
+        }
+        if self.sessions[self.active].worktree.is_some() {
+            return Err("this thread already has a worktree".into());
+        }
+        let root = self.project_path();
+        let name = format!("{}-{}", self.sessions[self.active].name, self.sessions[self.active].id);
+        let path = crate::git::worktree_add(std::path::Path::new(&root), &name)?;
+        let shown = path.display().to_string();
+        self.sessions[self.active].worktree = Some(shown.clone());
+        self.save();
+        Ok(shown)
+    }
+
+    pub fn remove_worktree(&mut self) -> Result<(), String> {
+        let sid = self.sessions[self.active].id;
+        if self.is_running(sid) {
+            return Err("stop the running turn first".into());
+        }
+        let wt = self.sessions[self.active].worktree.clone().ok_or("this thread has no worktree")?;
+        crate::git::worktree_remove(std::path::Path::new(&self.project_path()), std::path::Path::new(&wt))?;
+        self.sessions[self.active].worktree = None;
+        self.save();
+        Ok(())
+    }
+
     pub fn is_running(&self, sid: u32) -> bool {
         self.runs.values().any(|&s| s == sid)
     }
@@ -497,7 +536,7 @@ impl Model {
             return Err("stop the running turn before rewinding".into());
         }
         let cp = self.sessions[self.active].checkpoints.get(i).cloned().ok_or("no such checkpoint")?;
-        let cwd = self.project_path();
+        let cwd = self.work_path();
         let root = std::path::Path::new(&cwd);
         let thread = self.sessions[self.active].thread.clone();
         let pre = crate::git::checkpoint(root, &format!("{thread}/pre-rewind"))?;
@@ -515,7 +554,7 @@ impl Model {
             return Err("stop the running turn first".into());
         }
         let pre = self.sessions[self.active].pre_rewind.take().ok_or("nothing to undo")?;
-        let cwd = self.project_path();
+        let cwd = self.work_path();
         crate::git::restore(std::path::Path::new(&cwd), &pre)?;
         self.sessions[self.active].messages.push(Msg { user: false, header: "HYDRA".into(), text: "Rewind undone: files are back as they were.".into(), actions: vec![] });
         self.save();
@@ -578,7 +617,7 @@ impl Model {
             let s = &self.sessions[self.active];
             (s.id, s.thread.clone())
         };
-        let cwd = self.project_path();
+        let cwd = self.work_path();
         let model = MODELS[self.model].0;
         let header = MODELS[self.model].1.to_uppercase();
         let chat_like = !matches!(self.nav, "terminal" | "swarm");

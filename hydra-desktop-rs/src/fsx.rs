@@ -149,7 +149,9 @@ pub fn expand_mentions(prompt: &str, root: &Path) -> (String, Vec<String>) {
             if rel.is_empty() || used.iter().any(|u| u == rel) {
                 continue;
             }
-            if let Ok(p) = safe_join(root, rel) {
+            // inside the project by relative path, or an absolute path the user typed or dropped
+            let p = if Path::new(rel).is_absolute() { Ok(PathBuf::from(rel)) } else { safe_join(root, rel) };
+            if let Ok(p) = p {
                 if p.is_file() {
                     used.push(rel.to_string());
                 }
@@ -161,7 +163,8 @@ pub fn expand_mentions(prompt: &str, root: &Path) -> (String, Vec<String>) {
     }
     let mut out = prompt.to_string();
     for rel in &used {
-        let body = safe_join(root, rel).ok().and_then(|p| read_text(&p).ok()).unwrap_or_else(|| "(could not read this file)".into());
+        let full = if Path::new(rel).is_absolute() { Some(PathBuf::from(rel)) } else { safe_join(root, rel).ok() };
+        let body = full.and_then(|p| read_text(&p).ok()).unwrap_or_else(|| "(could not read this file)".into());
         out.push_str(&format!("\n\n--- attached file: {rel} ---\n{body}\n--- end of {rel} ---"));
     }
     (out, used)
@@ -266,6 +269,12 @@ mod tests {
         assert!(p.contains("remember the milk") && p.starts_with("look at @notes.txt"));
         let (p2, u2) = expand_mentions("no mentions here", &d);
         assert_eq!((p2.as_str(), u2.len()), ("no mentions here", 0));
+        let outside = tmp("mention-out");
+        std::fs::write(outside.join("o.txt"), "from elsewhere").unwrap();
+        let (p3, u3) = expand_mentions(&format!("read @{}", outside.join("o.txt").display()), &d);
+        assert_eq!(u3.len(), 1);
+        assert!(p3.contains("from elsewhere"));
+        let _ = std::fs::remove_dir_all(outside);
         assert_eq!(mention_prefix("see @src/ap"), Some("src/ap"));
         assert_eq!(mention_prefix("see src"), None);
         let _ = std::fs::remove_dir_all(d);
