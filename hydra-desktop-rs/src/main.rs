@@ -1,10 +1,9 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+use hydra_desktop::{app, theme};
 
-mod app;
-mod theme;
-mod widgets;
 
 fn main() -> eframe::Result<()> {
+    hydra_desktop::crash::install();
     let size = std::env::var("HYDRA_SIZE").ok().and_then(|s| {
         let (w, h) = s.split_once('x')?;
         Some([w.parse::<f32>().ok()?, h.parse::<f32>().ok()?])
@@ -12,7 +11,7 @@ fn main() -> eframe::Result<()> {
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Hydra")
         .with_inner_size(size)
-        .with_min_inner_size([820.0, 560.0]);
+        .with_min_inner_size(theme::RESP_MIN_WINDOW);
     if let Some(icon) = theme::window_icon() {
         viewport = viewport.with_icon(icon);
     }

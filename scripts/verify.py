@@ -922,7 +922,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "summon" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and "browser_fill_form" in names and "computer_find_window" in names and len(names) == 46
+        assert "read_file" in names and "summon" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and "browser_fill_form" in names and "computer_find_window" in names and {"git_status", "git_diff", "git_commit", "git_branch", "start_background_task", "task_output", "stop_background_task"} <= set(names) and len(names) == 53
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -1957,7 +1957,7 @@ def context_modes_agent_loop():
             db = sqlite3.connect(recall.ledger_path)
             cats = dict(db.execute("SELECT category, COUNT(*) FROM turns GROUP BY category"))
             db.close()
-            assert cats.get("instruction") == 1 and cats.get("error") == 1 and cats.get("chat") == 2 and cats.get("code") == 1, cats
+            assert cats.get("instruction") == 1 and cats.get("error") == 1 and cats.get("chat") == 3 and cats.get("code") == 1, cats  # chat holds the marker that answers the seeded lunch prompt
             assert [t["role"] for t in SessionContextLedger(session_id="gate_modes_a").turns][-2:] == ["user", "assistant"]
 
             # Mode B: turns stay live until 80 percent of the window, then older ones become one summary.
@@ -1985,7 +1985,7 @@ def context_modes_agent_loop():
 
 def _scripted_model(script):
     """Local HTTP model endpoint. script(handler, body) writes the whole reply. Returns (httpd, base_url)."""
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class Scripted(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -1995,7 +1995,7 @@ def _scripted_model(script):
         def log_message(self, *args):
             pass
 
-    httpd = HTTPServer(("127.0.0.1", 0), Scripted)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Scripted)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
 
@@ -2049,8 +2049,9 @@ def agent_loop_cancel_tool_round():
             assert result == CANCELLED_TEXT, result
             assert ledger._db is None
             turns = SessionContextLedger(session_id="gate_cancel_tools").turns
-            assert [t["role"] for t in turns][-2:] == ["assistant", "tool"], [t["role"] for t in turns]
-            results = turns[-1]["tool_results"]
+            assert [t["role"] for t in turns][-3:] == ["assistant", "tool", "assistant"], [t["role"] for t in turns]
+            assert turns[-1]["content"] == CANCELLED_TEXT, turns[-1]
+            results = turns[-2]["tool_results"]
             assert len(results) == 2 and all(r["result"] == "[Tool execution cancelled by user]" for r in results), results
             assert "cancelmarker" not in dispatch_native("memory_search", {"query": "cancelmarker0"})
     finally:
@@ -10835,9 +10836,24 @@ def wave22_session_logger_and_mimo_routing():
 
 
 @check
+def stdio_children_never_open_a_console():
+    """Every Popen the adapter process makes carries CREATE_NO_WINDOW on Windows, and main() installs that."""
+    import inspect
+    from hydra_cli import stdio_adapter as sa
+
+    assert sa.CREATE_NO_WINDOW == 0x08000000
+    assert sa.hidden_popen_kwargs({})["creationflags"] & 0x08000000
+    kept = sa.hidden_popen_kwargs({"creationflags": 0x200})["creationflags"]
+    assert kept == 0x200 | 0x08000000, "existing flags must survive"
+    assert sa.hide_child_consoles() is (os.name == "nt")
+    assert "hide_child_consoles()" in inspect.getsource(sa.main), "main must install the patch before serving"
+
+
+@check
 def desktop_launcher_targets_rust_exe():
     """The PySide6 app is gone. hydra desktop and the shortcut point at the Rust exe and say so when it is missing."""
-    assert not os.path.exists(os.path.join(REPO, "hydra_cli", "gui"))
+    gui_dir = os.path.join(REPO, "hydra_cli", "gui")
+    assert not (os.path.isdir(gui_dir) and any(f.endswith(".py") for f in os.listdir(gui_dir)))
     sys.path.insert(0, os.path.join(REPO, "scripts"))
     import create_desktop_shortcut as cds
     from hydra_cli import router
@@ -11638,6 +11654,1993 @@ def atmem_invariants_gate_context_and_episodes():
         assert out.returncode == 1 and "INV-GIT-001 : violated" in out.stdout, out.stdout + out.stderr
         out = subprocess.run([sys.executable, "-m", "hydra_cli.invariants", "check", fixture("final")], cwd=REPO, capture_output=True, text=True, env={**os.environ, "HYDRA_HOME": os.path.join(tmp, "hh")})
         assert out.returncode == (0 if progen_here else 1), out.stdout + out.stderr
+
+
+def _stdio_model(seen, tool=None, tokens=("alpha ", "beta ", "gamma"), pause=None, fail=False, sent=None):
+    """Scripted model for the stdio adapter. Replies with one tool call first when `tool` is set, then streams text."""
+    pause = pause if pause is not None else [0.0]
+    sent = sent if sent is not None else []
+
+    def script(handler, body):
+        seen.append(body)
+        if fail:
+            data = b'{"error":{"message":"scripted failure"}}'
+            handler.send_response(500)
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+            return
+        first = body["messages"][0]["content"]
+        if isinstance(first, str) and first.startswith("Summarize"):
+            data = json.dumps({"choices": [{"message": {"role": "assistant", "content": "SCRIPTED SUMMARY keeps parse_widget"}, "finish_reason": "stop"}]}).encode()
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+            return
+        if tool and not any(m.get("role") == "tool" for m in body["messages"]):
+            args = json.dumps(tool["arguments"])
+            chunks = [
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": tool["name"], "arguments": ""}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]},
+            ]
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.end_headers()
+            for chunk in chunks:
+                handler.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            handler.wfile.write(b"data: [DONE]\n\n")
+            handler.wfile.flush()
+            return
+        _sse(handler, tokens, pause[0], sent)
+
+    return _scripted_model(script)
+
+
+class _StdioChild:
+    """The real adapter as a child process, driven over pipes the way the native app will."""
+
+    def __init__(self, base, home, env=None):
+        import queue
+
+        self.home = home
+        self.base = base
+        self.project = os.path.join(home, "proj")
+        os.makedirs(self.project, exist_ok=True)
+        env = {**os.environ, "LOCAL_AI_BASE": base, "HOME": home, "USERPROFILE": home, "PYTHONPATH": REPO,
+               "PYTHONIOENCODING": "utf-8", **(env or {})}
+        self.stderr = tempfile.TemporaryFile()
+        self.proc = subprocess.Popen([sys.executable, "-m", "hydra_cli", "stdio"], cwd=home, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE, stderr=self.stderr, env=env)
+        self.queue = queue.Queue()
+        self.log = []
+        self.unparsed = []
+        self._empty = queue.Empty
+        self.hang_up = False
+        self.pump = threading.Thread(target=self._pump, daemon=True)
+        self.pump.start()
+
+    def _pump(self):
+        for raw in self.proc.stdout:
+            try:
+                msg = json.loads(raw.decode("utf-8"))
+                assert isinstance(msg, dict) and raw.endswith(b"\n")
+            except (ValueError, AssertionError):
+                self.unparsed.append(raw)
+                continue
+            self.log.append(msg)
+            self.queue.put(msg)
+            if self.hang_up:
+                break
+        self.proc.stdout.close()
+        self.queue.put(None)
+
+    def send(self, **msg):
+        self.send_raw(json.dumps(msg).encode("utf-8") + b"\n")
+
+    def send_raw(self, data):
+        self.proc.stdin.write(data)
+        self.proc.stdin.flush()
+
+    def next(self, timeout=20):
+        try:
+            msg = self.queue.get(timeout=timeout)
+        except self._empty:
+            raise AssertionError(f"no message in {timeout}s, log so far {self.log}")
+        assert msg is not None, f"adapter closed stdout, exit {self.proc.poll()}, log {self.log}"
+        return msg
+
+    def until(self, kind, timeout=20, turn=None):
+        """Read until a message of this type (and turn). Returns every message read, the match last."""
+        seen = []
+        while True:
+            msg = self.next(timeout)
+            seen.append(msg)
+            if msg["type"] == kind and (turn is None or msg.get("turn") == turn):
+                return seen
+
+    def turn(self, turn, prompt, thread="t1", **extra):
+        extra.setdefault("cwd", self.project)
+        self.send(type="turn", turn=turn, prompt=prompt, thread=thread, **extra)
+
+    def run_turn(self, turn, prompt, thread="t1", **extra):
+        self.turn(turn, prompt, thread, **extra)
+        return self.until("done", turn=turn)
+
+    def close(self, how="shutdown"):
+        """End the child. Returns its exit code. Fails if any stdout line was not a protocol object."""
+        try:
+            if how == "shutdown":
+                self.send(type="shutdown")  # stdin stays open: only the message may end the process
+            else:
+                self.proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            code = self.proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            raise AssertionError("adapter did not exit")
+        self.proc.stdin.close()
+        self.stderr.seek(0)
+        assert not self.unparsed, f"non protocol bytes on stdout: {self.unparsed[:3]}"
+        return code
+
+
+@contextmanager
+def _stdio_session(**model):
+    seen = []
+    httpd, base = _stdio_model(seen, **model)
+    with tempfile.TemporaryDirectory() as home:
+        child = _StdioChild(base, home)
+        try:
+            assert child.next()["type"] == "hello"
+            yield child, seen
+        finally:
+            if child.proc.poll() is None:
+                child.proc.kill()
+            httpd.shutdown()
+
+
+@check
+def stdio_handshake_and_exit():
+    """hello first, version mismatch exits 2, shutdown and stdin EOF exit 0."""
+    seen = []
+    httpd, base = _stdio_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home)
+            hello = child.next()
+            assert hello["type"] == "hello" and hello["protocol"] == 1 and hello["agent"] == "hydra", hello
+            assert {"turn", "cancel", "approval", "sessions", "history", "action"} <= set(hello["capabilities"])
+            assert hello["context_modes"] == ["recall", "compact", "sliding"]
+            child.send(type="hello", protocol=1)
+            child.send(type="sessions", id="s1")
+            assert child.next()["type"] == "session_list"
+            assert child.close("shutdown") == 0
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home)
+            child.next()
+            child.send(type="hello", protocol=99)
+            err = child.next()
+            assert err["type"] == "error" and err["code"] == "version", err
+            assert child.close("eof") == 2
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home)
+            child.next()
+            assert child.close("eof") == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_bad_input_never_kills_the_adapter():
+    """Malformed lines, unknown types, bad fields and unknown ids all get an error and the adapter keeps serving."""
+    with _stdio_session(fail=True) as (child, seen):
+        child.send_raw(b"{not json\n")
+        assert child.next()["code"] == "malformed"
+        child.send_raw(b"\xff\xfe\n")
+        assert child.next()["code"] == "malformed"
+        child.send_raw(b"[1, 2]\n")
+        assert child.next()["code"] == "malformed"
+        child.send_raw(b'{"type": 7}\n')
+        assert child.next()["code"] == "malformed"
+        child.send(type="warp_drive", id="w1")
+        err = child.next()
+        assert err["type"] == "error" and err["code"] == "unknown_type" and err["id"] == "w1", err
+        child.send(type="turn", turn="bad", prompt="", thread="", cwd="/no/such/dir", mode="loud")
+        err = child.next()
+        assert err["code"] == "bad_request" and err["turn"] == "bad", err
+        for needle in ("prompt", "thread", "cwd", "mode"):
+            assert needle in err["message"], err
+        child.send(type="cancel", turn="nothing")
+        assert child.next()["code"] == "unknown_turn"
+        child.send(type="approval", id="a9", decision="allow")
+        assert child.next()["code"] == "unknown_approval"
+        child.send(type="approval", id="a9", decision="maybe")
+        assert child.next()["code"] == "bad_request"
+        child.send_raw(b"x" * ((1 << 20) + 5) + b"\n")
+        assert child.next()["code"] == "line_too_long"
+        child.send(type="history", id="h1", thread="")
+        assert child.next()["code"] == "bad_request"
+        child.send(type="action", id="x1", action="no:such:action", params={})
+        res = child.until("action_result")[-1]
+        assert res["id"] == "x1" and res["result"]["isError"] is True, res
+        # a provider failure inside a turn is an error then done, and the adapter lives on
+        replies = child.run_turn("t-fail", "hello")
+        assert [m["type"] for m in replies][-2:] == ["error", "done"], replies
+        assert replies[-2]["code"] == "turn_failed" and replies[-2]["turn"] == "t-fail"
+        assert replies[-1]["ok"] is False and replies[-1]["cancelled"] is False
+        child.send(type="sessions", id="alive")
+        assert child.until("session_list")[-1]["id"] == "alive"
+        assert child.close() == 0
+
+
+@check
+def stdio_streamed_turn_and_clean_stdout():
+    """Tokens arrive in order, done carries the final text, and nothing else reaches stdout, even prints and child processes."""
+    with _stdio_session(tokens=("alpha ", "beta ", "gamma")) as (child, seen):
+        replies = child.run_turn("t1", "say three words", model="local")
+        tokens = [m["text"] for m in replies if m["type"] == "token"]
+        assert "".join(tokens).strip() == "alpha beta gamma" and tokens.index("alpha ") < tokens.index("beta ") < tokens.index("gamma"), tokens
+        done = replies[-1]
+        assert done == {"type": "done", "turn": "t1", "text": "alpha beta gamma", "ok": True, "cancelled": False}, done
+        assert all(m["turn"] == "t1" for m in replies if m["type"] in ("token", "done"))
+        assert seen[0]["stream"] is True and "say three words" in json.dumps(seen[0]["messages"])
+        assert child.close() == 0
+    # the guard itself: stray prints, raw descriptor writes and inherited child output land on stderr
+    probe = (
+        "import os, subprocess, sys, threading, time\n"
+        "from hydra_cli import stdio_adapter\n"
+        "def noise():\n"
+        "    time.sleep(0.5)\n"
+        "    print('STRAY PRINT'); sys.stdout.write('STRAY WRITE\\n'); os.write(1, b'STRAY FD\\n')\n"
+        "    subprocess.run([sys.executable, '-c', \"print('STRAY CHILD')\"])\n"
+        "threading.Thread(target=noise, daemon=True).start()\n"
+        "sys.exit(stdio_adapter.main())\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", probe], cwd=REPO, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, env={**os.environ, "PYTHONPATH": REPO})
+    time.sleep(2.5)
+    out, err = proc.communicate(timeout=30)
+    lines = out.decode("utf-8").splitlines()
+    assert proc.returncode == 0 and [json.loads(l)["type"] for l in lines] == ["hello"], (lines, err)
+    for stray in (b"STRAY PRINT", b"STRAY WRITE", b"STRAY FD", b"STRAY CHILD"):
+        assert stray in err, (stray, err)
+
+
+@check
+def stdio_approval_round_trip():
+    """allow runs the tool, skip does not, abort ends the turn, cancel releases a waiting approval. The filesystem proves each."""
+    tool = {"name": "write_file", "arguments": {"path": "out.txt", "content": "written\n"}}
+    with _stdio_session(tool=tool) as (child, seen):
+        target = os.path.join(child.project, "out.txt")
+
+        child.turn("allow", "write it", thread="ta", approve=True, model="local")
+        req = child.until("approval_request")[-1]
+        assert req["turn"] == "allow" and req["tool"] == "write_file" and req["arguments"]["path"] == "out.txt" and req["id"], req
+        assert not os.path.exists(target), "tool ran before the approval"
+        child.send(type="approval", id=req["id"], decision="allow")
+        replies = child.until("done", turn="allow")
+        kinds = [m["type"] for m in replies]
+        assert kinds.index("tool_start") < kinds.index("tool_result") < kinds.index("done"), kinds
+        start = replies[kinds.index("tool_start")]
+        result = replies[kinds.index("tool_result")]
+        assert start["call"] == result["call"] == 1 and start["tool"] == "write_file" and result["is_error"] is False, (start, result)
+        assert replies[-1]["ok"] is True
+        assert open(target, encoding="utf-8").read() == "written\n"
+        os.remove(target)
+
+        child.turn("skip", "write it", thread="tb", approve=True, model="local")
+        req = child.until("approval_request")[-1]
+        before = len(seen)
+        child.send(type="approval", id=req["id"], decision="skip")
+        replies = child.until("done", turn="skip")
+        assert not os.path.exists(target), "a skipped tool ran"
+        assert "tool_start" not in [m["type"] for m in replies] and replies[-1]["ok"] is True
+        assert any(m.get("role") == "tool" and "skipped" in m["content"] for m in seen[before]["messages"]), "the model was not told"
+
+        child.turn("abort", "write it", thread="tc", approve=True, model="local")
+        req = child.until("approval_request")[-1]
+        before = len(seen)
+        child.send(type="approval", id=req["id"], decision="abort")
+        done = child.until("done", turn="abort")[-1]
+        assert done["ok"] is False and done["cancelled"] is False, done
+        assert not os.path.exists(target) and len(seen) == before, "abort let the turn go on"
+
+        child.turn("cancel", "write it", thread="td", approve=True, model="local")
+        child.until("approval_request")
+        child.send(type="cancel", turn="cancel")
+        done = child.until("done", turn="cancel")[-1]
+        assert done["cancelled"] is True and done["ok"] is False and not os.path.exists(target), done
+
+        replies = child.run_turn("free", "write it", thread="te", model="local")
+        assert "approval_request" not in [m["type"] for m in replies], "approve defaults to off"
+        assert open(target, encoding="utf-8").read() == "written\n"
+        assert child.close() == 0
+
+
+@check
+def stdio_diff_event_for_edit_file():
+    """An edit_file turn emits the real unified diff, before the tool result, and the file changes on disk."""
+    tool = {"name": "edit_file", "arguments": {"path": "notes.txt", "old_text": "beta", "new_text": "BETA"}}
+    with _stdio_session(tool=tool) as (child, seen):
+        target = os.path.join(child.project, "notes.txt")
+        with open(target, "w", encoding="utf-8", newline="") as handle:
+            handle.write("alpha\nbeta\ngamma\n")
+        replies = child.run_turn("e1", "edit it", model="local")
+        kinds = [m["type"] for m in replies]
+        diffs = [m for m in replies if m["type"] == "diff"]
+        assert len(diffs) == 1 and diffs[0]["turn"] == "e1" and diffs[0]["path"] == "notes.txt", diffs
+        text = diffs[0]["diff"].splitlines()
+        assert text[:2] == ["--- a/notes.txt", "+++ b/notes.txt"] and "-beta" in text and "+BETA" in text and " alpha" in text, text
+        assert kinds.index("tool_start") < kinds.index("diff") < kinds.index("tool_result"), kinds
+        assert open(target, encoding="utf-8").read() == "alpha\nBETA\ngamma\n"
+        assert child.close() == 0
+
+
+@check
+def stdio_mid_turn_cancel():
+    """cancel stops a slow turn, the endpoint sees the client hang up, a second turn is refused while busy, and a fresh turn then completes."""
+    pause = [0.1]
+    sent = []
+    with _stdio_session(tokens=tuple(f"w{n} " for n in range(100)), pause=pause, sent=sent) as (child, seen):
+        child.turn("slow", "count", model="local")
+        child.until("token")
+        child.turn("second", "count again", model="local")
+        err = child.until("error")[-1]
+        assert err["code"] == "busy" and err["turn"] == "second", err
+        child.send(type="cancel", turn="slow")
+        replies = child.until("done", turn="slow")
+        done = replies[-1]
+        assert done["cancelled"] is True and done["ok"] is False, done
+        streamed = [m for m in replies if m["type"] == "token"]
+        assert len(streamed) < 90, len(streamed)
+        deadline = time.time() + 10
+        while "<client closed>" not in sent and time.time() < deadline:
+            time.sleep(0.05)
+        assert "<client closed>" in sent, "the endpoint never saw the client close"
+        pause[0] = 0.0
+        sent.clear()
+        tokens_after = child.run_turn("after", "count", model="local")
+        assert tokens_after[-1]["ok"] is True and tokens_after[-1]["text"].startswith("w0 w1"), tokens_after[-1]
+        assert child.close() == 0
+
+
+@check
+def stdio_context_modes_reach_the_model():
+    """recall, compact and sliding each change what the model endpoint receives, and compact summarizes near the window."""
+    with _stdio_session() as (child, seen):
+        trace = "traceback in parse_widget\n" + "x = 1\n" * 30
+        sent = {}
+        for mode in ("recall", "sliding", "compact"):
+            thread = f"m_{mode}"
+            child.run_turn(f"{mode}1", trace, thread=thread, mode=mode, model="local")
+            child.run_turn(f"{mode}2", "lunch order for the team", thread=thread, mode=mode, model="local")
+            child.run_turn(f"{mode}3", "why does parse_widget fail", thread=thread, mode=mode, model="local")
+            sent[mode] = json.dumps(seen[-1]["messages"])
+        assert "traceback in parse_widget" in sent["recall"] and "lunch order" not in sent["recall"] and "[RETRIEVED CONTEXT]" in sent["recall"]
+        assert "lunch order" in sent["sliding"] and "[PRIOR TURNS]" in sent["sliding"] and "[RETRIEVED CONTEXT]" not in sent["sliding"]
+        assert "traceback in parse_widget" in sent["compact"] and "lunch order" in sent["compact"] and "SCRIPTED SUMMARY" not in sent["compact"]
+        filler = " pad" * 400
+        summarized = False
+        for n in range(10):
+            before = len(seen)
+            child.run_turn(f"big{n}", f"turn{n}_marker" + filler, thread="m_big", mode="compact", model="local", context_chars=8000)
+            summarized = any(str(b["messages"][0]["content"]).startswith("Summarize") for b in seen[before:])
+            if summarized:
+                break
+        assert summarized, "compact never summarized"
+        child.run_turn("after", "next question", thread="m_big", mode="compact", model="local", context_chars=8000)
+        assert "SCRIPTED SUMMARY" in json.dumps(seen[-1]["messages"])
+        assert child.close() == 0
+
+
+@check
+def stdio_sessions_history_and_actions():
+    """sessions and history read the thread the turns wrote, and action reaches a real desktop service."""
+    with _stdio_session(tokens=("stored answer",)) as (child, seen):
+        child.run_turn("h1", "remember the walrus", thread="keep-me", model="local")
+        child.send(type="sessions", id="s1")
+        listing = child.until("session_list")[-1]
+        assert listing["id"] == "s1" and "keep-me" in [s["thread"] for s in listing["sessions"]], listing
+        child.send(type="history", id="h1", thread="keep-me")
+        hist = child.until("history_result")[-1]
+        assert hist["id"] == "h1" and hist["thread"] == "keep-me", hist
+        joined = json.dumps(hist["turns"])
+        assert "remember the walrus" in joined and "stored answer" in joined, hist
+        child.send(type="history", id="h2", thread="keep-me", limit=1)
+        assert len(child.until("history_result")[-1]["turns"]) == 1
+        child.send(type="action", id="x1", action="token:summary", params={})
+        res = child.until("action_result")[-1]
+        assert res["id"] == "x1" and res["action"] == "token:summary" and res["result"]["isError"] is False and "summary" in res["result"], res
+        assert child.close() == 0
+
+
+@check
+def stdio_permission_modes():
+    """manual asks, accept_edits lets edits through, plan skips writes, allow_always sticks to one thread and tool, bypass never asks."""
+    def write(name):
+        return {"name": "write_file", "arguments": {"path": name, "content": "x\n"}}
+
+    def kinds(replies):
+        return [m["type"] for m in replies]
+
+    with _stdio_session(tool=write("w.txt")) as (child, seen):
+        target = os.path.join(child.project, "w.txt")
+
+        replies = child.run_turn("plan", "write", thread="p1", permission="plan", model="local")
+        auto = [m for m in replies if m["type"] == "auto_decision"]
+        assert len(auto) == 1 and auto[0]["decision"] == "skip" and auto[0]["tool"] == "write_file", replies
+        assert "approval_request" not in kinds(replies) and "tool_start" not in kinds(replies)
+        assert not os.path.exists(target) and replies[-1]["ok"] is True, "plan mode wrote a file"
+
+        replies = child.run_turn("edits", "write", thread="p2", permission="accept_edits", model="local")
+        auto = [m for m in replies if m["type"] == "auto_decision"]
+        assert auto and auto[0]["decision"] == "allow" and "approval_request" not in kinds(replies), replies
+        assert kinds(replies).index("auto_decision") < kinds(replies).index("tool_start")
+        assert open(target, encoding="utf-8").read() == "x\n"
+        os.remove(target)
+
+        replies = child.run_turn("bypass", "write", thread="p3", permission="bypass", model="local")
+        assert "approval_request" not in kinds(replies) and "auto_decision" not in kinds(replies) and os.path.exists(target)
+        os.remove(target)
+
+        child.turn("m1", "write", thread="p4", permission="manual", model="local")
+        req = child.until("approval_request")[-1]
+        assert not os.path.exists(target)
+        child.send(type="approval", id=req["id"], decision="allow_always")
+        child.until("done", turn="m1")
+        assert os.path.exists(target)
+        os.remove(target)
+        replies = child.run_turn("m2", "write", thread="p4", permission="manual", model="local")
+        auto = [m for m in replies if m["type"] == "auto_decision"]
+        assert auto and auto[0]["decision"] == "allow" and "approval_request" not in kinds(replies) and os.path.exists(target), replies
+        os.remove(target)
+        replies = child.run_turn("m2p", "write", thread="p4", permission="plan", model="local")  # plan mode ignores the saved rule
+        assert [m["decision"] for m in replies if m["type"] == "auto_decision"] == ["skip"] and not os.path.exists(target), replies
+        child.turn("m3", "write", thread="p5", permission="manual", model="local")  # another thread still asks
+        req = child.until("approval_request")[-1]
+        child.send(type="approval", id=req["id"], decision="skip")
+        child.until("done", turn="m3")
+        assert not os.path.exists(target)
+
+        child.send(type="turn", turn="bad", prompt="hi", thread="p6", cwd=child.project, permission="root")
+        assert child.until("error")[-1]["code"] == "bad_request"
+        assert child.close() == 0
+
+    with _stdio_session(tool={"name": "run_command", "arguments": {"command": "echo hi"}}) as (child, seen):
+        child.turn("cmd", "run it", thread="p7", permission="accept_edits", model="local")
+        req = child.until("approval_request")[-1]
+        assert req["tool"] == "run_command", req
+        child.send(type="approval", id=req["id"], decision="abort")
+        assert child.until("done", turn="cmd")[-1]["ok"] is False
+        assert child.close() == 0
+
+    with _stdio_session(tool={"name": "read_file", "arguments": {"path": "r.txt"}}) as (child, seen):
+        with open(os.path.join(child.project, "r.txt"), "w", encoding="utf-8") as handle:
+            handle.write("readable\n")
+        replies = child.run_turn("read", "read it", thread="p8", permission="plan", model="local")
+        auto = [m for m in replies if m["type"] == "auto_decision"]
+        assert auto and auto[0]["decision"] == "allow", replies
+        result = [m for m in replies if m["type"] == "tool_result"][0]
+        assert result["is_error"] is False and "readable" in result["output"], result
+        replies = child.run_turn("read2", "read it", thread="p9", permission="accept_edits", model="local")
+        assert "approval_request" not in kinds(replies) and any(m["type"] == "auto_decision" and m["decision"] == "allow" for m in replies), replies
+        assert child.close() == 0
+
+
+def _marker_model(seen):
+    """Scripted model that acts on a marker in the last user message. SLOW streams for a while, WRITE_<name> writes that file, anything else answers with the marker."""
+    def script(handler, body):
+        seen.append(body)
+        users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        prompt = users[-1] if users else ""
+        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "RUN_", "MCP_", "GIT_", "TASK_", "PLAIN"))] or ["PLAIN"])[-1]
+        if word.startswith("SLOW"):
+            return _sse(handler, [f"{word}-{n} " for n in range(200)], 0.05, [])
+        if word.startswith(("WRITE_", "EDIT_", "RUN_", "MCP_", "GIT_", "TASK_")) and not any(m.get("role") == "tool" for m in body["messages"]):
+            name = word.split("_", 1)[1]
+            commands = {"status": "echo hello", "chain": "echo hello && echo bye", "other": "echo other", "near": "echo hellothere", "delete": "rm keep.txt"}
+            if word.startswith("RUN_"):
+                tool_name, args = "run_command", json.dumps({"command": commands[name]})
+            elif word.startswith("GIT_"):
+                git_calls = {"status": ("git_status", {}), "diff": ("git_diff", {}), "commit": ("git_commit", {"message": "add a"}),
+                             "branch": ("git_branch", {"op": "create", "name": "feat/x"}), "master": ("git_branch", {"op": "create", "name": "master"})}
+                tool_name, args = git_calls[name][0], json.dumps(git_calls[name][1])
+            elif word.startswith("TASK_"):
+                task_commands = {"start": "echo started; sleep 60", "quick": "echo quick-done; exit 3", "short": "sleep 1; exit 4"}
+                tool_name, args = "start_background_task", json.dumps({"command": task_commands[name]})
+            elif word.startswith("MCP_"):
+                tool_name, args = "demo__" + name, json.dumps({"text": "ping"})
+            else:
+                tool_name, args = "write_file", json.dumps({"path": name + ".txt", "content": f"content of {name}\n"})
+            chunks = [
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": tool_name, "arguments": ""}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]},
+            ]
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.end_headers()
+            for chunk in chunks:
+                handler.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            handler.wfile.write(b"data: [DONE]\n\n")
+            handler.wfile.flush()
+            return
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.end_headers()
+        handler.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': 'reply-to-' + word}}]})}\n\n".encode())
+        handler.wfile.flush()
+        time.sleep(0.4)  # keep parallel turns overlapping until their usage arrives
+        usage = {"choices": [], "usage": {"prompt_tokens": 100 + len(word), "completion_tokens": len(word)}}
+        handler.wfile.write(f"data: {json.dumps(usage)}\n\ndata: [DONE]\n\n".encode())
+        handler.wfile.flush()
+
+    return _scripted_model(script)
+
+
+@contextmanager
+def _marker_session():
+    seen = []
+    httpd, base = _marker_model(seen)
+    with tempfile.TemporaryDirectory() as home:
+        child = _StdioChild(base, home)
+        try:
+            assert child.next()["type"] == "hello"
+            yield child, seen
+        finally:
+            if child.proc.poll() is None:
+                child.proc.kill()
+            httpd.shutdown()
+
+
+def _project(child, name):
+    path = os.path.join(child.home, name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+@check
+def stdio_parallel_turns_share_nothing():
+    """Turns on different threads run at once. Approvals, diffs, usage, tokens and cancel each stay with their own turn."""
+    with _marker_session() as (child, seen):
+        pa, pb, pc, pe = (_project(child, n) for n in ("pa", "pb", "pc", "pe"))
+        child.turn("A", "SLOW please", thread="ta", cwd=pa, model="local")
+        child.turn("B", "WRITE_b now", thread="tb", cwd=pb, permission="manual", model="local")
+        child.turn("C", "WRITE_c now", thread="tc", cwd=pc, permission="manual", model="local")
+        child.turn("E", "WRITE_e now", thread="te", cwd=pe, permission="manual", model="local")
+        child.turn("A2", "PLAIN", thread="ta", cwd=pa, model="local")
+        assert child.until("error")[-1]["code"] == "busy"  # same thread
+        child.turn("A", "PLAIN", thread="tz", cwd=pa, model="local")
+        assert child.until("error")[-1]["code"] == "busy"  # same turn id
+        by_turn = {name: [] for name in "ABCEDPQ"}
+        arrived = []
+        while len(arrived) < 3:
+            msg = child.next()
+            if msg.get("turn") in by_turn:
+                by_turn[msg["turn"]].append(msg)
+            if msg["type"] == "approval_request":
+                arrived.append(msg)
+        assert {m["turn"] for m in arrived} == {"B", "C", "E"} and len({m["id"] for m in arrived}) == 3
+        for m in arrived:
+            assert m["arguments"]["path"] == m["turn"].lower() + ".txt", m
+        decisions = {"B": "allow", "C": "skip", "E": "allow"}
+        for m in reversed(arrived):  # answer in the opposite order from arrival
+            child.send(type="approval", id=m["id"], decision=decisions[m["turn"]])
+        done = set()
+        while done != {"B", "C", "E"}:
+            msg = child.next()
+            if msg.get("turn") in by_turn:
+                by_turn[msg["turn"]].append(msg)
+            if msg["type"] == "done":
+                done.add(msg["turn"])
+        for name, folder in (("b", pb), ("e", pe)):
+            assert open(os.path.join(folder, name + ".txt"), encoding="utf-8").read() == f"content of {name}\n"
+        assert not os.path.exists(os.path.join(pc, "c.txt")) and not os.path.exists(os.path.join(pa, "b.txt"))
+        assert [m["path"] for m in by_turn["B"] if m["type"] == "diff"] == ["b.txt"]
+        assert [m["path"] for m in by_turn["E"] if m["type"] == "diff"] == ["e.txt"]
+        assert not [m for m in by_turn["C"] if m["type"] == "diff"]
+        assert all(m["type"] in ("checkpoint", "context", "token", "usage") for m in by_turn["A"]), by_turn["A"]
+        # usage numbers come from each turn's own provider reply
+        child.turn("P", "PLAIN1", thread="tp", cwd=pa, model="local")
+        child.turn("Q", "PLAIN22222", thread="tq", cwd=pa, model="local")
+        done = set()
+        while done != {"P", "Q"}:
+            msg = child.next()
+            if msg.get("turn") in by_turn:
+                by_turn[msg["turn"]].append(msg)
+            if msg["type"] == "done":
+                done.add(msg["turn"])
+        for name, word in (("P", "PLAIN1"), ("Q", "PLAIN22222")):
+            usage = [m for m in by_turn[name] if m["type"] == "usage"]
+            assert len(usage) == 1 and usage[0]["prompt_tokens"] == 100 + len(word) and usage[0]["completion_tokens"] == len(word), (name, usage)
+        # cancel reaches only the turn it names
+        child.turn("D", "SLOW again", thread="td", cwd=pa, model="local")
+        child.until("token", turn="D")
+        child.send(type="cancel", turn="D")
+        while True:
+            msg = child.next()
+            if msg["type"] == "done" and msg["turn"] == "D":
+                assert msg["cancelled"] is True
+                break
+            assert not (msg["type"] == "done" and msg["turn"] == "A"), "cancel of D stopped A"
+        child.send(type="cancel", turn="A")
+        replies = child.until("done", turn="A")
+        assert replies[-1]["cancelled"] is True
+        assert not [m for m in replies if m["type"] == "token" and m["turn"] == "A" and not m["text"].startswith("SLOW")]
+        assert child.close() == 0
+
+
+@check
+def stdio_turn_limit_and_internal_errors():
+    """The ninth parallel turn is refused, a broken ledger is an error not a crash, and a closed stdout exits 70."""
+    with _marker_session() as (child, seen):
+        for n in range(8):
+            child.turn(f"s{n}", "SLOW", thread=f"lim{n}", model="local")
+        child.turn("nine", "PLAIN", thread="lim9", model="local")
+        err = child.until("error")[-1]
+        assert err["code"] == "busy" and err["turn"] == "nine", err
+        for n in range(8):
+            child.send(type="cancel", turn=f"s{n}")
+        left = {f"s{n}" for n in range(8)}
+        while left:
+            msg = child.next()
+            if msg["type"] == "done":
+                left.discard(msg["turn"])
+        bad = os.path.join(child.home, ".hydra", "sessions", "broken")
+        os.makedirs(bad, exist_ok=True)
+        with open(os.path.join(bad, "ledger.db"), "wb") as handle:
+            handle.write(b"this is not a sqlite file" * 40)
+        child.send(type="history", id="hb", thread="broken")
+        err = child.until("error")[-1]
+        assert err["code"] == "internal" and err["id"] == "hb", err
+        child.send(type="sessions", id="alive")
+        assert child.until("session_list")[-1]["id"] == "alive"
+        child.hang_up = True  # the app stops reading and closes its end of stdout
+        child.send(type="sessions", id="last")
+        child.pump.join(timeout=20)
+        assert not child.pump.is_alive()
+        child.send(type="sessions", id="gone")
+        assert child.proc.wait(timeout=20) == 70
+        child.stderr.seek(0)
+        assert b"stdout closed by the app" in child.stderr.read()
+
+
+@check
+def stdio_tool_result_is_cut_at_4000_characters():
+    """A long tool output arrives cut to 4000 characters with truncated true, a short one whole with truncated false."""
+    with _stdio_session(tool={"name": "read_file", "arguments": {"path": "big.txt"}}) as (child, seen):
+        with open(os.path.join(child.project, "big.txt"), "w", encoding="utf-8") as handle:
+            handle.write("0123456789" * 900)
+        result = [m for m in child.run_turn("big", "read it", model="local") if m["type"] == "tool_result"][0]
+        assert result["truncated"] is True and len(result["output"]) == 4000, (result["truncated"], len(result["output"]))
+        assert child.close() == 0
+    with _stdio_session(tool={"name": "read_file", "arguments": {"path": "small.txt"}}) as (child, seen):
+        with open(os.path.join(child.project, "small.txt"), "w", encoding="utf-8") as handle:
+            handle.write("tiny\n")
+        result = [m for m in child.run_turn("small", "read it", model="local") if m["type"] == "tool_result"][0]
+        assert result["truncated"] is False and "tiny" in result["output"], result
+        assert child.close() == 0
+
+
+@check
+def stdio_thread_resumes_after_restart():
+    """A thread keeps its project, mode, model and context across a restart, and a new thread without a cwd is refused."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            first = _StdioChild(base, home)
+            first.next()
+            project = _project(first, "resumed")
+            done = first.run_turn("r1", "PLAIN remember zebra", thread="keep", cwd=project, mode="sliding", model="local", permission="bypass")[-1]
+            assert done["ok"] is True
+            assert first.close() == 0
+
+            second = _StdioChild(base, home)
+            second.next()
+            second.send(type="sessions", id="s")
+            entry = [x for x in second.until("session_list")[-1]["sessions"] if x["thread"] == "keep"][0]
+            assert entry["cwd"] == project and entry["mode"] == "sliding" and entry["model"] == "local", entry
+            assert entry["permission"] == "bypass" and entry["title"] == "PLAIN remember zebra", entry
+            second.send(type="history", id="h", thread="keep")
+            assert second.until("history_result")[-1]["meta"]["cwd"] == project
+            second.send(type="turn", turn="r2", prompt="WRITE_resumed now", thread="keep")
+            replies = second.until("done", turn="r2")
+            assert replies[-1]["ok"] is True, replies
+            assert open(os.path.join(project, "resumed.txt"), encoding="utf-8").read() == "content of resumed\n"
+            assert "zebra" in json.dumps(seen[-1]["messages"]) or any("zebra" in json.dumps(b["messages"]) for b in seen[-2:]), "context was not resumed"
+            second.send(type="turn", turn="r3", prompt="PLAIN", thread="brand-new")
+            err = second.until("error")[-1]
+            assert err["code"] == "bad_request" and "cwd" in err["message"], err
+            assert second.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_approval_rules_with_command_prefixes():
+    """allow_always can name a command prefix and a scope, chained commands never match, rules list and remove, and they survive a restart."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home)
+            child.next()
+            proj, other = _project(child, "rp"), _project(child, "rq")
+            counter = [0]
+
+            def run(thread, key, answer=None, cwd=proj, **fields):
+                """Run one RUN_<key> turn. Returns (asked, auto_decisions, tool_output) and answers a request with `answer`."""
+                counter[0] += 1
+                name = f"u{counter[0]}"
+                child.turn(name, f"RUN_{key} now", thread=thread, cwd=cwd, permission="manual", model="local")
+                asked, auto, errors = None, [], []
+                while True:
+                    msg = child.next()
+                    if msg["type"] == "approval_request":
+                        asked = msg
+                        child.send(type="approval", id=msg["id"], decision=answer or "skip", **fields)
+                    elif msg["type"] == "auto_decision":
+                        auto.append(msg)
+                    elif msg["type"] == "error":
+                        errors.append(msg)
+                    elif msg["type"] == "done" and msg["turn"] == name:
+                        return asked, auto, errors
+
+            asked, auto, errors = run("t1", "status", "allow_always", prefix="echo hello")
+            assert asked["tool"] == "run_command" and not auto and not errors
+            asked, auto, errors = run("t1", "status")
+            assert asked is None and len(auto) == 1 and auto[0]["decision"] == "allow" and auto[0]["rule"], (asked, auto)
+            rule_id = auto[0]["rule"]
+            asked, auto, errors = run("t1", "chain")
+            assert asked is not None and not auto, "a chained command matched a prefix rule"
+            asked, auto, errors = run("t1", "other")
+            assert asked is not None and not auto, "an unrelated command matched"
+            asked, auto, errors = run("t1", "near")
+            assert asked is not None and not auto, "a prefix matched in the middle of a word"
+            asked, auto, errors = run("t2", "status")
+            assert asked is not None and not auto, "a thread rule leaked to another thread"
+            asked, auto, errors = run("t1", "other", "allow_always", prefix="rm")
+            assert len(errors) == 1 and errors[0]["code"] == "bad_request", errors
+            child.send(type="rules", id="r1", thread="t1")
+            rules = child.until("rules_result")[-1]["rules"]
+            assert [(r["id"], r["tool"], r["prefix"], r["scope"]) for r in rules] == [(rule_id, "run_command", "echo hello", "thread")], rules
+
+            asked, auto, errors = run("t1", "other", "allow_always", scope="project", prefix="echo other")
+            assert not errors
+            asked, auto, errors = run("t3", "other")  # same project, other thread
+            assert asked is None and auto and auto[0]["decision"] == "allow", (asked, auto)
+            asked, auto, errors = run("t4", "other", cwd=other)  # other project asks
+            assert asked is not None
+            child.send(type="rules", id="r2", thread="t3")
+            rules = child.until("rules_result")[-1]["rules"]
+            assert [(r["prefix"], r["scope"]) for r in rules] == [("echo other", "project")], rules
+            assert child.close() == 0
+
+            again = _StdioChild(base, home)
+            again.next()
+            again.send(type="turn", turn="z1", prompt="RUN_other now", thread="t3", permission="manual", model="local")
+            kinds = [m["type"] for m in again.until("done", turn="z1")]
+            assert "auto_decision" in kinds and "approval_request" not in kinds, kinds
+            again.send(type="rules", id="r3", thread="t1", op="remove", rule=rule_id)
+            assert [r["scope"] for r in again.until("rules_result")[-1]["rules"]] == ["project"]
+            again.send(type="turn", turn="z2", prompt="RUN_status now", thread="t1", permission="manual", model="local")
+            req = again.until("approval_request")[-1]  # the removed rule no longer lets it through
+            again.send(type="approval", id=req["id"], decision="skip")
+            again.until("done", turn="z2")
+            assert again.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_checkpoint_and_rewind():
+    """Each turn is snapshotted in a shadow repository. Rewind restores edits, recreates deletions, removes new files, leaves ignored files and the project's own git alone, and can be undone."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home)
+            child.next()
+            proj = _project(child, "cp")
+
+            def put(name, text):
+                with open(os.path.join(proj, name), "w", encoding="utf-8", newline="") as handle:
+                    handle.write(text)
+
+            def get(name):
+                with open(os.path.join(proj, name), encoding="utf-8", newline="") as handle:
+                    return handle.read()
+
+            def git(*args):
+                return subprocess.run(["git", *args], cwd=proj, capture_output=True, text=True, check=True).stdout
+
+            put("keep.txt", "keep\n")
+            put("edit.txt", "v1\n")
+            put(".gitignore", "ignored.log\n")
+            put("ignored.log", "log one\n")
+            git("init", "--quiet")
+            git("-c", "user.name=t", "-c", "user.email=t@t", "add", "-A")
+            git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "--quiet", "-m", "seed")
+            own_head = git("rev-parse", "HEAD")
+
+            ids = []
+            for turn, prompt in (("k1", "WRITE_edit"), ("k2", "WRITE_new"), ("k3", "RUN_delete")):
+                replies = child.run_turn(turn, prompt + " now", thread="cp", cwd=proj, permission="bypass", model="local")
+                cps = [m for m in replies if m["type"] == "checkpoint"]
+                assert len(cps) == 1 and cps[0]["ok"] is True and cps[0]["turn"] == turn and cps[0]["id"], replies
+                assert replies.index(cps[0]) < [m["type"] for m in replies].index("done")
+                ids.append(cps[0]["id"])
+            assert len(set(ids)) == 3
+            assert get("edit.txt") == "content of edit\n" and get("new.txt") == "content of new\n" and not os.path.exists(os.path.join(proj, "keep.txt"))
+            put("ignored.log", "log two\n")
+
+            child.run_turn("o1", "PLAIN", thread="cp-other", cwd=proj, permission="bypass", model="local")  # same project, other thread
+            child.send(type="checkpoints", id="c1", thread="cp")
+            listed = child.until("checkpoint_list")[-1]["checkpoints"]
+            assert sorted(c["turn"] for c in listed) == ["k1", "k2", "k3"] and {c["id"] for c in listed} == set(ids), listed
+
+            child.send(type="rewind", id="w1", thread="cp", checkpoint=ids[0])
+            res = child.until("rewind_result")[-1]
+            assert res["id"] == "w1" and res["checkpoint"] == ids[0] and res["backup"], res
+            assert get("edit.txt") == "v1\n" and get("keep.txt") == "keep\n" and not os.path.exists(os.path.join(proj, "new.txt"))
+            assert get("ignored.log") == "log two\n", "an ignored file was touched"
+            assert sorted(res["restored"]) == ["edit.txt", "keep.txt"] and res["removed"] == ["new.txt"], res
+
+            child.send(type="rewind", id="w2", thread="cp", checkpoint=res["backup"])  # undo the rewind
+            again = child.until("rewind_result")[-1]
+            assert get("edit.txt") == "content of edit\n" and get("new.txt") == "content of new\n" and not os.path.exists(os.path.join(proj, "keep.txt")), again
+
+            child.turn("k5", "SLOW", thread="cp", permission="bypass", model="local")
+            child.until("token", turn="k5")
+            child.send(type="rewind", id="wb", thread="cp", checkpoint=ids[0])
+            assert child.until("error")[-1]["code"] == "busy"
+            child.send(type="cancel", turn="k5")
+            child.until("done", turn="k5")
+
+            child.send(type="rewind", id="w3", thread="cp", checkpoint="0" * 40)
+            assert child.until("error")[-1]["code"] == "bad_request"
+            child.send(type="rewind", id="w4", thread="nobody", checkpoint=ids[0])
+            assert child.until("error")[-1]["code"] == "bad_request"
+
+            assert git("stash", "list") == "", "a stash appeared in the project"
+            assert git("rev-parse", "HEAD") == own_head, "the project's own repository moved"
+            assert os.path.isdir(os.path.join(home, ".hydra", "shadow"))
+            assert not os.path.exists(os.path.join(proj, ".hydra"))
+
+            replies = child.run_turn("k4", "PLAIN", thread="cp", permission="bypass", model="local", checkpoint=False)
+            assert "checkpoint" not in [m["type"] for m in replies]
+            assert child.close() == 0
+
+            with tempfile.TemporaryDirectory() as broken_home:  # the shadow store cannot be created
+                os.makedirs(os.path.join(broken_home, ".hydra"))
+                with open(os.path.join(broken_home, ".hydra", "shadow"), "w", encoding="utf-8") as handle:
+                    handle.write("a file where the store should be")
+                nogit = _StdioChild(base, broken_home)
+                nogit.next()
+                replies = nogit.run_turn("g1", "PLAIN", thread="cp2", cwd=proj, permission="bypass", model="local")
+                cp = [m for m in replies if m["type"] == "checkpoint"][0]
+                assert cp["ok"] is False and cp["id"] is None and cp["reason"], cp
+                assert replies[-1]["type"] == "done" and replies[-1]["ok"] is True, replies
+                assert nogit.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_two_hundred_runs_of_four_parallel_turns():
+    """200 runs of four overlapping turns each: plain, approved write, skipped write, bypass write with diff. No message strays, every file, diff, usage number and approval lands with its own turn."""
+    import random
+
+    seen = []
+
+    def script(handler, body):
+        seen.append(1)
+        users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        word = [w for w in users[-1].replace("\n", " ").split() if w.startswith("T")][-1]
+        run, slot, kind = word[1:].split("_")
+        usage = {"choices": [], "usage": {"prompt_tokens": int(run) * 4 + int(slot) + 1, "completion_tokens": int(slot) + 1}}
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.end_headers()
+        if kind in ("write", "skip", "bypass") and not any(m.get("role") == "tool" for m in body["messages"]):
+            args = json.dumps({"path": word + ".txt", "content": word + "\n"})
+            chunks = [
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": ""}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]},
+                usage,
+            ]
+        else:
+            chunks = [{"choices": [{"delta": {"content": "ok-"}}]}, {"choices": [{"delta": {"content": word}}]}, usage]
+        for chunk in chunks:
+            handler.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        handler.wfile.write(b"data: [DONE]\n\n")
+        handler.wfile.flush()
+
+    httpd, base = _scripted_model(script)
+    rng = random.Random(20261011)
+    kinds = ("plain", "write", "skip", "bypass")
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home)
+            child.next()
+            for run in range(200):
+                names = {}
+                for slot, kind in enumerate(kinds):
+                    word = f"T{run}_{slot}_{kind}"
+                    folder = _project(child, f"r{run}s{slot}")
+                    names[f"x{run}_{slot}"] = (word, kind, folder, slot)
+                    child.turn(f"x{run}_{slot}", word, thread=f"th{run}_{slot}", cwd=folder, model="local", checkpoint=False,
+                               permission="manual" if kind in ("write", "skip") else "bypass")
+                got = {turn: [] for turn in names}
+                waiting = []
+                done = 0
+                deadline = time.time() + 60
+                while done < 4:
+                    assert time.time() < deadline, (run, got)
+                    msg = child.next(30)
+                    turn = msg.get("turn")
+                    assert turn in names, (run, "message for no turn of this run", msg)
+                    got[turn].append(msg)
+                    if msg["type"] == "approval_request":
+                        waiting.append(msg)
+                        if len(waiting) == 2:
+                            rng.shuffle(waiting)
+                            for req in waiting:
+                                kind = names[req["turn"]][1]
+                                child.send(type="approval", id=req["id"], decision="allow" if kind == "write" else "skip")
+                    if msg["type"] == "done":
+                        done += 1
+                assert len({m["id"] for m in waiting}) == 2
+                for turn, (word, kind, folder, slot) in names.items():
+                    msgs = got[turn]
+                    types = [m["type"] for m in msgs]
+                    assert types.count("done") == 1 and types[-1] == "done" and msgs[-1]["ok"] is True, (run, turn, msgs)
+                    assert "".join(m["text"] for m in msgs if m["type"] == "token") .endswith("ok-" + word), (run, turn, msgs)
+                    use = [m for m in msgs if m["type"] == "usage"]
+                    assert [(u["prompt_tokens"], u["completion_tokens"]) for u in use] == [(run * 4 + slot + 1, slot + 1)] * len(use) and use, (run, turn, use)
+                    target = os.path.join(folder, word + ".txt")
+                    wrote = kind in ("write", "bypass")
+                    assert os.path.exists(target) == wrote, (run, turn, kind)
+                    if wrote:
+                        assert open(target, encoding="utf-8").read() == word + "\n"
+                    assert [m["path"] for m in msgs if m["type"] == "diff"] == ([word + ".txt"] if wrote else []), (run, turn)
+                    assert ("approval_request" in types) == (kind in ("write", "skip")), (run, turn)
+                    starts = [m["arguments"]["path"] for m in msgs if m["type"] == "tool_start"]
+                    results = [m["output"] for m in msgs if m["type"] == "tool_result"]
+                    assert starts == ([word + ".txt"] if wrote else []), (run, turn, starts)
+                    assert len(results) == len(starts) and all(word in r for r in results), (run, turn, results)
+            assert child.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_turn_runs_on_a_machine_without_git():
+    """Pat's PC may have no git: the checkpoint reports ok false and the turn still answers (found by the clean-machine bundle run)."""
+    seen = []
+    httpd, base = _stdio_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home, env={"PATH": os.path.join(home, "empty-bin")})
+            assert child.next()["type"] == "hello"
+            replies = child.run_turn("g1", "hello", thread="nogit", model="local")
+            cp = [m for m in replies if m["type"] == "checkpoint"]
+            assert cp and cp[0]["ok"] is False and "git" in cp[0]["reason"], cp
+            done = [m for m in replies if m["type"] == "done"][-1]
+            assert done["ok"] is True and done["text"], replies
+            assert child.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_rules_and_skills_reach_the_model():
+    """The project's AGENTS.md and the skills the app picks go into the system prompt, and the context message says which."""
+    with _stdio_session() as (child, seen):
+        with open(os.path.join(child.project, "AGENTS.md"), "w", encoding="utf-8") as handle:
+            handle.write("rule : MARKER_RULE_42 answer tersely\n")
+        child.send(type="skills", id="k")
+        listed = child.until("skill_list")[-1]["skills"]
+        code = [x for x in listed if x["id"] == "code"]
+        assert code and code[0]["keys"] and code[0]["title"], listed
+        replies = child.run_turn("s1", "hello", thread="sk", model="local", skills=["code"])
+        ctx = [m for m in replies if m["type"] == "context"]
+        assert len(ctx) == 1 and ctx[0]["turn"] == "s1" and ctx[0]["skills"] == ["code"], ctx
+        assert os.path.realpath(ctx[0]["rules"]) == os.path.realpath(os.path.join(child.project, "AGENTS.md")), ctx
+        system = seen[-1]["messages"][0]["content"]
+        system = system if isinstance(system, str) else json.dumps(system)
+        assert "MARKER_RULE_42" in system and "[SKILL: code]" in system and "read the file before an edit" in system
+        replies = child.run_turn("s2", "hello", thread="sk2", model="local")
+        system = json.dumps(seen[-1]["messages"][0]["content"])
+        assert "[SKILL:" not in system and "MARKER_RULE_42" in system
+        assert [m["skills"] for m in replies if m["type"] == "context"] == [[]]
+        os.remove(os.path.join(child.project, "AGENTS.md"))
+        replies = child.run_turn("s3", "hello", thread="sk3", model="local")
+        assert [m["rules"] for m in replies if m["type"] == "context"] == [None], replies
+        assert "MARKER_RULE_42" not in json.dumps(seen[-1]["messages"][0]["content"])
+        child.send(type="turn", turn="s4", prompt="hi", thread="sk4", cwd=child.project, skills=["no-such-skill"])
+        assert child.until("error")[-1]["code"] == "bad_request"
+        assert child.close() == 0
+
+
+_TINY_MCP_SERVER = r"""
+import json, sys
+log = sys.argv[1]
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    method = msg.get("method")
+    if method == "initialize":
+        result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "demo", "version": "1"}}
+    elif method == "tools/list":
+        result = {"tools": [{"name": "echo", "description": "Echo the text back.",
+                             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
+    elif method == "tools/call":
+        text = msg["params"]["arguments"]["text"]
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+        result = {"content": [{"type": "text", "text": "echo:" + text}], "isError": False}
+    else:
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": method}}) + "\n")
+        sys.stdout.flush()
+        continue
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}) + "\n")
+    sys.stdout.flush()
+"""
+
+
+@check
+def stdio_mcp_server_tools_reach_the_loop_behind_permissions():
+    """A stdio MCP server from the project config gives the model its tools. Calls run under bypass, are skipped under plan, and ask under manual."""
+    with _marker_session() as (child, seen):
+        child.send(type="mcp", id="m0", cwd=child.project)
+        empty = child.until("mcp_status")[-1]
+        assert empty["config"] is None and empty["servers"] == [], empty
+        server, log = os.path.join(child.home, "tiny_mcp.py"), os.path.join(child.home, "calls.log")
+        with open(server, "w", encoding="utf-8") as handle:
+            handle.write(_TINY_MCP_SERVER)
+        os.makedirs(os.path.join(child.project, ".hydra"), exist_ok=True)
+        with open(os.path.join(child.project, ".hydra", "mcp_servers.json"), "w", encoding="utf-8") as handle:
+            json.dump({"mcpServers": {"demo": {"command": sys.executable, "args": [server, log]},
+                                      "broken": {"command": os.path.join(child.home, "no-such-binary")}}}, handle)
+        child.send(type="mcp", id="m1", cwd=child.project)
+        status = child.until("mcp_status")[-1]
+        by_name = {x["name"]: x for x in status["servers"]}
+        assert status["id"] == "m1" and status["config"].endswith(os.path.join(".hydra", "mcp_servers.json")), status
+        assert by_name["demo"]["ok"] and by_name["demo"]["tools"] == ["demo__echo"] and by_name["demo"]["error"] is None
+        assert not by_name["broken"]["ok"] and by_name["broken"]["error"] and by_name["broken"]["tools"] == []
+
+        replies = child.run_turn("m2", "MCP_echo", thread="mcp1", model="local")
+        ctx = [m for m in replies if m["type"] == "context"][0]
+        assert ctx["mcp_tools"] == ["demo__echo"] and "broken" in ctx["mcp_errors"], ctx
+        starts = [m for m in replies if m["type"] == "tool_start"]
+        results = [m for m in replies if m["type"] == "tool_result"]
+        assert [m["tool"] for m in starts] == ["demo__echo"] and starts[0]["arguments"] == {"text": "ping"}, replies
+        assert "echo:ping" in results[0]["output"] and not results[0]["is_error"], results
+        assert any(t["function"]["name"] == "demo__echo" for t in seen[0].get("tools", [])), "model never saw the MCP tool"
+        assert "echo:ping" in json.dumps(seen[-1]["messages"])
+        with open(log, encoding="utf-8") as handle:
+            assert handle.read().split() == ["ping"]
+
+        replies = child.run_turn("m3", "MCP_echo", thread="mcp2", model="local", permission="plan")
+        assert not [m for m in replies if m["type"] == "tool_start"], replies
+        child.turn("m4", "MCP_echo", thread="mcp3", model="local", permission="manual")
+        ask = child.until("approval_request", turn="m4")[-1]
+        assert ask["tool"] == "demo__echo", ask
+        child.send(type="approval", id=ask["id"], decision="skip")
+        replies = child.until("done", turn="m4")
+        assert not [m for m in replies if m["type"] == "tool_start"], replies
+        with open(log, encoding="utf-8") as handle:
+            assert handle.read().split() == ["ping"], "a skipped or denied MCP call still ran"
+        assert child.close() == 0
+
+
+@check
+def stdio_git_tools_follow_permissions_and_keep_off_main():
+    """git_status and git_diff run without asking, git_commit and git_branch ask under manual, and a commit on main is refused."""
+    with _marker_session() as (child, seen):
+        repo = child.project
+        git = lambda *a: subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True, check=True).stdout
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        with open(os.path.join(repo, "a.txt"), "w", encoding="utf-8") as handle:
+            handle.write("one\n")
+        git("add", "a.txt")
+        git("commit", "-qm", "base")
+        with open(os.path.join(repo, "a.txt"), "a", encoding="utf-8") as handle:
+            handle.write("two\n")
+
+        def result(replies, tool):
+            out = [m for m in replies if m["type"] == "tool_result" and m["tool"] == tool]
+            assert len(out) == 1, replies
+            return out[0]
+
+        replies = child.run_turn("g1", "GIT_status", thread="g", model="local", permission="plan")
+        status = json.loads(result(replies, "git_status")["output"])
+        assert status["branch"] == "main" and status["files"] == [{"status": " M", "path": "a.txt"}], status
+        replies = child.run_turn("g2", "GIT_diff", thread="g", model="local", permission="plan")
+        assert "+two" in json.loads(result(replies, "git_diff")["output"])["diff"]
+        assert not [m for m in child.log if m["type"] == "approval_request"]
+
+        replies = child.run_turn("g3", "GIT_commit", thread="g", model="local", permission="bypass")
+        refused = result(replies, "git_commit")
+        assert refused["is_error"] and "main" in refused["output"], refused
+        assert git("log", "--format=%s").split("\n")[0] == "base"
+        replies = child.run_turn("g4", "GIT_master", thread="g", model="local", permission="bypass")
+        assert "refusing" in result(replies, "git_branch")["output"] and "master" not in git("branch").split()
+        offered = {t["function"]["name"] for t in seen[-1].get("tools", [])}
+        assert {"git_status", "git_diff", "git_commit", "git_branch"} <= offered, offered
+
+        child.turn("g5", "GIT_branch", thread="g", model="local", permission="manual")
+        ask = child.until("approval_request", turn="g5")[-1]
+        assert ask["tool"] == "git_branch" and ask["arguments"] == {"op": "create", "name": "feat/x"}, ask
+        child.send(type="approval", id=ask["id"], decision="allow")
+        child.until("done", turn="g5")
+        assert git("branch", "--show-current").strip() == "feat/x"
+
+        child.turn("g6", "GIT_commit", thread="g", model="local", permission="manual")
+        ask = child.until("approval_request", turn="g6")[-1]
+        assert ask["tool"] == "git_commit", ask
+        child.send(type="approval", id=ask["id"], decision="skip")
+        child.until("done", turn="g6")
+        assert git("log", "-1", "--format=%s").strip() == "base"
+        replies = child.run_turn("g7", "GIT_commit", thread="g", model="local", permission="plan")
+        assert not [m for m in replies if m["type"] == "tool_start"] and git("log", "-1", "--format=%s").strip() == "base"
+
+        child.turn("g8", "GIT_commit", thread="g", model="local", permission="manual")
+        ask = child.until("approval_request", turn="g8")[-1]
+        child.send(type="approval", id=ask["id"], decision="allow")
+        replies = child.until("done", turn="g8")
+        done = json.loads(result(replies, "git_commit")["output"])
+        assert done["branch"] == "feat/x" and done["commit"] == git("rev-parse", "HEAD").strip(), done
+        assert git("log", "-1", "--format=%s").strip() == "add a" and git("status", "--porcelain") == ""
+        assert git("rev-parse", "main").strip() != done["commit"]
+        assert child.close() == 0
+
+
+@check
+def stdio_provider_retries_transient_failures_before_the_first_token():
+    """A 503 or a dropped connection before any token is sent again with a retry message. A 400, or a failure after a token, is not."""
+    calls = {}
+
+    def script(handler, body):
+        users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        word = users[-1].split()[-1]
+        calls[word] = n = calls.get(word, 0) + 1
+        if (word == "FLAKY" and n == 1) or word == "DOWN":
+            handler.send_response(503)
+            handler.send_header("Content-Length", "0")
+            handler.end_headers()
+            return
+        if word == "FLAKY" and n == 2:
+            handler.close_connection = True
+            return
+        if word == "HARD":
+            handler.send_response(400)
+            handler.send_header("Content-Length", "2")
+            handler.end_headers()
+            handler.wfile.write(b"no")
+            return
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.end_headers()
+        handler.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': 'ok-' + word}}]})}\n\n".encode())
+        handler.wfile.flush()
+        if word == "RESET":
+            import socket
+            import struct
+
+            time.sleep(0.2)
+            handler.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            handler.connection.close()
+        elif word != "CUT":
+            handler.wfile.write(b"data: [DONE]\n\n")
+        handler.close_connection = True
+
+    httpd, base = _scripted_model(script)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home, env={"HYDRA_BACKOFF_BASE": "0.01", "HYDRA_PROVIDER_RETRIES": "2"})
+            assert child.next()["type"] == "hello"
+            replies = child.run_turn("r1", "FLAKY", thread="r1", model="local")
+            retries = [m for m in replies if m["type"] == "retry"]
+            assert [(m["attempt"], m["of"]) for m in retries] == [(1, 2), (2, 2)], replies
+            assert retries[0]["reason"] == "HTTP 503" and retries[1]["reason"].startswith("connection lost"), retries
+            assert retries[0]["wait"] < retries[1]["wait"] and all(m["turn"] == "r1" for m in retries)
+            assert replies[-1]["ok"] and replies[-1]["text"] == "ok-FLAKY" and calls["FLAKY"] == 3, replies
+            assert "".join(m["text"] for m in replies if m["type"] == "token") == "ok-FLAKY"
+
+            replies = child.run_turn("r2", "DOWN", thread="r2", model="local")
+            assert len([m for m in replies if m["type"] == "retry"]) == 2 and not replies[-1]["ok"], replies
+            assert calls["DOWN"] == 3, calls
+            for word in ("HARD", "CUT", "RESET"):
+                before = dict(calls)
+                replies = child.run_turn("r-" + word, word, thread="r-" + word, model="local")
+                assert not [m for m in replies if m["type"] == "retry"] and not replies[-1]["ok"], replies
+                assert calls[word] - before.get(word, 0) == 1, calls
+            assert child.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_respawn_after_a_killed_backend():
+    """The app kills the agent mid-turn and starts a new one. Threads, history, checkpoints, rewind and resume all still work."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            first = _StdioChild(base, home)
+            first.next()
+            project = _project(first, "respawn")
+            assert first.run_turn("k1", "WRITE_one remember zebra", thread="keep", cwd=project, model="local", mode="sliding")[-1]["ok"]
+            first.turn("k2", "SLOW and long", thread="keep", cwd=project, model="local")
+            replies = first.until("token", turn="k2")
+            killed_checkpoint = [m for m in replies if m["type"] == "checkpoint" and m["turn"] == "k2"][0]["id"]
+            first.proc.kill()
+            assert first.proc.wait(timeout=10) != 0
+            with open(os.path.join(project, "one.txt"), "w", encoding="utf-8") as handle:
+                handle.write("changed after the crash\n")
+
+            second = _StdioChild(base, home)
+            assert second.next()["type"] == "hello"
+            second.send(type="sessions", id="s")
+            entry = [x for x in second.until("session_list")[-1]["sessions"] if x["thread"] == "keep"][0]
+            assert entry["cwd"] == project, entry
+            second.send(type="history", id="h", thread="keep")
+            turns = second.until("history_result")[-1]["turns"]
+            assert any("zebra" in str(t["content"]) for t in turns if t["role"] == "user"), turns
+            assert not any("SLOW-" in str(t["content"]) for t in turns if t["role"] == "assistant"), "a killed reply was stored"
+            second.send(type="checkpoints", id="c", thread="keep")
+            listed = second.until("checkpoint_list")[-1]["checkpoints"]
+            assert [c["turn"] for c in listed][:2] == ["k2", "k1"] and listed[0]["id"] == killed_checkpoint, listed
+            second.send(type="rewind", id="w", thread="keep", checkpoint=killed_checkpoint)
+            result = second.until("rewind_result")[-1]
+            assert result["restored"] == ["one.txt"], result
+            assert open(os.path.join(project, "one.txt"), encoding="utf-8").read() == "content of one\n"
+            replies = second.run_turn("k3", "PLAIN again", thread="keep", model="local")
+            assert replies[-1]["ok"] and replies[0]["type"] == "checkpoint" and replies[0]["ok"], replies
+            assert "zebra" in json.dumps(seen[-1]["messages"]), json.dumps([m for m in seen[-1]["messages"] if m["role"] != "system"])[:1400]
+            assert second.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+def _group_alive(pid):
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@check
+def stdio_background_tasks_outlive_the_turn_and_stop_on_request():
+    """A task the agent starts keeps running after its turn, reports its exit, is gated like run_command, and is stopped by task_stop or by shutdown."""
+    if os.name == "nt":
+        raise Skip("background task check uses POSIX process groups")
+    with _marker_session() as (child, seen):
+        replies = child.run_turn("b1", "TASK_start", thread="bt", model="local", permission="bypass")
+        assert replies[-1]["ok"], replies
+        started = json.loads([m for m in replies if m["type"] == "tool_result"][0]["output"])
+        task, pid = started["task"], started["pid"]
+        update = [m for m in replies if m["type"] == "task_update"][0]
+        assert update["task"] == task and update["state"] == "running" and update["thread"] == "bt" and update["turn"] == "b1", update
+        assert update["cwd"] == child.project and update["command"] == "echo started; sleep 60"
+        assert _group_alive(pid), "the task ended with its turn"
+
+        replies = child.run_turn("b2", "TASK_quick", thread="bt", model="local", permission="bypass")
+        quick = json.loads([m for m in replies if m["type"] == "tool_result"][0]["output"])["task"]
+        ended = [m for m in replies if m["type"] == "task_update" and m["task"] == quick and m["state"] != "running"]
+        ended = ended or [m for m in child.until("task_update") if m["type"] == "task_update" and m["task"] == quick]
+        assert ended[-1]["state"] == "exited" and ended[-1]["exit_code"] == 3 and ended[-1]["ended"], ended
+
+        child.send(type="tasks", id="l1")
+        listed = {x["task"]: x for x in child.until("task_list")[-1]["tasks"]}
+        assert listed[task]["state"] == "running" and listed[quick]["state"] == "exited", listed
+
+        child.turn("b3", "TASK_start", thread="bt", model="local", permission="manual")
+        ask = child.until("approval_request", turn="b3")[-1]
+        assert ask["tool"] == "start_background_task", ask
+        child.send(type="approval", id=ask["id"], decision="skip")
+        child.until("done", turn="b3")
+        replies = child.run_turn("b4", "TASK_start", thread="bt", model="local", permission="plan")
+        assert not [m for m in replies if m["type"] in ("tool_start", "task_update")], replies
+        child.send(type="tasks", id="l2")
+        assert len(child.until("task_list")[-1]["tasks"]) == 2
+
+        child.send(type="task_stop", id="s1", task=task)
+        replies = child.until("task_list")
+        stopped = {x["task"]: x for x in replies[-1]["tasks"]}[task]
+        assert replies[-1]["id"] == "s1" and stopped["state"] == "stopped" and stopped["exit_code"] is not None, stopped
+        assert not _group_alive(pid), "task_stop left the task running"
+        child.send(type="task_stop", id="s2", task="t999")
+        assert child.until("error")[-1]["code"] == "bad_request"
+
+        replies = child.run_turn("b5", "TASK_start", thread="bt2", model="local", permission="bypass")
+        last = json.loads([m for m in replies if m["type"] == "tool_result"][0]["output"])["pid"]
+        assert _group_alive(last)
+        assert child.close() == 0
+        deadline = time.time() + 5
+        while _group_alive(last) and time.time() < deadline:
+            time.sleep(0.05)
+        assert not _group_alive(last), "a task outlived the agent"
+
+    from hydra_cli.native_tools import BackgroundTasks
+
+    with tempfile.TemporaryDirectory() as tmp, _env(HOME=tmp, USERPROFILE=tmp):
+        tasks = BackgroundTasks()
+        heard = []
+        tasks.add_listener(heard.append)
+        made = tasks.start("printf 'abcdefghij'", tmp)
+        deadline = time.time() + 5
+        while tasks.output(made["task"])["state"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+        out = tasks.output(made["task"], tail=4)
+        assert out["output"] == "ghij" and out["truncated"] and out["exit_code"] == 0, out
+        assert [h["state"] for h in heard] == ["running", "exited"], heard
+        assert tasks.output("nope")["isError"] and tasks.start("  ", tmp)["isError"]
+
+
+@contextmanager
+def _env(**values):
+    saved = {k: os.environ.get(k) for k in values}
+    os.environ.update(values)
+    try:
+        yield
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+@check
+def stdio_background_tasks_are_adopted_after_a_kill():
+    """A task left running by a killed agent is adopted by the next one, listed, reported and stoppable. Tasks that ended meanwhile are marked ended with their exit code, and a record whose pid now names another process is never adopted."""
+    if os.name == "nt":
+        raise Skip("background task check uses POSIX process groups")
+    stranger = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        with _marker_session() as (first, seen):
+            longer = json.loads([m for m in first.run_turn("a1", "TASK_start", thread="ad", model="local", permission="bypass")
+                                 if m["type"] == "tool_result"][0]["output"])
+            short = json.loads([m for m in first.run_turn("a2", "TASK_short", thread="ad", model="local", permission="bypass")
+                                if m["type"] == "tool_result"][0]["output"])
+            folder = os.path.join(first.home, ".hydra", "tasks")
+            with open(os.path.join(folder, longer["task"] + ".json"), encoding="utf-8") as handle:
+                record = json.load(handle)
+            assert record["pid"] == longer["pid"] and record["identity"] and record["state"] == "running", record
+            forged = dict(record, task="t-forged", pid=stranger.pid, pgid=stranger.pid, identity="linux:1")
+            with open(os.path.join(folder, "t-forged.json"), "w", encoding="utf-8") as handle:
+                json.dump(forged, handle)
+            first.proc.kill()
+            first.proc.wait(timeout=10)
+            assert _group_alive(longer["pid"]), "the task died with the agent"
+            deadline = time.time() + 5
+            while _group_alive(short["pid"]) and time.time() < deadline:
+                time.sleep(0.05)
+
+            second = _StdioChild(first.base, first.home)
+            assert second.next()["type"] == "hello"
+            updates = {}
+            while len(updates) < 3:
+                msg = second.next()
+                assert msg["type"] == "task_update", msg
+                updates[msg["task"]] = msg
+            live, done, fake = updates[longer["task"]], updates[short["task"]], updates["t-forged"]
+            assert live["state"] == "running" and live["adopted"] and live["pid"] == longer["pid"] and live["thread"] == "ad", live
+            assert done["state"] == "exited" and done["exit_code"] == 4 and done["ended"] and done["adopted"], done
+            assert fake["state"] == "exited" and fake["exit_code"] is None, fake
+            assert not [m for m in second.log if m.get("task") == "t-forged" and m["state"] == "running"], "a reused pid was adopted"
+            second.send(type="tasks", id="l")
+            listed = {x["task"]: x for x in second.until("task_list")[-1]["tasks"]}
+            assert listed[longer["task"]]["state"] == "running" and listed[short["task"]]["state"] == "exited"
+            second.send(type="task_stop", id="s", task=longer["task"])
+            replies = second.until("task_list")
+            assert {x["task"]: x for x in replies[-1]["tasks"]}[longer["task"]]["state"] == "stopped"
+            ended = [m for m in replies if m["type"] == "task_update" and m["task"] == longer["task"]]
+            assert ended and ended[-1]["state"] == "stopped" and ended[-1]["ended"], replies
+            assert not _group_alive(longer["pid"]), "task_stop did not reach the adopted task"
+            with open(os.path.join(folder, longer["task"] + ".json"), encoding="utf-8") as handle:
+                assert json.load(handle)["state"] == "stopped"
+            assert second.close() == 0
+            assert stranger.poll() is None, "the agent killed a process that only reused a task pid"
+
+            third = _StdioChild(first.base, first.home)
+            assert third.next()["type"] == "hello"
+            third.send(type="tasks", id="l3")
+            assert third.until("task_list")[-1]["tasks"] == [], "ended tasks were adopted again"
+            assert third.close() == 0
+    finally:
+        stranger.kill()
+        stranger.wait()
+
+
+@check
+def background_task_platform_paths():
+    """Windows tasks get a new process group and are stopped by taskkill of the tree, polite first and then /F. POSIX tasks get a new session. This host runs only the POSIX processes; the Windows branch is checked by the commands it builds and sends."""
+    from hydra_cli.native_tools import (CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, BackgroundTasks, process_identity,
+                                        task_kill_commands, task_launch, task_spawn_options)
+
+    assert task_spawn_options("nt") == {"creationflags": CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW}
+    assert (CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW) == (0x200, 0x08000000)
+    assert task_spawn_options("posix") == {"start_new_session": True}
+    assert task_launch("npm run dev", "x.exit", "nt") == ("npm run dev", True, {})
+    argv, shell, extra = task_launch("exit 5", "x.exit", "posix")
+    assert argv[:2] == ["/bin/sh", "-c"] and shell is False and extra == {"HYDRA_TASK_CMD": "exit 5", "HYDRA_TASK_EXIT": "x.exit"}
+    assert task_kill_commands(4321) == [["taskkill", "/PID", "4321", "/T"], ["taskkill", "/PID", "4321", "/T", "/F"]]
+
+    me = process_identity(os.getpid())
+    assert me and me == process_identity(os.getpid())
+    gone = subprocess.Popen(["true"])
+    deadline = time.time() + 5
+    while process_identity(gone.pid) is not None and time.time() < deadline:
+        time.sleep(0.02)
+    assert process_identity(gone.pid) is None, "an exited but unreaped child still counts as alive"
+    gone.wait()
+    assert process_identity(gone.pid) is None
+
+    with tempfile.TemporaryDirectory() as tmp, _env(HOME=tmp, USERPROFILE=tmp):
+        posix = BackgroundTasks(platform="posix")
+        made = posix.start("exit 5", tmp)
+        deadline = time.time() + 5
+        while posix.output(made["task"])["state"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+        with open(os.path.join(tmp, ".hydra", "tasks", made["task"] + ".exit"), encoding="utf-8") as handle:
+            assert handle.read() == "5" and posix.output(made["task"])["exit_code"] == 5
+
+        sent = []
+        windows = BackgroundTasks(platform="nt", runner=lambda argv, **kw: sent.append(argv) or (len(sent) == 2 and windows._finish("w1", 1)))
+        windows._tasks["w1"] = {"task": "w1", "pid": 4321, "pgid": 4321, "state": "running", "exit_code": None, "ended": None,
+                                "identity": "nt:1:2", "log": os.path.join(tmp, "w1.log"), "exit_file": ""}
+        windows._ended["w1"] = threading.Event()
+        result = windows.stop("w1", grace=0.2)
+        assert sent == task_kill_commands(4321) and result["state"] == "stopped", (sent, result)
+        sent.clear()
+        windows._tasks["w2"] = dict(windows._tasks["w1"], task="w2", state="running", ended=None)
+        windows._ended["w2"] = threading.Event()
+        windows._runner = lambda argv, **kw: sent.append(argv) or windows._finish("w2", 0)
+        windows.stop("w2", grace=5)
+        assert sent == task_kill_commands(4321)[:1], "a stop that ended the tree still sent /F"
+
+
+@check
+def stdio_mcp_servers_toggle_per_project():
+    """The app turns an MCP server off for one project. Its tools leave that project's turns only, and the choice survives a restart."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            server, log = os.path.join(home, "tiny_mcp.py"), os.path.join(home, "calls.log")
+            with open(server, "w", encoding="utf-8") as handle:
+                handle.write(_TINY_MCP_SERVER)
+            os.makedirs(os.path.join(home, ".hydra"), exist_ok=True)
+            with open(os.path.join(home, ".hydra", "mcp_servers.json"), "w", encoding="utf-8") as handle:
+                json.dump({"mcpServers": {"demo": {"command": sys.executable, "args": [server, log]}}}, handle)
+            calls = lambda: open(log, encoding="utf-8").read().split() if os.path.exists(log) else []
+
+            child = _StdioChild(base, home)
+            child.next()
+            pa, pb = _project(child, "pa"), _project(child, "pb")
+            child.send(type="mcp_toggle", id="x1", cwd=pa, server="demo", enabled=False)
+            status = child.until("mcp_status")[-1]
+            assert status["id"] == "x1" and status["servers"] == [{"name": "demo", "enabled": False, "ok": False, "error": None, "tools": []}], status
+            replies = child.run_turn("p1", "MCP_echo", thread="pa", cwd=pa, model="local", permission="bypass")
+            assert [m["mcp_tools"] for m in replies if m["type"] == "context"] == [[]], replies
+            assert not any(t["function"]["name"] == "demo__echo" for t in seen[0].get("tools", [])), "a disabled server's tool reached the model"
+            assert calls() == [], "a disabled server ran a tool"
+            replies = child.run_turn("p2", "MCP_echo", thread="pb", cwd=pb, model="local", permission="bypass")
+            assert [m["mcp_tools"] for m in replies if m["type"] == "context"] == [["demo__echo"]], replies
+            assert calls() == ["ping"]
+            child.send(type="mcp", id="x2", cwd=pb)
+            assert child.until("mcp_status")[-1]["servers"][0]["enabled"] is True
+            child.send(type="mcp_toggle", id="x3", cwd=pa, server="nope", enabled=False)
+            assert child.until("error")[-1]["code"] == "bad_request"
+            child.send(type="mcp_toggle", id="x4", cwd=pa, server="demo", enabled="no")
+            assert child.until("error")[-1]["code"] == "bad_request"
+            assert child.close() == 0
+
+            again = _StdioChild(base, home)
+            again.next()
+            again.send(type="mcp", id="y1", cwd=pa)
+            assert again.until("mcp_status")[-1]["servers"][0]["enabled"] is False, "the choice did not survive a restart"
+            again.send(type="mcp_toggle", id="y2", cwd=pa, server="demo", enabled=True)
+            status = again.until("mcp_status")[-1]
+            assert status["servers"] == [{"name": "demo", "enabled": True, "ok": True, "error": None, "tools": ["demo__echo"]}], status
+            again.run_turn("p3", "MCP_echo", thread="pa", model="local", permission="bypass")
+            assert calls() == ["ping", "ping"]
+            assert again.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def provider_paths_share_the_transient_retry():
+    """stream_chat_completion and fetch_chat_completion retry 429, 500, 502, 503, 504 and lost connections before the first token, through the same helper as the agent loop."""
+    import socket
+    import struct
+
+    from hydra_cli import agent, providers
+
+    assert agent.transient_reason is providers.transient_reason and agent.retry_wait is providers.retry_wait
+    assert not hasattr(agent, "_transient_reason"), "the loop keeps its own copy"
+    calls = {}
+
+    def script(handler, body):
+        plan = handler.path.strip("/").split("/")[0].split("-")
+        n = calls[handler.path] = calls.get(handler.path, 0) + 1
+        step = plan[min(n, len(plan)) - 1]
+        if step.isdigit():
+            handler.send_response(int(step))
+            handler.send_header("Content-Length", "0")
+            if step == "429":
+                handler.send_header("Retry-After", "0.01")
+            handler.end_headers()
+            return
+        if step == "reset":
+            handler.close_connection = True
+            return
+        if body.get("stream"):
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.end_headers()
+            handler.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': 'ok'}}]})}\n\n".encode())
+            handler.wfile.flush()
+            if step == "cut":
+                handler.wfile.write(b": pad\n" * 2000)  # past the 4096 byte read, so the token is parsed and yielded first
+                handler.wfile.flush()
+                time.sleep(0.3)
+                handler.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+                handler.connection.close()
+                return
+            handler.wfile.write(b"data: [DONE]\n\n")
+        else:
+            data = json.dumps({"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}).encode()
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.end_headers()
+            handler.wfile.write(data)
+        handler.close_connection = True
+
+    httpd, base = _scripted_model(script)
+    msgs = [{"role": "user", "content": "hi"}]
+    stream = lambda path: "".join(providers.stream_chat_completion(f"{base}/{path}", {}, "m", msgs, max_retries=3, backoff_base=0.01))
+    fetch = lambda path: providers.fetch_chat_completion(f"{base}/{path}", {}, "m", msgs, max_retries=3, backoff_base=0.01)
+    try:
+        for name, call in (("s", stream), ("f", fetch)):
+            for plan in ("503-reset-ok", "500-502-504-ok", "429-ok"):
+                path = f"{plan}/{name}"
+                assert call(path) == "ok", (name, plan)
+                assert calls["/" + path] == len(plan.split("-")), (name, plan, calls)
+            for plan, count in (("400-ok", 1), ("404-ok", 1), ("503-503-503-503-503-ok", 4)):
+                path = f"{plan}/{name}"
+                try:
+                    call(path)
+                    raise AssertionError(f"{name} {plan} did not fail")
+                except providers.ProviderError:
+                    pass
+                assert calls["/" + path] == count, (name, plan, calls)
+        got = []
+        try:  # a reset after a token may read as an early end, which the stream path accepts; it is never sent again
+            for token in providers.stream_chat_completion(f"{base}/cut-ok/s", {}, "m", msgs, max_retries=3, backoff_base=0.01):
+                got.append(token)
+        except providers.ProviderError:
+            pass
+        assert got == ["ok"] and calls["/cut-ok/s"] == 1, (got, calls)
+    finally:
+        httpd.shutdown()
+
+    from urllib.error import HTTPError
+
+    def http_error(code, retry_after=None):
+        headers = {"Retry-After": retry_after} if retry_after is not None else {}
+        return HTTPError("http://x", code, "x", headers, None)
+
+    assert providers.retry_wait(http_error(429, "3"), 0, 0.5) == 3.0
+    assert providers.retry_wait(http_error(429, "99"), 0, 0.5) == 10.0
+    assert providers.retry_wait(http_error(429, "soon"), 1, 0.5) == 1.0
+    assert providers.retry_wait(http_error(503, "3"), 5, 0.5) == 8.0 and providers.retry_wait(http_error(503), 5, 0.5, cap=4.0) == 4.0
+    assert [providers.transient_reason(http_error(c)) for c in (429, 500, 501, 502, 503, 504, 400)] == ["HTTP 429", "HTTP 500", None, "HTTP 502", "HTTP 503", "HTTP 504", None]
+    assert providers.transient_reason(ConnectionRefusedError()) is None and providers.transient_reason(ConnectionResetError()).startswith("connection lost")
+
+
+@check
+def stdio_two_agents_never_share_a_task():
+    """Two agents start on one home at once after a kill. Each orphaned task gets exactly one owner, the other agent cannot stop it, a lock held by a dead process does not block, and a dead owner's tasks are adopted again."""
+    if os.name == "nt":
+        raise Skip("background task check uses POSIX process groups and flock")
+    seen = []
+    httpd, base = _marker_model(seen)
+    spawned = []
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            first = _StdioChild(base, home)
+            first.next()
+            tasks = {}
+            for n in range(4):
+                out = [m for m in first.run_turn(f"o{n}", "TASK_start", thread=f"o{n}", model="local", permission="bypass")
+                       if m["type"] == "tool_result"][0]["output"]
+                made = json.loads(out)
+                tasks[made["task"]] = made["pid"]
+            spawned.extend(tasks.values())
+            first.proc.kill()
+            first.proc.wait(timeout=10)
+            folder = os.path.join(home, ".hydra", "tasks")
+
+            holder = subprocess.Popen([sys.executable, "-c", "import fcntl, sys, time; f = open(sys.argv[1], 'a+b'); "
+                                       "fcntl.flock(f.fileno(), fcntl.LOCK_EX); print('held', flush=True); time.sleep(60)",
+                                       os.path.join(folder, ".lock")], stdout=subprocess.PIPE)
+            assert holder.stdout.readline().strip() == b"held"
+            a, b = _StdioChild(base, home), _StdioChild(base, home)
+            assert a.next()["type"] == "hello" and b.next()["type"] == "hello"
+            time.sleep(0.5)
+            assert not [m for m in a.log + b.log if m["type"] == "task_update"], "adoption ran while another process held the lock"
+            holder.kill()
+            holder.wait()
+
+            owners = {}
+            for child in (a, b):
+                child.send(type="tasks", id="l")
+                for x in child.until("task_list")[-1]["tasks"]:
+                    if x["state"] == "running":
+                        owners.setdefault(x["task"], []).append(child)
+            assert sorted(owners) == sorted(tasks) and all(len(v) == 1 for v in owners.values()), owners
+            for task, (owner,) in owners.items():
+                with open(os.path.join(folder, task + ".json"), encoding="utf-8") as handle:
+                    assert json.load(handle)["owner"]["pid"] == owner.proc.pid
+            task, (owner,) = next(iter(owners.items()))
+            other = b if owner is a else a
+            other.send(type="task_stop", id="x", task=task)
+            assert other.until("error")[-1]["code"] == "bad_request"
+            assert _group_alive(tasks[task]), "an agent stopped a task it does not own"
+
+            a.proc.kill()
+            b.proc.kill()
+            a.proc.wait(timeout=10)
+            b.proc.wait(timeout=10)
+            assert all(_group_alive(pid) for pid in tasks.values())
+            third = _StdioChild(base, home)
+            third.next()
+            third.send(type="tasks", id="l3")
+            listed = {x["task"]: x for x in third.until("task_list")[-1]["tasks"]}
+            assert all(listed[t]["state"] == "running" and listed[t]["adopted"] for t in tasks), listed
+            assert third.close() == 0
+            deadline = time.time() + 5
+            while any(_group_alive(pid) for pid in tasks.values()) and time.time() < deadline:
+                time.sleep(0.05)
+            assert not any(_group_alive(pid) for pid in tasks.values()), "a re-adopted task survived shutdown"
+    finally:
+        httpd.shutdown()
+        for pid in spawned:
+            try:
+                os.killpg(pid, 9)
+            except OSError:
+                pass
+
+
+@check
+def background_task_records_are_pruned_at_startup():
+    """Ended records older than the bound, and the oldest beyond the cap, are deleted with their log and exit files. Running, tracked and live-owned records stay."""
+    from hydra_cli.native_tools import BackgroundTasks, process_identity
+
+    with tempfile.TemporaryDirectory() as tmp, _env(HOME=tmp, USERPROFILE=tmp, HYDRA_TASK_KEEP="3", HYDRA_TASK_KEEP_DAYS="7"):
+        folder = BackgroundTasks.folder()
+        now = time.time()
+        live_agent = subprocess.Popen(["sleep", "60"])
+        try:
+            dead = {"pid": 999999, "identity": "linux:1"}
+            alive = {"pid": live_agent.pid, "identity": process_identity(live_agent.pid)}
+
+            def record(task, state, age_days, owner=dead):
+                info = {"task": task, "state": state, "pid": 999999, "pgid": 999999, "identity": "linux:1", "exit_code": 0,
+                        "started": now - age_days * 86400 - 5, "ended": None if state == "running" else now - age_days * 86400,
+                        "owner": owner, "log": os.path.join(folder, task + ".log"), "exit_file": os.path.join(folder, task + ".exit")}
+                for suffix, body in ((".json", json.dumps(info)), (".log", "x"), (".exit", "0")):
+                    with open(os.path.join(folder, task + suffix), "w", encoding="utf-8") as handle:
+                        handle.write(body)
+
+            record("old", "exited", 10)
+            for n in range(5):
+                record(f"new{n}", "exited", n * 0.1)
+            record("theirs", "exited", 30, owner=alive)
+            record("tracked", "stopped", 30)
+            tasks = BackgroundTasks()
+            tasks._tasks["tracked"] = {"task": "tracked"}
+            record("running", "running", 30, owner=dead)
+            with tasks._folder_lock():
+                gone = tasks.prune(now)
+            assert sorted(gone) == ["new3", "new4", "old"], gone
+            left = sorted(f for f in os.listdir(folder) if not f.startswith("."))
+            expect = sorted(f"{t}{x}" for t in ("new0", "new1", "new2", "theirs", "tracked", "running") for x in (".json", ".log", ".exit"))
+            assert left == expect, left
+
+            record("running", "running", 30, owner=alive)
+            fresh = BackgroundTasks()
+            record("ancient", "exited", 9)
+            fresh.adopt()
+            assert not os.path.exists(os.path.join(folder, "ancient.json")), "adopt did not prune"
+            assert os.path.exists(os.path.join(folder, "running.json")) and fresh.list() == [], fresh.list()
+
+            with _env(HYDRA_TASK_KEEP="100"):
+                record("eight", "exited", 8)
+                record("six", "exited", 6)
+                with fresh._folder_lock():
+                    assert "eight" in fresh.prune(now) and os.path.exists(os.path.join(folder, "six.json"))
+
+            victim = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            try:
+                record("foreign", "running", 0, owner=alive)
+                fresh._tasks["foreign"] = dict(json.load(open(os.path.join(folder, "foreign.json"))), pid=victim.pid, pgid=victim.pid)
+                fresh._ended["foreign"] = threading.Event()
+                refused = fresh.stop("foreign", grace=0.2)
+                assert refused["isError"] and str(live_agent.pid) in refused["error"], refused
+                time.sleep(0.2)
+                assert victim.poll() is None, "an agent stopped a task another live agent owns"
+            finally:
+                victim.kill()
+                victim.wait()
+        finally:
+            live_agent.kill()
+            live_agent.wait()
+
+
+@check
+def stdio_two_agents_write_one_thread_without_loss():
+    """Two real agents remove different rules from one thread at once. Every removal sticks, and a reader never sees a torn file or a stray temp file."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, ".hydra", "sessions", "shared", "rules.json")
+            os.makedirs(os.path.dirname(path))
+            a, b = _StdioChild(base, home), _StdioChild(base, home)
+            a.next()
+            b.next()
+            for round_ in range(3):
+                ids = [f"r{round_}x{n}" for n in range(60)]
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump([{"id": i, "tool": "run_command", "prefix": "echo"} for i in ids], handle)
+                stop, torn = threading.Event(), []
+
+                def read():
+                    while not stop.is_set():
+                        try:
+                            with open(path, "rb") as handle:
+                                data = handle.read()
+                            json.loads(data)
+                        except FileNotFoundError:
+                            torn.append("missing")
+                        except ValueError:
+                            torn.append(data[:80])
+
+                reader = threading.Thread(target=read)
+                reader.start()
+                for n, rid in enumerate(ids):
+                    (a if n % 2 else b).send(type="rules", id=rid, thread="shared", op="remove", rule=rid)
+                for child in (a, b):
+                    got = 0
+                    while got < 30:
+                        if child.next()["type"] == "rules_result":
+                            got += 1
+                stop.set()
+                reader.join()
+                assert not torn, f"round {round_}: a reader saw {torn[:3]}"
+                with open(path, encoding="utf-8") as handle:
+                    left = json.load(handle)
+                assert left == [], f"round {round_}: {len(left)} removed rules came back"
+                assert sorted(os.listdir(os.path.dirname(path))) == ["rules.json"], os.listdir(os.path.dirname(path))
+            assert a.close() == 0 and b.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_rewind_takes_the_conversation_back_too():
+    """A rewind puts the thread's conversation back to the checkpoint along with the files. History and the next turn see it, and rewinding to the backup undoes it."""
+    with _marker_session() as (child, seen):
+        first = child.run_turn("c1", "PLAIN alpha zebra", thread="cv", model="local", mode="sliding")
+        second = child.run_turn("c2", "PLAIN beta yak", thread="cv", model="local")
+        cp1 = [m for m in first if m["type"] == "checkpoint"][0]
+        cp2 = [m for m in second if m["type"] == "checkpoint"][0]
+        assert cp1["turns"] == 0 and cp2["turns"] >= 2, (cp1, cp2)
+        child.send(type="checkpoints", id="l", thread="cv")
+        listed = {c["id"]: c for c in child.until("checkpoint_list")[-1]["checkpoints"]}
+        assert cp1["id"] in listed and cp2["id"] in listed, (cp1, cp2, listed)
+        assert listed[cp2["id"]]["turns"] == cp2["turns"] and listed[cp1["id"]]["turns"] == 0, listed
+
+        def history():
+            child.send(type="history", id="h", thread="cv")
+            return json.dumps(child.until("history_result")[-1]["turns"])
+
+        assert "yak" in history()
+        child.send(type="rewind", id="w", thread="cv", checkpoint=cp2["id"])
+        result = child.until("rewind_result")[-1]
+        assert result["conversation"] is True and result["turns"] == cp2["turns"], result
+        text = history()
+        assert "zebra" in text and "yak" not in text, text
+        third = child.run_turn("c3", "PLAIN gamma", thread="cv", model="local")
+        sent = json.dumps(seen[-1]["messages"])
+        assert third[-1]["ok"] and "zebra" in sent and "yak" not in sent, sent[:600]
+
+        child.send(type="rewind", id="u", thread="cv", checkpoint=result["backup"])
+        undone = child.until("rewind_result")[-1]
+        assert undone["conversation"] is True and undone["turns"] > cp2["turns"], undone
+        text = history()
+        assert "yak" in text and "gamma" not in text, text
+
+        child.send(type="rewind", id="z", thread="cv", checkpoint=cp1["id"])
+        assert child.until("rewind_result")[-1]["turns"] == 0
+        assert history() == "[]"
+        assert child.close() == 0
+
+
+@check
+def stdio_one_turn_per_thread_across_agents():
+    """A thread running a turn in one agent is busy for every other agent, for turns and rewinds. Finishing or dying frees it."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            a, b = _StdioChild(base, home), _StdioChild(base, home)
+            a.next()
+            b.next()
+            assert a.run_turn("a0", "PLAIN first", thread="sh", model="local")[-1]["ok"]
+            assert b.run_turn("b0", "PLAIN after a finished", thread="sh", model="local")[-1]["ok"], "a finished turn kept the thread"
+            a.send(type="checkpoints", id="c", thread="sh")
+            checkpoint = a.until("checkpoint_list")[-1]["checkpoints"][0]["id"]
+
+            a.turn("a1", "SLOW and long", thread="sh", model="local")
+            a.until("token", turn="a1")
+            b.turn("b1", "PLAIN", thread="sh", model="local")
+            err = b.until("error")[-1]
+            assert err["code"] == "busy" and err["turn"] == "b1" and "another agent" in err["message"], err
+            b.send(type="rewind", id="w", thread="sh", checkpoint=checkpoint)
+            err = b.until("error")[-1]
+            assert err["code"] == "busy" and err["id"] == "w", err
+            assert b.run_turn("b2", "PLAIN other thread", thread="other", model="local")[-1]["ok"]
+
+            a.proc.kill()
+            a.proc.wait(timeout=10)
+            replies = b.run_turn("b3", "PLAIN after the holder died", thread="sh", model="local")
+            assert replies[-1]["ok"], replies
+            assert b.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_checkpoint_conversations_are_pruned():
+    """Conversation copies beyond the count or older than the age bound are deleted. The newest and the backup a rewind just took always stay, and a pruned checkpoint still rewinds its files."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home, env={"HYDRA_CHECKPOINT_KEEP": "3", "HYDRA_CHECKPOINT_KEEP_DAYS": "7"})
+            child.next()
+            folder = os.path.join(home, ".hydra", "sessions", "pr", "checkpoints")
+            ids = []
+            for n in range(5):
+                replies = child.run_turn(f"p{n}", f"WRITE_f{n} now", thread="pr", model="local")
+                ids.append([m for m in replies if m["type"] == "checkpoint"][0]["id"])
+                time.sleep(0.02)
+            kept = lambda: sorted(f[:-3] for f in os.listdir(folder))
+            assert kept() == sorted(ids[2:]), (kept(), ids)
+            child.send(type="checkpoints", id="l", thread="pr")
+            listed = {c["id"]: c["turns"] for c in child.until("checkpoint_list")[-1]["checkpoints"]}
+            assert [listed[i] is None for i in ids] == [True, True, False, False, False], listed
+
+            child.send(type="rewind", id="w", thread="pr", checkpoint=ids[1])
+            result = child.until("rewind_result")[-1]
+            assert result["conversation"] is False and result["turns"] is None, result
+            assert result["removed"] == ["f1.txt", "f2.txt", "f3.txt", "f4.txt"] and os.path.exists(os.path.join(child.project, "f0.txt"))
+            assert result["backup"] in kept() and len(kept()) == 3, kept()
+
+            old = time.time() - 8 * 86400
+            for sha in kept():
+                os.utime(os.path.join(folder, sha + ".db"), (old, old))
+            replies = child.run_turn("p9", "PLAIN", thread="pr", model="local")
+            newest = [m for m in replies if m["type"] == "checkpoint"][0]["id"]
+            assert kept() == [newest], kept()
+
+            child.send(type="rewind", id="w2", thread="pr", checkpoint=newest)
+            backup = child.until("rewind_result")[-1]["backup"]
+            for sha in kept():
+                os.utime(os.path.join(folder, sha + ".db"), (old, old))
+            child.send(type="rewind", id="w3", thread="pr", checkpoint=ids[4])
+            again = child.until("rewind_result")[-1]
+            assert again["backup"] in kept(), (again, kept())
+            assert child.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_interrupted_prompt_gets_an_explicit_reply():
+    """A prompt whose agent was killed mid-stream, or whose turn was cancelled, gets an assistant marker. History says so, and the next request alternates roles."""
+    from hydra_cli.agent import CANCELLED_TEXT, INTERRUPTED_TEXT
+
+    def alternates(roles):
+        return all(a != b for a, b in zip(roles, roles[1:]))
+
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            first = _StdioChild(base, home)
+            first.next()
+            assert first.run_turn("i1", "PLAIN alpha", thread="ir", model="local", mode="sliding")[-1]["ok"]
+            first.turn("i2", "SLOW beta", thread="ir", model="local")
+            first.until("token", turn="i2")
+            first.proc.kill()
+            first.proc.wait(timeout=10)
+
+            second = _StdioChild(base, home)
+            second.next()
+            second.send(type="history", id="h", thread="ir")
+            turns = second.until("history_result")[-1]["turns"]
+            assert [(t["role"], t["content"]) for t in turns] == [("user", "PLAIN alpha"), ("assistant", "reply-to-PLAIN"),
+                                                                  ("user", "SLOW beta"), ("assistant", INTERRUPTED_TEXT)], turns
+            second.send(type="history", id="h2", thread="ir")
+            assert len(second.until("history_result")[-1]["turns"]) == 4, "history wrote the marker twice"
+
+            assert second.run_turn("i3", "PLAIN gamma", thread="ir", model="local")[-1]["ok"]
+            sent = seen[-1]["messages"]
+            assert alternates([m["role"] for m in sent if m["role"] in ("user", "assistant")]), sent
+            prior = [line.split(" : ", 1)[0] for line in sent[-1]["content"].split("\n") if line.startswith(("user : ", "assistant : "))]
+            assert prior and alternates(prior) and INTERRUPTED_TEXT in sent[-1]["content"], sent[-1]["content"]
+
+            second.turn("i4", "SLOW delta", thread="ir", model="local")
+            second.until("token", turn="i4")
+            second.send(type="history", id="busy", thread="ir")
+            assert second.until("history_result")[-1]["turns"][-1] == {"role": "user", "content": "SLOW delta"}, "a running turn got a marker"
+            second.send(type="cancel", turn="i4")
+            assert second.until("done", turn="i4")[-1]["cancelled"]
+            second.send(type="history", id="h3", thread="ir")
+            turns = second.until("history_result")[-1]["turns"]
+            assert alternates([t["role"] for t in turns]) and turns[-1] == {"role": "assistant", "content": CANCELLED_TEXT}, turns
+            assert second.run_turn("i5", "PLAIN epsilon", thread="ir", model="local")[-1]["ok"]
+            second.send(type="history", id="h4", thread="ir")
+            turns = second.until("history_result")[-1]["turns"]
+            assert alternates([t["role"] for t in turns]) and len(turns) == 10, turns
+            second.turn("i6", "SLOW zeta", thread="ir", model="local")
+            second.until("token", turn="i6")
+            second.proc.kill()
+            second.proc.wait(timeout=10)
+
+            third = _StdioChild(base, home)
+            third.next()
+            assert third.run_turn("i7", "PLAIN eta", thread="ir", model="local")[-1]["ok"]
+            assert INTERRUPTED_TEXT in seen[-1]["messages"][-1]["content"], "the next turn skipped the marker"
+            third.send(type="history", id="h5", thread="ir")
+            turns = third.until("history_result")[-1]["turns"]
+            assert alternates([t["role"] for t in turns]) and turns[-3] == {"role": "assistant", "content": INTERRUPTED_TEXT}, turns
+            assert third.close() == 0
+
+            from hydra_cli.context import SessionContextLedger
+            saved = os.environ.get("HOME")
+            os.environ["HOME"] = home
+            try:
+                ledger = SessionContextLedger(session_id="ir-tools")
+                ledger.append_turn(role="user", content="run it")
+                ledger.append_turn(role="assistant", content="", tool_calls=[{"id": "c", "function": {"name": "list_dir", "arguments": "{}"}}])
+                assert ledger.close_unanswered(INTERRUPTED_TEXT), "a tool call round counted as a reply"
+                assert not ledger.close_unanswered(INTERRUPTED_TEXT), "a marker was written twice"
+                ledger.end_turn()
+            finally:
+                os.environ["HOME"] = saved
+    finally:
+        httpd.shutdown()
 
 
 def main() -> int:
