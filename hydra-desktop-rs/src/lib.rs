@@ -6,3 +6,4 @@ pub mod crash;
 pub mod health;
 pub mod fsx;
 pub mod git;
+pub mod workspace;
