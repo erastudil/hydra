@@ -462,3 +462,37 @@ fn a_respawned_agent_adopts_a_running_task_and_the_app_can_stop_it() {
 fn unsafe_kill(pid: u32) {
     let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).status();
 }
+
+#[test]
+fn stopping_a_task_another_live_agent_owns_is_refused_and_shown() {
+    let mut r = rig("owned").expect("rig");
+    r.m.sessions[0].permission = "bypass".into();
+    assert!(r.m.submit(&mut r.be, "BGTASK start a server"));
+    done(&mut r);
+    pump(&mut r, 10, |m| m.running_tasks() == 1);
+    let id = r.m.tasks.keys().next().cloned().unwrap();
+    // a second, live agent on the same home does not own the task
+    let mut other = Backend::spawn_with(&r.envs, || {}).expect("second agent");
+    let mut m2 = Model::new(None, r.m.cwd.clone());
+    let end = Instant::now() + Duration::from_secs(10);
+    while !m2.agent_ready && Instant::now() < end {
+        if let Ok(ev) = other.rx.recv_timeout(Duration::from_millis(50)) {
+            m2.apply(ev);
+        }
+    }
+    m2.stop_task(&mut other, &id);
+    let end = Instant::now() + Duration::from_secs(10);
+    while m2.notice.is_empty() && Instant::now() < end {
+        if let Ok(ev) = other.rx.recv_timeout(Duration::from_millis(50)) {
+            m2.apply(ev);
+        }
+    }
+    assert!(m2.notice.starts_with("Could not stop the task:"), "toast text: {:?}", m2.notice);
+    pump(&mut r, 1, |_| false);
+    assert_eq!(r.m.running_tasks(), 1, "the owner's task keeps running");
+    r.m.stop_task(&mut r.be, &id);
+    pump(&mut r, 15, |m| m.running_tasks() == 0);
+    assert_eq!(r.m.tasks[&id]["state"], "stopped", "the owner can stop it");
+    drop(other);
+    let _ = std::fs::remove_dir_all(&r.dir);
+}

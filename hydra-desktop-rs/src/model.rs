@@ -164,6 +164,7 @@ pub enum Pending {
     UndoRewind(u32),
     Rules,
     Query,
+    TaskStop,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -749,7 +750,7 @@ impl Model {
 
     pub fn stop_task(&mut self, be: &mut Backend, task: &str) {
         let id = be.task_stop(task);
-        self.act(Pending::Query, id);
+        self.act(Pending::TaskStop, id);
     }
 
     pub fn toggle_skill(&mut self, id: &str) {
@@ -1193,6 +1194,8 @@ impl Model {
             }
             Pending::Rewind(_, _) | Pending::UndoRewind(_) => self.notice = format!("Rewind failed: {message}"),
             Pending::Query => self.notice = format!("Agent request failed: {message}"),
+            // another live agent owns it (c28b966): only that agent may stop it
+            Pending::TaskStop => self.notice = format!("Could not stop the task: {message}"),
             _ => self.log(&format!("\n[error] {message}")),
         }
     }
@@ -1201,7 +1204,7 @@ impl Model {
         let is_err = r.get("isError").and_then(|x| x.as_bool()).unwrap_or(false);
         let err_text = r.get("error").and_then(|x| x.as_str()).unwrap_or("action failed").to_string();
         match kind {
-            Pending::Rewind(_, _) | Pending::UndoRewind(_) | Pending::Rules | Pending::Query => {}
+            Pending::Rewind(_, _) | Pending::UndoRewind(_) | Pending::Rules | Pending::Query | Pending::TaskStop => {}
             Pending::Terminal(sid) => {
                 if is_err {
                     return self.action_failed(Pending::Terminal(sid), &err_text);
