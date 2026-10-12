@@ -145,7 +145,7 @@ impl HydraApp {
             health_rx: { let (tx, rx) = std::sync::mpsc::channel(); std::thread::spawn(move || { let _ = tx.send(health::run()); }); rx },
             checks: vec![],
             crash_note: hydra_desktop::crash::take_last_crash().map(|c| c.1),
-            panel_dismissed: false,
+            panel_dismissed: std::env::var("HYDRA_OPEN").as_deref() == Ok("dismiss"),
             started: -1.0,
             start_error,
             nav_open: true,
@@ -950,7 +950,7 @@ impl HydraApp {
     fn startup_panel(&mut self, ctx: &egui::Context) -> bool {
         let fatal = health::fatal_problems(&self.checks).len();
         let stalled = self.be.is_some() && !self.m.agent_ready && self.started >= 0.0 && ctx.input(|i| i.time) - self.started > 20.0;
-        let down = self.be.is_none() && self.start_error.is_some();
+        let down = self.be.is_none() && self.start_error.as_deref().is_some_and(|e| e != "backend disabled");
         let show = (fatal > 0 || stalled || down || self.crash_note.is_some()) && !self.panel_dismissed;
         if !show {
             return false;
