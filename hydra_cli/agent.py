@@ -271,6 +271,25 @@ def progen_paths(text: str) -> List[str]:
     return found
 
 
+def find_project_rules(cwd: Optional[str] = None) -> Optional[str]:
+    """Path of the guidance file detect_project_rules loads for this directory, or None."""
+    curr = os.path.abspath(cwd or os.getcwd())
+    for _ in range(6):
+        for fname in PROJECT_RULE_FILES:
+            target = os.path.join(curr, fname)
+            try:
+                with open(target, "r", encoding="utf-8", errors="replace") as handle:
+                    if handle.read().strip():
+                        return target
+            except OSError:
+                continue
+        parent = os.path.dirname(curr)
+        if parent == curr:
+            break
+        curr = parent
+    return None
+
+
 def detect_project_rules(cwd: Optional[str] = None) -> Optional[str]:
     """
     Search cwd and up to 5 parent directories for project guidance files
@@ -2813,6 +2832,27 @@ def set_usage_sink(sink: Optional[Callable[[Dict[str, Any]], None]]) -> None:
     _USAGE_SINK.set(sink)
 
 
+_RETRY_SINK: "contextvars.ContextVar[Optional[Callable[[Dict[str, Any]], None]]]" = contextvars.ContextVar("hydra_retry", default=None)
+TRANSIENT_HTTP_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+def set_retry_sink(sink: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+    """Receive attempt, wait and reason each time the calling thread retries a provider request."""
+    _RETRY_SINK.set(sink)
+
+
+def _transient_reason(exc: BaseException) -> Optional[str]:
+    """Why a failed provider request is worth sending again, or None when it is not."""
+    import http.client
+
+    if isinstance(exc, HTTPError):
+        return f"HTTP {exc.code}" if exc.code in TRANSIENT_HTTP_CODES else None
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    if isinstance(reason, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, http.client.RemoteDisconnected)):
+        return f"connection lost: {type(reason).__name__}"
+    return None
+
+
 def _report_usage(usage: Any) -> None:
     sink = _USAGE_SINK.get()
     if sink is not None and isinstance(usage, dict) and usage:
@@ -2965,10 +3005,56 @@ def _fetch_streaming_completion(
     req = Request(url, data=data, headers=headers, method="POST")
     where = describe_endpoint(url)
     timeout = min(timeout, 60)  # no byte for a minute is a dead provider, not a slow one
+    retries = max(0, int(os.environ.get("HYDRA_PROVIDER_RETRIES", "2")))
+    base_wait = float(os.environ.get("HYDRA_BACKOFF_BASE", "0.5"))
+    emitted = threading.Event()
+
+    def mark(fn: Any) -> Any:
+        if fn is None:
+            return None
+
+        def call(*a: Any, **k: Any) -> Any:
+            emitted.set()
+            return fn(*a, **k)
+        return call
+
+    on_token, on_reasoning = mark(on_token), mark(on_reasoning)
+    attempt = 0
+    while True:
+        try:
+            return _fetch_streaming_once(req, timeout, where, on_token, on_action, on_reasoning, cancel)
+        except (HTTPError, URLError, OSError) as e:
+            reason = _transient_reason(e)
+            # a retry after the first token would show the user the start of the reply twice
+            if reason is None or attempt >= retries or emitted.is_set():
+                _raise_stream_error(e, where)
+            wait = min(4.0, base_wait * (2 ** attempt))
+            attempt += 1
+            sink = _RETRY_SINK.get()
+            if sink is not None:
+                try:
+                    sink({"attempt": attempt, "of": retries, "wait": wait, "reason": reason})
+                except Exception:
+                    pass
+            if cancel is not None:
+                if cancel.wait(wait):
+                    raise TurnCancelled()
+            else:
+                time.sleep(wait)
+
+
+def _fetch_streaming_once(req: Any, timeout: int, where: str, on_token: Any, on_action: Any, on_reasoning: Any, cancel: Any) -> Dict[str, Any]:
     try:
         if cancel is not None:
             return _run_cancellable(lambda cb: _stream_request(req, timeout, cb, where, on_action, on_reasoning, cancel), on_token, on_action, on_reasoning, cancel)
         return _stream_request(req, timeout, (on_token, on_action, on_reasoning), where, on_action, on_reasoning, cancel)
+    except json.JSONDecodeError as e:
+        raise ProviderError(f"Invalid JSON from {where}: {e}") from e
+
+
+def _raise_stream_error(e: BaseException, where: str) -> None:
+    try:
+        raise e
     except HTTPError as e:
         error_body = ""
         try:
@@ -2978,8 +3064,6 @@ def _fetch_streaming_completion(
         raise ProviderError(redact(f"HTTP {e.code} from {where}: {error_body}")) from e
     except URLError as e:
         raise ProviderError(redact(f"Connection failed to {where}: {e.reason}")) from e
-    except json.JSONDecodeError as e:
-        raise ProviderError(f"Invalid JSON from {where}: {e}") from e
 
 
 def tool_result_text(result: Any) -> str:
@@ -3125,6 +3209,7 @@ def _run_agent_loop(
     on_reasoning: Optional[Callable[[str], None]] = None,
     max_context_chars: Optional[int] = None,
     cancel: Optional[threading.Event] = None,
+    extra_context: Optional[str] = None,
 ) -> str:
     """
     Execute autonomous agent loop with native coding tools and MCP tool invocation until completion or max turns.
@@ -3194,6 +3279,8 @@ def _run_agent_loop(
     register = dialect_instruction(dialect) if dialect else ""
     if register and register not in effective_sys:
         effective_sys = f"{effective_sys}\n\n{register}"
+    if extra_context and extra_context.strip():
+        effective_sys = f"{effective_sys}\n\n{extra_context.strip()}"
     effective_sys = f"{effective_sys}\n\n{_memory_block(target_cwd)}"
 
     original_prompt = prompt

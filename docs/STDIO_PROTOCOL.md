@@ -55,7 +55,7 @@ agent hello : `{"type":"hello","protocol":1,"agent":"hydra","capabilities":[...]
 
 app hello : `{"type":"hello","protocol":1}`
 
-capabilities : turn, cancel, approval, permission, rules, checkpoint, sessions, history, action.
+capabilities : turn, cancel, approval, permission, rules, checkpoint, skills, mcp, tasks, sessions, history, action.
 
 
 ## messages from the app to the agent
@@ -69,9 +69,10 @@ turn : start a turn.
 - model : alias string. default is the thread's last model, or the orchestrator model for a new thread. `local` and `free` pick those tiers.
 - permission : manual, accept_edits, plan or bypass. default bypass, or manual when approve is true. may differ on every turn. when omitted the thread's last permission is used.
   - manual : every tool call asks the app, except tools the app allowed for good with `allow_always`.
-  - accept_edits : read only tools and write_file and edit_file run on their own, every other tool asks.
+  - accept_edits : read only tools, git_status, git_diff, write_file and edit_file run on their own. every other tool asks.
   - plan : read only tools run on their own, every other tool is skipped without asking and the model is told it was skipped.
   - bypass : nothing asks.
+- skills : list of skill ids from `skill_list`, default empty. the body of each picked skill is added to the system prompt of this turn only. an unknown id fails the turn with `bad_request`.
 - checkpoint : boolean, default true. when true the project is snapshotted before the turn runs, see `checkpoint`.
 - approve : boolean, older spelling. true means manual, false means bypass. permission wins when both are sent.
 - context_chars : integer of at least 4096. the context budget in characters. default is four times the model window.
@@ -94,6 +95,14 @@ checkpoints : list the checkpoints of a thread, newest first. fields id, thread.
 
 rewind : put the project files back to a checkpoint. fields id, thread, checkpoint. code only, the conversation is not rewound. the thread must not be running a turn, else `error` code busy. an unknown checkpoint or thread gets `error` code bad_request. before touching anything the adapter snapshots the current state, so a rewind can be undone by rewinding to the backup id in the reply. reply `rewind_result`.
 
+tasks : list the background tasks of this agent process. field id. reply `task_list`.
+
+task_stop : stop a background task and every process it started. fields id, task. an unknown task gets `error` code bad_request. reply `task_list`.
+
+skills : list the skills a turn may pick. field id. reply `skill_list`.
+
+mcp : show the MCP servers a project gets. fields id, cwd, refresh. refresh true asks every server for its tools again. reply `mcp_status`.
+
 rules : list or remove the approval rules that apply to a thread. fields id, thread, op, rule. op is list, the default, or remove, which also needs rule, the rule id. reply `rules_result`.
 
 sessions : list threads on disk. fields id, optional. reply `session_list`.
@@ -108,6 +117,12 @@ action : run a desktop service by command palette name, for the old panels. fiel
 hello : see handshake.
 
 token : fields turn, text. streamed answer text in arrival order. concatenated they are the model reply of the current round.
+
+context : fields turn, rules, skills. sent once per turn after `checkpoint` and before the model runs. rules is the path of the AGENTS.md, .cursorrules or CLAUDE.md file found in cwd or up to five parents above it, or null. its text goes into the system prompt. skills is the list of skill ids added to this turn. mcp_tools lists the MCP tools the model gets this turn. mcp_errors maps each server that failed to start or list its tools to the reason.
+
+task_update : fields task, thread, turn, command, cwd, pid, state, exit_code, started, ended. sent when a task starts and once more when it ends. thread and turn name the turn that started it. state is running, exited or stopped. exit_code and ended are null while it runs. times are epoch seconds. it can arrive between turns.
+
+retry : fields turn, attempt, of, wait, reason. the provider request of this turn failed before its first token and is sent again after wait seconds. attempt counts from 1 up to of. reason is `HTTP <code>` for 429, 500, 502, 503 and 504, or `connection lost: <kind>` for a reset or dropped connection. any other failure, or any failure after a token, is not retried and ends the turn with `error` code turn_failed. HYDRA_PROVIDER_RETRIES sets of, default 2. HYDRA_BACKOFF_BASE sets the first wait, default 0.5, which doubles on each attempt up to 4 seconds. cancel during a wait ends the turn at once.
 
 tool_start : fields turn, call, tool, arguments. arguments is the parsed object, or the raw string if it was not JSON. sent after approval, just before the tool runs. skipped tools never produce it.
 
@@ -130,6 +145,12 @@ approval_request : fields turn, id, tool, arguments. sent only when the permissi
 done : fields turn, text, ok, cancelled. exactly one per turn and always the last message of that turn. text is the final answer, or the cancel marker text when cancelled. ok is false on cancel, abort and failure.
 
 error : fields code, message, redacted, and turn or id when the failure belongs to one. redacted is true when secrets or url paths were scrubbed from message. a failure inside a turn writes `error` with turn, then `done` with ok false.
+
+skill_list : fields id, skills. each skill has id, keys, the words it is about, and title, the first line of its body.
+
+task_list : fields id, tasks. each task has the fields of `task_update`.
+
+mcp_status : fields id, config, servers. config is the config file in use or null. each server has name, ok, error and tools. error is null when ok is true. tools lists the tool names the model sees.
 
 rules_result : fields id, thread, rules. each rule has id, tool, prefix or null, and scope.
 
@@ -183,8 +204,58 @@ codes : malformed, unknown_type, bad_request, line_too_long, busy, unknown_turn,
 kill : the app should send `shutdown` and wait before it kills the child.
 
 
+## respawn
+
+when the child dies, the app starts a new one with the same home directory and sends `hello` as usual. nothing from the dead child carries over in memory. everything below lives on disk and carries over.
+
+turns : every turn that was running is lost. the app shows each as failed. it never waits for their `done`.
+
+threads : `sessions` lists the dead child's threads with their saved cwd, mode, model and permission. a turn on such a thread needs no cwd.
+
+history : finished turns are kept. a reply cut off by the kill is never stored as an answer.
+
+checkpoints : the checkpoint taken before a killed turn is kept and listed. `rewind` to it puts the files back as they were before that turn.
+
+approvals : pending approvals die with the child. their ids mean nothing to the new one.
+
+
 ## checkpoints
 
 store : a bare git repository under ~/.hydra/shadow, one per project directory, using the project as work tree. the project's own repository, branches, stashes and files are never written. the project's .gitignore rules apply, so ignored files are neither saved nor restored. .git and .hydra directories are always skipped. git must be on the path, else every checkpoint reports ok false.
 
 limits : a rewind restores and removes files only. it does not undo commands run outside the project directory and it does not rewind the conversation ledger.
+
+## mcp servers
+
+config : the agent reads `.hydra/mcp_servers.json` in the turn cwd, else `~/.hydra/mcp_servers.json`. the file maps server names to command, args and env, under `mcpServers` or at the top level.
+
+transport : each server is a child process that speaks newline JSON-RPC 2.0 on its stdio. it starts on the first turn or `mcp` request of its project and stays up until the agent exits. a change to the config file restarts the servers of that config.
+
+names : a tool `echo` of server `demo` reaches the model as `demo__echo`.
+
+permission : MCP tools are never read only. manual asks for each call, accept_edits asks too, plan skips them, and bypass runs them. approval rules apply to them like to any other tool.
+
+failure : a server that fails to start leaves its tools out and shows in `mcp_errors`. the turn runs with the rest.
+
+## git tools
+
+git_status : read only. branch, clean and files, each file with its two letter porcelain status and path.
+
+git_diff : read only. fields path and staged. returns diff and truncated.
+
+git_commit : asks under manual and accept_edits, skipped under plan. fields message and paths. it stages paths, or every change, then commits. it refuses on main or master and when nothing is staged. returns branch and commit.
+
+git_branch : asks like git_commit. op list, create or switch, and name. create switches to the new branch. creating main or master is refused.
+
+git runs with an argument list, never through a shell. paths must stay inside the turn cwd. these tools never push.
+
+
+## background tasks
+
+tools : start_background_task takes a shell command and returns task and pid at once. task_output returns state, exit_code and the last output, 4000 characters unless tail says otherwise. stop_background_task stops one.
+
+permission : start_background_task asks like run_command and plan skips it. task_output is read only. stop_background_task asks under manual.
+
+output : each task writes stdout and stderr to ~/.hydra/tasks/<task>.log.
+
+lifetime : a task keeps running after its turn ends. stop sends SIGTERM to its process group, then SIGKILL after 3 seconds. on Windows it terminates the process. shutdown or EOF stops every task. a killed agent leaves them running, and a respawned agent does not know them.

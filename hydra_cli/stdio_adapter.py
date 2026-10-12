@@ -22,9 +22,9 @@ TOOL_OUTPUT_CHARS = 4000
 CONTEXT_MODES = ("recall", "compact", "sliding")
 DECISIONS = {"allow": "y", "allow_always": "y", "skip": "n", "abort": "q"}
 PERMISSIONS = ("manual", "accept_edits", "plan", "bypass")
-READ_ONLY_TOOLS = frozenset({"read_file", "list_dir", "grep_search", "find_files", "search_files", "compact_context", "retrieve_context"})
+READ_ONLY_TOOLS = frozenset({"task_output", "git_status", "git_diff", "read_file", "list_dir", "grep_search", "find_files", "search_files", "compact_context", "retrieve_context"})
 EDIT_TOOLS = frozenset({"write_file", "edit_file"})
-CAPABILITIES = ["turn", "cancel", "approval", "permission", "rules", "checkpoint", "sessions", "history", "action"]
+CAPABILITIES = ["turn", "cancel", "approval", "permission", "rules", "checkpoint", "skills", "mcp", "tasks", "sessions", "history", "action"]
 EXIT_OK = 0
 EXIT_VERSION = 2
 EXIT_FATAL = 70
@@ -61,6 +61,12 @@ class Adapter:
         self._requests: Dict[str, _Turn] = {}  # approval id -> the turn waiting on it
         self._approvals = 0
         self._rules_lock = threading.Lock()
+        self._mcp: Dict[str, Any] = {}
+        from hydra_cli.native_tools import BACKGROUND_TASKS
+
+        self._tasks = BACKGROUND_TASKS
+        self._tasks.add_listener(lambda info: self.emit({"type": "task_update", **_task_view(info)}))
+        self._mcp_lock = threading.Lock()
         self._shadow_lock = threading.RLock()  # one shadow git operation at a time: init and index locks do not mix
         self._calls = 0
         self._ledgers: Dict[str, Any] = {}
@@ -126,6 +132,11 @@ class Adapter:
             self.error(f"{type(exc).__name__}: {exc}", "fatal")
             self.exit_code = EXIT_FATAL
         self._stop_turns()
+        self._tasks.stop_all()
+        with self._mcp_lock:
+            for _stamp, registry in self._mcp.values():
+                registry.shutdown()
+            self._mcp.clear()
         return self.exit_code
 
     def _stop_turns(self) -> None:
@@ -151,7 +162,7 @@ class Adapter:
         handler = {
             "hello": self._on_hello, "turn": self._on_turn, "cancel": self._on_cancel,
             "approval": self._on_approval, "shutdown": lambda m: False, "sessions": self._on_sessions,
-            "history": self._on_history, "action": self._on_action, "rules": self._on_rules,
+            "history": self._on_history, "action": self._on_action, "rules": self._on_rules, "skills": self._on_skills, "mcp": self._on_mcp, "tasks": self._on_tasks, "task_stop": self._on_task_stop,
             "checkpoints": self._on_checkpoints, "rewind": self._on_rewind,
         }.get(kind)
         if handler is None:
@@ -199,6 +210,10 @@ class Adapter:
             problems.append("context_chars must be an integer of at least 4096")
         if msg.get("permission") is not None and msg.get("permission") not in PERMISSIONS:
             problems.append(f"permission must be one of {', '.join(PERMISSIONS)}")
+        skills = msg.get("skills", [])
+        known_skills = {sk["id"] for sk in _skills()}
+        if not isinstance(skills, list) or any(not isinstance(x, str) or x not in known_skills for x in skills):
+            problems.append(f"skills must be a list of known skill ids: {', '.join(sorted(known_skills))}")
         if msg.get("model") is not None and not isinstance(msg.get("model"), str):
             problems.append("model must be a string")
         if problems:
@@ -420,6 +435,67 @@ class Adapter:
             rules = self._read_rules(thread)
         self.emit({"type": "rules_result", "id": req, "thread": thread, "rules": rules})
 
+    def _mcp_registry(self, cwd: str) -> Any:
+        """The MCP registry for a project, built from its config and reused while the config file is unchanged."""
+        from hydra_cli.mcp_registry import McpRegistry
+
+        config = next((p for p in (os.path.join(cwd, ".hydra", "mcp_servers.json"),
+                                   os.path.join(os.path.expanduser("~"), ".hydra", "mcp_servers.json"))
+                       if os.path.isfile(p)), None)
+        if config is None:
+            return None
+        config = os.path.realpath(config)
+        stamp = os.stat(config).st_mtime_ns
+        with self._mcp_lock:
+            cached = self._mcp.get(config)
+            if cached is not None and cached[0] == stamp:
+                return cached[1]
+            if cached is not None:
+                cached[1].shutdown()
+            try:
+                registry = McpRegistry(config_path=config, auto_load=False)
+            except (OSError, ValueError) as exc:
+                registry = McpRegistry(auto_load=False)
+                registry.config_path = config
+                registry.errors["config"] = f"{type(exc).__name__}: {exc}"
+            registry.get_tools()
+            self._mcp[config] = (stamp, registry)
+            return registry
+
+    def _on_mcp(self, msg: Dict[str, Any]) -> None:
+        req = _text(msg.get("id"))
+        cwd = msg.get("cwd")
+        if not isinstance(cwd, str) or not os.path.isdir(cwd):
+            return self.error("mcp needs cwd, an existing directory", "bad_request", req=req)
+        registry = self._mcp_registry(cwd)
+        servers: List[Dict[str, Any]] = []
+        if registry is not None:
+            with self._mcp_lock:
+                if msg.get("refresh"):
+                    registry.get_tools(refresh=True)
+                tools = registry.get_tools()
+                names = sorted(set(registry._server_configs) | set(registry.errors))
+                for name in names:
+                    servers.append({"name": name, "ok": name not in registry.errors, "error": registry.errors.get(name),
+                                    "tools": [t["name"] for t in tools if t.get("_server") == name]})
+        self.emit({"type": "mcp_status", "id": req, "config": registry.config_path if registry else None,
+                   "servers": servers})
+
+    def _on_tasks(self, msg: Dict[str, Any]) -> None:
+        self.emit({"type": "task_list", "id": _text(msg.get("id")), "tasks": [_task_view(x) for x in self._tasks.list()]})
+
+    def _on_task_stop(self, msg: Dict[str, Any]) -> None:
+        req = _text(msg.get("id"))
+        task = msg.get("task")
+        if not isinstance(task, str) or task not in {x["task"] for x in self._tasks.list()}:
+            return self.error(f"no task {task!r}", "bad_request", req=req)
+        self._tasks.stop(task)
+        self._on_tasks(msg)
+
+    def _on_skills(self, msg: Dict[str, Any]) -> None:
+        listed = [{"id": sk["id"], "keys": sk["keys"], "title": (sk["body"].splitlines() or [""])[0]} for sk in _skills()]
+        self.emit({"type": "skill_list", "id": _text(msg.get("id")), "skills": listed})
+
     def _on_sessions(self, msg: Dict[str, Any]) -> None:
         from pathlib import Path
 
@@ -511,7 +587,7 @@ class Adapter:
 
     def _run_turn(self, t: _Turn, msg: Dict[str, Any]) -> None:
         turn, thread = t.id, t.thread
-        from hydra_cli.agent import CANCELLED_TEXT, run_agent_loop, set_usage_sink
+        from hydra_cli.agent import CANCELLED_TEXT, run_agent_loop, set_retry_sink, set_usage_sink
         from hydra_cli.config import DEFAULT_ORCHESTRATOR_MODEL, get_context_window
         from hydra_cli.context import SessionContextLedger
         from hydra_cli.ui import set_approval_handler, set_diff_sink, set_tool_sink, set_tool_start_sink
@@ -539,6 +615,8 @@ class Adapter:
                        "cost_usd": rec["total_cost_usd"]})
 
         set_usage_sink(usage)
+        set_retry_sink(lambda info: self.emit({"type": "retry", "turn": turn, **info}))
+        self._tasks.owner.set({"thread": thread, "turn": turn})
         permission = t.permission
         set_approval_handler(lambda tool, args_json: self._approve(t, tool, args_json))
         set_diff_sink(lambda path, text: self.emit({"type": "diff", "turn": turn, "path": path, "diff": text}))
@@ -548,12 +626,24 @@ class Adapter:
         try:
             if msg.get("checkpoint", True):
                 self.emit({"type": "checkpoint", "turn": turn, "thread": thread, **self._snapshot(msg["cwd"], f"turn={turn}", thread)})
+            from hydra_cli.agent import find_project_rules
+
+            chosen = [sk for sk in _skills() if sk["id"] in (msg.get("skills") or [])]
+            extra = "\n\n".join(f"[SKILL: {sk['id']}]\n{sk['body']}" for sk in chosen)
+            mcp = self._mcp_registry(msg["cwd"])
+            with self._mcp_lock:
+                mcp_tools = [tool["name"] for tool in mcp.get_tools()] if mcp else []
+                mcp_errors = dict(mcp.errors) if mcp else {}
+            self.emit({"type": "context", "turn": turn, "rules": find_project_rules(msg["cwd"]),
+                       "skills": [sk["id"] for sk in chosen], "mcp_tools": mcp_tools, "mcp_errors": mcp_errors})
             answer = run_agent_loop(
                 alias=alias, prompt=msg["prompt"], session_id=thread, resume_session=True, cwd=msg["cwd"],
                 steer_mode=permission != "bypass", ledger=ledger, strategy=msg.get("mode", "recall"),
                 on_token=lambda text: self.emit({"type": "token", "turn": turn, "text": text}),
                 max_context_chars=msg.get("context_chars") or get_context_window(alias) * 4,
                 cancel=t.cancel,
+                extra_context=extra,
+                registry=mcp,
             )
             cancelled = t.cancel.is_set() or answer == CANCELLED_TEXT
             ok = not cancelled and answer != "[Turn aborted by developer]"
@@ -564,6 +654,7 @@ class Adapter:
             final = {"type": "done", "turn": turn, "text": "", "ok": False, "cancelled": t.cancel.is_set()}
         finally:
             set_usage_sink(None)
+            set_retry_sink(None)
             set_approval_handler(None)
             set_diff_sink(None)
             set_tool_sink(None)
@@ -640,6 +731,17 @@ def _command_has_prefix(command: str, prefix: str) -> bool:
     if not prefix or any(token in command for token in _SHELL_CONTROL):
         return False
     return command == prefix or command.startswith(prefix + " ")
+
+
+def _task_view(info: Dict[str, Any]) -> Dict[str, Any]:
+    keys = ("task", "thread", "turn", "command", "cwd", "pid", "state", "exit_code", "started", "ended")
+    return {key: info.get(key) for key in keys}
+
+
+def _skills() -> List[Dict[str, Any]]:
+    from hydra_cli.alice_gate import load_skills
+
+    return load_skills()
 
 
 def _text(value: Any) -> Optional[str]:

@@ -227,6 +227,10 @@ class McpRegistry:
 
         return openai_tools
 
+    def has_tool(self, qualified_tool_name: str) -> bool:
+        """True when a registered server lists this namespaced tool."""
+        return any(tool["name"] == qualified_tool_name for tool in self.get_tools())
+
     def dispatch(self, qualified_tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
         """
         Route tool execution to the target client.

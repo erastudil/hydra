@@ -922,7 +922,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "summon" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and "browser_fill_form" in names and "computer_find_window" in names and len(names) == 46
+        assert "read_file" in names and "summon" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and "browser_fill_form" in names and "computer_find_window" in names and {"git_status", "git_diff", "git_commit", "git_branch", "start_background_task", "task_output", "stop_background_task"} <= set(names) and len(names) == 53
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -12135,14 +12135,23 @@ def _marker_model(seen):
         seen.append(body)
         users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
         prompt = users[-1] if users else ""
-        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "RUN_", "PLAIN"))] or ["PLAIN"])[-1]
+        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "RUN_", "MCP_", "GIT_", "TASK_", "PLAIN"))] or ["PLAIN"])[-1]
         if word.startswith("SLOW"):
             return _sse(handler, [f"{word}-{n} " for n in range(200)], 0.05, [])
-        if word.startswith(("WRITE_", "EDIT_", "RUN_")) and not any(m.get("role") == "tool" for m in body["messages"]):
+        if word.startswith(("WRITE_", "EDIT_", "RUN_", "MCP_", "GIT_", "TASK_")) and not any(m.get("role") == "tool" for m in body["messages"]):
             name = word.split("_", 1)[1]
             commands = {"status": "echo hello", "chain": "echo hello && echo bye", "other": "echo other", "near": "echo hellothere", "delete": "rm keep.txt"}
             if word.startswith("RUN_"):
                 tool_name, args = "run_command", json.dumps({"command": commands[name]})
+            elif word.startswith("GIT_"):
+                git_calls = {"status": ("git_status", {}), "diff": ("git_diff", {}), "commit": ("git_commit", {"message": "add a"}),
+                             "branch": ("git_branch", {"op": "create", "name": "feat/x"}), "master": ("git_branch", {"op": "create", "name": "master"})}
+                tool_name, args = git_calls[name][0], json.dumps(git_calls[name][1])
+            elif word.startswith("TASK_"):
+                task_commands = {"start": "echo started; sleep 60", "quick": "echo quick-done; exit 3"}
+                tool_name, args = "start_background_task", json.dumps({"command": task_commands[name]})
+            elif word.startswith("MCP_"):
+                tool_name, args = "demo__" + name, json.dumps({"text": "ping"})
             else:
                 tool_name, args = "write_file", json.dumps({"path": name + ".txt", "content": f"content of {name}\n"})
             chunks = [
@@ -12231,7 +12240,7 @@ def stdio_parallel_turns_share_nothing():
         assert [m["path"] for m in by_turn["B"] if m["type"] == "diff"] == ["b.txt"]
         assert [m["path"] for m in by_turn["E"] if m["type"] == "diff"] == ["e.txt"]
         assert not [m for m in by_turn["C"] if m["type"] == "diff"]
-        assert all(m["type"] in ("checkpoint", "token", "usage") for m in by_turn["A"]), by_turn["A"]
+        assert all(m["type"] in ("checkpoint", "context", "token", "usage") for m in by_turn["A"]), by_turn["A"]
         # usage numbers come from each turn's own provider reply
         child.turn("P", "PLAIN1", thread="tp", cwd=pa, model="local")
         child.turn("Q", "PLAIN22222", thread="tq", cwd=pa, model="local")
@@ -12605,6 +12614,359 @@ def stdio_two_hundred_runs_of_four_parallel_turns():
             assert child.close() == 0
     finally:
         httpd.shutdown()
+
+
+@check
+def stdio_rules_and_skills_reach_the_model():
+    """The project's AGENTS.md and the skills the app picks go into the system prompt, and the context message says which."""
+    with _stdio_session() as (child, seen):
+        with open(os.path.join(child.project, "AGENTS.md"), "w", encoding="utf-8") as handle:
+            handle.write("rule : MARKER_RULE_42 answer tersely\n")
+        child.send(type="skills", id="k")
+        listed = child.until("skill_list")[-1]["skills"]
+        code = [x for x in listed if x["id"] == "code"]
+        assert code and code[0]["keys"] and code[0]["title"], listed
+        replies = child.run_turn("s1", "hello", thread="sk", model="local", skills=["code"])
+        ctx = [m for m in replies if m["type"] == "context"]
+        assert len(ctx) == 1 and ctx[0]["turn"] == "s1" and ctx[0]["skills"] == ["code"], ctx
+        assert os.path.realpath(ctx[0]["rules"]) == os.path.realpath(os.path.join(child.project, "AGENTS.md")), ctx
+        system = seen[-1]["messages"][0]["content"]
+        system = system if isinstance(system, str) else json.dumps(system)
+        assert "MARKER_RULE_42" in system and "[SKILL: code]" in system and "read the file before an edit" in system
+        replies = child.run_turn("s2", "hello", thread="sk2", model="local")
+        system = json.dumps(seen[-1]["messages"][0]["content"])
+        assert "[SKILL:" not in system and "MARKER_RULE_42" in system
+        assert [m["skills"] for m in replies if m["type"] == "context"] == [[]]
+        os.remove(os.path.join(child.project, "AGENTS.md"))
+        replies = child.run_turn("s3", "hello", thread="sk3", model="local")
+        assert [m["rules"] for m in replies if m["type"] == "context"] == [None], replies
+        assert "MARKER_RULE_42" not in json.dumps(seen[-1]["messages"][0]["content"])
+        child.send(type="turn", turn="s4", prompt="hi", thread="sk4", cwd=child.project, skills=["no-such-skill"])
+        assert child.until("error")[-1]["code"] == "bad_request"
+        assert child.close() == 0
+
+
+_TINY_MCP_SERVER = r"""
+import json, sys
+log = sys.argv[1]
+for line in sys.stdin:
+    msg = json.loads(line)
+    if "id" not in msg:
+        continue
+    method = msg.get("method")
+    if method == "initialize":
+        result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "demo", "version": "1"}}
+    elif method == "tools/list":
+        result = {"tools": [{"name": "echo", "description": "Echo the text back.",
+                             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}]}
+    elif method == "tools/call":
+        text = msg["params"]["arguments"]["text"]
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write(text + "\n")
+        result = {"content": [{"type": "text", "text": "echo:" + text}], "isError": False}
+    else:
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": method}}) + "\n")
+        sys.stdout.flush()
+        continue
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": result}) + "\n")
+    sys.stdout.flush()
+"""
+
+
+@check
+def stdio_mcp_server_tools_reach_the_loop_behind_permissions():
+    """A stdio MCP server from the project config gives the model its tools. Calls run under bypass, are skipped under plan, and ask under manual."""
+    with _marker_session() as (child, seen):
+        child.send(type="mcp", id="m0", cwd=child.project)
+        empty = child.until("mcp_status")[-1]
+        assert empty["config"] is None and empty["servers"] == [], empty
+        server, log = os.path.join(child.home, "tiny_mcp.py"), os.path.join(child.home, "calls.log")
+        with open(server, "w", encoding="utf-8") as handle:
+            handle.write(_TINY_MCP_SERVER)
+        os.makedirs(os.path.join(child.project, ".hydra"), exist_ok=True)
+        with open(os.path.join(child.project, ".hydra", "mcp_servers.json"), "w", encoding="utf-8") as handle:
+            json.dump({"mcpServers": {"demo": {"command": sys.executable, "args": [server, log]},
+                                      "broken": {"command": os.path.join(child.home, "no-such-binary")}}}, handle)
+        child.send(type="mcp", id="m1", cwd=child.project)
+        status = child.until("mcp_status")[-1]
+        by_name = {x["name"]: x for x in status["servers"]}
+        assert status["id"] == "m1" and status["config"].endswith(os.path.join(".hydra", "mcp_servers.json")), status
+        assert by_name["demo"]["ok"] and by_name["demo"]["tools"] == ["demo__echo"] and by_name["demo"]["error"] is None
+        assert not by_name["broken"]["ok"] and by_name["broken"]["error"] and by_name["broken"]["tools"] == []
+
+        replies = child.run_turn("m2", "MCP_echo", thread="mcp1", model="local")
+        ctx = [m for m in replies if m["type"] == "context"][0]
+        assert ctx["mcp_tools"] == ["demo__echo"] and "broken" in ctx["mcp_errors"], ctx
+        starts = [m for m in replies if m["type"] == "tool_start"]
+        results = [m for m in replies if m["type"] == "tool_result"]
+        assert [m["tool"] for m in starts] == ["demo__echo"] and starts[0]["arguments"] == {"text": "ping"}, replies
+        assert "echo:ping" in results[0]["output"] and not results[0]["is_error"], results
+        assert any(t["function"]["name"] == "demo__echo" for t in seen[0].get("tools", [])), "model never saw the MCP tool"
+        assert "echo:ping" in json.dumps(seen[-1]["messages"])
+        with open(log, encoding="utf-8") as handle:
+            assert handle.read().split() == ["ping"]
+
+        replies = child.run_turn("m3", "MCP_echo", thread="mcp2", model="local", permission="plan")
+        assert not [m for m in replies if m["type"] == "tool_start"], replies
+        child.turn("m4", "MCP_echo", thread="mcp3", model="local", permission="manual")
+        ask = child.until("approval_request", turn="m4")[-1]
+        assert ask["tool"] == "demo__echo", ask
+        child.send(type="approval", id=ask["id"], decision="skip")
+        replies = child.until("done", turn="m4")
+        assert not [m for m in replies if m["type"] == "tool_start"], replies
+        with open(log, encoding="utf-8") as handle:
+            assert handle.read().split() == ["ping"], "a skipped or denied MCP call still ran"
+        assert child.close() == 0
+
+
+@check
+def stdio_git_tools_follow_permissions_and_keep_off_main():
+    """git_status and git_diff run without asking, git_commit and git_branch ask under manual, and a commit on main is refused."""
+    with _marker_session() as (child, seen):
+        repo = child.project
+        git = lambda *a: subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True, check=True).stdout
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@example.com")
+        git("config", "user.name", "t")
+        with open(os.path.join(repo, "a.txt"), "w", encoding="utf-8") as handle:
+            handle.write("one\n")
+        git("add", "a.txt")
+        git("commit", "-qm", "base")
+        with open(os.path.join(repo, "a.txt"), "a", encoding="utf-8") as handle:
+            handle.write("two\n")
+
+        def result(replies, tool):
+            out = [m for m in replies if m["type"] == "tool_result" and m["tool"] == tool]
+            assert len(out) == 1, replies
+            return out[0]
+
+        replies = child.run_turn("g1", "GIT_status", thread="g", model="local", permission="plan")
+        status = json.loads(result(replies, "git_status")["output"])
+        assert status["branch"] == "main" and status["files"] == [{"status": " M", "path": "a.txt"}], status
+        replies = child.run_turn("g2", "GIT_diff", thread="g", model="local", permission="plan")
+        assert "+two" in json.loads(result(replies, "git_diff")["output"])["diff"]
+        assert not [m for m in child.log if m["type"] == "approval_request"]
+
+        replies = child.run_turn("g3", "GIT_commit", thread="g", model="local", permission="bypass")
+        refused = result(replies, "git_commit")
+        assert refused["is_error"] and "main" in refused["output"], refused
+        assert git("log", "--format=%s").split("\n")[0] == "base"
+        replies = child.run_turn("g4", "GIT_master", thread="g", model="local", permission="bypass")
+        assert "refusing" in result(replies, "git_branch")["output"] and "master" not in git("branch").split()
+        offered = {t["function"]["name"] for t in seen[-1].get("tools", [])}
+        assert {"git_status", "git_diff", "git_commit", "git_branch"} <= offered, offered
+
+        child.turn("g5", "GIT_branch", thread="g", model="local", permission="manual")
+        ask = child.until("approval_request", turn="g5")[-1]
+        assert ask["tool"] == "git_branch" and ask["arguments"] == {"op": "create", "name": "feat/x"}, ask
+        child.send(type="approval", id=ask["id"], decision="allow")
+        child.until("done", turn="g5")
+        assert git("branch", "--show-current").strip() == "feat/x"
+
+        child.turn("g6", "GIT_commit", thread="g", model="local", permission="manual")
+        ask = child.until("approval_request", turn="g6")[-1]
+        assert ask["tool"] == "git_commit", ask
+        child.send(type="approval", id=ask["id"], decision="skip")
+        child.until("done", turn="g6")
+        assert git("log", "-1", "--format=%s").strip() == "base"
+        replies = child.run_turn("g7", "GIT_commit", thread="g", model="local", permission="plan")
+        assert not [m for m in replies if m["type"] == "tool_start"] and git("log", "-1", "--format=%s").strip() == "base"
+
+        child.turn("g8", "GIT_commit", thread="g", model="local", permission="manual")
+        ask = child.until("approval_request", turn="g8")[-1]
+        child.send(type="approval", id=ask["id"], decision="allow")
+        replies = child.until("done", turn="g8")
+        done = json.loads(result(replies, "git_commit")["output"])
+        assert done["branch"] == "feat/x" and done["commit"] == git("rev-parse", "HEAD").strip(), done
+        assert git("log", "-1", "--format=%s").strip() == "add a" and git("status", "--porcelain") == ""
+        assert git("rev-parse", "main").strip() != done["commit"]
+        assert child.close() == 0
+
+
+@check
+def stdio_provider_retries_transient_failures_before_the_first_token():
+    """A 503 or a dropped connection before any token is sent again with a retry message. A 400, or a failure after a token, is not."""
+    calls = {}
+
+    def script(handler, body):
+        users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        word = users[-1].split()[-1]
+        calls[word] = n = calls.get(word, 0) + 1
+        if (word == "FLAKY" and n == 1) or word == "DOWN":
+            handler.send_response(503)
+            handler.send_header("Content-Length", "0")
+            handler.end_headers()
+            return
+        if word == "FLAKY" and n == 2:
+            handler.close_connection = True
+            return
+        if word == "HARD":
+            handler.send_response(400)
+            handler.send_header("Content-Length", "2")
+            handler.end_headers()
+            handler.wfile.write(b"no")
+            return
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.end_headers()
+        handler.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': 'ok-' + word}}]})}\n\n".encode())
+        handler.wfile.flush()
+        if word == "RESET":
+            import socket
+            import struct
+
+            time.sleep(0.2)
+            handler.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            handler.connection.close()
+        elif word != "CUT":
+            handler.wfile.write(b"data: [DONE]\n\n")
+        handler.close_connection = True
+
+    httpd, base = _scripted_model(script)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            child = _StdioChild(base, home, env={"HYDRA_BACKOFF_BASE": "0.01", "HYDRA_PROVIDER_RETRIES": "2"})
+            assert child.next()["type"] == "hello"
+            replies = child.run_turn("r1", "FLAKY", thread="r1", model="local")
+            retries = [m for m in replies if m["type"] == "retry"]
+            assert [(m["attempt"], m["of"]) for m in retries] == [(1, 2), (2, 2)], replies
+            assert retries[0]["reason"] == "HTTP 503" and retries[1]["reason"].startswith("connection lost"), retries
+            assert retries[0]["wait"] < retries[1]["wait"] and all(m["turn"] == "r1" for m in retries)
+            assert replies[-1]["ok"] and replies[-1]["text"] == "ok-FLAKY" and calls["FLAKY"] == 3, replies
+            assert "".join(m["text"] for m in replies if m["type"] == "token") == "ok-FLAKY"
+
+            replies = child.run_turn("r2", "DOWN", thread="r2", model="local")
+            assert len([m for m in replies if m["type"] == "retry"]) == 2 and not replies[-1]["ok"], replies
+            assert calls["DOWN"] == 3, calls
+            for word in ("HARD", "CUT", "RESET"):
+                before = dict(calls)
+                replies = child.run_turn("r-" + word, word, thread="r-" + word, model="local")
+                assert not [m for m in replies if m["type"] == "retry"] and not replies[-1]["ok"], replies
+                assert calls[word] - before.get(word, 0) == 1, calls
+            assert child.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+@check
+def stdio_respawn_after_a_killed_backend():
+    """The app kills the agent mid-turn and starts a new one. Threads, history, checkpoints, rewind and resume all still work."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            first = _StdioChild(base, home)
+            first.next()
+            project = _project(first, "respawn")
+            assert first.run_turn("k1", "WRITE_one remember zebra", thread="keep", cwd=project, model="local", mode="sliding")[-1]["ok"]
+            first.turn("k2", "SLOW and long", thread="keep", cwd=project, model="local")
+            replies = first.until("token", turn="k2")
+            killed_checkpoint = [m for m in replies if m["type"] == "checkpoint" and m["turn"] == "k2"][0]["id"]
+            first.proc.kill()
+            assert first.proc.wait(timeout=10) != 0
+            with open(os.path.join(project, "one.txt"), "w", encoding="utf-8") as handle:
+                handle.write("changed after the crash\n")
+
+            second = _StdioChild(base, home)
+            assert second.next()["type"] == "hello"
+            second.send(type="sessions", id="s")
+            entry = [x for x in second.until("session_list")[-1]["sessions"] if x["thread"] == "keep"][0]
+            assert entry["cwd"] == project, entry
+            second.send(type="history", id="h", thread="keep")
+            turns = second.until("history_result")[-1]["turns"]
+            assert any("zebra" in str(t["content"]) for t in turns if t["role"] == "user"), turns
+            assert not any("SLOW-" in str(t["content"]) for t in turns if t["role"] == "assistant"), "a killed reply was stored"
+            second.send(type="checkpoints", id="c", thread="keep")
+            listed = second.until("checkpoint_list")[-1]["checkpoints"]
+            assert [c["turn"] for c in listed][:2] == ["k2", "k1"] and listed[0]["id"] == killed_checkpoint, listed
+            second.send(type="rewind", id="w", thread="keep", checkpoint=killed_checkpoint)
+            result = second.until("rewind_result")[-1]
+            assert result["restored"] == ["one.txt"], result
+            assert open(os.path.join(project, "one.txt"), encoding="utf-8").read() == "content of one\n"
+            replies = second.run_turn("k3", "PLAIN again", thread="keep", model="local")
+            assert replies[-1]["ok"] and replies[0]["type"] == "checkpoint" and replies[0]["ok"], replies
+            assert "zebra" in json.dumps(seen[-1]["messages"]), json.dumps([m for m in seen[-1]["messages"] if m["role"] != "system"])[:1400]
+            assert second.close() == 0
+    finally:
+        httpd.shutdown()
+
+
+def _group_alive(pid):
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@check
+def stdio_background_tasks_outlive_the_turn_and_stop_on_request():
+    """A task the agent starts keeps running after its turn, reports its exit, is gated like run_command, and is stopped by task_stop or by shutdown."""
+    if os.name == "nt":
+        raise Skip("background task check uses POSIX process groups")
+    with _marker_session() as (child, seen):
+        replies = child.run_turn("b1", "TASK_start", thread="bt", model="local", permission="bypass")
+        assert replies[-1]["ok"], replies
+        started = json.loads([m for m in replies if m["type"] == "tool_result"][0]["output"])
+        task, pid = started["task"], started["pid"]
+        update = [m for m in replies if m["type"] == "task_update"][0]
+        assert update["task"] == task and update["state"] == "running" and update["thread"] == "bt" and update["turn"] == "b1", update
+        assert update["cwd"] == child.project and update["command"] == "echo started; sleep 60"
+        assert _group_alive(pid), "the task ended with its turn"
+
+        replies = child.run_turn("b2", "TASK_quick", thread="bt", model="local", permission="bypass")
+        quick = json.loads([m for m in replies if m["type"] == "tool_result"][0]["output"])["task"]
+        ended = [m for m in replies if m["type"] == "task_update" and m["task"] == quick and m["state"] != "running"]
+        ended = ended or [m for m in child.until("task_update") if m["type"] == "task_update" and m["task"] == quick]
+        assert ended[-1]["state"] == "exited" and ended[-1]["exit_code"] == 3 and ended[-1]["ended"], ended
+
+        child.send(type="tasks", id="l1")
+        listed = {x["task"]: x for x in child.until("task_list")[-1]["tasks"]}
+        assert listed[task]["state"] == "running" and listed[quick]["state"] == "exited", listed
+
+        child.turn("b3", "TASK_start", thread="bt", model="local", permission="manual")
+        ask = child.until("approval_request", turn="b3")[-1]
+        assert ask["tool"] == "start_background_task", ask
+        child.send(type="approval", id=ask["id"], decision="skip")
+        child.until("done", turn="b3")
+        replies = child.run_turn("b4", "TASK_start", thread="bt", model="local", permission="plan")
+        assert not [m for m in replies if m["type"] in ("tool_start", "task_update")], replies
+        child.send(type="tasks", id="l2")
+        assert len(child.until("task_list")[-1]["tasks"]) == 2
+
+        child.send(type="task_stop", id="s1", task=task)
+        replies = child.until("task_list")
+        stopped = {x["task"]: x for x in replies[-1]["tasks"]}[task]
+        assert replies[-1]["id"] == "s1" and stopped["state"] == "stopped" and stopped["exit_code"] is not None, stopped
+        assert not _group_alive(pid), "task_stop left the task running"
+        child.send(type="task_stop", id="s2", task="t999")
+        assert child.until("error")[-1]["code"] == "bad_request"
+
+        replies = child.run_turn("b5", "TASK_start", thread="bt2", model="local", permission="bypass")
+        last = json.loads([m for m in replies if m["type"] == "tool_result"][0]["output"])["pid"]
+        assert _group_alive(last)
+        assert child.close() == 0
+        deadline = time.time() + 5
+        while _group_alive(last) and time.time() < deadline:
+            time.sleep(0.05)
+        assert not _group_alive(last), "a task outlived the agent"
+
+    from hydra_cli.native_tools import BackgroundTasks
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tasks = BackgroundTasks()
+        heard = []
+        tasks.add_listener(heard.append)
+        made = tasks.start("printf 'abcdefghij'", tmp)
+        deadline = time.time() + 5
+        while tasks.output(made["task"])["state"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+        out = tasks.output(made["task"], tail=4)
+        assert out["output"] == "ghij" and out["truncated"] and out["exit_code"] == 0, out
+        assert [h["state"] for h in heard] == ["running", "exited"], heard
+        assert tasks.output("nope")["isError"] and tasks.start("  ", tmp)["isError"]
 
 
 def main() -> int:
