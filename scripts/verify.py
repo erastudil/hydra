@@ -12101,6 +12101,8 @@ def stdio_permission_modes():
         assert auto and auto[0]["decision"] == "allow", replies
         result = [m for m in replies if m["type"] == "tool_result"][0]
         assert result["is_error"] is False and "readable" in result["output"], result
+        replies = child.run_turn("read2", "read it", thread="p9", permission="accept_edits", model="local")
+        assert "approval_request" not in kinds(replies) and any(m["type"] == "auto_decision" and m["decision"] == "allow" for m in replies), replies
         assert child.close() == 0
 
 
