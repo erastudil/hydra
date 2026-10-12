@@ -135,7 +135,7 @@ class Composer(QWidget):
         row.addWidget(self.send)
         lay.addLayout(row)
         motion.HoverGlow(self.send, theme.PALETTE["ring"])
-        motion.HoverGlow(self.input, theme.PALETTE["ring"], 14)
+        self._glow = motion.HoverGlow(self.input, theme.PALETTE["ring"], 14)
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
         if obj is self.input and event.type() == QEvent.KeyPress:
@@ -153,6 +153,10 @@ class Composer(QWidget):
     def set_busy(self, busy: bool) -> None:
         self.send.setEnabled(not busy)
         self.stop.setEnabled(busy)
+        self._glow.pulse(busy)
+
+    def flash_error(self) -> None:
+        self._glow.flash(theme.PALETTE["danger"])
 
     def set_mode(self, mode: str) -> None:
         idx = self.mode.findData(mode)

@@ -533,10 +533,11 @@ class _ReflowSafeApplication(Application):
             new_width = self.output.get_size().columns
         except Exception:
             new_width = 0
-        if screen is not None and old is not None and cursor is not None and 0 < new_width < old.columns:
-            extra = reflow_rows_above_cursor(screen, cursor.x, cursor.y, new_width)
-            if extra:
-                self.output.cursor_up(extra)
+        # The terminal reflows committed scrollback on its own. Climbing the
+        # cursor to erase those rows is what leaves ghosts and overlaps the
+        # composer when the window changes width. reflow_rows_above_cursor
+        # stays available for measurement; the live region does not use it.
+        del screen, old, cursor, new_width
         if os.name == "nt":
             _win32_scroll_viewport(0)
         super()._on_resize()
@@ -602,6 +603,8 @@ class HydraTUI:
         self._ask_label = ""
         self._queued: List[str] = []
         self._busy_since = 0.0
+        self._reason_tokens = 0
+        self._streaming = False
         self._activity: Optional[str] = None
         self._interrupting = False
         self._notice = ""
@@ -623,6 +626,7 @@ class HydraTUI:
 
         self._uni = ui.can_encode("╭─╮│╰╯❯⠋▁⏎◆●", sys.__stdout__)
         self._spinner = SPINNER_UNI if self._uni else SPINNER_ASCII
+        self._think_frames = "◐◓◑◒" if self._uni else SPINNER_ASCII
         self._meter = METER_UNI if self._uni else METER_ASCII
         self._g = {
             "tl": "╭" if self._uni else "+", "tr": "╮" if self._uni else "+",
@@ -825,8 +829,31 @@ class HydraTUI:
 
     def begin_stream(self) -> None:
         """Open a live answer above the composer. Tokens follow through write_token."""
+        self._streaming = True
         self._pin_prompt()
         self.write_token("\n")
+
+    def note_reasoning(self, count: int) -> None:
+        """Count reasoning tokens for the status row. The text itself stays hidden."""
+        if count <= 0:
+            return
+        self._reason_tokens += int(count)
+        self._invalidate()
+
+    def write_action(self, line: str) -> None:
+        """Paint one collapsed action row above the composer."""
+        if not line:
+            return
+        mode = ui.color_mode()
+        reset = ui.RESET if mode else ""
+        accent = ui.fg(ui.ACCENT_RGB, mode, True) if mode else ""
+        dim = ui.fg((95, 107, 99), mode) if mode else ""
+        if " · " in line:
+            head, meta = line.split(" · ", 1)
+            painted = f"{accent}{head}{reset} {dim}· {meta}{reset}\n"
+        else:
+            painted = f"{accent}{line}{reset}\n"
+        self.write_token(painted)
 
     def write_token(self, text: str) -> None:
         """Paint generated text immediately. Partial tokens skip the line gate."""
@@ -844,6 +871,7 @@ class HydraTUI:
         target.flush()
 
     def end_stream(self) -> None:
+        self._streaming = False
         self.write_token("\n\n")
         self._pin_prompt()
 
@@ -856,6 +884,8 @@ class HydraTUI:
 
     def _begin_busy(self) -> None:
         self._busy_since = time.monotonic()
+        self._reason_tokens = 0
+        self._streaming = False
         self._activity = None
         self._interrupting = False
 
@@ -1149,8 +1179,9 @@ class HydraTUI:
         if state == "answer":
             return ui.AMBER_RGB
         if state in ("busy", "stt"):
-            return ui.lerp_rgb((18, 120, 96), (64, 255, 166), t)
-        return (36, 150, 108)
+            pulse = (math.sin(time.monotonic() * (2 * math.pi / 1.6)) + 1) / 2
+            return ui.lerp_rgb((31, 122, 69), (0, 255, 102), pulse)
+        return (31, 122, 69)
 
     def _border_style(self) -> str:
         return f"fg:{_hex(self._border_rgb())}"
@@ -1169,7 +1200,7 @@ class HydraTUI:
             return f"type your answer {g['dot']} {g['enter']} to send {g['dot']} escape to cancel"
         if state == "busy":
             return f"type to queue {g['dot']} {g['enter2']} steers the running turn"
-        return f"ask hydra anything {g['dot']} / for commands {g['dot']} ctrl+space to dictate"
+        return "Ask anything, or / for commands"
 
     def _line_prefix(self, lineno: int, wrap_count: int) -> Fragments:
         if lineno == 0 and wrap_count == 0:
@@ -1221,7 +1252,16 @@ class HydraTUI:
         elif state == "answer":
             left = [("class:status.answer", f" {g['diamond']} "), ("class:status", "hydra is waiting on your answer")]
         elif state == "busy":
-            left = [("class:status.spin", f" {self._spin()} "), ("class:status", "working...")]
+            elapsed = int(now - self._busy_since) if self._busy_since else 0
+            frame = self._think_frames[int(now * (1000 / 120)) % len(self._think_frames)]
+            if self._streaming:
+                label = "Responding · working..."
+            else:
+                extra = ""
+                if elapsed >= 1 and self._reason_tokens:
+                    extra = f" · {self._reason_tokens} tokens"
+                label = f"Thinking {elapsed}s{extra} · working... · esc to interrupt"
+            left = [("class:status.spin", f" {frame} "), ("class:status", label)]
             if self._interrupting:
                 left.append(("class:error", f" {g['dot']} interrupting"))
         notice: Fragments = []

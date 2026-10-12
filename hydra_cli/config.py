@@ -318,4 +318,4 @@ if __name__ == "__main__":
         print(f"primary_provider: {providers[0]}")
         print(f"fallback_providers: {providers[1:]}")
     else:
-        print("allowed_providers: all configured providers")
+        print("allowed_providers: general gateways (cheaperinference, vercel, openrouter)")

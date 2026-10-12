@@ -557,7 +557,9 @@ def providers_for_model(
     """Configured providers that may serve this model, in fallback order.
 
     The catalog's model_providers map limits a model to the providers that carry it
-    (for example a Vercel-only alias). Other models may use every configured provider.
+    (for example a Vercel-only alias). Unrestricted models use the general gateways
+    only: CheaperInference, Vercel AI Gateway, then OpenRouter. Hugging Face, RunPod,
+    Modal, and local runners stay off that path unless the catalog names them.
     When health_aware is True, healthy providers are dynamically prioritized ahead of
     degraded or tripped circuit-breaker providers (WO-05).
     """
@@ -568,7 +570,13 @@ def providers_for_model(
         if loc:
             configured.append(loc)
     if not allowed:
-        usable = configured
+        usable = [p for p in configured if p.get("id") in GENERAL_PROVIDER_IDS]
+        if configured and not usable:
+            raise CredentialsMissingError(
+                "No general gateway is configured. Set CHEAPERINFERENCE_API_KEY, "
+                "AI_GATEWAY_API_KEY, or OPENROUTER_API_KEY. Hugging Face, RunPod, and "
+                "Modal only serve models assigned to them."
+            )
     else:
         rank = {pid: index for index, pid in enumerate(allowed)}
         usable = [p for p in configured if p.get("id") in rank]
@@ -3651,8 +3659,25 @@ def reset_kv_checkpoint_manager() -> None:
     _DEFAULT_KV_CHECKPOINT_MANAGER.reset()
 
 
+# Catalog ids that predate the live gateway slugs (checked Oct 2026).
+# Applied before each host's namespace rewrite.
+_CANONICAL_MODEL_IDS = {
+    "mimo-2.6-pro": "xiaomi/mimo-v2.6-pro",
+    "mimo-2.6-flash": "xiaomi/mimo-v2.6-flash",
+    "xiaomi/mimo-2.6-pro": "xiaomi/mimo-v2.6-pro",
+    "xiaomi/mimo-2.6-flash": "xiaomi/mimo-v2.6-flash",
+    "deepseek-4.1-flash": "deepseek/deepseek-v4.1-flash",
+    "deepseek/deepseek-4.1-flash": "deepseek/deepseek-v4.1-flash",
+}
+
+# Aggregators that can serve an unrestricted catalog model.
+# Hugging Face, RunPod, Modal, and local runners only serve models assigned to them.
+GENERAL_PROVIDER_IDS = ("cheaperinference", "vercel", "openrouter")
+
+
 def adapt_model_for_url(url: str, model: str) -> str:
-    """Translate provider namespaces. Unknown ids pass through unchanged."""
+    """Translate a catalog id onto the slug the destination gateway actually serves."""
+    model = _CANONICAL_MODEL_IDS.get(model, model)
     parsed = urlparse(url)
     host = (parsed.hostname or url).lower()
     if host.endswith("vercel.sh") or ".vercel." in host:
@@ -3665,6 +3690,8 @@ def adapt_model_for_url(url: str, model: str) -> str:
             return rewritten
         if model.startswith("qwen/"):
             return "alibaba/" + model[len("qwen/"):]
+        if model.startswith("glm-") or model.startswith("z-ai/") or model.startswith("zai/"):
+            return "zai/" + model.split("/", 1)[-1]
     elif "openrouter.ai" in host:
         if model.startswith("spacexai/"):
             return "x-ai/" + model[len("spacexai/"):]
@@ -3672,6 +3699,8 @@ def adapt_model_for_url(url: str, model: str) -> str:
             return "qwen/" + model[len("alibaba/"):]
         if model.startswith("meta/") and not model.startswith("meta-llama/"):
             return "meta-llama/" + model[len("meta/"):]
+        if model.startswith("zai/"):
+            return "z-ai/" + model[len("zai/"):]
         if model.startswith("glm-"):
             return "z-ai/" + model
         if model.startswith("deepseek-"):

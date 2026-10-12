@@ -19,6 +19,7 @@ class AgentWorker(QObject):
 
     token = Signal(str)
     tool = Signal(str, str, bool, str)
+    action = Signal(str)  # one collapsed row per step: thought, read, edit, ran, search, summon
     diff = Signal(str, str)
     approval = Signal(str, str)
     finished = Signal(str, bool)  # answer or error text, ok
@@ -69,6 +70,7 @@ class AgentWorker(QObject):
                 ledger=ledger,
                 strategy=req.get("mode", "recall"),
                 on_token=lambda t: self.token.emit(t),
+                on_action=lambda line: self.action.emit(line),
                 max_context_chars=get_context_window(alias) * 4,
                 cancel=self._cancel,
             )

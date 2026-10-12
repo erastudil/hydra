@@ -68,6 +68,7 @@ from hydra_cli.providers import (
     providers_for_model,
     reasoning_fields,
     redact,
+    stream_chat_completion,
 )
 from hydra_cli.ui import (
     GREEN_BOLD,
@@ -124,6 +125,79 @@ def print_unified_diff(path: str, old_content: str, new_content: str, raw_diff: 
     sys.stderr.flush()
 
 
+_ACTION_VERBS = {
+    "thought": "Thought",
+    "read": "Read",
+    "write": "Wrote",
+    "edit": "Edited",
+    "ran": "Ran",
+    "search": "Searched",
+    "find": "Found",
+    "list": "Listed",
+    "summon": "Summoned",
+    "subagent": "Subagent",
+    "swarm": "Swarm",
+    "error": "Error",
+    "tool": "Used",
+}
+
+
+def collapsed_action_line(kind: str, target: str = "", meta: str = "") -> str:
+    """One transcript row: disclosure, verb, target, optional dim metadata."""
+    verb = _ACTION_VERBS.get(kind, "Used")
+    target = " ".join(str(target or "").split())
+    if len(target) > 72:
+        target = target[:71] + "…"
+    meta = " ".join(str(meta or "").split())
+    line = f"▸ {verb}"
+    if target:
+        line += " " + target
+    if meta:
+        line += " · " + meta
+    return line
+
+
+def collapsed_tool_line(fn_name: str, args: Any, result: Any, is_error: bool = False) -> str:
+    """Collapse a finished tool call to a single row. Bodies stay off the transcript."""
+    payload = args if isinstance(args, dict) else {}
+    if fn_name == "read_file":
+        return collapsed_action_line("read", str(payload.get("path") or "file"), "error" if is_error else "")
+    if fn_name == "write_file":
+        return collapsed_action_line("write", str(payload.get("path") or "file"), "error" if is_error else "")
+    if fn_name == "edit_file":
+        return collapsed_action_line("edit", str(payload.get("path") or "file"), "error" if is_error else "")
+    if fn_name == "run_command":
+        code = 0
+        if isinstance(result, dict):
+            code = result.get("exit_code", 1 if is_error else 0)
+        elif is_error:
+            code = 1
+        meta = "error" if is_error else f"exit {code}"
+        return collapsed_action_line("ran", str(payload.get("command") or ""), meta)
+    if fn_name == "grep_search":
+        query = str(payload.get("query") or "")
+        matches = 0
+        if isinstance(result, str) and not result.startswith("No matches") and not result.startswith("Path not found"):
+            matches = len([line for line in result.splitlines() if line.strip() and not line.startswith("[TRUNCATED")])
+        meta = "error" if is_error else f"{matches} matches"
+        return collapsed_action_line("search", f'"{query}"', meta)
+    if fn_name == "find_files":
+        pattern = str(payload.get("pattern") or "*")
+        return collapsed_action_line("find", pattern, "error" if is_error else "")
+    if fn_name == "list_dir":
+        return collapsed_action_line("list", str(payload.get("path") or "."), "error" if is_error else "")
+    if fn_name == "summon":
+        return collapsed_action_line("summon", str(payload.get("alias") or ""), "error" if is_error else "")
+    if fn_name == "invoke_subagent":
+        alias = str(payload.get("alias") or payload.get("role") or "")
+        return collapsed_action_line("subagent", alias, "error" if is_error else "")
+    if fn_name == "swarm_fanout":
+        return collapsed_action_line("swarm", str(payload.get("prompt") or payload.get("task") or ""), "error" if is_error else "")
+    if is_error:
+        return collapsed_action_line("error", fn_name or "tool")
+    return collapsed_action_line("tool", fn_name or "tool")
+
+
 DEFAULT_AGENT_SYSTEM_PROMPT = os.environ.get(
     "HYDRA_AGENT_SYSTEM_PROMPT",
     (
@@ -134,6 +208,16 @@ DEFAULT_AGENT_SYSTEM_PROMPT = os.environ.get(
         "2. Plan: Formulate a minimal, deterministic plan. Identify invariants, dependencies, and potential side effects.\n"
         "3. Implement: Apply surgical changes using edit_file or write_file. Prefer minimal, clean diffs that preserve existing code conventions and formatting.\n"
         "4. Verify: Always run tests, type checks, or build commands using run_command to verify changes before declaring completion. Exit code 0 is passing; unverified assertions carry zero truth value.\n\n"
+        "SUMMON:\n"
+        "You are the orchestrator. Do the work locally with the file and shell tools when you can. "
+        "Summon another head only when the task needs a different model.\n"
+        "- summon: one completion. Pass a catalog alias and a prompt. "
+        "Aliases: opus 5.5, sonnet 5.5, haiku 4.5, sol 6.1, gemini 3.8, grok 4.7, "
+        "glm 5.3 flash, deepseek 4.1 flash, mimo 2.6 pro, mimo 2.6 flash, qwen 3.8.\n"
+        "- invoke_subagent: a tool-using child for one bounded coding subtask. Pass the same kind of alias.\n"
+        "- swarm_fanout: parallel architect, coder, and auditor heads.\n"
+        "Pass the alias exactly. An alias that is not in the catalog is refused. "
+        "Never send a raw provider model id, and never include a credential.\n\n"
         "CONTEXT LEDGER & STEERING:\n"
         "- The system maintains a rigorous context ledger of your execution history. Commands like /compact and /retrieve manipulate this state.\n"
         "- The user may interrupt your execution or provide in-flight steering directives. You must immediately realign your plan to these directives.\n\n"
@@ -2544,15 +2628,34 @@ def _fetch_raw_completion(url: str, headers: Dict[str, str], payload: Dict[str, 
     return parsed
 
 
-def _emit_message_content(message: Dict[str, Any], on_token: Optional[Callable[[str], None]]) -> None:
+def _announce_thought(state: Dict[str, Any]) -> None:
+    """Commit one collapsed thinking row before the first visible token."""
+    if state.get("announced"):
+        return
+    state["announced"] = True
+    hook = state.get("on_action")
+    if not hook:
+        return
+    elapsed = max(0, int(time.monotonic() - float(state.get("started") or time.monotonic())))
+    try:
+        hook(collapsed_action_line("thought", f"{elapsed}s"))
+    except Exception:
+        pass
+
+
+def _emit_message_content(message: Dict[str, Any], on_token: Optional[Callable[[str], None]], state: Optional[Dict[str, Any]] = None) -> None:
     content = message.get("content")
     if on_token and isinstance(content, str) and content:
+        if state is not None:
+            _announce_thought(state)
         on_token(content)
 
 
 def _append_text(state: Dict[str, Any], text: str, on_token: Optional[Callable[[str], None]]) -> None:
     if not text:
         return
+    if on_token:
+        _announce_thought(state)
     state["content"].append(text)
     if on_token:
         on_token(text)
@@ -2644,13 +2747,26 @@ def _merge_reasoning_details(state: Dict[str, Any], details: Any) -> None:
         slots[idx] = dict(block)
 
 
+def _note_reasoning(state: Dict[str, Any], reasoning: str) -> None:
+    if not reasoning:
+        return
+    state["reasoning"].append(reasoning)
+    hook = state.get("on_reasoning")
+    if not hook:
+        return
+    try:
+        hook(reasoning)
+    except Exception:
+        pass
+
+
 def _apply_stream_delta(delta: Dict[str, Any], state: Dict[str, Any], on_token: Optional[Callable[[str], None]]) -> None:
     _absorb_content(state, delta.get("content") or "", on_token)
     reasoning = delta.get("reasoning_content")
     if reasoning is None:
         reasoning = delta.get("reasoning") or ""
     if isinstance(reasoning, str) and reasoning:
-        state["reasoning"].append(reasoning)
+        _note_reasoning(state, reasoning)
     _merge_reasoning_details(state, delta.get("reasoning_details"))
     for tc in delta.get("tool_calls") or []:
         _merge_tool_call(state, tc)
@@ -2692,10 +2808,15 @@ def _consume_completion_body(
     resp: Any,
     on_token: Optional[Callable[[str], None]],
     where: str,
+    on_action: Optional[Callable[[str], None]] = None,
+    on_reasoning: Optional[Callable[[str], None]] = None,
     cancel: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     """Read an SSE stream, or one JSON body, and return an OpenAI chat completion object."""
     state = _empty_stream_state()
+    state["started"] = time.monotonic()
+    state["on_action"] = on_action
+    state["on_reasoning"] = on_reasoning
     saw_done = False
     buffered: List[str] = []
     for raw_line in resp:
@@ -2714,7 +2835,7 @@ def _consume_completion_body(
             if not choices:
                 raise ProviderError(f"Empty completion from {where}")
             message = choices[0].get("message") or {}
-            _emit_message_content(message, on_token)
+            _emit_message_content(message, on_token, state)
             return parsed
         if line.startswith("data:"):
             data = line[5:].strip()
@@ -2744,7 +2865,7 @@ def _consume_completion_body(
                 _merge_reasoning_details(state, message.get("reasoning_details"))
                 reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
                 if isinstance(reasoning, str) and reasoning:
-                    state["reasoning"].append(reasoning)
+                    _note_reasoning(state, reasoning)
             continue
         buffered.append(line)
     if buffered and not state["content"] and not state["tools"]:
@@ -2754,7 +2875,7 @@ def _consume_completion_body(
             choices = parsed.get("choices") or []
             if choices:
                 message = choices[0].get("message") or {}
-                _emit_message_content(message, on_token)
+                _emit_message_content(message, on_token, state)
                 return parsed
     if not saw_done and not state["content"] and not state["tools"] and not state["reasoning"] and not state.get("reasoning_details"):
         raise ProviderError(f"Stream from {where} ended before data: [DONE]")
@@ -2768,6 +2889,8 @@ def _fetch_streaming_completion(
     payload: Dict[str, Any],
     timeout: int = 120,
     on_token: Optional[Callable[[str], None]] = None,
+    on_action: Optional[Callable[[str], None]] = None,
+    on_reasoning: Optional[Callable[[str], None]] = None,
     cancel: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
     """Stream one chat completion and return the assembled message JSON."""
@@ -2778,7 +2901,7 @@ def _fetch_streaming_completion(
     where = describe_endpoint(url)
     try:
         with urlopen(req, timeout=timeout) as resp:
-            return _consume_completion_body(resp, on_token, where, cancel)
+            return _consume_completion_body(resp, on_token, where, on_action=on_action, on_reasoning=on_reasoning, cancel=cancel)
     except HTTPError as e:
         error_body = ""
         try:
@@ -2822,6 +2945,92 @@ def run_agent_loop(*args: Any, **kwargs: Any) -> str:
             ledger.end_turn()
 
 
+def iter_chat_events(alias: str, prompt: str, mode: str = "chat", system_prompt: Optional[str] = None):
+    """Yield chat events as they arrive: token, thought, tool, done, error.
+
+    Agent mode runs the tool loop on a worker thread so each row is available
+    before the turn finishes. Chat mode yields provider tokens directly.
+    """
+    import queue
+    import threading
+
+    cleaned = (prompt or "").strip()
+    if not cleaned:
+        yield {"event": "error", "text": collapsed_action_line("error", "empty prompt")}
+        return
+
+    if (mode or "chat").lower() == "agent":
+        bus: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue()
+
+        def on_token(text: str) -> None:
+            if text:
+                bus.put({"event": "token", "text": text})
+
+        def on_action(line: str) -> None:
+            kind = "thought" if line.startswith("▸ Thought") else "tool"
+            bus.put({"event": kind, "text": line})
+
+        def worker() -> None:
+            try:
+                answer = run_agent_loop(
+                    alias=alias,
+                    prompt=cleaned,
+                    system_prompt=system_prompt,
+                    on_token=on_token,
+                    on_action=on_action,
+                )
+                bus.put({"event": "done", "text": answer or ""})
+            except Exception as exc:
+                bus.put({"event": "error", "text": collapsed_action_line("error", redact(exc)[:72])})
+            finally:
+                bus.put(None)
+
+        threading.Thread(target=worker, daemon=True).start()
+        while True:
+            item = bus.get()
+            if item is None:
+                break
+            yield item
+        return
+
+    started = time.monotonic()
+    try:
+        route = resolve_route(alias)
+        model = route["model"]
+        providers = providers_for_model(model, get_frontier_providers())
+    except Exception as exc:
+        yield {"event": "error", "text": collapsed_action_line("error", redact(exc)[:72])}
+        return
+    if not providers:
+        yield {"event": "error", "text": collapsed_action_line("error", "no provider")}
+        return
+    messages: List[Dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": cleaned})
+    last_error = "empty stream"
+    for provider in providers:
+        emitted = False
+        try:
+            for token in stream_chat_completion(provider["url"], provider["headers"], model, messages):
+                if not token:
+                    continue
+                if not emitted:
+                    emitted = True
+                    secs = max(0, int(time.monotonic() - started))
+                    yield {"event": "thought", "text": collapsed_action_line("thought", f"{secs}s")}
+                yield {"event": "token", "text": token}
+            if emitted:
+                yield {"event": "done", "text": ""}
+                return
+        except Exception as exc:
+            last_error = redact(exc)
+            if emitted:
+                yield {"event": "error", "text": collapsed_action_line("error", last_error[:72])}
+                return
+    yield {"event": "error", "text": collapsed_action_line("error", str(last_error)[:72])}
+
+
 def _run_agent_loop(
     alias: str,
     prompt: str,
@@ -2845,6 +3054,8 @@ def _run_agent_loop(
     dialect: Optional[str] = None,
     strategy: Optional[str] = None,
     on_token: Optional[Callable[[str], None]] = None,
+    on_action: Optional[Callable[[str], None]] = None,
+    on_reasoning: Optional[Callable[[str], None]] = None,
     max_context_chars: Optional[int] = None,
     cancel: Optional[threading.Event] = None,
 ) -> str:
@@ -2997,6 +3208,23 @@ def _run_agent_loop(
     order = list(providers)
     turn_groups: List[List[Dict[str, Any]]] = []
     use_prompt_tool_adapter = use_prompt_adapter
+    announced = {"thought": False}
+
+    def _publish(line: str) -> None:
+        if not line:
+            return
+        if line.startswith("▸ Thought"):
+            if announced["thought"]:
+                return
+            announced["thought"] = True
+        if on_action is not None:
+            try:
+                on_action(line)
+            except Exception:
+                pass
+            return
+        sys.stderr.write(line + "\n")
+        sys.stderr.flush()
 
     def complete_turn() -> Dict[str, Any]:
         nonlocal use_prompt_tool_adapter, context_chars
@@ -3050,6 +3278,8 @@ def _run_agent_loop(
                             payload,
                             timeout=timeout,
                             on_token=on_token,
+                            on_action=_publish,
+                            on_reasoning=on_reasoning,
                             cancel=cancel,
                         )
                     else:
@@ -3131,6 +3361,8 @@ def _run_agent_loop(
             ledger.append_turn(role="user", content=f"[IN-FLIGHT STEERING DIRECTIVE]: {directive}")
             sys.stderr.write(f"{c_tool_head} Steering directive received: {directive}\n")
             sys.stderr.flush()
+        announced["thought"] = False
+        step_started = time.monotonic()
         try:
             with ThinkingSpinner(
                 message="Thinking...",
@@ -3208,21 +3440,10 @@ def _run_agent_loop(
         steering_directive: Optional[str] = None
         turn_aborted = False
 
-        # Telemetry: print model thought/preamble if present before tool calls
         thought_content = message.get("reasoning_content") or message.get("thought")
-        if thought_content and str(thought_content).strip():
-            wrapped = wrap_text(str(thought_content).strip())
-            sys.stderr.write(f"\n{c_mid}[Thought]{c_reset} {wrapped}\n")
-            sys.stderr.flush()
-
-        msg_content = message.get("content") or ""
-        if msg_content and on_token is None:
-            preamble = re.sub(r"<tool_call>.*?</tool_call>", "", msg_content, flags=re.DOTALL | re.IGNORECASE).strip()
-            preamble = re.sub(r"```(?:tool_call|tool).*?```", "", preamble, flags=re.DOTALL | re.IGNORECASE).strip()
-            if preamble:
-                wrapped_pre = wrap_text(preamble)
-                sys.stderr.write(f"\n{c_mid}{wrapped_pre}{c_reset}\n")
-                sys.stderr.flush()
+        if not announced["thought"] and thought_content and str(thought_content).strip():
+            elapsed = max(0, int(time.monotonic() - step_started))
+            _publish(collapsed_action_line("thought", f"{elapsed}s"))
 
         # Execute each tool call
         for tc_idx, tc in enumerate(tool_calls):
@@ -3349,99 +3570,20 @@ def _run_agent_loop(
                 checkpointer.scratchpad.record_tool_invocation(fn_name, args, obs_text, is_error=False)
                 continue
 
-            orig_file_content: Optional[str] = None
-            diff_path: Optional[str] = None
-
-            if fn_name == "read_file":
-                fpath = args.get("path", "") if isinstance(args, dict) else ""
-                s_line = args.get("start_line") if isinstance(args, dict) else None
-                e_line = args.get("end_line") if isinstance(args, dict) else None
-                s_val = int(s_line) if s_line is not None else 1
-                if e_line is not None:
-                    e_val = int(e_line)
-                else:
-                    abs_p = os.path.abspath(os.path.join(target_cwd, fpath)) if fpath else ""
-                    if abs_p and os.path.isfile(abs_p):
-                        try:
-                            with open(abs_p, "r", encoding="utf-8", errors="replace") as _f:
-                                e_val = sum(1 for _ in _f)
-                        except Exception:
-                            e_val = "end"
-                    else:
-                        e_val = "end"
-                sys.stderr.write(f"\n{c_tool_head} Read: {fpath} (lines {s_val}-{e_val})\n")
-                sys.stderr.flush()
-
-            elif fn_name == "write_file":
-                fpath = args.get("path", "") if isinstance(args, dict) else ""
-                fcontent = args.get("content", "") if isinstance(args, dict) else ""
-                byte_count = len(fcontent.encode("utf-8"))
-                sys.stderr.write(f"\n{c_tool_head} Write: {fpath} ({byte_count} bytes)\n")
-                sys.stderr.flush()
-                diff_path = fpath
-                abs_p = os.path.abspath(os.path.join(target_cwd, fpath))
-                if os.path.isfile(abs_p):
-                    try:
-                        with open(abs_p, "r", encoding="utf-8", errors="replace") as f_orig:
-                            orig_file_content = f_orig.read()
-                    except Exception:
-                        orig_file_content = None
-                else:
-                    orig_file_content = ""
-
-            elif fn_name == "edit_file":
-                fpath = args.get("path", "") if isinstance(args, dict) else ""
-                sys.stderr.write(f"\n{c_tool_head} Edit: {fpath}\n")
-                sys.stderr.flush()
-                diff_path = fpath
-                abs_p = os.path.abspath(os.path.join(target_cwd, fpath))
-                if os.path.isfile(abs_p):
-                    try:
-                        with open(abs_p, "r", encoding="utf-8", errors="replace") as f_orig:
-                            orig_file_content = f_orig.read()
-                    except Exception:
-                        orig_file_content = None
-                else:
-                    orig_file_content = ""
-
-            elif fn_name == "run_command":
-                cmd_str = args.get("command", "") if isinstance(args, dict) else str(args)
-                sys.stderr.write(f"\n{c_tool_head} $ {cmd_str}\n")
-                sys.stderr.flush()
-
-            elif fn_name == "grep_search":
-                q_str = args.get("query", "") if isinstance(args, dict) else str(args)
-                p_str = args.get("path", ".") if isinstance(args, dict) else "."
-                sys.stderr.write(f"\n{c_tool_head} Grep: '{q_str}' in {p_str}\n")
-                sys.stderr.flush()
-
-            elif fn_name == "find_files":
-                pat_str = args.get("pattern", "*") if isinstance(args, dict) else "*"
-                p_str = args.get("path", ".") if isinstance(args, dict) else "."
-                sys.stderr.write(f"\n{c_tool_head} Find: '{pat_str}' in {p_str}\n")
-                sys.stderr.flush()
-
-            elif fn_name == "list_dir":
-                p_str = args.get("path", ".") if isinstance(args, dict) else "."
-                sys.stderr.write(f"\n{c_tool_head} List: {p_str}\n")
-                sys.stderr.flush()
-
-            elif fn_name == "invoke_subagent":
-                sub_role = (args.get("alias") or args.get("role") or actual_alias) if isinstance(args, dict) else actual_alias
-                sub_task = (args.get("prompt") or args.get("task") or "") if isinstance(args, dict) else ""
-                sys.stderr.write(f"\n{c_tool_head} Subagent [{sub_role}]: {sub_task}\n")
-                sys.stderr.flush()
-
-            elif fn_name == "swarm_fanout":
-                task_str = (args.get("prompt") or args.get("task") or "") if isinstance(args, dict) else ""
-                sys.stderr.write(f"\n{c_tool_head} Swarm Fanout: {task_str}\n")
-                sys.stderr.flush()
-
-            else:
-                sys.stderr.write(f"\n{c_tool_head} Invoking tool: {c_tool_call}{fn_name}{c_reset}\n")
-                sys.stderr.flush()
-
             is_error = False
+            diff_path: Optional[str] = None
+            orig_file_content: Optional[str] = None
+            if fn_name in ("write_file", "edit_file") and isinstance(args, dict) and args.get("path"):
+                diff_path = str(args.get("path"))
+                abs_p = os.path.abspath(os.path.join(target_cwd, diff_path))
+                orig_file_content = ""
+                if os.path.isfile(abs_p):
+                    try:
+                        with open(abs_p, "r", encoding="utf-8", errors="replace") as f_orig:
+                            orig_file_content = f_orig.read()
+                    except Exception:
+                        orig_file_content = None
+
             result_content: Any = None
             interrupted_during_tool = False
 
@@ -3576,6 +3718,8 @@ def _run_agent_loop(
                     turn_aborted = True
                     break
 
+            _publish(collapsed_tool_line(fn_name, args, result_content, is_error))
+
             if not is_error and diff_path is not None:
                 abs_path_target = os.path.abspath(os.path.join(target_cwd, diff_path))
                 if os.path.isfile(abs_path_target):
@@ -3591,52 +3735,6 @@ def _run_agent_loop(
             if _tsink is not None:
                 _tsink(fn_name, args_str, bool(is_error),
                        result_content if isinstance(result_content, str) else json.dumps(result_content, default=str))
-
-            if fn_name == "run_command":
-                exit_code = 0
-                out_text = ""
-                if isinstance(result_content, dict):
-                    exit_code = result_content.get("exit_code", 1 if is_error else 0)
-                    out_text = (result_content.get("stdout") or result_content.get("stderr") or result_content.get("error") or "").strip()
-                else:
-                    out_text = str(result_content).strip()
-                    if is_error:
-                        exit_code = 1
-
-                if out_text:
-                    out_lines = out_text.splitlines()
-                    if len(out_lines) > 8:
-                        summary = "\n".join("  " + l for l in out_lines[:6]) + f"\n  ... [{len(out_lines) - 6} lines truncated]"
-                    else:
-                        summary = "\n".join("  " + l for l in out_lines)
-                    sys.stderr.write(f"{summary}\n")
-                sys.stderr.write(f"  Exit code: {exit_code}\n")
-                sys.stderr.flush()
-
-            elif fn_name == "grep_search":
-                match_count = 0
-                if isinstance(result_content, str):
-                    if not result_content.startswith("No matches") and not result_content.startswith("Path not found"):
-                        match_count = len([l for l in result_content.splitlines() if not l.startswith("[TRUNCATED") and ":" in l])
-                sys.stderr.write(f"  Match count: {match_count}\n")
-                sys.stderr.flush()
-
-            elif fn_name == "find_files":
-                match_count = 0
-                if isinstance(result_content, str):
-                    if not result_content.startswith("No files matching") and not result_content.startswith("Path not found"):
-                        match_count = len([l for l in result_content.splitlines() if not l.startswith("[TRUNCATED") and l.strip()])
-                sys.stderr.write(f"  Match count: {match_count}\n")
-                sys.stderr.flush()
-
-            elif fn_name == "list_dir":
-                entry_count = 0
-                if isinstance(result_content, str):
-                    if not result_content.endswith("(empty directory)") and not result_content.startswith("Directory not found") and not result_content.startswith("Path is not a directory"):
-                        lines_out = [l for l in result_content.splitlines() if l.strip()]
-                        entry_count = max(0, len(lines_out) - 1)
-                sys.stderr.write(f"  Match count: {entry_count}\n")
-                sys.stderr.flush()
 
             checkpointer.scratchpad.record_tool_invocation(fn_name, args, result_content, is_error=is_error)
 
@@ -4003,6 +4101,17 @@ def run_interactive_agent(
         def on_token(text: str) -> None:
             wrapper.feed(text)
 
+        def on_action(line: str) -> None:
+            if tui is not None:
+                tui.write_action(line)
+            else:
+                sys.stderr.write(line + "\n")
+                sys.stderr.flush()
+
+        def on_reasoning(text: str) -> None:
+            if tui is not None and text:
+                tui.note_reasoning(max(1, len(text) // 4))
+
         loop_alias = active_alias
         loop_system = active_system_prompt
         loop_effort = active_effort
@@ -4053,6 +4162,8 @@ def run_interactive_agent(
                 dialect=active_dialect,
                 strategy=active_strategy,
                 on_token=on_token,
+                on_action=on_action,
+                on_reasoning=on_reasoning,
                 max_context_chars=(active_window or get_context_window(loop_alias)) * 4,
             )
         finally:

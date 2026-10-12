@@ -73,6 +73,7 @@ class MainWindow(QMainWindow):
         self._start.connect(self.worker.run_turn)
         self.worker.token.connect(self._on_token)
         self.worker.tool.connect(self._on_tool)
+        self.worker.action.connect(self._on_action)
         self.worker.diff.connect(self._on_diff)
         self.worker.approval.connect(self._on_approval)
         self.worker.finished.connect(self._on_finished)
@@ -201,9 +202,16 @@ class MainWindow(QMainWindow):
         self._answer_parts.append(text)
         self.transcript.stream(text)
 
+    def _on_action(self, line: str) -> None:
+        """Collapsed step row from the agent loop; bodies stay out of the transcript."""
+        if self._streaming:
+            self.transcript.end_assistant()
+            self._streaming = False
+        self.transcript.line("tool", line)
+
     def _on_tool(self, name: str, args: str, is_error: bool, out: str) -> None:
-        summary = f"{name} {args[:160]}" + (" (error)" if is_error else "")
-        self.transcript.line("tool", summary)
+        """Full tool output stays available to checks and the store; the transcript shows the collapsed row."""
+        self._last_tool = (name, args, is_error)
 
     def _on_diff(self, path: str, text: str) -> None:
         self.diffs.add(path, text)
@@ -227,6 +235,8 @@ class MainWindow(QMainWindow):
             role = "cancelled" if text == CANCELLED_TEXT else "error"
             self.transcript.line(role, "turn cancelled" if role == "cancelled" else text)
             self.store.add_message(self.thread_id, role, "turn cancelled" if role == "cancelled" else text)
+            if role == "error":
+                self.composer.flash_error()
         self._set_busy(False)
 
     def closeEvent(self, event) -> None:  # noqa: N802

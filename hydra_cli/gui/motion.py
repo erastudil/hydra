@@ -112,6 +112,39 @@ class HoverGlow(QObject):
     def _to(self, radius: int, name: str, curve: str) -> None:
         _variant(self._fx, self._fx.blurRadius(), float(radius), name, curve, self._fx.setBlurRadius)
 
+    def pulse(self, on: bool) -> None:
+        """Slow breathing glow while a turn is thinking. Reduced motion holds a steady glow instead of a loop."""
+        loop = self._fx.property("_pulse")
+        if isinstance(loop, QAbstractAnimation):
+            loop.stop()
+            self._fx.setProperty("_pulse", None)
+        if not on:
+            self._to(self._radius if self._w.hasFocus() else 0, "base", "exit")
+            return
+        if theme.reduced_motion():
+            self._fx.setBlurRadius(float(self._radius))
+            return
+        anim = QVariantAnimation(self._fx)
+        top = float(self._radius) * 1.3
+        anim.setDuration(1600)
+        anim.setKeyValueAt(0.0, 0.0)
+        anim.setKeyValueAt(0.5, top)
+        anim.setKeyValueAt(1.0, 0.0)
+        anim.setEasingCurve(theme.easing("standard"))
+        anim.setLoopCount(-1)
+        anim.valueChanged.connect(self._fx.setBlurRadius)
+        self._fx.setProperty("_pulse", anim)
+        anim.start()
+
+    def flash(self, color: str) -> None:
+        """Brief colored flash, used for a turn that failed. Returns to the resting accent color."""
+        old = self._fx.color()
+        hot = QColor(color)
+        hot.setAlpha(200)
+        self._fx.setColor(hot)
+        _variant(self._fx, float(self._radius), 0.0, "slow", "exit", self._fx.setBlurRadius,
+                 done=lambda: self._fx.setColor(old))
+
 
 def is_gliding(owner: QObject) -> bool:
     live = owner.property(_LIVE)

@@ -262,7 +262,7 @@
       "model": "glm-5.3-flash"
     },
     "orchestrator": {
-      "model": "glm-5.3-flash"
+      "model": "mimo-2.6-pro"
     },
     "alice": {
       "model": "glm-5.3-flash",
@@ -361,10 +361,12 @@
     ],
     "glm-5.3-flash": [
       "cheaperinference",
+      "vercel",
       "openrouter"
     ],
     "glm 5.3 flash": [
       "cheaperinference",
+      "vercel",
       "openrouter"
     ],
     "meta-llama/Llama-3.1-8B-Instruct": [
@@ -372,18 +374,22 @@
     ],
     "deepseek-4.1-flash": [
       "cheaperinference",
+      "vercel",
       "openrouter"
     ],
     "deepseek 4.1 flash": [
       "cheaperinference",
+      "vercel",
       "openrouter"
     ],
     "mimo-2.6-flash": [
       "cheaperinference",
+      "vercel",
       "openrouter"
     ],
     "mimo 2.6 flash": [
       "cheaperinference",
+      "vercel",
       "openrouter"
     ],
     "gemma-e4b": [
@@ -391,10 +397,12 @@
     ],
     "mimo-2.6-pro": [
       "cheaperinference",
+      "vercel",
       "openrouter"
     ],
     "mimo 2.6 pro": [
       "cheaperinference",
+      "vercel",
       "openrouter"
     ]
   },
