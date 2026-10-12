@@ -91,7 +91,7 @@ def check_runtime(binary, problems):
     """Run the app headless; exactly one top-level window may exist and no terminal emulator may start."""
     env = dict(os.environ, HYDRA_NO_STATE="1")
     proc = subprocess.Popen(["xvfb-run", "-a", "-s", "-screen 0 1280x800x24", "bash", "-c",
-                             f'"{binary}" & P=$!; sleep 5; xdotool search --onlyvisible --name "" 2>/dev/null | wc -l; pgrep -c -f "xterm|gnome-terminal|konsole" || true; kill $P'],
+                             f'"{binary}" & P=$!; sleep 5; xdotool search --onlyvisible --name "" 2>/dev/null | wc -l; ps -eo comm | grep -cE "^(xterm|gnome-terminal|konsole|x-terminal-emulator)$" || true; kill $P'],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env)
     out = proc.communicate(timeout=60)[0].split()
     if not out:
