@@ -1985,7 +1985,7 @@ def context_modes_agent_loop():
 
 def _scripted_model(script):
     """Local HTTP model endpoint. script(handler, body) writes the whole reply. Returns (httpd, base_url)."""
-    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class Scripted(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -1995,7 +1995,7 @@ def _scripted_model(script):
         def log_message(self, *args):
             pass
 
-    httpd = HTTPServer(("127.0.0.1", 0), Scripted)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Scripted)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
 
@@ -11715,7 +11715,9 @@ class _StdioChild:
         self.log = []
         self.unparsed = []
         self._empty = queue.Empty
-        threading.Thread(target=self._pump, daemon=True).start()
+        self.hang_up = False
+        self.pump = threading.Thread(target=self._pump, daemon=True)
+        self.pump.start()
 
     def _pump(self):
         for raw in self.proc.stdout:
@@ -11727,6 +11729,9 @@ class _StdioChild:
                 continue
             self.log.append(msg)
             self.queue.put(msg)
+            if self.hang_up:
+                break
+        self.proc.stdout.close()
         self.queue.put(None)
 
     def send(self, **msg):
@@ -11754,7 +11759,8 @@ class _StdioChild:
                 return seen
 
     def turn(self, turn, prompt, thread="t1", **extra):
-        self.send(type="turn", turn=turn, prompt=prompt, thread=thread, cwd=self.project, **extra)
+        extra.setdefault("cwd", self.project)
+        self.send(type="turn", turn=turn, prompt=prompt, thread=thread, **extra)
 
     def run_turn(self, turn, prompt, thread="t1", **extra):
         self.turn(turn, prompt, thread, **extra)
@@ -12118,6 +12124,187 @@ def stdio_permission_modes():
         assert result["is_error"] is False and "readable" in result["output"], result
         replies = child.run_turn("read2", "read it", thread="p9", permission="accept_edits", model="local")
         assert "approval_request" not in kinds(replies) and any(m["type"] == "auto_decision" and m["decision"] == "allow" for m in replies), replies
+        assert child.close() == 0
+
+
+def _marker_model(seen):
+    """Scripted model that acts on a marker in the last user message. SLOW streams for a while, WRITE_<name> writes that file, anything else answers with the marker."""
+    def script(handler, body):
+        seen.append(body)
+        users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        prompt = users[-1] if users else ""
+        word = next((w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "PLAIN"))), "PLAIN")
+        if word.startswith("SLOW"):
+            return _sse(handler, [f"{word}-{n} " for n in range(200)], 0.05, [])
+        if word.startswith(("WRITE_", "EDIT_")) and not any(m.get("role") == "tool" for m in body["messages"]):
+            name = word.split("_", 1)[1]
+            args = json.dumps({"path": name + ".txt", "content": f"content of {name}\n"})
+            chunks = [
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "write_file", "arguments": ""}}]}}]},
+                {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]},
+            ]
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/event-stream")
+            handler.end_headers()
+            for chunk in chunks:
+                handler.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+            handler.wfile.write(b"data: [DONE]\n\n")
+            handler.wfile.flush()
+            return
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.end_headers()
+        handler.wfile.write(f"data: {json.dumps({'choices': [{'delta': {'content': 'reply-to-' + word}}]})}\n\n".encode())
+        handler.wfile.flush()
+        time.sleep(0.4)  # keep parallel turns overlapping until their usage arrives
+        usage = {"choices": [], "usage": {"prompt_tokens": 100 + len(word), "completion_tokens": len(word)}}
+        handler.wfile.write(f"data: {json.dumps(usage)}\n\ndata: [DONE]\n\n".encode())
+        handler.wfile.flush()
+
+    return _scripted_model(script)
+
+
+@contextmanager
+def _marker_session():
+    seen = []
+    httpd, base = _marker_model(seen)
+    with tempfile.TemporaryDirectory() as home:
+        child = _StdioChild(base, home)
+        try:
+            assert child.next()["type"] == "hello"
+            yield child, seen
+        finally:
+            if child.proc.poll() is None:
+                child.proc.kill()
+            httpd.shutdown()
+
+
+def _project(child, name):
+    path = os.path.join(child.home, name)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+@check
+def stdio_parallel_turns_share_nothing():
+    """Turns on different threads run at once. Approvals, diffs, usage, tokens and cancel each stay with their own turn."""
+    with _marker_session() as (child, seen):
+        pa, pb, pc, pe = (_project(child, n) for n in ("pa", "pb", "pc", "pe"))
+        child.turn("A", "SLOW please", thread="ta", cwd=pa, model="local")
+        child.turn("B", "WRITE_b now", thread="tb", cwd=pb, permission="manual", model="local")
+        child.turn("C", "WRITE_c now", thread="tc", cwd=pc, permission="manual", model="local")
+        child.turn("E", "WRITE_e now", thread="te", cwd=pe, permission="manual", model="local")
+        child.turn("A2", "PLAIN", thread="ta", cwd=pa, model="local")
+        assert child.until("error")[-1]["code"] == "busy"  # same thread
+        child.turn("A", "PLAIN", thread="tz", cwd=pa, model="local")
+        assert child.until("error")[-1]["code"] == "busy"  # same turn id
+        by_turn = {name: [] for name in "ABCEDPQ"}
+        arrived = []
+        while len(arrived) < 3:
+            msg = child.next()
+            if msg.get("turn") in by_turn:
+                by_turn[msg["turn"]].append(msg)
+            if msg["type"] == "approval_request":
+                arrived.append(msg)
+        assert {m["turn"] for m in arrived} == {"B", "C", "E"} and len({m["id"] for m in arrived}) == 3
+        for m in arrived:
+            assert m["arguments"]["path"] == m["turn"].lower() + ".txt", m
+        decisions = {"B": "allow", "C": "skip", "E": "allow"}
+        for m in reversed(arrived):  # answer in the opposite order from arrival
+            child.send(type="approval", id=m["id"], decision=decisions[m["turn"]])
+        done = set()
+        while done != {"B", "C", "E"}:
+            msg = child.next()
+            if msg.get("turn") in by_turn:
+                by_turn[msg["turn"]].append(msg)
+            if msg["type"] == "done":
+                done.add(msg["turn"])
+        for name, folder in (("b", pb), ("e", pe)):
+            assert open(os.path.join(folder, name + ".txt"), encoding="utf-8").read() == f"content of {name}\n"
+        assert not os.path.exists(os.path.join(pc, "c.txt")) and not os.path.exists(os.path.join(pa, "b.txt"))
+        assert [m["path"] for m in by_turn["B"] if m["type"] == "diff"] == ["b.txt"]
+        assert [m["path"] for m in by_turn["E"] if m["type"] == "diff"] == ["e.txt"]
+        assert not [m for m in by_turn["C"] if m["type"] == "diff"]
+        assert all(m["type"] in ("token", "usage") for m in by_turn["A"]), by_turn["A"]
+        # usage numbers come from each turn's own provider reply
+        child.turn("P", "PLAIN1", thread="tp", cwd=pa, model="local")
+        child.turn("Q", "PLAIN22222", thread="tq", cwd=pa, model="local")
+        done = set()
+        while done != {"P", "Q"}:
+            msg = child.next()
+            if msg.get("turn") in by_turn:
+                by_turn[msg["turn"]].append(msg)
+            if msg["type"] == "done":
+                done.add(msg["turn"])
+        for name, word in (("P", "PLAIN1"), ("Q", "PLAIN22222")):
+            usage = [m for m in by_turn[name] if m["type"] == "usage"]
+            assert len(usage) == 1 and usage[0]["prompt_tokens"] == 100 + len(word) and usage[0]["completion_tokens"] == len(word), (name, usage)
+        # cancel reaches only the turn it names
+        child.turn("D", "SLOW again", thread="td", cwd=pa, model="local")
+        child.until("token", turn="D")
+        child.send(type="cancel", turn="D")
+        while True:
+            msg = child.next()
+            if msg["type"] == "done" and msg["turn"] == "D":
+                assert msg["cancelled"] is True
+                break
+            assert not (msg["type"] == "done" and msg["turn"] == "A"), "cancel of D stopped A"
+        child.send(type="cancel", turn="A")
+        replies = child.until("done", turn="A")
+        assert replies[-1]["cancelled"] is True
+        assert not [m for m in replies if m["type"] == "token" and m["turn"] == "A" and not m["text"].startswith("SLOW")]
+        assert child.close() == 0
+
+
+@check
+def stdio_turn_limit_and_internal_errors():
+    """The ninth parallel turn is refused, a broken ledger is an error not a crash, and a closed stdout exits 70."""
+    with _marker_session() as (child, seen):
+        for n in range(8):
+            child.turn(f"s{n}", "SLOW", thread=f"lim{n}", model="local")
+        child.turn("nine", "PLAIN", thread="lim9", model="local")
+        err = child.until("error")[-1]
+        assert err["code"] == "busy" and err["turn"] == "nine", err
+        for n in range(8):
+            child.send(type="cancel", turn=f"s{n}")
+        left = {f"s{n}" for n in range(8)}
+        while left:
+            msg = child.next()
+            if msg["type"] == "done":
+                left.discard(msg["turn"])
+        bad = os.path.join(child.home, ".hydra", "sessions", "broken")
+        os.makedirs(bad, exist_ok=True)
+        with open(os.path.join(bad, "ledger.db"), "wb") as handle:
+            handle.write(b"this is not a sqlite file" * 40)
+        child.send(type="history", id="hb", thread="broken")
+        err = child.until("error")[-1]
+        assert err["code"] == "internal" and err["id"] == "hb", err
+        child.send(type="sessions", id="alive")
+        assert child.until("session_list")[-1]["id"] == "alive"
+        child.hang_up = True  # the app stops reading and closes its end of stdout
+        child.send(type="sessions", id="last")
+        child.pump.join(timeout=20)
+        assert not child.pump.is_alive()
+        child.send(type="sessions", id="gone")
+        assert child.proc.wait(timeout=20) == 70
+        child.stderr.seek(0)
+        assert b"stdout closed by the app" in child.stderr.read()
+
+
+@check
+def stdio_tool_result_is_cut_at_4000_characters():
+    """A long tool output arrives cut to 4000 characters with truncated true, a short one whole with truncated false."""
+    with _stdio_session(tool={"name": "read_file", "arguments": {"path": "big.txt"}}) as (child, seen):
+        with open(os.path.join(child.project, "big.txt"), "w", encoding="utf-8") as handle:
+            handle.write("0123456789" * 900)
+        result = [m for m in child.run_turn("big", "read it", model="local") if m["type"] == "tool_result"][0]
+        assert result["truncated"] is True and len(result["output"]) == 4000, (result["truncated"], len(result["output"]))
+        assert child.close() == 0
+    with _stdio_session(tool={"name": "read_file", "arguments": {"path": "small.txt"}}) as (child, seen):
+        with open(os.path.join(child.project, "small.txt"), "w", encoding="utf-8") as handle:
+            handle.write("tiny\n")
+        result = [m for m in child.run_turn("small", "read it", model="local") if m["type"] == "tool_result"][0]
+        assert result["truncated"] is False and "tiny" in result["output"], result
         assert child.close() == 0
 
 

@@ -26,6 +26,26 @@ CAPABILITIES = ["turn", "cancel", "approval", "permission", "sessions", "history
 EXIT_OK = 0
 EXIT_VERSION = 2
 EXIT_FATAL = 70
+MAX_TURNS = 8
+
+
+class _Turn:
+    """Everything one running turn owns. Parallel turns share nothing but the output lock."""
+
+    def __init__(self, turn: str, thread: str, permission: str) -> None:
+        self.id = turn
+        self.thread = thread
+        self.permission = permission
+        self.cancel = threading.Event()
+        self.gate = threading.Event()
+        self.decision = ""
+        self.pending: Optional[str] = None
+        self.asked: Optional[tuple] = None
+        self.worker: Optional[threading.Thread] = None
+
+    def release(self, decision: str) -> None:
+        self.decision = decision
+        self.gate.set()
 
 
 class Adapter:
@@ -34,15 +54,11 @@ class Adapter:
         self._writer = writer
         self._write_lock = threading.Lock()
         self._state = threading.Lock()
-        self._worker: Optional[threading.Thread] = None
-        self._turn_id: Optional[str] = None
-        self._cancel = threading.Event()
-        self._pending: Optional[str] = None  # id of the approval request being awaited
-        self._decision = ""
-        self._gate = threading.Event()
+        self._turns: Dict[str, _Turn] = {}
+        self._busy_threads: Dict[str, str] = {}  # thread -> turn id
+        self._requests: Dict[str, _Turn] = {}  # approval id -> the turn waiting on it
         self._approvals = 0
         self._always: set = set()  # (thread, tool) pairs the app allowed for good
-        self._asked: Optional[tuple] = None  # (thread, tool) of the request being awaited
         self._calls = 0
         self._ledgers: Dict[str, Any] = {}
         self.exit_code = EXIT_OK
@@ -52,8 +68,14 @@ class Adapter:
     def emit(self, message: Dict[str, Any]) -> None:
         line = json.dumps(message, ensure_ascii=False, default=str, separators=(",", ":"))
         with self._write_lock:
-            self._writer.write(line + "\n")
-            self._writer.flush()
+            try:
+                self._writer.write(line + "\n")
+                self._writer.flush()
+            except (OSError, ValueError):
+                # the app closed its end of stdout, so nobody is left to talk to
+                sys.stderr.write("hydra stdio : stdout closed by the app, exiting 70\n")
+                sys.stderr.flush()
+                os._exit(EXIT_FATAL)
 
     def error(self, message: str, code: str, turn: Optional[str] = None, req: Optional[str] = None) -> None:
         from hydra_cli.providers import redact
@@ -100,19 +122,18 @@ class Adapter:
         except Exception as exc:  # reader failure is fatal, the app sees the exit code
             self.error(f"{type(exc).__name__}: {exc}", "fatal")
             self.exit_code = EXIT_FATAL
-        self._stop_turn()
+        self._stop_turns()
         return self.exit_code
 
-    def _stop_turn(self) -> None:
-        self._cancel.set()
-        self._release("q")
-        worker = self._worker
-        if worker is not None:
-            worker.join(timeout=30)
-
-    def _release(self, decision: str) -> None:
-        self._decision = decision
-        self._gate.set()
+    def _stop_turns(self) -> None:
+        with self._state:
+            running = list(self._turns.values())
+        for t in running:
+            t.cancel.set()
+            t.release("q")
+        for t in running:
+            if t.worker is not None:
+                t.worker.join(timeout=30)
 
     def _dispatch(self, raw: bytes) -> bool:
         try:
@@ -132,7 +153,11 @@ class Adapter:
         if handler is None:
             self.error(f"unknown message type {kind!r}", "unknown_type", req=_text(msg.get("id")))
             return True
-        result = handler(msg)
+        try:
+            result = handler(msg)
+        except Exception as exc:  # one bad request must not end the session
+            self.error(f"{type(exc).__name__}: {exc}", "internal", req=_text(msg.get("id")), turn=_text(msg.get("turn")))
+            return True
         return result is not False
 
     # handlers, all run on the reader thread and return quickly
@@ -170,36 +195,42 @@ class Adapter:
             problems.append("model must be a string")
         if problems:
             return self.error("; ".join(problems), "bad_request", turn=turn)
+        permission = msg.get("permission") or ("manual" if msg.get("approve") else "bypass")
         with self._state:
-            if self._turn_id is not None:
-                return self.error(f"turn {self._turn_id} is still running", "busy", turn=turn)
-            self._turn_id = turn
-            self._cancel.clear()
-            self._gate.clear()
-            self._pending = None
-            self._worker = threading.Thread(target=self._run_turn, args=(turn, msg, thread), name="hydra-turn", daemon=True)
-            self._worker.start()
+            if turn in self._turns:
+                return self.error(f"turn id {turn} is already running", "busy", turn=turn)
+            if thread in self._busy_threads:
+                return self.error(f"thread {thread} is still running turn {self._busy_threads[thread]}", "busy", turn=turn)
+            if len(self._turns) >= MAX_TURNS:
+                return self.error(f"{MAX_TURNS} turns are already running", "busy", turn=turn)
+            t = _Turn(turn, thread, permission)
+            self._turns[turn] = t
+            self._busy_threads[thread] = turn
+            t.worker = threading.Thread(target=self._run_turn, args=(t, msg), name=f"hydra-turn-{turn}", daemon=True)
+            t.worker.start()
 
     def _on_cancel(self, msg: Dict[str, Any]) -> None:
         turn = _text(msg.get("turn"))
         with self._state:
-            if turn is None or turn != self._turn_id:
+            t = self._turns.get(turn) if turn else None
+            if t is None:
                 return self.error(f"no running turn {turn!r}", "unknown_turn", turn=turn)
-            self._cancel.set()
-            self._release("q")
+            t.cancel.set()
+            t.release("q")
 
     def _on_approval(self, msg: Dict[str, Any]) -> None:
         req = _text(msg.get("id"))
         decision = DECISIONS.get(msg.get("decision"))
         if decision is None:
-            return self.error("decision must be allow, skip or abort", "bad_request", req=req)
+            return self.error("decision must be allow, allow_always, skip or abort", "bad_request", req=req)
         with self._state:
-            if req is None or req != self._pending:
+            t = self._requests.pop(req, None) if req else None
+            if t is None:
                 return self.error(f"no pending approval {req!r}", "unknown_approval", req=req)
-            self._pending = None
-            if msg.get("decision") == "allow_always" and self._asked is not None:
-                self._always.add(self._asked)
-            self._release(decision)
+            t.pending = None
+            if msg.get("decision") == "allow_always" and t.asked is not None:
+                self._always.add(t.asked)
+            t.release(decision)
 
     def _on_sessions(self, msg: Dict[str, Any]) -> None:
         from pathlib import Path
@@ -253,8 +284,9 @@ class Adapter:
 
     # the turn worker
 
-    def _approve(self, turn: str, thread: str, permission: str, tool: str, args_json: str) -> str:
+    def _approve(self, t: _Turn, tool: str, args_json: str) -> str:
         """Decide one tool call. Plan and accept_edits decide on their own for some tools, the rest ask the app."""
+        turn, thread, permission = t.id, t.thread, t.permission
         if permission == "plan":
             decision, reason = ("y", "plan mode allows read only tools") if tool in READ_ONLY_TOOLS else ("n", "plan mode allows read only tools")
         elif tool in READ_ONLY_TOOLS and permission != "manual":
@@ -270,18 +302,20 @@ class Adapter:
                        "decision": "allow" if decision == "y" else "skip", "reason": reason})
             return decision
         with self._state:
-            if self._cancel.is_set():
+            if t.cancel.is_set():
                 return "q"
             self._approvals += 1
             req = f"a{self._approvals}"
-            self._pending = req
-            self._asked = (thread, tool)
-            self._gate.clear()
+            t.pending = req
+            t.asked = (thread, tool)
+            self._requests[req] = t
+            t.gate.clear()
         self.emit({"type": "approval_request", "turn": turn, "id": req, "tool": tool, "arguments": _args(args_json)})
-        self._gate.wait()
-        return self._decision
+        t.gate.wait()
+        return t.decision
 
-    def _run_turn(self, turn: str, msg: Dict[str, Any], thread: str) -> None:
+    def _run_turn(self, t: _Turn, msg: Dict[str, Any]) -> None:
+        turn, thread = t.id, t.thread
         from hydra_cli.agent import CANCELLED_TEXT, run_agent_loop, set_usage_sink
         from hydra_cli.config import DEFAULT_ORCHESTRATOR_MODEL, get_context_window
         from hydra_cli.context import SessionContextLedger
@@ -310,8 +344,8 @@ class Adapter:
                        "cost_usd": rec["total_cost_usd"]})
 
         set_usage_sink(usage)
-        permission = msg.get("permission") or ("manual" if msg.get("approve") else "bypass")
-        set_approval_handler(lambda tool, args_json: self._approve(turn, thread, permission, tool, args_json))
+        permission = t.permission
+        set_approval_handler(lambda tool, args_json: self._approve(t, tool, args_json))
         set_diff_sink(lambda path, text: self.emit({"type": "diff", "turn": turn, "path": path, "diff": text}))
         set_tool_start_sink(start)
         set_tool_sink(result)
@@ -322,15 +356,15 @@ class Adapter:
                 steer_mode=permission != "bypass", ledger=ledger, strategy=msg.get("mode", "recall"),
                 on_token=lambda text: self.emit({"type": "token", "turn": turn, "text": text}),
                 max_context_chars=msg.get("context_chars") or get_context_window(alias) * 4,
-                cancel=self._cancel,
+                cancel=t.cancel,
             )
-            cancelled = self._cancel.is_set() or answer == CANCELLED_TEXT
+            cancelled = t.cancel.is_set() or answer == CANCELLED_TEXT
             ok = not cancelled and answer != "[Turn aborted by developer]"
             final = {"type": "done", "turn": turn, "text": CANCELLED_TEXT if cancelled else (answer or ""),
                      "ok": ok, "cancelled": cancelled}
         except Exception as exc:
             self.error(f"{type(exc).__name__}: {exc}", "turn_failed", turn=turn)
-            final = {"type": "done", "turn": turn, "text": "", "ok": False, "cancelled": self._cancel.is_set()}
+            final = {"type": "done", "turn": turn, "text": "", "ok": False, "cancelled": t.cancel.is_set()}
         finally:
             set_usage_sink(None)
             set_approval_handler(None)
@@ -340,8 +374,10 @@ class Adapter:
         # The slot frees and `done` is written under one lock: a turn sent right after `done` is never refused as
         # busy, and its messages cannot overtake this `done`.
         with self._state:
-            self._turn_id = None
-            self._pending = None
+            self._turns.pop(turn, None)
+            self._busy_threads.pop(thread, None)
+            if t.pending:
+                self._requests.pop(t.pending, None)
             self.emit(final)
 
 

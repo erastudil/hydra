@@ -127,7 +127,7 @@ per turn : tokens, tool events, diffs and approval requests come in the order th
 
 tool order : approval_request or auto_decision, then tool_start, then diff if any, then tool_result.
 
-one turn at a time : a `turn` while another runs gets `error` code busy and the running turn is untouched. a turn sent after the `done` of the previous one is always accepted, and none of its messages come before that `done`.
+parallel turns : up to 8 turns run at once, one per thread. a `turn` for a thread that is still running, with a turn id already in use, or past the limit of 8 gets `error` code busy and nothing running is touched. every message of a turn carries its turn id, approval ids are unique per process, and each turn owns its approval wait, cancel flag, diff, tool and usage hooks, so turns never see each other's events. messages of different turns interleave freely, order holds only within one turn. a turn sent after the `done` of the previous one is always accepted, and none of its messages come before that `done`.
 
 replies : `session_list`, `history_result` and `action_result` echo the request id and may interleave with turn messages.
 
@@ -146,7 +146,9 @@ turn failure : provider failure, missing credentials or any exception in the loo
 
 action failure : `error` code action_failed with the request id.
 
-codes : malformed, unknown_type, bad_request, line_too_long, busy, unknown_turn, unknown_approval, turn_failed, action_failed, version, fatal.
+internal : a handler raised, for example a damaged ledger file. `error` code internal with turn or id when known. the adapter keeps running.
+
+codes : malformed, unknown_type, bad_request, line_too_long, busy, unknown_turn, unknown_approval, turn_failed, action_failed, internal, fatal, version.
 
 
 ## exit codes
@@ -155,6 +157,6 @@ codes : malformed, unknown_type, bad_request, line_too_long, busy, unknown_turn,
 
 2 : protocol version mismatch.
 
-70 : internal failure of the reader. `error` code fatal is written first when the pipe still works.
+70 : the app closed its end of stdout. the adapter notes it on stderr and exits at once, without finishing running turns. there is nobody left to hear them. a failure of the stdin reader itself also exits 70, after `error` code fatal.
 
 kill : the app should send `shutdown` and wait before it kills the child.

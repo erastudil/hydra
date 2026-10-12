@@ -14,6 +14,7 @@ from hydra_cli.ui import StreamWrap, clean_pasted_text, approve_tool, diff_sink,
 from hydra_cli._version import __version__
 
 from datetime import datetime, timezone
+import contextvars
 import json
 import os
 import shutil
@@ -2804,17 +2805,16 @@ class TurnCancelled(Exception):
     """Raised inside a model call when the caller set the cancel event."""
 
 
-_USAGE_SINK: Optional[Callable[[Dict[str, Any]], None]] = None
+_USAGE_SINK: "contextvars.ContextVar[Optional[Callable[[Dict[str, Any]], None]]]" = contextvars.ContextVar("hydra_usage", default=None)
 
 
 def set_usage_sink(sink: Optional[Callable[[Dict[str, Any]], None]]) -> None:
-    """Receive the provider usage object (prompt_tokens, completion_tokens) of each completion round."""
-    global _USAGE_SINK
-    _USAGE_SINK = sink
+    """Receive the provider usage object (prompt_tokens, completion_tokens) of each completion round of the calling thread."""
+    _USAGE_SINK.set(sink)
 
 
 def _report_usage(usage: Any) -> None:
-    sink = _USAGE_SINK
+    sink = _USAGE_SINK.get()
     if sink is not None and isinstance(usage, dict) and usage:
         try:
             sink(usage)
