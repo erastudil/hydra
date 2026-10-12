@@ -2875,6 +2875,8 @@ def _consume_completion_body(
             if not choices:
                 continue
             choice = choices[0]
+            if choice.get("finish_reason"):
+                state["finished"] = True
             message = choice.get("message") or {}
             delta = choice.get("delta") or {}
             if delta:
@@ -2900,9 +2902,47 @@ def _consume_completion_body(
                 return parsed
     if not saw_done and not state["content"] and not state["tools"] and not state["reasoning"] and not state.get("reasoning_details"):
         raise ProviderError(f"Stream from {where} ended before data: [DONE]")
+    if not saw_done and not state.get("finished"):
+        # the connection closed mid-reply: never present half an answer as a finished one
+        raise ProviderError(f"Reply from {where} was cut off before it finished (connection closed after {len(state['content'])} characters)")
     finish = "tool_calls" if state["tools"] else "stop"
     _report_usage(state.get("usage"))
     return {"choices": [{"message": _message_from_stream_state(state), "finish_reason": finish}]}
+
+
+def _stream_request(req: Any, timeout: int, callbacks: Any, where: str, on_action: Any, on_reasoning: Any, cancel: Any) -> Dict[str, Any]:
+    on_token, on_action, on_reasoning = callbacks
+    with urlopen(req, timeout=timeout) as resp:
+        return _consume_completion_body(resp, on_token, where, on_action=on_action, on_reasoning=on_reasoning, cancel=cancel)
+
+
+def _run_cancellable(work: Callable[[Any], Dict[str, Any]], on_token: Any, on_action: Any, on_reasoning: Any, cancel: threading.Event) -> Dict[str, Any]:
+    """Run a blocking provider read on a helper thread so Stop returns within a fraction of a second even when the
+    socket is silent. An abandoned read can no longer emit anything and ends on its own at the socket timeout."""
+    box: Dict[str, Any] = {}
+    abandoned = threading.Event()
+
+    def gate(fn: Any) -> Any:
+        if fn is None:
+            return None
+        return lambda *a, **k: None if abandoned.is_set() else fn(*a, **k)
+
+    def run() -> None:
+        try:
+            box["result"] = work((gate(on_token), gate(on_action), gate(on_reasoning)))
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=run, daemon=True, name="hydra-provider-read")
+    worker.start()
+    while worker.is_alive():
+        worker.join(0.1)
+        if cancel.is_set():
+            abandoned.set()
+            raise TurnCancelled()
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
 
 
 def _fetch_streaming_completion(
@@ -2923,9 +2963,11 @@ def _fetch_streaming_completion(
     data = json.dumps(body).encode("utf-8")
     req = Request(url, data=data, headers=headers, method="POST")
     where = describe_endpoint(url)
+    timeout = min(timeout, 60)  # no byte for a minute is a dead provider, not a slow one
     try:
-        with urlopen(req, timeout=timeout) as resp:
-            return _consume_completion_body(resp, on_token, where, on_action=on_action, on_reasoning=on_reasoning, cancel=cancel)
+        if cancel is not None:
+            return _run_cancellable(lambda cb: _stream_request(req, timeout, cb, where, on_action, on_reasoning, cancel), on_token, on_action, on_reasoning, cancel)
+        return _stream_request(req, timeout, (on_token, on_action, on_reasoning), where, on_action, on_reasoning, cancel)
     except HTTPError as e:
         error_body = ""
         try:

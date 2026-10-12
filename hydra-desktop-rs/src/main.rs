@@ -1,9 +1,5 @@
 #![windows_subsystem = "windows"]
-mod app;
-mod layout;
-mod motion;
-mod theme;
-mod widgets;
+use hydra_desktop::{app, theme};
 
 fn main() -> eframe::Result<()> {
     hydra_desktop::crash::install();

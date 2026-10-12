@@ -7,3 +7,8 @@ pub mod health;
 pub mod fsx;
 pub mod git;
 pub mod workspace;
+pub mod app;
+pub mod theme;
+pub mod widgets;
+pub mod layout;
+pub mod motion;

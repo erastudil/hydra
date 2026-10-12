@@ -40,6 +40,10 @@ pub fn is_repo(root: &Path) -> bool {
     ok(root, &["rev-parse", "--is-inside-work-tree"]).map(|s| s.trim() == "true").unwrap_or(false)
 }
 
+pub fn init(root: &Path) -> Result<(), String> {
+    ok(root, &["init", "-q"]).map(|_| ())
+}
+
 pub fn status(root: &Path) -> Result<Status, String> {
     let out = ok(root, &["status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all"])?;
     let mut st = Status::default();

@@ -165,3 +165,32 @@ fn at_mentions_attach_file_text_to_the_prompt_but_not_to_the_bubble() {
     assert!(msgs.last().unwrap().text.contains("remember the milk"), "the agent got the file text: {}", msgs.last().unwrap().text);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_thread_with_a_worktree_runs_its_turn_there_and_other_threads_stay_put() {
+    let (mut m, mut be, dir) = setup("wt", 1);
+    let repo = dir.join("p0");
+    git_repo(&repo);
+    assert!(pump(&mut m, &be, 10, |m| m.agent_ready));
+    let first = m.active;
+    m.new_session();
+    let second = m.active;
+    let wt = m.start_worktree().unwrap();
+    assert!(std::path::Path::new(&wt).join("a.txt").is_file());
+    assert!(m.start_worktree().is_err(), "one worktree per thread");
+    assert!(m.submit(&mut be, "TOUCH in the worktree"));
+    m.select(first);
+    assert!(m.submit(&mut be, "go here"));
+    assert!(pump(&mut m, &be, 10, |m| !m.any_busy()));
+    assert_eq!(std::fs::read_to_string(std::path::Path::new(&wt).join("a.txt")).unwrap(), "agent was here\n", "edit landed in the worktree");
+    assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "original\n", "main checkout untouched");
+    let t2 = m.sessions[second].messages.last().unwrap().text.clone();
+    let t1 = m.sessions[first].messages.last().unwrap().text.clone();
+    assert!(t2.contains(&wt), "{t2}");
+    assert!(!t1.contains(".hydra"), "{t1}");
+    m.select(second);
+    m.remove_worktree().unwrap();
+    assert!(!std::path::Path::new(&wt).exists());
+    assert!(m.sessions[second].worktree.is_none());
+    let _ = std::fs::remove_dir_all(dir);
+}
