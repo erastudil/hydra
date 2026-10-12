@@ -55,7 +55,7 @@ agent hello : `{"type":"hello","protocol":1,"agent":"hydra","capabilities":[...]
 
 app hello : `{"type":"hello","protocol":1}`
 
-capabilities : turn, cancel, approval, permission, rules, checkpoint, skills, mcp, sessions, history, action.
+capabilities : turn, cancel, approval, permission, rules, checkpoint, skills, mcp, tasks, sessions, history, action.
 
 
 ## messages from the app to the agent
@@ -95,6 +95,10 @@ checkpoints : list the checkpoints of a thread, newest first. fields id, thread.
 
 rewind : put the project files back to a checkpoint. fields id, thread, checkpoint. code only, the conversation is not rewound. the thread must not be running a turn, else `error` code busy. an unknown checkpoint or thread gets `error` code bad_request. before touching anything the adapter snapshots the current state, so a rewind can be undone by rewinding to the backup id in the reply. reply `rewind_result`.
 
+tasks : list the background tasks of this agent process. field id. reply `task_list`.
+
+task_stop : stop a background task and every process it started. fields id, task. an unknown task gets `error` code bad_request. reply `task_list`.
+
 skills : list the skills a turn may pick. field id. reply `skill_list`.
 
 mcp : show the MCP servers a project gets. fields id, cwd, refresh. refresh true asks every server for its tools again. reply `mcp_status`.
@@ -115,6 +119,8 @@ hello : see handshake.
 token : fields turn, text. streamed answer text in arrival order. concatenated they are the model reply of the current round.
 
 context : fields turn, rules, skills. sent once per turn after `checkpoint` and before the model runs. rules is the path of the AGENTS.md, .cursorrules or CLAUDE.md file found in cwd or up to five parents above it, or null. its text goes into the system prompt. skills is the list of skill ids added to this turn. mcp_tools lists the MCP tools the model gets this turn. mcp_errors maps each server that failed to start or list its tools to the reason.
+
+task_update : fields task, thread, turn, command, cwd, pid, state, exit_code, started, ended. sent when a task starts and once more when it ends. thread and turn name the turn that started it. state is running, exited or stopped. exit_code and ended are null while it runs. times are epoch seconds. it can arrive between turns.
 
 retry : fields turn, attempt, of, wait, reason. the provider request of this turn failed before its first token and is sent again after wait seconds. attempt counts from 1 up to of. reason is `HTTP <code>` for 429, 500, 502, 503 and 504, or `connection lost: <kind>` for a reset or dropped connection. any other failure, or any failure after a token, is not retried and ends the turn with `error` code turn_failed. HYDRA_PROVIDER_RETRIES sets of, default 2. HYDRA_BACKOFF_BASE sets the first wait, default 0.5, which doubles on each attempt up to 4 seconds. cancel during a wait ends the turn at once.
 
@@ -141,6 +147,8 @@ done : fields turn, text, ok, cancelled. exactly one per turn and always the las
 error : fields code, message, redacted, and turn or id when the failure belongs to one. redacted is true when secrets or url paths were scrubbed from message. a failure inside a turn writes `error` with turn, then `done` with ok false.
 
 skill_list : fields id, skills. each skill has id, keys, the words it is about, and title, the first line of its body.
+
+task_list : fields id, tasks. each task has the fields of `task_update`.
 
 mcp_status : fields id, config, servers. config is the config file in use or null. each server has name, ok, error and tools. error is null when ok is true. tools lists the tool names the model sees.
 
@@ -240,3 +248,14 @@ git_commit : asks under manual and accept_edits, skipped under plan. fields mess
 git_branch : asks like git_commit. op list, create or switch, and name. create switches to the new branch. creating main or master is refused.
 
 git runs with an argument list, never through a shell. paths must stay inside the turn cwd. these tools never push.
+
+
+## background tasks
+
+tools : start_background_task takes a shell command and returns task and pid at once. task_output returns state, exit_code and the last output, 4000 characters unless tail says otherwise. stop_background_task stops one.
+
+permission : start_background_task asks like run_command and plan skips it. task_output is read only. stop_background_task asks under manual.
+
+output : each task writes stdout and stderr to ~/.hydra/tasks/<task>.log.
+
+lifetime : a task keeps running after its turn ends. stop sends SIGTERM to its process group, then SIGKILL after 3 seconds. on Windows it terminates the process. shutdown or EOF stops every task. a killed agent leaves them running, and a respawned agent does not know them.

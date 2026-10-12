@@ -2238,6 +2238,131 @@ class AstFstringModernizer:
 
 
 
+class BackgroundTasks:
+    """Shell commands the agent leaves running between tool calls. Output goes to a log file under ~/.hydra/tasks.
+    Listeners hear every start and exit. Tasks die with the process that started them."""
+
+    TAIL_CHARS = 4000
+
+    def __init__(self) -> None:
+        import contextvars
+        import threading
+
+        self._lock = threading.Lock()
+        self._tasks: Dict[str, Dict[str, Any]] = {}
+        self._procs: Dict[str, Any] = {}
+        self._listeners: List[Callable[[Dict[str, Any]], None]] = []
+        self._count = 0
+        self.owner: "contextvars.ContextVar[Dict[str, Any]]" = contextvars.ContextVar("hydra_task_owner", default={})
+
+    def add_listener(self, listener: Callable[[Dict[str, Any]], None]) -> None:
+        with self._lock:
+            self._listeners.append(listener)
+
+    def _tell(self, info: Dict[str, Any]) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener(dict(info))
+            except Exception:
+                pass
+
+    def start(self, command: str, cwd: str) -> Dict[str, Any]:
+        import subprocess
+        import threading
+        import time as _time
+
+        if not isinstance(command, str) or not command.strip():
+            return {"isError": True, "error": "command required"}
+        folder = os.path.join(os.path.expanduser("~"), ".hydra", "tasks")
+        os.makedirs(folder, exist_ok=True)
+        with self._lock:
+            self._count += 1
+            task = f"t{self._count}-{uuid.uuid4().hex[:6]}"
+        log = os.path.join(folder, task + ".log")
+        posix = os.name != "nt"
+        try:
+            with open(log, "wb") as out:
+                proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
+                                        stderr=subprocess.STDOUT, start_new_session=posix,
+                                        creationflags=0 if posix else 0x08000000 | 0x00000200)
+        except OSError as exc:
+            return {"isError": True, "error": f"could not start: {exc}"}
+        owner = self.owner.get()
+        info = {"task": task, "command": command, "cwd": cwd, "pid": proc.pid, "state": "running", "exit_code": None,
+                "started": _time.time(), "ended": None, "thread": owner.get("thread"), "turn": owner.get("turn"), "log": log}
+        with self._lock:
+            self._tasks[task] = info
+            self._procs[task] = proc
+        self._tell(info)
+        threading.Thread(target=self._watch, args=(task, proc), daemon=True, name=f"hydra-task-{task}").start()
+        return {"isError": False, "task": task, "state": "running", "pid": proc.pid}
+
+    def _watch(self, task: str, proc: Any) -> None:
+        import time as _time
+
+        code = proc.wait()
+        with self._lock:
+            info = self._tasks[task]
+            info["exit_code"] = code
+            info["ended"] = _time.time()
+            if info["state"] == "running":
+                info["state"] = "exited"
+            snapshot = dict(info)
+        self._tell(snapshot)
+
+    def list(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [dict(info) for info in self._tasks.values()]
+
+    def output(self, task: str, tail: int = TAIL_CHARS) -> Dict[str, Any]:
+        with self._lock:
+            info = dict(self._tasks[task]) if task in self._tasks else None
+        if info is None:
+            return {"isError": True, "error": f"no task {task!r}"}
+        limit = max(1, min(int(tail or self.TAIL_CHARS), 100000))
+        with open(info["log"], "rb") as handle:
+            data = handle.read().decode("utf-8", "replace")
+        return {"isError": False, "task": task, "state": info["state"], "exit_code": info["exit_code"],
+                "output": data[-limit:], "truncated": len(data) > limit}
+
+    def stop(self, task: str, grace: float = 3.0) -> Dict[str, Any]:
+        import signal
+        import subprocess
+
+        with self._lock:
+            proc = self._procs.get(task)
+            info = self._tasks.get(task)
+            if info is None:
+                return {"isError": True, "error": f"no task {task!r}"}
+            if info["state"] != "running":
+                return {"isError": False, "task": task, "state": info["state"], "exit_code": info["exit_code"]}
+            info["state"] = "stopped"
+        try:
+            if os.name != "nt":
+                os.killpg(proc.pid, signal.SIGTERM)
+            else:
+                proc.terminate()
+            try:
+                proc.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                if os.name != "nt":
+                    os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+                proc.wait(timeout=grace)
+        except (ProcessLookupError, PermissionError):
+            pass
+        return {"isError": False, "task": task, "state": "stopped", "exit_code": proc.returncode}
+
+    def stop_all(self) -> None:
+        for info in self.list():
+            if info["state"] == "running":
+                self.stop(info["task"], grace=1.0)
+
+
+BACKGROUND_TASKS = BackgroundTasks()
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -2363,6 +2488,9 @@ class NativeToolRegistry:
             "capture_active_window": self.computer_capture_active_window,
             "computer_safe_key_sequence": self.computer_safe_key_sequence,
             "safe_key_sequence": self.computer_safe_key_sequence,
+            "start_background_task": lambda command: BACKGROUND_TASKS.start(command, self.cwd),
+            "task_output": lambda task, tail=BackgroundTasks.TAIL_CHARS: BACKGROUND_TASKS.output(task, tail),
+            "stop_background_task": lambda task: BACKGROUND_TASKS.stop(task),
             "git_status": self.git_status,
             "git_diff": self.git_diff,
             "git_commit": self.git_commit,
@@ -4625,6 +4753,34 @@ class NativeToolRegistry:
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "start_background_task",
+                    "description": "Start a shell command that keeps running after this call, such as a dev server or a watcher. Returns a task id at once.",
+                    "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "task_output",
+                    "description": "State, exit code and the last output of a background task.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"task": {"type": "string"}, "tail": {"type": "integer", "description": "Characters from the end, default 4000."}},
+                        "required": ["task"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "stop_background_task",
+                    "description": "Stop a background task and every process it started.",
+                    "parameters": {"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+                },
+            },
             {
                 "type": "function",
                 "function": {

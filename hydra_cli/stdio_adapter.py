@@ -22,9 +22,9 @@ TOOL_OUTPUT_CHARS = 4000
 CONTEXT_MODES = ("recall", "compact", "sliding")
 DECISIONS = {"allow": "y", "allow_always": "y", "skip": "n", "abort": "q"}
 PERMISSIONS = ("manual", "accept_edits", "plan", "bypass")
-READ_ONLY_TOOLS = frozenset({"git_status", "git_diff", "read_file", "list_dir", "grep_search", "find_files", "search_files", "compact_context", "retrieve_context"})
+READ_ONLY_TOOLS = frozenset({"task_output", "git_status", "git_diff", "read_file", "list_dir", "grep_search", "find_files", "search_files", "compact_context", "retrieve_context"})
 EDIT_TOOLS = frozenset({"write_file", "edit_file"})
-CAPABILITIES = ["turn", "cancel", "approval", "permission", "rules", "checkpoint", "skills", "mcp", "sessions", "history", "action"]
+CAPABILITIES = ["turn", "cancel", "approval", "permission", "rules", "checkpoint", "skills", "mcp", "tasks", "sessions", "history", "action"]
 EXIT_OK = 0
 EXIT_VERSION = 2
 EXIT_FATAL = 70
@@ -62,6 +62,10 @@ class Adapter:
         self._approvals = 0
         self._rules_lock = threading.Lock()
         self._mcp: Dict[str, Any] = {}
+        from hydra_cli.native_tools import BACKGROUND_TASKS
+
+        self._tasks = BACKGROUND_TASKS
+        self._tasks.add_listener(lambda info: self.emit({"type": "task_update", **_task_view(info)}))
         self._mcp_lock = threading.Lock()
         self._shadow_lock = threading.RLock()  # one shadow git operation at a time: init and index locks do not mix
         self._calls = 0
@@ -128,6 +132,7 @@ class Adapter:
             self.error(f"{type(exc).__name__}: {exc}", "fatal")
             self.exit_code = EXIT_FATAL
         self._stop_turns()
+        self._tasks.stop_all()
         with self._mcp_lock:
             for _stamp, registry in self._mcp.values():
                 registry.shutdown()
@@ -157,7 +162,7 @@ class Adapter:
         handler = {
             "hello": self._on_hello, "turn": self._on_turn, "cancel": self._on_cancel,
             "approval": self._on_approval, "shutdown": lambda m: False, "sessions": self._on_sessions,
-            "history": self._on_history, "action": self._on_action, "rules": self._on_rules, "skills": self._on_skills, "mcp": self._on_mcp,
+            "history": self._on_history, "action": self._on_action, "rules": self._on_rules, "skills": self._on_skills, "mcp": self._on_mcp, "tasks": self._on_tasks, "task_stop": self._on_task_stop,
             "checkpoints": self._on_checkpoints, "rewind": self._on_rewind,
         }.get(kind)
         if handler is None:
@@ -476,6 +481,17 @@ class Adapter:
         self.emit({"type": "mcp_status", "id": req, "config": registry.config_path if registry else None,
                    "servers": servers})
 
+    def _on_tasks(self, msg: Dict[str, Any]) -> None:
+        self.emit({"type": "task_list", "id": _text(msg.get("id")), "tasks": [_task_view(x) for x in self._tasks.list()]})
+
+    def _on_task_stop(self, msg: Dict[str, Any]) -> None:
+        req = _text(msg.get("id"))
+        task = msg.get("task")
+        if not isinstance(task, str) or task not in {x["task"] for x in self._tasks.list()}:
+            return self.error(f"no task {task!r}", "bad_request", req=req)
+        self._tasks.stop(task)
+        self._on_tasks(msg)
+
     def _on_skills(self, msg: Dict[str, Any]) -> None:
         listed = [{"id": sk["id"], "keys": sk["keys"], "title": (sk["body"].splitlines() or [""])[0]} for sk in _skills()]
         self.emit({"type": "skill_list", "id": _text(msg.get("id")), "skills": listed})
@@ -600,6 +616,7 @@ class Adapter:
 
         set_usage_sink(usage)
         set_retry_sink(lambda info: self.emit({"type": "retry", "turn": turn, **info}))
+        self._tasks.owner.set({"thread": thread, "turn": turn})
         permission = t.permission
         set_approval_handler(lambda tool, args_json: self._approve(t, tool, args_json))
         set_diff_sink(lambda path, text: self.emit({"type": "diff", "turn": turn, "path": path, "diff": text}))
@@ -714,6 +731,11 @@ def _command_has_prefix(command: str, prefix: str) -> bool:
     if not prefix or any(token in command for token in _SHELL_CONTROL):
         return False
     return command == prefix or command.startswith(prefix + " ")
+
+
+def _task_view(info: Dict[str, Any]) -> Dict[str, Any]:
+    keys = ("task", "thread", "turn", "command", "cwd", "pid", "state", "exit_code", "started", "ended")
+    return {key: info.get(key) for key in keys}
 
 
 def _skills() -> List[Dict[str, Any]]:

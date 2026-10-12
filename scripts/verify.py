@@ -922,7 +922,7 @@ def tools_sandbox_and_memory():
         blocked = registry.run_command("rm -rf /")
         assert blocked["status"] == "BLOCKED"
         names = {item["function"]["name"] for item in registry.get_openai_tools()}
-        assert "read_file" in names and "summon" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and "browser_fill_form" in names and "computer_find_window" in names and {"git_status", "git_diff", "git_commit", "git_branch"} <= set(names) and len(names) == 50
+        assert "read_file" in names and "summon" in names and "retrieve_context" in names and "browser_action" in names and "sort_imports" in names and "detect_p013" in names and "measure_complexity" in names and "check_type_annotations" in names and "clean_unused_variables" in names and "lint_docstrings" in names and "fold_constants" in names and "ban_mock_tests" in names and "analyze_ponytail" in names and "detect_p014" in names and "lint_state_vectors" in names and "check_function_length" in names and "check_arg_count" in names and "find_structural_duplicates" in names and "check_narrow_exceptions" in names and "modernize_fstrings" in names and "computer_screen_capture" in names and "computer_mouse_click" in names and "browser_fill_form" in names and "computer_find_window" in names and {"git_status", "git_diff", "git_commit", "git_branch", "start_background_task", "task_output", "stop_background_task"} <= set(names) and len(names) == 53
         assert "1: def main():" in registry.dispatch("read_file", {"path": "src/main.py", "start_line": 1, "end_line": 1})
         assert registry.dispatch("nonexistent_tool", {}).get("isError")
         deep = NativeToolRegistry(cwd=root, subagent_depth=3)
@@ -12135,10 +12135,10 @@ def _marker_model(seen):
         seen.append(body)
         users = [m["content"] for m in body["messages"] if m.get("role") == "user" and isinstance(m.get("content"), str)]
         prompt = users[-1] if users else ""
-        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "RUN_", "MCP_", "GIT_", "PLAIN"))] or ["PLAIN"])[-1]
+        word = ([w for w in prompt.replace("\n", " ").split() if w.startswith(("SLOW", "WRITE_", "EDIT_", "RUN_", "MCP_", "GIT_", "TASK_", "PLAIN"))] or ["PLAIN"])[-1]
         if word.startswith("SLOW"):
             return _sse(handler, [f"{word}-{n} " for n in range(200)], 0.05, [])
-        if word.startswith(("WRITE_", "EDIT_", "RUN_", "MCP_", "GIT_")) and not any(m.get("role") == "tool" for m in body["messages"]):
+        if word.startswith(("WRITE_", "EDIT_", "RUN_", "MCP_", "GIT_", "TASK_")) and not any(m.get("role") == "tool" for m in body["messages"]):
             name = word.split("_", 1)[1]
             commands = {"status": "echo hello", "chain": "echo hello && echo bye", "other": "echo other", "near": "echo hellothere", "delete": "rm keep.txt"}
             if word.startswith("RUN_"):
@@ -12147,6 +12147,9 @@ def _marker_model(seen):
                 git_calls = {"status": ("git_status", {}), "diff": ("git_diff", {}), "commit": ("git_commit", {"message": "add a"}),
                              "branch": ("git_branch", {"op": "create", "name": "feat/x"}), "master": ("git_branch", {"op": "create", "name": "master"})}
                 tool_name, args = git_calls[name][0], json.dumps(git_calls[name][1])
+            elif word.startswith("TASK_"):
+                task_commands = {"start": "echo started; sleep 60", "quick": "echo quick-done; exit 3"}
+                tool_name, args = "start_background_task", json.dumps({"command": task_commands[name]})
             elif word.startswith("MCP_"):
                 tool_name, args = "demo__" + name, json.dumps({"text": "ping"})
             else:
@@ -12886,6 +12889,84 @@ def stdio_respawn_after_a_killed_backend():
             assert second.close() == 0
     finally:
         httpd.shutdown()
+
+
+def _group_alive(pid):
+    try:
+        os.killpg(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@check
+def stdio_background_tasks_outlive_the_turn_and_stop_on_request():
+    """A task the agent starts keeps running after its turn, reports its exit, is gated like run_command, and is stopped by task_stop or by shutdown."""
+    if os.name == "nt":
+        raise Skip("background task check uses POSIX process groups")
+    with _marker_session() as (child, seen):
+        replies = child.run_turn("b1", "TASK_start", thread="bt", model="local", permission="bypass")
+        assert replies[-1]["ok"], replies
+        started = json.loads([m for m in replies if m["type"] == "tool_result"][0]["output"])
+        task, pid = started["task"], started["pid"]
+        update = [m for m in replies if m["type"] == "task_update"][0]
+        assert update["task"] == task and update["state"] == "running" and update["thread"] == "bt" and update["turn"] == "b1", update
+        assert update["cwd"] == child.project and update["command"] == "echo started; sleep 60"
+        assert _group_alive(pid), "the task ended with its turn"
+
+        replies = child.run_turn("b2", "TASK_quick", thread="bt", model="local", permission="bypass")
+        quick = json.loads([m for m in replies if m["type"] == "tool_result"][0]["output"])["task"]
+        ended = [m for m in replies if m["type"] == "task_update" and m["task"] == quick and m["state"] != "running"]
+        ended = ended or [m for m in child.until("task_update") if m["type"] == "task_update" and m["task"] == quick]
+        assert ended[-1]["state"] == "exited" and ended[-1]["exit_code"] == 3 and ended[-1]["ended"], ended
+
+        child.send(type="tasks", id="l1")
+        listed = {x["task"]: x for x in child.until("task_list")[-1]["tasks"]}
+        assert listed[task]["state"] == "running" and listed[quick]["state"] == "exited", listed
+
+        child.turn("b3", "TASK_start", thread="bt", model="local", permission="manual")
+        ask = child.until("approval_request", turn="b3")[-1]
+        assert ask["tool"] == "start_background_task", ask
+        child.send(type="approval", id=ask["id"], decision="skip")
+        child.until("done", turn="b3")
+        replies = child.run_turn("b4", "TASK_start", thread="bt", model="local", permission="plan")
+        assert not [m for m in replies if m["type"] in ("tool_start", "task_update")], replies
+        child.send(type="tasks", id="l2")
+        assert len(child.until("task_list")[-1]["tasks"]) == 2
+
+        child.send(type="task_stop", id="s1", task=task)
+        replies = child.until("task_list")
+        stopped = {x["task"]: x for x in replies[-1]["tasks"]}[task]
+        assert replies[-1]["id"] == "s1" and stopped["state"] == "stopped" and stopped["exit_code"] is not None, stopped
+        assert not _group_alive(pid), "task_stop left the task running"
+        child.send(type="task_stop", id="s2", task="t999")
+        assert child.until("error")[-1]["code"] == "bad_request"
+
+        replies = child.run_turn("b5", "TASK_start", thread="bt2", model="local", permission="bypass")
+        last = json.loads([m for m in replies if m["type"] == "tool_result"][0]["output"])["pid"]
+        assert _group_alive(last)
+        assert child.close() == 0
+        deadline = time.time() + 5
+        while _group_alive(last) and time.time() < deadline:
+            time.sleep(0.05)
+        assert not _group_alive(last), "a task outlived the agent"
+
+    from hydra_cli.native_tools import BackgroundTasks
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tasks = BackgroundTasks()
+        heard = []
+        tasks.add_listener(heard.append)
+        made = tasks.start("printf 'abcdefghij'", tmp)
+        deadline = time.time() + 5
+        while tasks.output(made["task"])["state"] == "running" and time.time() < deadline:
+            time.sleep(0.02)
+        out = tasks.output(made["task"], tail=4)
+        assert out["output"] == "ghij" and out["truncated"] and out["exit_code"] == 0, out
+        assert [h["state"] for h in heard] == ["running", "exited"], heard
+        assert tasks.output("nope")["isError"] and tasks.start("  ", tmp)["isError"]
 
 
 def main() -> int:
