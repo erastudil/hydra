@@ -160,6 +160,8 @@ session_list : fields id, sessions. each session has thread, updated in epoch se
 
 history_result : fields id, thread, turns, meta. each turn has role and content, oldest first. meta is the saved thread settings, empty for a thread without any.
 
+unanswered prompt : a prompt whose turn ended without a final reply gets an assistant turn with a marker, so user and assistant turns alternate in history and in the next request. a cancelled turn stores `[Turn cancelled by user]`. a turn that ended any other way, such as an agent killed mid-stream, stores `[Turn interrupted before a reply]`. the agent writes that marker when the next turn on the thread starts, or on a `history` request when no agent runs a turn on the thread. partial text streamed before the end is not stored.
+
 action_result : fields id, action, result. result is whatever the service returned, an object with isError.
 
 

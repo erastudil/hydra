@@ -568,9 +568,15 @@ class Adapter:
         limit = msg.get("limit", 200)
         if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
             return self.error("limit must be a positive integer", "bad_request", req=req)
-        ledger = self._ledgers.get(thread)
-        if ledger is None:
-            ledger = SessionContextLedger(session_id=thread)
+        from hydra_cli.agent import INTERRUPTED_TEXT
+
+        ledger = SessionContextLedger(session_id=thread)  # its own connection: a running turn owns the cached one
+        held = _thread_lock(thread)
+        if held is not None:  # no turn holds the thread in any agent, so an unanswered prompt was interrupted for good
+            try:
+                ledger.close_unanswered(INTERRUPTED_TEXT)
+            finally:
+                held.__exit__(None, None, None)
         turns = [{"role": t["role"], "content": t["content"]} for t in ledger.turns][-limit:]
         ledger.end_turn()
         self.emit({"type": "history_result", "id": req, "thread": thread, "turns": turns, "meta": _load_meta(thread)})
