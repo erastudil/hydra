@@ -61,9 +61,12 @@ hydra_cli/gui/transcript.py
 hydra_cli/gui/window.py
 hydra_cli/gui/worker.py
 hydra_cli/hands.py
+hydra_cli/invariants.json
+hydra_cli/invariants.py
 hydra_cli/mcp.py
 hydra_cli/mcp_registry.py
 hydra_cli/mcp_servers.default.json
+hydra_cli/memory.py
 hydra_cli/native_tools.py
 hydra_cli/providers.py
 hydra_cli/repl.py
