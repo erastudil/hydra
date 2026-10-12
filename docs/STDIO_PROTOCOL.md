@@ -275,3 +275,10 @@ identity : a record holds pid, pgid and the process start time, from /proc on Li
 posix stop : SIGTERM to the process group, then SIGKILL after 3 seconds.
 
 windows stop : each task starts with CREATE_NEW_PROCESS_GROUP. stop runs `taskkill /PID <pid> /T`, then the same with /F after 3 seconds. this branch has only been checked on Linux, by the commands it builds and sends. it has not run on Windows yet.
+
+
+## shared state
+
+several agents may run on one home at once. every change to a thread's thread.json or to a rules.json file holds an exclusive lock on ~/.hydra/.state.lock across the read, the change and the write. the lock code is native_tools.file_lock, the same one the task folder uses.
+
+every such file is written to a temp file unique to the writer and then moved over the old one with os.replace. a reader sees the old file or the new one, never a mix.

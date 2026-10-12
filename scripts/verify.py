@@ -13375,6 +13375,56 @@ def background_task_records_are_pruned_at_startup():
             live_agent.wait()
 
 
+@check
+def stdio_two_agents_write_one_thread_without_loss():
+    """Two real agents remove different rules from one thread at once. Every removal sticks, and a reader never sees a torn file or a stray temp file."""
+    seen = []
+    httpd, base = _marker_model(seen)
+    try:
+        with tempfile.TemporaryDirectory() as home:
+            path = os.path.join(home, ".hydra", "sessions", "shared", "rules.json")
+            os.makedirs(os.path.dirname(path))
+            a, b = _StdioChild(base, home), _StdioChild(base, home)
+            a.next()
+            b.next()
+            for round_ in range(3):
+                ids = [f"r{round_}x{n}" for n in range(60)]
+                with open(path, "w", encoding="utf-8") as handle:
+                    json.dump([{"id": i, "tool": "run_command", "prefix": "echo"} for i in ids], handle)
+                stop, torn = threading.Event(), []
+
+                def read():
+                    while not stop.is_set():
+                        try:
+                            with open(path, "rb") as handle:
+                                data = handle.read()
+                            json.loads(data)
+                        except FileNotFoundError:
+                            torn.append("missing")
+                        except ValueError:
+                            torn.append(data[:80])
+
+                reader = threading.Thread(target=read)
+                reader.start()
+                for n, rid in enumerate(ids):
+                    (a if n % 2 else b).send(type="rules", id=rid, thread="shared", op="remove", rule=rid)
+                for child in (a, b):
+                    got = 0
+                    while got < 30:
+                        if child.next()["type"] == "rules_result":
+                            got += 1
+                stop.set()
+                reader.join()
+                assert not torn, f"round {round_}: a reader saw {torn[:3]}"
+                with open(path, encoding="utf-8") as handle:
+                    left = json.load(handle)
+                assert left == [], f"round {round_}: {len(left)} removed rules came back"
+                assert sorted(os.listdir(os.path.dirname(path))) == ["rules.json"], os.listdir(os.path.dirname(path))
+            assert a.close() == 0 and b.close() == 0
+    finally:
+        httpd.shutdown()
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")

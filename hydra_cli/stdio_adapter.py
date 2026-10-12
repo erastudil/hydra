@@ -229,8 +229,10 @@ class Adapter:
             if len(self._turns) >= MAX_TURNS:
                 return self.error(f"{MAX_TURNS} turns are already running", "busy", turn=turn)
             t = _Turn(turn, thread, permission)
-            _save_meta(thread, {"cwd": cwd, "mode": mode, "model": msg.get("model"), "permission": permission,
-                                "title": stored.get("title") or prompt.strip()[:80], "updated": int(time.time())})
+            with _state_lock():
+                title = _load_meta(thread).get("title") or prompt.strip()[:80]
+                _save_meta(thread, {"cwd": cwd, "mode": mode, "model": msg.get("model"), "permission": permission,
+                                    "title": title, "updated": int(time.time())})
             self._turns[turn] = t
             self._busy_threads[thread] = turn
             t.worker = threading.Thread(target=self._run_turn, args=(t, msg), name=f"hydra-turn-{turn}", daemon=True)
@@ -377,19 +379,16 @@ class Adapter:
         return found
 
     def _write_rules(self, thread: str, scope: str, rules: List[Dict[str, Any]]) -> None:
-        path = self._rule_files(thread)[scope]
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump([{k: v for k, v in r.items() if k != "scope"} for r in rules], handle)
-        os.replace(tmp, path)
+        from hydra_cli.native_tools import atomic_write_json
+
+        atomic_write_json(self._rule_files(thread)[scope], [{k: v for k, v in r.items() if k != "scope"} for r in rules])
 
     def _match_rule(self, thread: str, tool: str, args_json: str) -> Optional[Dict[str, Any]]:
         command = ""
         if tool == "run_command":
             args = _args(args_json)
             command = str(args.get("command", "")) if isinstance(args, dict) else ""
-        with self._rules_lock:
+        with self._rules_lock, _state_lock():
             rules = self._read_rules(thread)
         for rule in rules:
             if rule["tool"] != tool:
@@ -415,7 +414,7 @@ class Adapter:
                 return "prefix must match the command being approved"
         if scope not in self._rule_files(thread):
             return "this thread has no project yet"
-        with self._rules_lock:
+        with self._rules_lock, _state_lock():
             mine = [r for r in self._read_rules(thread) if r["scope"] == scope]
             mine.append({"id": uuid.uuid4().hex[:8], "tool": tool, "prefix": prefix.strip() if prefix else None})
             self._write_rules(thread, scope, mine)
@@ -427,7 +426,7 @@ class Adapter:
         op = msg.get("op", "list")
         if not thread or op not in ("list", "remove"):
             return self.error("thread must be set and op must be list or remove", "bad_request", req=req)
-        with self._rules_lock:
+        with self._rules_lock, _state_lock():
             if op == "remove":
                 rid = _text(msg.get("rule"))
                 for scope in self._rule_files(thread):
@@ -745,12 +744,18 @@ def _load_meta(thread: str) -> Dict[str, Any]:
 
 
 def _save_meta(thread: str, meta: Dict[str, Any]) -> None:
-    path = _meta_path(thread)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump(meta, handle)
-    os.replace(tmp, path)
+    from hydra_cli.native_tools import atomic_write_json
+
+    atomic_write_json(_meta_path(thread), meta)
+
+
+def _state_lock() -> Any:
+    """Held around every read, change and write of thread meta and rules files, across all agents on this home."""
+    from pathlib import Path
+
+    from hydra_cli.native_tools import file_lock
+
+    return file_lock(str(Path.home() / ".hydra" / ".state.lock"))
 
 
 _SHELL_CONTROL = ("&&", "||", ";", "|", "`", "$(", "\n", ">", "<", "&")
