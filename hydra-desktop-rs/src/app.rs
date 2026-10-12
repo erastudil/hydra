@@ -6,6 +6,9 @@ use eframe::egui::{self, vec2, Align, Color32, CornerRadius, Key, Layout, Margin
 use hydra_desktop::backend::Backend;
 use hydra_desktop::health::{self, Check};
 use hydra_desktop::model::Status;
+use hydra_desktop::workspace::Work;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use hydra_desktop::model::*;
 
 const DRAWER_TABS: &[(&str, &str)] = &[("screen", "Live Screen"), ("term", "Terminal Logs"), ("diff", "Diffs & Code"), ("agent", "Agent Runner")];
@@ -74,6 +77,12 @@ pub struct HydraApp {
     start_error: Option<String>,
     open_folder: Option<(String, String)>, // (typed path, error)
     rename: Option<(usize, String)>,
+    work: Work,
+    finder: Option<(String, usize)>,
+    rewind_confirm: Option<usize>,
+    queue: HashMap<u32, Vec<String>>,
+    mention_sel: usize,
+    was_busy: bool,
 }
 
 struct ShotPlan {
@@ -89,6 +98,8 @@ impl HydraApp {
         let cwd = std::env::var("HYDRA_CWD").unwrap_or_else(|_| std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into()));
         let state = if std::env::var("HYDRA_NO_STATE").is_ok() { None } else { Some(state_dir().join("state.json")) };
         let mut m = Model::new(state, cwd);
+        let wake_ctx = cc.egui_ctx.clone();
+        let mut work = Work::new(PathBuf::from(m.project_path()), move || wake_ctx.request_repaint());
         let ctx = cc.egui_ctx.clone();
         let (be, start_error) = match std::env::var("HYDRA_NO_BACKEND") {
             Ok(_) => (None, Some("backend disabled".to_string())),
@@ -101,9 +112,15 @@ impl HydraApp {
             m.notice = e.clone();
         }
         if let Ok(t) = std::env::var("HYDRA_TAB") {
-            if let Some(k) = DRAWER_TABS.iter().find(|d| d.0 == t) {
+            if let Some(k) = DRAWER_TABS.iter().chain([("files", ""), ("git", "")].iter()).find(|d| d.0 == t) {
                 m.drawer_tab = k.0;
             }
+        }
+        if let Ok(f) = std::env::var("HYDRA_FILE") {
+            work.open_file(&f);
+        }
+        if let Ok(f) = std::env::var("HYDRA_SELECT") {
+            work.select_change(&f, false);
         }
         let palette = if std::env::var("HYDRA_OPEN").as_deref() == Ok("palette") { Some((String::new(), 0)) } else { None };
         Self {
@@ -133,6 +150,12 @@ impl HydraApp {
             start_error,
             open_folder: if std::env::var("HYDRA_OPEN").as_deref() == Ok("folder") { Some((std::env::var("HYDRA_CWD").unwrap_or_default(), String::new())) } else { None },
             rename: None,
+            work,
+            finder: if std::env::var("HYDRA_OPEN").as_deref() == Ok("finder") { Some((String::new(), 0)) } else { None },
+            rewind_confirm: None,
+            queue: HashMap::new(),
+            mention_sel: 0,
+            was_busy: false,
         }
     }
 
@@ -204,6 +227,12 @@ impl HydraApp {
 
     fn send(&mut self) {
         let text = self.input.clone();
+        if self.m.active_busy() && !text.trim().is_empty() && !matches!(self.m.nav, "terminal" | "swarm") {
+            let sid = self.m.sessions[self.m.active].id;
+            self.queue.entry(sid).or_default().push(text.trim().to_string());
+            self.input.clear();
+            return;
+        }
         let Some(be) = &mut self.be else {
             self.m.notice = "agent process is not running".into();
             return;
@@ -476,12 +505,13 @@ impl HydraApp {
 
     // ---------------------------------------------------------------- chat
     fn chat(&mut self, ui: &mut egui::Ui) {
+        let mut rewind_pick: Option<usize> = None;
         let max_w = (ui.available_width() - 48.0).min(760.0).max(150.0);
         ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 20.0);
             egui::Frame::new().inner_margin(Margin::same(24)).show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                for m in &self.m.sessions[self.m.active].messages {
+                for (mi, m) in self.m.sessions[self.m.active].messages.iter().enumerate() {
                     let layout = if m.user { Layout::top_down(Align::Max) } else { Layout::top_down(Align::Min) };
                     ui.with_layout(layout, |ui| {
                         ui.spacing_mut().item_spacing = vec2(0.0, 8.0);
@@ -501,10 +531,18 @@ impl HydraApp {
                             let c = if a.starts_with('×') { ERROR } else if a.starts_with('✓') { ACCENT } else { MUTED };
                             ui.add(egui::Label::new(rt(a, 12.0, c)).wrap());
                         }
+                        if m.user && self.m.checkpoint_for(mi).is_some() && !self.m.active_busy() {
+                            if ui.add(egui::Label::new(rt("‹ Rewind files to before this message", 11.0, MUTED)).sense(Sense::click())).on_hover_text("Restore the project to how it was before this message").clicked() {
+                                rewind_pick = self.m.checkpoint_for(mi);
+                            }
+                        }
                     });
                 }
             });
         });
+        if rewind_pick.is_some() {
+            self.rewind_confirm = rewind_pick;
+        }
     }
 
     // ---------------------------------------------------------------- composer
@@ -561,6 +599,37 @@ impl HydraApp {
                 }
             });
         });
+        // meta row: permission mode, queue, undo rewind, hints
+        let (mut cycle, mut undo) = (false, false);
+        ui.horizontal(|ui| {
+            let perm = self.m.sessions[self.m.active].permission.clone();
+            let label = PERMISSIONS.iter().find(|p| p.0 == perm).map(|p| p.1).unwrap_or("Accept edits");
+            if widgets::button(ui, &format!("Permissions: {label}"), Kind::Secondary, 11.0, (10.0, 3.0), None).on_hover_text("Click to change what the agent may do without asking").clicked() {
+                cycle = true;
+            }
+            let q = self.queue.get(&self.m.sessions[self.m.active].id).map(|q| q.len()).unwrap_or(0);
+            if q > 0 {
+                ui.label(rt(format!("{q} queued, sends when this turn ends"), 11.0, ACCENT));
+            } else if self.m.active_busy() {
+                ui.label(rt("Enter queues a follow-up", 11.0, MUTED));
+            } else {
+                ui.label(rt("@ attaches a file   Ctrl+P finds files   Ctrl+O opens a folder", 11.0, MUTED));
+            }
+            if self.m.sessions[self.m.active].pre_rewind.is_some() && !self.m.active_busy() {
+                if widgets::button(ui, "Undo rewind", Kind::Secondary, 11.0, (10.0, 3.0), None).clicked() {
+                    undo = true;
+                }
+            }
+        });
+        if cycle {
+            self.m.cycle_permission();
+        }
+        if undo {
+            if let Err(e) = self.m.undo_rewind() {
+                self.m.notice = e;
+            }
+        }
+        self.mention_popup(ui);
         if do_stop {
             if let Some(be) = &mut self.be {
                 self.m.stop(be);
@@ -568,6 +637,320 @@ impl HydraApp {
         }
         if do_send {
             self.send();
+        }
+    }
+
+    // ---------------------------------------------------------------- files
+    fn tree_rows(&mut self, ui: &mut egui::Ui, rel: &str, depth: usize, open: &mut Option<String>) {
+        for e in self.work.entries(rel) {
+            let path = if rel.is_empty() { e.name.clone() } else { format!("{rel}/{}", e.name) };
+            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+            let is_open = self.work.open.as_ref().map(|f| f.rel == path).unwrap_or(false);
+            if is_open {
+                ui.painter().rect_filled(rect, cr(6), ACCENT_DIM);
+            } else if resp.hovered() {
+                ui.painter().rect_filled(rect, cr(6), BG3);
+            }
+            let x = rect.left() + 6.0 + depth as f32 * 14.0;
+            let expanded = self.work.expanded.contains(&path);
+            let mark = if e.dir { if expanded { "▾" } else { "▸" } } else { " " };
+            let dirty = self.work.status.as_ref().map(|s| s.changes.iter().any(|c| c.path == path)).unwrap_or(false);
+            ui.painter().text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, mark, egui::FontId::new(11.0, egui::FontFamily::Proportional), MUTED);
+            ui.painter().text(egui::pos2(x + 14.0, rect.center().y), egui::Align2::LEFT_CENTER, &e.name, egui::FontId::new(12.0, egui::FontFamily::Proportional), if e.dir { TEXT } else if dirty { ACCENT } else { TEXT2 });
+            if resp.clicked() {
+                if e.dir {
+                    self.work.toggle(&path);
+                } else {
+                    *open = Some(path.clone());
+                }
+            }
+            if e.dir && expanded {
+                self.tree_rows(ui, &path, depth + 1, open);
+            }
+        }
+    }
+
+    fn files_tab(&mut self, ui: &mut egui::Ui) {
+        let (mut save, mut close, mut find) = (false, false, false);
+        if self.work.open.is_some() {
+            let (dirty, rel, error) = {
+                let f = self.work.open.as_ref().unwrap();
+                (f.dirty(), f.rel.clone(), f.error.clone())
+            };
+            ui.horizontal(|ui| {
+                if widgets::button(ui, "‹ Files", Kind::Secondary, 12.0, (10.0, 5.0), None).clicked() {
+                    close = true;
+                }
+                ui.label(rtb(format!("{rel}{}", if dirty { " ●" } else { "" }), 12.0, if dirty { ACCENT } else { TEXT2 }));
+            });
+            if let Some(e) = error {
+                ui.label(rt(format!("Cannot show this file: {e}"), 12.0, ERROR));
+            } else {
+                if let Some(f) = self.work.open.as_mut() {
+                    egui::Frame::new().fill(BG).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(12)).inner_margin(Margin::same(8)).show(ui, |ui| {
+                        ui.add(egui::TextEdit::multiline(&mut f.text).code_editor().font(egui::FontId::monospace(12.0)).desired_width(f32::INFINITY).desired_rows(24).frame(egui::Frame::NONE));
+                    });
+                }
+                ui.horizontal(|ui| {
+                    if widgets::button(ui, "Save  Ctrl+S", Kind::Primary, 12.0, (12.0, 6.0), None).clicked() {
+                        save = true;
+                    }
+                    ui.label(rt(self.work.note.clone(), 11.0, if self.work.note.starts_with("error") { ERROR } else { MUTED }));
+                });
+            }
+        } else {
+            ui.horizontal(|ui| {
+                ui.label(rtb(self.m.projects.iter().find(|p| p.id == self.m.active_project).map(|p| p.name.clone()).unwrap_or_default(), 12.0, TEXT));
+                ui.label(rt(format!("{} files", self.work.index.len()), 11.0, MUTED));
+                if widgets::button(ui, "Find  Ctrl+P", Kind::Secondary, 11.0, (10.0, 4.0), None).clicked() {
+                    find = true;
+                }
+            });
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let mut open = None;
+            self.tree_rows(ui, "", 0, &mut open);
+            if let Some(p) = open {
+                self.work.open_file(&p);
+            }
+        }
+        if close {
+            self.work.open = None;
+            self.work.note.clear();
+        }
+        if save {
+            self.save_open_file();
+        }
+        if find {
+            self.finder = Some((String::new(), 0));
+        }
+    }
+
+    fn save_open_file(&mut self) {
+        self.work.note = match self.work.save_open() {
+            Ok(_) => "saved".into(),
+            Err(e) => format!("error: {e}"),
+        };
+    }
+
+    // ---------------------------------------------------------------- git
+    fn git_tab(&mut self, ui: &mut egui::Ui) {
+        if !self.work.is_repo {
+            ui.label(rt("This folder is not a git repository. Checkpoints, rewind and change review need git.", 12.0, MUTED));
+            if widgets::button(ui, "Initialize git here", Kind::Primary, 12.0, (12.0, 6.0), None).clicked() {
+                self.work.note = match hydra_desktop::git::init(&self.work.root) {
+                    Ok(_) => "initialized".into(),
+                    Err(e) => format!("error: {e}"),
+                };
+                self.work.refresh(true);
+            }
+            ui.label(rt(self.work.note.clone(), 11.0, MUTED));
+            return;
+        }
+        let st = self.work.status.clone().unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.label(rtb(format!("branch  {}", st.branch), 13.0, ACCENT));
+            if st.ahead > 0 || st.behind > 0 {
+                ui.label(rt(format!("↑{} ↓{}", st.ahead, st.behind), 12.0, MUTED));
+            }
+            if let Some(u) = &st.upstream {
+                ui.label(rt(u.clone(), 11.0, MUTED));
+            }
+        });
+        let (mut sel, mut stage, mut unstage) = (None, None, None);
+        let mut section = |ui: &mut egui::Ui, title: &str, staged: bool, sel: &mut Option<(String, bool)>, act: &mut Option<String>| {
+            let rows: Vec<_> = st.changes.iter().filter(|c| if staged { c.x != '.' && c.x != '?' } else { c.y != '.' || c.x == '?' }).collect();
+            if rows.is_empty() {
+                return;
+            }
+            ui.label(rt(format!("{title} ({})", rows.len()), 11.0, MUTED).extra_letter_spacing(0.5));
+            for c in rows {
+                let letter = if staged { c.x } else if c.x == '?' { '?' } else { c.y };
+                let col = match letter { 'M' => TEXT2, 'A' => ACCENT, 'D' => ERROR, '?' => ACCENT2, _ => ERROR };
+                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+                let on = self.work.selected.as_deref() == Some(c.path.as_str()) && self.work.selected_staged == staged;
+                if on {
+                    ui.painter().rect_filled(rect, cr(6), ACCENT_DIM);
+                } else if resp.hovered() {
+                    ui.painter().rect_filled(rect, cr(6), BG3);
+                }
+                ui.painter().text(egui::pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, letter, egui::FontId::monospace(12.0), col);
+                ui.painter().text(egui::pos2(rect.left() + 26.0, rect.center().y), egui::Align2::LEFT_CENTER, &c.path, egui::FontId::new(12.0, egui::FontFamily::Proportional), TEXT2);
+                let br = egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), vec2(22.0, 20.0));
+                let bhover = ui.rect_contains_pointer(br);
+                ui.painter().text(br.center(), egui::Align2::CENTER_CENTER, if staged { "−" } else { "+" }, egui::FontId::new(15.0, egui::FontFamily::Proportional), if bhover { ACCENT } else { MUTED });
+                if resp.clicked() {
+                    if bhover {
+                        *act = Some(c.path.clone());
+                    } else {
+                        *sel = Some((c.path.clone(), staged));
+                    }
+                }
+            }
+        };
+        let mut unstage_pick = None;
+        section(ui, "STAGED", true, &mut sel, &mut unstage_pick);
+        let mut stage_pick = None;
+        section(ui, "CHANGES", false, &mut sel, &mut stage_pick);
+        if st.changes.is_empty() {
+            ui.label(rt("Working tree clean.", 12.0, MUTED));
+        }
+        if let Some(p) = stage_pick {
+            stage = Some(p);
+        }
+        if let Some(p) = unstage_pick {
+            unstage = Some(p);
+        }
+        // diff of the selected file with per-hunk actions
+        let (mut reject, mut stage_h) = (None, None);
+        if self.work.selected.is_some() {
+            let hunks = self.work.hunks();
+            let untracked = st.changes.iter().any(|c| Some(&c.path) == self.work.selected.as_ref() && c.x == '?');
+            ui.add_space(4.0);
+            ui.label(rtb(self.work.selected.clone().unwrap_or_default(), 12.0, TEXT));
+            for (hi, h) in hunks.iter().enumerate() {
+                egui::Frame::new().fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(12)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    egui::Frame::new().fill(ELEV).inner_margin(Margin::symmetric(12, 6)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(rt(&h.header, 11.0, MUTED));
+                            if !untracked && !self.work.selected_staged {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if widgets::button(ui, "Reject", Kind::Danger, 11.0, (8.0, 3.0), None).clicked() {
+                                        reject = Some(hi);
+                                    }
+                                    if widgets::button(ui, "Stage", Kind::Secondary, 11.0, (8.0, 3.0), None).clicked() {
+                                        stage_h = Some(hi);
+                                    }
+                                });
+                            }
+                        });
+                    });
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for line in &h.lines {
+                        let (bg, fg) = if line.starts_with('+') { (DIFF_ADD, DIFF_ADD_TEXT) } else if line.starts_with('-') { (DIFF_DEL, DIFF_DEL_TEXT) } else { (Color32::TRANSPARENT, MUTED) };
+                        egui::Frame::new().fill(bg).inner_margin(Margin::symmetric(12, 1)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.add(egui::Label::new(RichText::new(line).size(TYPE_DIFF).color(fg)).wrap());
+                        });
+                    }
+                });
+            }
+        }
+        // commit box
+        ui.add_space(6.0);
+        ui.add(egui::TextEdit::multiline(&mut self.work.commit_msg).hint_text(rt("Commit message", 12.0, MUTED)).desired_rows(2).desired_width(f32::INFINITY));
+        let (mut draft, mut commit, mut push) = (false, false, false);
+        ui.horizontal(|ui| {
+            if widgets::button(ui, "Draft", Kind::Secondary, 12.0, (10.0, 5.0), None).clicked() {
+                draft = true;
+            }
+            if widgets::button(ui, "Commit", Kind::Primary, 12.0, (12.0, 5.0), None).clicked() {
+                commit = true;
+            }
+            if widgets::button(ui, "Push", Kind::Secondary, 12.0, (10.0, 5.0), None).clicked() {
+                push = true;
+            }
+        });
+        if !self.work.note.is_empty() {
+            ui.add(egui::Label::new(rt(self.work.note.clone(), 11.0, if self.work.note.starts_with("error") { ERROR } else { MUTED })).wrap());
+        }
+        if let Some((p, staged)) = sel {
+            self.work.select_change(&p, staged);
+        }
+        let report = |w: &mut Work, r: Result<(), String>| {
+            if let Err(e) = r {
+                w.note = format!("error: {e}");
+            }
+        };
+        if let Some(p) = stage {
+            let r = self.work.stage(&[p]);
+            report(&mut self.work, r);
+        }
+        if let Some(p) = unstage {
+            let r = self.work.unstage(&[p]);
+            report(&mut self.work, r);
+        }
+        if let Some(i) = reject {
+            let r = self.work.reject_hunk(i);
+            report(&mut self.work, r);
+        }
+        if let Some(i) = stage_h {
+            let r = self.work.stage_hunk(i);
+            report(&mut self.work, r);
+        }
+        if draft {
+            self.work.commit_msg = self.work.draft_message();
+        }
+        if commit {
+            let r = self.work.commit().map(|_| ());
+            report(&mut self.work, r);
+        }
+        if push {
+            self.work.note = match self.work.push() {
+                Ok(o) => if o.trim().is_empty() { "pushed".into() } else { o.trim().to_string() },
+                Err(e) => format!("error: {e}"),
+            };
+        }
+    }
+
+    /// Popup above the composer while an `@file` word is being typed. Up/Down pick, Tab or Enter inserts.
+    fn mention_popup(&mut self, ui: &mut egui::Ui) {
+        let Some(prefix) = hydra_desktop::fsx::mention_prefix(&self.input).map(|p| p.to_string()) else { return };
+        let hits: Vec<String> = hydra_desktop::fsx::fuzzy(&prefix, &self.work.index, 6).into_iter().map(String::from).collect();
+        if hits.is_empty() {
+            return;
+        }
+        self.mention_sel = self.mention_sel.min(hits.len() - 1);
+        let ctx = ui.ctx().clone();
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowDown)) {
+            self.mention_sel = (self.mention_sel + 1) % hits.len();
+        }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::ArrowUp)) {
+            self.mention_sel = (self.mention_sel + hits.len() - 1) % hits.len();
+        }
+        let mut pick = ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab)).then(|| hits[self.mention_sel].clone());
+        let rect = self.composer_rect;
+        egui::Area::new(egui::Id::new("mentions")).order(egui::Order::Foreground).fixed_pos(egui::pos2(rect.left(), rect.top() - 8.0 - hits.len() as f32 * 24.0 - 12.0)).show(&ctx, |ui| {
+            egui::Frame::new().fill(BG2).stroke(Stroke::new(1.0, ACCENT_BORDER_HOVER)).corner_radius(cr(12)).inner_margin(Margin::same(6)).show(ui, |ui| {
+                ui.set_width(rect.width().min(520.0));
+                for (i, h) in hits.iter().enumerate() {
+                    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+                    if i == self.mention_sel {
+                        ui.painter().rect_filled(r, cr(8), ACCENT_DIM);
+                    }
+                    ui.painter().text(egui::pos2(r.left() + 8.0, r.center().y), egui::Align2::LEFT_CENTER, h, egui::FontId::new(12.0, egui::FontFamily::Proportional), if i == self.mention_sel { ACCENT } else { TEXT2 });
+                    if resp.clicked() {
+                        pick = Some(h.clone());
+                    }
+                }
+            });
+        });
+        if let Some(p) = pick {
+            let at = self.input.rfind('@').unwrap_or(0);
+            self.input.truncate(at);
+            self.input.push('@');
+            self.input.push_str(&p);
+            self.input.push(' ');
+            self.focus_input = true;
+        }
+    }
+
+    /// Send queued messages for threads that just went idle.
+    fn run_queue(&mut self) {
+        let ready: Vec<u32> = self.queue.iter().filter(|(sid, q)| !q.is_empty() && !self.m.is_running(**sid)).map(|(sid, _)| *sid).collect();
+        for sid in ready {
+            let Some(idx) = self.m.sessions.iter().position(|s| s.id == sid) else { self.queue.remove(&sid); continue };
+            let text = self.queue.get_mut(&sid).map(|q| q.remove(0)).unwrap_or_default();
+            let keep = self.m.active;
+            let keep_project = self.m.active_project;
+            self.m.active = idx;
+            self.m.active_project = self.m.sessions[idx].project;
+            if let Some(be) = &mut self.be {
+                self.m.submit(be, &text);
+            }
+            self.m.active = keep;
+            self.m.active_project = keep_project;
         }
     }
 
@@ -611,6 +994,34 @@ impl HydraApp {
                 }
             });
         });
+        egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(8, 2)).show(ui, |ui| {
+            ui.set_width(width - 17.0);
+            ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+            ui.horizontal(|ui| {
+                for (key, label) in [("files", "Files"), ("git", "Changes")] {
+                    let active = self.m.drawer_tab == key;
+                    let mut text = label.to_string();
+                    if key == "git" {
+                        if let Some(st) = &self.work.status {
+                            if !st.changes.is_empty() {
+                                text = format!("Changes ({})", st.changes.len());
+                            }
+                        }
+                    }
+                    let (rect, resp) = ui.allocate_exact_size(vec2((width - 17.0 - 4.0) / 2.0 - 4.0, 26.0), Sense::click());
+                    if active {
+                        ui.painter().rect_filled(rect, cr(10), ACCENT_DIM);
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(rect, cr(10), BG3);
+                    }
+                    let fam = if active { egui::FontFamily::Name(BOLD.into()) } else { egui::FontFamily::Proportional };
+                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::new(TYPE_DRAWER_TAB, fam), if active { ACCENT } else if resp.hovered() { TEXT } else { MUTED });
+                    if resp.clicked() {
+                        self.m.drawer_tab = key;
+                    }
+                }
+            });
+        });
         let y = ui.cursor().top();
         ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, BORDER));
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -621,6 +1032,8 @@ impl HydraApp {
                     "screen" => self.screen_tab(ui, width - 33.0),
                     "term" => self.term_tab(ui),
                     "diff" => self.diff_tab(ui),
+                    "files" => self.files_tab(ui),
+                    "git" => self.git_tab(ui),
                     _ => self.agent_tab(ui, width - 33.0),
                 }
             });
@@ -890,6 +1303,81 @@ impl HydraApp {
             }
             return;
         }
+        if let Some(i) = self.rewind_confirm {
+            let label = self.m.sessions[self.m.active].checkpoints.get(i).map(|c| c.label.clone()).unwrap_or_default();
+            let (mut go, mut cancel) = (false, false);
+            modal_frame(ctx, "rewind", 520.0, |ui| {
+                ui.label(rtb("REWIND FILES", 13.0, ACCENT));
+                ui.add(egui::Label::new(rt(format!("Put the project back to how it was before:\n\"{label}\"\n\nEverything changed since then is replaced. The state right now is saved first, so you can Undo rewind."), 12.0, TEXT2)).wrap());
+                ui.horizontal(|ui| {
+                    if widgets::button(ui, "Rewind", Kind::Danger, 13.0, (16.0, 8.0), None).clicked() {
+                        go = true;
+                    }
+                    if widgets::button(ui, "Cancel", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                cancel = true;
+            }
+            if go {
+                if let Err(e) = self.m.rewind_code(i) {
+                    self.m.notice = e.clone();
+                    self.work.note = format!("error: {e}");
+                }
+                self.work.refresh(true);
+            }
+            if go || cancel {
+                self.rewind_confirm = None;
+            }
+            return;
+        }
+        if let Some((q, sel)) = self.finder.clone() {
+            let (mut q, mut sel) = (q, sel);
+            let hits: Vec<String> = hydra_desktop::fsx::fuzzy(&q, &self.work.index, 12).into_iter().map(String::from).collect();
+            if ctx.input(|i| i.key_pressed(Key::ArrowDown)) {
+                sel = (sel + 1).min(hits.len().saturating_sub(1));
+            }
+            if ctx.input(|i| i.key_pressed(Key::ArrowUp)) {
+                sel = sel.saturating_sub(1);
+            }
+            sel = sel.min(hits.len().saturating_sub(1));
+            let (mut open, mut close) = (None::<String>, false);
+            modal_frame(ctx, "finder", 560.0, |ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut q).hint_text(rt("Find a file by name", 13.0, MUTED)).desired_width(f32::INFINITY).font(egui::FontId::new(14.0, egui::FontFamily::Proportional)));
+                r.request_focus();
+                if r.changed() {
+                    sel = 0;
+                }
+                if ui.input(|i| i.key_pressed(Key::Enter)) {
+                    open = hits.get(sel).cloned();
+                }
+                for (i, h) in hits.iter().enumerate() {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+                    if i == sel {
+                        ui.painter().rect_filled(rect, cr(8), ACCENT_DIM);
+                    }
+                    ui.painter().text(egui::pos2(rect.left() + 8.0, rect.center().y), egui::Align2::LEFT_CENTER, h, egui::FontId::new(12.0, egui::FontFamily::Proportional), if i == sel { ACCENT } else { TEXT2 });
+                    if resp.clicked() {
+                        open = Some(h.clone());
+                    }
+                }
+                if hits.is_empty() {
+                    ui.label(rt("No matching files.", 12.0, MUTED));
+                }
+            });
+            if ctx.input(|i| i.key_pressed(Key::Escape)) {
+                close = true;
+            }
+            if let Some(p) = open {
+                self.work.open_file(&p);
+                self.m.drawer_tab = "files";
+                close = true;
+            }
+            self.finder = if close { None } else { Some((q, sel)) };
+            return;
+        }
         if let Some((path, err)) = self.open_folder.clone() {
             let (mut path, mut err) = (path, err);
             let (mut open, mut close, mut go): (bool, bool, Option<String>) = (false, false, None);
@@ -1124,6 +1612,12 @@ impl HydraApp {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
             self.palette = if self.palette.is_some() { None } else { Some((String::new(), 0)) };
         }
+        if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::P)) {
+            self.finder = Some((String::new(), 0));
+        }
+        if self.m.drawer_tab == "files" && ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::S)) {
+            self.save_open_file();
+        }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::O)) {
             self.open_folder = Some((self.m.project_path(), String::new()));
         }
@@ -1211,7 +1705,38 @@ impl eframe::App for HydraApp {
                 self.send();
             }
         }
+        if self.m.agent_ready {
+            if let Ok(script) = std::env::var("HYDRA_DEMO_SCRIPT") {
+                std::env::remove_var("HYDRA_DEMO_SCRIPT");
+                // "index:prompt|index:prompt": start one turn in each listed thread (screenshot and demo hook)
+                let keep = self.m.active;
+                for part in script.split('|') {
+                    if let Some((i, prompt)) = part.split_once(':') {
+                        if let Ok(i) = i.parse::<usize>() {
+                            if i < self.m.sessions.len() {
+                                self.m.select(i);
+                                if let Some(be) = &mut self.be {
+                                    self.m.submit(be, prompt);
+                                }
+                            }
+                        }
+                    }
+                }
+                self.m.select(keep.min(self.m.sessions.len() - 1));
+            }
+        }
         self.shortcuts(ctx);
+        self.work.set_root(PathBuf::from(self.m.project_path()));
+        self.work.poll();
+        if matches!(self.m.drawer_tab, "files" | "git") {
+            self.work.refresh(false);
+        }
+        let busy_now = self.m.any_busy();
+        if self.was_busy && !busy_now {
+            self.work.refresh(true);
+        }
+        self.was_busy = busy_now;
+        self.run_queue();
         if self.be.is_some() && (self.m.agent_running || self.m.drawer_tab == "agent") && time - self.last_poll > 0.5 && !self.m.pending.values().any(|p| matches!(p, Pending::AgentStatus)) {
             self.last_poll = time;
             if let Some(be) = &mut self.be {
