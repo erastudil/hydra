@@ -38,7 +38,7 @@ canonical cli entrypoints : posix bin/hydra, node bin/hydra.js, windows bin/hydr
 
 interactive repl : python REPL in hydra_cli/repl.py triggered via hydra, hydra chat, or hydra tui.
 
-manifest sync : install.sh and install.ps1 must enumerate every runtime file under hydra_cli/ plus bin/hydra and bin/hydra.js; drift triggers verification failure.
+manifest sync : install.sh and install.ps1 must enumerate every runtime file under hydra_cli/ (.py, .json, .jsonl and skills/*.md) plus bin/hydra and bin/hydra.js; drift triggers verification failure.
 
 
 ## verification and ponytail doctrine

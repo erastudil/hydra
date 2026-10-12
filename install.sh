@@ -47,6 +47,7 @@ hydra_cli/computer_use.py
 hydra_cli/config.py
 hydra_cli/context.py
 hydra_cli/desktop_core.py
+hydra_cli/data/stacks_cards.jsonl
 hydra_cli/dictation.py
 hydra_cli/display.py
 hydra_cli/gui/__init__.py
@@ -74,6 +75,19 @@ hydra_cli/router.py
 hydra_cli/sandbox.py
 hydra_cli/serve.py
 hydra_cli/session_logger.py
+hydra_cli/skills/alice.md
+hydra_cli/skills/backend.md
+hydra_cli/skills/code.md
+hydra_cli/skills/containers.md
+hydra_cli/skills/devops.md
+hydra_cli/skills/disambiguation.md
+hydra_cli/skills/discovery.md
+hydra_cli/skills/easylm.md
+hydra_cli/skills/frontend.md
+hydra_cli/skills/grammar.md
+hydra_cli/skills/hydra.md
+hydra_cli/skills/logic.md
+hydra_cli/skills/stack.md
 hydra_cli/speculative.py
 hydra_cli/swarm.py
 hydra_cli/tool_adapter.py
