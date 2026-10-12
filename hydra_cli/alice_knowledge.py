@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Optional
 
+from hydra_cli._version import __version__
+
 STOP = {
     "a", "an", "the", "of", "and", "or", "to", "in", "on", "for", "is", "it",
     "what", "whats", "does", "how", "why", "with", "from", "this", "that",
@@ -332,7 +334,7 @@ CARDS: List[Dict[str, str]] = [
         "cues": "major minor patch version",
         "comment": (
             "Semantic Versioning is MAJOR.MINOR.PATCH. A breaking change bumps major. "
-            "Hydra is 1.2.1. The Alice spec is 1.1.0."
+            f"Hydra is {__version__}. The Alice spec is 1.1.0."
         ),
     },
     {

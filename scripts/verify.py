@@ -145,14 +145,14 @@ def run_cli(args, stdin=None, timeout=20, extra_env=None):
 def _runtime_files():
     names = ["bin/hydra", "bin/hydra.js"]
     cli = os.path.join(REPO, "hydra_cli")
-    found = []
-    for sub in ("", "gui"):
-        folder = os.path.join(cli, sub)
-        for name in os.listdir(folder):
-            if os.path.isfile(os.path.join(folder, name)) and name.endswith((".py", ".json")):
-                found.append(f"hydra_cli/{sub + '/' if sub else ''}{name}")
-    names.extend(sorted(found))
-    return names
+    suffixes = (".py", ".json", ".jsonl", ".md")
+    for dirpath, dirnames, filenames in os.walk(cli):
+        dirnames[:] = [d for d in sorted(dirnames) if d != "__pycache__"]
+        for name in filenames:
+            if name.endswith(suffixes):
+                rel = os.path.relpath(os.path.join(dirpath, name), REPO).replace(os.sep, "/")
+                names.append(rel)
+    return names[:2] + sorted(names[2:])
 
 
 def _quoted_files(text, pattern):
@@ -164,6 +164,8 @@ def _quoted_files(text, pattern):
 
 @check
 def manifests():
+    import re
+
     from hydra_cli import __version__
     from hydra_cli.config import MODEL_MAP
 
@@ -171,6 +173,15 @@ def manifests():
     with open(catalog_path, encoding="utf-8") as handle:
         catalog = json.load(handle)
     assert catalog["version"] == __version__
+    pyproject = open(os.path.join(REPO, "pyproject.toml"), encoding="utf-8").read()
+    py_ver = re.search(r'(?m)^version = "([^"]+)"', pyproject)
+    assert py_ver and py_ver.group(1) == __version__, "pyproject.toml version drifted from hydra_cli._version"
+    setup_text = open(os.path.join(REPO, "setup.py"), encoding="utf-8").read()
+    setup_ver = re.search(r'version="([^"]+)"', setup_text)
+    assert setup_ver and setup_ver.group(1) == __version__, "setup.py version drifted from hydra_cli._version"
+    with open(os.path.join(REPO, "package.json"), encoding="utf-8") as handle:
+        package = json.load(handle)
+    assert package["version"] == __version__, "package.json version drifted from hydra_cli._version"
     assert "model_providers" in catalog and "aliases" in catalog
     assert set(MODEL_MAP) <= set(catalog["aliases"])
 
@@ -182,8 +193,6 @@ def manifests():
     expected = _runtime_files()
     sh_text = open(os.path.join(REPO, "install.sh"), encoding="utf-8").read()
     ps_text = open(os.path.join(REPO, "install.ps1"), encoding="utf-8").read()
-    import re
-
     sh_match = re.search(r'FILES="(.*?)"', sh_text, re.S)
     ps_match = re.search(r"\$Files = @\((.*?)\)", ps_text, re.S)
     assert sh_match and ps_match
@@ -216,15 +225,54 @@ def manifests():
         )
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == f"hydra {__version__}"
+        loaded = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from hydra_cli.hands import load_cards; from hydra_cli.alice_gate import load_skills; "
+                "cards = load_cards(); skills = load_skills(); "
+                "assert cards and skills, (len(cards), len(skills))",
+            ],
+            cwd=dest,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert loaded.returncode == 0, loaded.stderr or loaded.stdout
+
+
+@check
+def release_archive_urls():
+    """Install docs may only name release assets that GitHub actually serves."""
+    import re
+
+    urls = []
+    for name in ("README.md", "GUIDE.md"):
+        text = open(os.path.join(REPO, name), encoding="utf-8").read()
+        urls.extend(re.findall(r"https://github\.com/erastudil/hydra/releases/download/\S+", text))
+    urls = [url.rstrip(").,") for url in urls]
+    assert urls, "README.md and GUIDE.md name no release assets"
+    for url in dict.fromkeys(urls):
+        request = urllib.request.Request(url, method="HEAD")
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                assert response.status == 200, f"{url} -> {response.status}"
+        except urllib.error.HTTPError as exc:
+            raise AssertionError(f"{url} -> {exc.code}") from exc
+        except urllib.error.URLError as exc:
+            raise Skip(f"release host unreachable: {exc.reason}") from exc
 
 
 @check
 def cli_processes():
+    from hydra_cli import __version__
+
     cases = [
         (["--help"], 0, "USAGE:", ""),
         (["-h"], 0, "USAGE:", ""),
         (["help"], 0, "USAGE:", ""),
-        (["--version"], 0, "1.2.2", ""),
+        (["--version"], 0, __version__, ""),
         (["-v"], 0, "hydra ", ""),
         (["banner"], 0, "Sovereign Multi-Headed AI Shell", ""),
         (["setup"], 0, "HYDRA SETUP & INTEGRATION GUIDE", ""),
@@ -1446,7 +1494,7 @@ withEnv({ OPENROUTER_API_KEY: 'sk-or-v1-supersecret' }, () => {
   assert.equal(clean.includes('0123abcd'), false);
   assert.equal(clean.includes('sk-or-v1-supersecret'), false);
 });
-assert.equal(hydra.VERSION, '1.2.2');
+assert.equal(hydra.VERSION, process.argv[3]);
 assert.equal(Object.hasOwn(hydra.CATALOG.aliases, 'alice-emap'), false);
 assert.equal(hydra.resolveRoute('muse').model, 'meta/muse-spark-1.3');
 assert.equal(hydra.resolveRoute('llama 3.1 8b').model, 'meta-llama/Llama-3.1-8B-Instruct');
@@ -1456,6 +1504,8 @@ assert.equal(hydra.sanitizeStreamText('a\rb\x1b[?1000hc'), 'abc');
 
 @check
 def node_launcher():
+    from hydra_cli import __version__
+
     node = shutil.which("node")
     if not node:
         raise Skip("node is not installed; bin/hydra.js checks need Node.js 18+")
@@ -1464,7 +1514,7 @@ def node_launcher():
         with open(script, "w", encoding="utf-8") as handle:
             handle.write(NODE_SOURCE)
         proc = subprocess.run(
-            [node, script, os.path.join(REPO, "bin", "hydra.js")],
+            [node, script, os.path.join(REPO, "bin", "hydra.js"), __version__],
             capture_output=True,
             text=True,
             timeout=20,
@@ -12079,6 +12129,16 @@ def atmem_invariant_violations_block_commits_and_verify():
     from hydra_cli import invariants
     assert invariants.check_gate.__module__ == "hydra_cli.invariants"
     assert not hasattr(_mem(), "probe_no_todo_markers"), "invariant logic must live only in invariants.py"
+
+
+@check
+def knowledge_semver():
+    from hydra_cli import __version__
+    from hydra_cli.alice_knowledge import search_knowledge
+
+    card = search_knowledge("what is semver")
+    assert card and card["card_id"] == "std:semver", card
+    assert f"Hydra is {__version__}." in card["comment"]
 
 
 @check

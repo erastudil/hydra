@@ -58,11 +58,11 @@ From the Git repository:
 pip install "git+https://github.com/erastudil/hydra.git"
 ```
 
-From release archives:
+From the published release archive ([v1.1.0](https://github.com/erastudil/hydra/releases/tag/v1.1.0), the latest archive on GitHub). Git and the direct installer below track current source.
 
 ```bash
-pip install https://github.com/erastudil/hydra/releases/download/v1.2.0/hydra_ai_cli-1.2.0-py3-none-any.whl
-npm install -g https://github.com/erastudil/hydra/releases/download/v1.2.0/hydra-agent-cli-1.2.0.tgz
+pip install https://github.com/erastudil/hydra/releases/download/v1.1.0/hydra_ai_cli-1.1.0-py3-none-any.whl
+npm install -g https://github.com/erastudil/hydra/releases/download/v1.1.0/hydra-agent-cli-1.1.0.tgz
 ```
 
 Direct POSIX / Windows curl/irm installer:
