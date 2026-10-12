@@ -37,4 +37,15 @@ P
   if run --exe /tmp/Hydra-console.exe --src "$SRC" --adapter "$ADAPTER"; then echo "SURVIVED (bad): console-subsystem exe"; fail=1; else echo "killed: console-subsystem exe"; fi
   run --exe "$EXE" --src "$SRC" --adapter "$ADAPTER" || { echo "real exe fails the check"; fail=1; }
 fi
+# bundle checks
+if [ -d dist/Hydra ]; then
+  python3 scripts/check_bundle.py dist/Hydra >/dev/null 2>&1 || { echo "real bundle fails its check"; fail=1; }
+  bm() { local name=$1; shift; rm -rf /tmp/bundle-mut && cp -r dist/Hydra /tmp/bundle-mut && ( "$@" ); if python3 scripts/check_bundle.py /tmp/bundle-mut >/dev/null 2>&1; then echo "SURVIVED (bad): $name"; fail=1; else echo "killed: $name"; fi; }
+  bm "no embedded python" rm /tmp/bundle-mut/runtime/python.exe
+  bm "agent code missing" rm /tmp/bundle-mut/app/hydra_cli/stdio_adapter.py
+  bm "pth without app path" sed -i 's/^\.\.\\app$//' /tmp/bundle-mut/runtime/python312._pth
+  bm "wheel missing" rm -rf /tmp/bundle-mut/runtime/Lib/site-packages/prompt_toolkit
+  bm "console exe" python3 -c "import struct;f='/tmp/bundle-mut/Hydra.exe';d=bytearray(open(f,'rb').read());pe=struct.unpack_from('<I',d,0x3c)[0];struct.pack_into('<H',d,pe+92,3);open(f,'wb').write(d)"
+  rm -rf /tmp/bundle-mut
+fi
 [ $fail = 0 ] && echo "mutation pass: all checks kill their mutations" || { echo "mutation pass FAILED"; exit 1; }

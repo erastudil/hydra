@@ -120,6 +120,20 @@ pub struct Model {
     pub export_dir: Option<PathBuf>,
 }
 
+/// Write a file so a crash at any point leaves either the old or the new content: temp file, fsync, keep `.bak`, rename.
+pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    let ok = std::fs::File::create(&tmp).and_then(|mut f| f.write_all(bytes).and_then(|_| f.sync_all())).is_ok();
+    if !ok {
+        return;
+    }
+    if path.is_file() {
+        let _ = std::fs::copy(path, path.with_extension("bak"));
+    }
+    let _ = std::fs::rename(&tmp, path);
+}
+
 pub fn state_dir() -> PathBuf {
     if let Ok(d) = std::env::var("HYDRA_STATE_DIR") {
         return PathBuf::from(d);
@@ -181,7 +195,9 @@ impl Model {
             state_path,
         };
         if let Some(p) = &m.state_path {
-            if let Some(saved) = std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<Saved>(&t).ok()) {
+            let try_load = |path: &std::path::Path| std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Saved>(&t).ok());
+            let loaded = try_load(p).or_else(|| try_load(&p.with_extension("bak")));
+            if let Some(saved) = loaded {
                 if !saved.sessions.is_empty() {
                     m.active = saved.active.min(saved.sessions.len() - 1);
                     m.sessions = saved.sessions;
@@ -214,10 +230,7 @@ impl Model {
             let _ = std::fs::create_dir_all(dir);
         }
         if let Ok(t) = serde_json::to_string_pretty(&saved) {
-            let tmp = p.with_extension("tmp");
-            if std::fs::write(&tmp, t).is_ok() {
-                let _ = std::fs::rename(&tmp, p);
-            }
+            write_atomic(p, t.as_bytes());
         }
     }
 
@@ -397,7 +410,7 @@ impl Model {
             if m.text.is_empty() {
                 m.text = format!("Error: {msg}");
             } else {
-                m.actions.push(format!("✗ {msg}"));
+                m.actions.push(format!("× {msg}"));
             }
         }
     }
@@ -439,7 +452,7 @@ impl Model {
                     if t == turn {
                         let first = output.lines().next().unwrap_or("").chars().take(100).collect::<String>();
                         if let Some(m) = self.last_assistant(sid) {
-                            m.actions.push(format!("{} {tool}: {first}", if is_error { "✗" } else { "✓" }));
+                            m.actions.push(format!("{} {tool}: {first}", if is_error { "×" } else { "✓" }));
                         }
                     }
                 }
@@ -663,6 +676,20 @@ mod tests {
         assert_eq!(b.sessions[0].messages.last().unwrap().text, "hello");
         assert_eq!((b.tokens, b.model, b.nav), (1234, 3, "swarm"));
         assert_eq!(b.sessions[0].thread, a.sessions[0].thread);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn truncated_state_recovers_from_backup() {
+        let dir = std::env::temp_dir().join(format!("hydra-bak-{}", std::process::id()));
+        let path = dir.join("state.json");
+        let mut a = Model::new(Some(path.clone()), ".".into());
+        a.sessions[0].messages.push(Msg { user: true, header: "YOU".into(), text: "keep me".into(), actions: vec![] });
+        a.save();
+        a.save(); // second save leaves the first as .bak
+        std::fs::write(&path, b"{\"sessions\": [ {tru").unwrap(); // simulated torn write
+        let b = Model::new(Some(path), ".".into());
+        assert_eq!(b.sessions[0].messages.last().unwrap().text, "keep me");
         let _ = std::fs::remove_dir_all(dir);
     }
 

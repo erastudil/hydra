@@ -13,5 +13,7 @@ fi
 cd ..
 python3 scripts/check_no_console.py --src hydra-desktop-rs/src --runtime "$PWD/hydra-desktop-rs/target/release/Hydra" \
   $( [ -f hydra-desktop-rs/target/x86_64-pc-windows-gnu/release/Hydra.exe ] && echo --exe hydra-desktop-rs/target/x86_64-pc-windows-gnu/release/Hydra.exe )
+scripts/package_windows.sh >/dev/null
+python3 scripts/check_bundle.py dist/Hydra
 scripts/mutate_checks.sh
 echo "check_rust: ok"

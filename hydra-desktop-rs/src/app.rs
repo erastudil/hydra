@@ -4,6 +4,7 @@ use crate::theme::*;
 use crate::widgets::{self, Kind, Part};
 use eframe::egui::{self, vec2, Align, Color32, CornerRadius, Key, Layout, Margin, Modifiers, RichText, ScrollArea, Sense, Stroke, StrokeKind};
 use hydra_desktop::backend::Backend;
+use hydra_desktop::health::{self, Check};
 use hydra_desktop::model::*;
 
 const DRAWER_TABS: &[(&str, &str)] = &[("screen", "Live Screen"), ("term", "Terminal Logs"), ("diff", "Diffs & Code"), ("agent", "Agent Runner")];
@@ -64,6 +65,11 @@ pub struct HydraApp {
     shot: Option<ShotPlan>,
     focus_input: bool,
     composer_rect: egui::Rect,
+    health_rx: std::sync::mpsc::Receiver<Vec<Check>>,
+    checks: Vec<Check>,
+    crash_note: Option<String>,
+    panel_dismissed: bool,
+    started: f64,
     start_error: Option<String>,
 }
 
@@ -116,8 +122,36 @@ impl HydraApp {
             shot,
             focus_input: true,
             composer_rect: egui::Rect::NOTHING,
+            health_rx: { let (tx, rx) = std::sync::mpsc::channel(); std::thread::spawn(move || { let _ = tx.send(health::run()); }); rx },
+            checks: vec![],
+            crash_note: hydra_desktop::crash::take_last_crash().map(|c| c.1),
+            panel_dismissed: false,
+            started: -1.0,
             start_error,
         }
+    }
+
+    fn retry_backend(&mut self, ctx: &egui::Context) {
+        let c = ctx.clone();
+        match Backend::spawn(move || c.request_repaint()) {
+            Ok(b) => {
+                self.be = Some(b);
+                self.start_error = None;
+                self.m.notice.clear();
+            }
+            Err(e) => {
+                self.be = None;
+                self.start_error = Some(e.clone());
+                self.m.notice = e;
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(health::run());
+        });
+        self.health_rx = rx;
+        self.started = -1.0;
+        self.panel_dismissed = false;
     }
 
     fn run(&mut self, cmd: Cmd) {
@@ -367,7 +401,7 @@ impl HydraApp {
                             });
                         }
                         for a in &m.actions {
-                            let c = if a.starts_with('✗') { ERROR } else if a.starts_with('✓') { ACCENT } else { MUTED };
+                            let c = if a.starts_with('×') { ERROR } else if a.starts_with('✓') { ACCENT } else { MUTED };
                             ui.add(egui::Label::new(rt(a, 12.0, c)).wrap());
                         }
                     });
@@ -675,7 +709,60 @@ impl HydraApp {
     }
 
     // ---------------------------------------------------------------- modals
+    fn startup_panel(&mut self, ctx: &egui::Context) -> bool {
+        let fatal = health::fatal_problems(&self.checks).len();
+        let stalled = self.be.is_some() && !self.m.agent_ready && self.started >= 0.0 && ctx.input(|i| i.time) - self.started > 20.0;
+        let down = self.be.is_none() && self.start_error.is_some();
+        let show = (fatal > 0 || stalled || down || self.crash_note.is_some()) && !self.panel_dismissed;
+        if !show {
+            return false;
+        }
+        let (mut retry, mut dismiss) = (false, false);
+        modal_frame(ctx, "startup", 640.0, |ui| {
+            ui.label(rtb("HYDRA NEEDS ATTENTION", 14.0, ACCENT));
+            if let Some(n) = &self.crash_note {
+                ui.add(egui::Label::new(rt(format!("Last session ended unexpectedly. Saved sessions were kept.\n{n}"), 12.0, ERROR)).wrap());
+            }
+            if let Some(e) = &self.start_error {
+                ui.add(egui::Label::new(rt(format!("Agent did not start: {e}"), 12.0, ERROR)).wrap());
+            } else if stalled {
+                ui.add(egui::Label::new(rt("The agent started but has not answered after 20 seconds.", 12.0, ERROR)).wrap());
+            }
+            for c in &self.checks {
+                let (mark, col) = if c.ok { ("✓", ACCENT) } else if c.fatal { ("×", ERROR) } else { ("!", MUTED) };
+                ui.horizontal_top(|ui| {
+                    ui.label(rtb(mark, 13.0, col));
+                    ui.vertical(|ui| {
+                        ui.label(rtb(c.name, 12.0, TEXT));
+                        ui.add(egui::Label::new(rt(&c.detail, 11.0, MUTED)).wrap());
+                    });
+                });
+            }
+            ui.add(egui::Label::new(rt(format!("Logs: {}", hydra_desktop::crash::log_dir().display()), 11.0, MUTED)).wrap());
+            ui.horizontal(|ui| {
+                if widgets::button(ui, "Retry", Kind::Primary, 13.0, (16.0, 8.0), None).clicked() {
+                    retry = true;
+                }
+                if widgets::button(ui, if fatal > 0 { "Continue without agent" } else { "Dismiss" }, Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+                    dismiss = true;
+                }
+            });
+        });
+        if retry {
+            self.crash_note = None;
+            self.retry_backend(ctx);
+        }
+        if dismiss {
+            self.crash_note = None;
+            self.panel_dismissed = true;
+        }
+        true
+    }
+
     fn modals(&mut self, ctx: &egui::Context) {
+        if self.startup_panel(ctx) {
+            return;
+        }
         if let Some(a) = self.m.approval.clone() {
             let mut decision: Option<&str> = None;
             modal_frame(ctx, "approval", 520.0, |ui| {
@@ -900,6 +987,12 @@ impl eframe::App for HydraApp {
         let time = ctx.input(|i| i.time);
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
         self.drain();
+        if let Ok(c) = self.health_rx.try_recv() {
+            self.checks = c;
+        }
+        if self.started < 0.0 {
+            self.started = time;
+        }
         if self.m.agent_ready && self.m.busy.is_none() {
             if let Ok(p) = std::env::var("HYDRA_DEMO_PROMPT") {
                 std::env::remove_var("HYDRA_DEMO_PROMPT");
