@@ -780,7 +780,7 @@ impl HydraApp {
     fn header(&mut self, ui: &mut egui::Ui, time: f64, narrow: bool) {
         ui.spacing_mut().item_spacing = vec2(12.0, 0.0);
         let rect = ui.max_rect();
-        ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)), |ui| {
+        let brand = ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::left_to_right(Align::Center)), |ui| {
             let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
             paint_logo(ui, r);
             if narrow {
@@ -792,12 +792,16 @@ impl HydraApp {
             } else {
                 ui.label(rtb("HYDRA DESKTOP", TYPE_BRAND, ACCENT));
             }
-            let (r, _) = ui.allocate_exact_size(vec2(66.0, 22.0), Sense::hover());
-            widgets::glow(ui, r, 11, ACCENT_DIM, 8);
-            ui.painter().rect_filled(r, cr(11), ACCENT_DIM);
-            ui.painter().rect_stroke(r, cr(11), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
-            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "v1.2.2", egui::FontId::new(TYPE_BADGE, egui::FontFamily::Name(BOLD.into())), ACCENT);
+            // narrow windows give the badge's width to the cost chip
+            if !narrow {
+                let (r, _) = ui.allocate_exact_size(vec2(66.0, 22.0), Sense::hover());
+                widgets::glow(ui, r, 11, ACCENT_DIM, 8);
+                ui.painter().rect_filled(r, cr(11), ACCENT_DIM);
+                ui.painter().rect_stroke(r, cr(11), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "v1.2.2", egui::FontId::new(TYPE_BADGE, egui::FontFamily::Name(BOLD.into())), ACCENT);
+            }
         });
+        let brand_right = brand.response.rect.right();
         ui.scope_builder(egui::UiBuilder::new().max_rect(rect).layout(Layout::right_to_left(Align::Center)), |ui| {
             ui.spacing_mut().item_spacing.x = 12.0;
             if widgets::button(ui, if narrow { "Palette" } else { "Ctrl+K Palette" }, Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
@@ -817,41 +821,49 @@ impl HydraApp {
                 (false, true) => (false, "offline"),
             };
             widgets::chip_parts(ui, (12.0, 6.0), 8.0, &[Part::Dot(dot_live), Part::Text(label.into(), TYPE_STATUS_PILL, false, TEXT2)], time);
-            let cwd_display = if self.m.cwd.len() > 28 {
-                let end = &self.m.cwd[self.m.cwd.len() - 25..];
-                format!("…{end}")
-            } else {
-                self.m.cwd.clone()
-            };
-            widgets::chip_parts(ui, (12.0, 6.0), 8.0, &[Part::Text(format!("cwd: {cwd_display}"), TYPE_STATUS_PILL, false, TEXT2)], time);
             let (tok, cost) = self.m.tally();
-            let parts = if narrow {
-                vec![Part::Text(tok, TYPE_TOKEN_TALLY, true, TEXT), Part::Text("•".into(), TYPE_TOKEN_TALLY, false, BORDER), Part::Text(cost, TYPE_TOKEN_TALLY, true, ACCENT)]
-            } else {
-                vec![
-                    Part::Text("Tokens:".into(), TYPE_TOKEN_TALLY, false, TEXT2),
-                    Part::Text(tok, TYPE_TOKEN_TALLY, true, TEXT),
-                    Part::Text("•".into(), TYPE_TOKEN_TALLY, false, BORDER),
-                    Part::Text("Cost:".into(), TYPE_TOKEN_TALLY, false, TEXT2),
-                    Part::Text(cost, TYPE_TOKEN_TALLY, true, ACCENT),
-                ]
-            };
-            widgets::chip_parts(ui, (14.0, 6.0), 8.0, &parts, time);
-
+            let tally_compact = vec![Part::Text(tok.clone(), TYPE_TOKEN_TALLY, true, TEXT), Part::Text("•".into(), TYPE_TOKEN_TALLY, false, BORDER), Part::Text(cost.clone(), TYPE_TOKEN_TALLY, true, ACCENT)];
+            let tally_full = vec![
+                Part::Text("Tokens:".into(), TYPE_TOKEN_TALLY, false, TEXT2),
+                Part::Text(tok, TYPE_TOKEN_TALLY, true, TEXT),
+                Part::Text("•".into(), TYPE_TOKEN_TALLY, false, BORDER),
+                Part::Text("Cost:".into(), TYPE_TOKEN_TALLY, false, TEXT2),
+                Part::Text(cost, TYPE_TOKEN_TALLY, true, ACCENT),
+            ];
             let (prompt, comp, win, pct) = self.m.telemetry();
-            let telem_parts = if narrow {
-                vec![
-                    Part::Text(format!("{pct:.1}%"), TYPE_TOKEN_TALLY, true, if pct > 80.0 { ERROR } else { ACCENT }),
-                ]
-            } else {
-                vec![
-                    Part::Text("Context:".into(), TYPE_TOKEN_TALLY, false, TEXT2),
-                    Part::Text(format!("{}+{}/{}", fmt_tokens(prompt), fmt_tokens(comp), fmt_tokens(win)), TYPE_TOKEN_TALLY, true, TEXT),
-                    Part::Text("•".into(), TYPE_TOKEN_TALLY, false, BORDER),
-                    Part::Text(format!("{pct:.1}%"), TYPE_TOKEN_TALLY, true, if pct > 80.0 { ERROR } else { ACCENT }),
-                ]
+            let pct_part = Part::Text(format!("{pct:.1}%"), TYPE_TOKEN_TALLY, true, if pct > 80.0 { ERROR } else { ACCENT });
+            let telem_full = vec![
+                Part::Text("Context:".into(), TYPE_TOKEN_TALLY, false, TEXT2),
+                Part::Text(format!("{}+{}/{}", fmt_tokens(prompt), fmt_tokens(comp), fmt_tokens(win)), TYPE_TOKEN_TALLY, true, TEXT),
+                Part::Text("•".into(), TYPE_TOKEN_TALLY, false, BORDER),
+                pct_part.clone(),
+            ];
+            let telem_compact = vec![pct_part];
+            // fit the chips between the brand and the buttons: cost first (full or compact), then the cwd (elided), then context,
+            // which the composer's ctx meter already shows
+            let gap = ui.spacing().item_spacing.x;
+            let mut room = ui.available_rect_before_wrap().right() - brand_right - gap;
+            let pick = |ui: &egui::Ui, room: &mut f32, full: Vec<Part>, compact: Vec<Part>| {
+                let opts = if narrow { vec![compact] } else { vec![full, compact] };
+                let chosen = opts.into_iter().find(|p| widgets::chip_measure(ui, (14.0, 6.0), 8.0, p).1.x + gap <= *room);
+                if let Some(p) = &chosen {
+                    *room -= widgets::chip_measure(ui, (14.0, 6.0), 8.0, p).1.x + gap;
+                }
+                chosen
             };
-            widgets::chip_parts(ui, (14.0, 6.0), 8.0, &telem_parts, time);
+            let tally = pick(ui, &mut room, tally_full, tally_compact);
+            let cwd_chip = |t: &str| vec![Part::Text(t.into(), TYPE_STATUS_PILL, false, TEXT2)];
+            let cwd = fit_cwd(&self.m.cwd, |t| widgets::chip_measure(ui, (12.0, 6.0), 8.0, &cwd_chip(t)).1.x + gap <= room);
+            if let Some(t) = &cwd {
+                room -= widgets::chip_measure(ui, (12.0, 6.0), 8.0, &cwd_chip(t)).1.x + gap;
+            }
+            let telem = pick(ui, &mut room, telem_full, telem_compact);
+            if let Some(t) = &cwd {
+                widgets::chip_parts(ui, (12.0, 6.0), 8.0, &cwd_chip(t), time);
+            }
+            for p in [tally, telem].into_iter().flatten() {
+                widgets::chip_parts(ui, (14.0, 6.0), 8.0, &p, time);
+            }
         });
     }
 
@@ -2280,8 +2292,9 @@ impl HydraApp {
                 let row_h = TYPE_DIFF + 5.0;
                 egui::Frame::new().fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(10)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
+                    // show_rows reserves row height plus the item spacing in effect here, so zero it first or the rows stop short of the box (D08)
+                    ui.spacing_mut().item_spacing.y = 0.0;
                     ScrollArea::vertical().id_salt(("diffrows", &key)).max_height(460.0).auto_shrink([false, true]).show_rows(ui, row_h, lines.len(), |ui, range| {
-                        ui.spacing_mut().item_spacing.y = 0.0;
                         for l in &lines[range] {
                             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
                             let (bg, fg) = match l.kind {
@@ -3609,6 +3622,17 @@ impl HydraApp {
     }
 }
 
+/// The cwd chip text: the whole path if it fits, else "…" plus as much of its tail as fits, else nothing.
+pub fn fit_cwd(cwd: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
+    let full = format!("cwd: {cwd}");
+    if fits(&full) {
+        return Some(full);
+    }
+    let chars: Vec<char> = cwd.chars().collect();
+    // shortest useful tail is the last 8 characters
+    (8..chars.len()).rev().map(|n| format!("cwd: …{}", chars[chars.len() - n..].iter().collect::<String>())).find(|t| fits(t))
+}
+
 fn pick_folder_dialog(initial: &str) -> Option<String> {
     #[cfg(windows)]
     {
@@ -3617,7 +3641,7 @@ fn pick_folder_dialog(initial: &str) -> Option<String> {
             "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; if ('{}' -ne '') {{ $d.SelectedPath = '{}' }}; if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{ Write-Output $d.SelectedPath }}",
             escaped, escaped
         );
-        let output = std::process::Command::new("powershell")
+        let output = crate::proc::command("powershell")
             .args(["-NoProfile", "-Command", &script])
             .output()
             .ok()?;

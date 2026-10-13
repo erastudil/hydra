@@ -1,6 +1,5 @@
-#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+#![windows_subsystem = "windows"]
 use hydra_desktop::{app, theme};
-
 
 fn main() -> eframe::Result<()> {
     hydra_desktop::crash::install();

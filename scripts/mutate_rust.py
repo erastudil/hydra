@@ -52,6 +52,8 @@ MUTATIONS = [
     ("D16 long tab names when narrow", "src/app.rs", "let tight = (width - 17.0 - 12.0) / n - 4.0 < 96.0;", "let tight = false;", ["--test", "ui", "d16"]),
     ("D18 error without model label", M, "    if msg.contains(label) {", "    if true {", ["--lib", "errors_name"]),
     ("unchanged fields resent", M, "if last.as_ref().map(|l| l[i] == now_meta[i]).unwrap_or(false) { None }", "if false { None }", ["--test", "concurrency"]),
+    ("D08 diff rows reserve item spacing", "src/app.rs", "                    ui.spacing_mut().item_spacing.y = 0.0;\n                    ScrollArea::vertical().id_salt((\"diffrows\", &key)).max_height(460.0).auto_shrink([false, true]).show_rows(ui, row_h, lines.len(), |ui, range| {\n", "                    ScrollArea::vertical().id_salt((\"diffrows\", &key)).max_height(460.0).auto_shrink([false, true]).show_rows(ui, row_h, lines.len(), |ui, range| {\n                        ui.spacing_mut().item_spacing.y = 0.0;\n", ["--test", "ui", "a_long_diff"]),
+    ("header chips not fitted", "src/app.rs", "let mut room = ui.available_rect_before_wrap().right() - brand_right - gap;", "let mut room = f32::INFINITY;", ["--test", "ui", "header_chips"]),
 ]
 
 

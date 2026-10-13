@@ -367,3 +367,75 @@ fn undo_rewind_is_fully_visible_at_desk_and_narrow_widths() {
     }
 }
 
+
+/// Painted text shapes whose text starts with `prefix`, with their screen rects.
+fn painted_texts(h: &Harness<'static, HydraApp>, prefix: &str) -> Vec<egui::Rect> {
+    h.output().shapes.iter().filter_map(|c| match &c.shape {
+        egui::Shape::Text(t) if t.galley.text().starts_with(prefix) => Some(t.visual_bounding_rect()),
+        _ => None,
+    }).collect()
+}
+
+#[test]
+fn a_long_diff_fills_its_box_with_rows() {
+    // D08: rows were packed at the line height while the list reserved line height plus item spacing,
+    // so the bottom third of the diff box stayed empty
+    for (w, hgt) in [(1280.0, 800.0), (900.0, 700.0)] {
+        let mut h = harness_sized(&format!("diffbox{w}"), w, hgt);
+        settle(&mut h);
+        let body: String = (0..5000).map(|i| format!("+line {i}\n")).collect();
+        let a = app(&mut h);
+        let i = a.model().active;
+        a.model_mut().sessions[i].diffs.push(DiffItem { path: "big.txt".into(), diff: format!("--- /dev/null\n+++ b/big.txt\n@@ -0,0 +1,5000 @@\n{body}") });
+        a.model_mut().drawer_tab = "diff";
+        a.model_mut().tab_pinned = true;
+        h.run_steps(5);
+        let rows = painted_texts(&h, "+ line ");
+        assert!(rows.len() > 5, "diff rows are painted at {w}x{hgt}: {}", rows.len());
+        let last = rows.iter().map(|r| r.max.y).fold(f32::MIN, f32::max);
+        let pitch = (rows[1].center().y - rows[0].center().y).abs();
+        // the box is the BG3 frame that holds the rows
+        let boxr = h.output().shapes.iter().filter_map(|c| match &c.shape {
+            egui::Shape::Rect(r) if r.fill == hydra_desktop::theme::BG3 && r.rect.contains(rows[0].center()) => Some(r.rect),
+            _ => None,
+        }).min_by(|a, b| a.area().total_cmp(&b.area())).expect("diff box frame");
+        let gap = boxr.max.y - last;
+        assert!(gap < 2.0 * pitch, "{w}x{hgt}: {} rows end at {last}, box ends at {}: {gap:.0} px empty (row pitch {pitch:.0})", rows.len(), boxr.max.y);
+    }
+}
+
+#[test]
+fn header_chips_never_cover_the_brand_and_the_cost_stays_visible() {
+    // the cwd and context chips pushed the right-hand group over the brand and off the left edge
+    for (w, hgt) in [(1920.0, 1080.0), (1280.0, 800.0), (900.0, 700.0), (820.0, 560.0)] {
+        let mut h = harness_sized(&format!("header{w}"), w, hgt);
+        settle(&mut h);
+        app(&mut h).model_mut().cwd = "/home/someone/projects/a-rather-long-project-name/src/ünïcode-dir".into();
+        h.run_steps(5);
+        let header_h = hydra_desktop::layout::frame(w).header_height;
+        let brand: Vec<egui::Rect> = ["HYDRA", "DESKTOP", "v1.2.2"].iter().flat_map(|p| painted_texts(&h, p)).filter(|r| r.max.y < header_h).collect();
+        assert!(!brand.is_empty(), "{w}: brand painted");
+        let brand_right = brand.iter().map(|r| r.max.x).fold(f32::MIN, f32::max);
+        let texts: Vec<(String, egui::Rect)> = h.output().shapes.iter().filter_map(|c| match &c.shape {
+            egui::Shape::Text(t) => Some((t.galley.text().to_string(), t.visual_bounding_rect())),
+            _ => None,
+        }).filter(|(s, r)| r.max.y < header_h && !s.is_empty() && !["HYDRA DESKTOP", "HYDRA", "DESKTOP", "v1.2.2"].contains(&s.as_str())).collect();
+        for (s, r) in &texts {
+            assert!(r.min.x > brand_right && r.max.x <= w, "{w}x{hgt}: header text {s:?} at {r:?} overlaps the brand (ends {brand_right}) or leaves the window");
+        }
+        assert!(texts.iter().any(|(s, _)| s == "$0.0000"), "{w}: cost chip is shown");
+        if w >= 1920.0 {
+            assert!(texts.iter().any(|(s, _)| s.starts_with("cwd: ") && s.ends_with("ünïcode-dir")), "{w}: a wide window shows the cwd: {texts:?}");
+        }
+    }
+}
+
+#[test]
+fn cwd_chip_elides_from_the_left_on_char_boundaries() {
+    use hydra_desktop::app::fit_cwd;
+    let p = "/home/josé/проекты/hydra";
+    assert_eq!(fit_cwd(p, |_| true).as_deref(), Some("cwd: /home/josé/проекты/hydra"));
+    // a width budget in characters stands in for pixels; the tail is kept and never split inside a character
+    assert_eq!(fit_cwd(p, |t| t.chars().count() <= 20).as_deref(), Some("cwd: …/проекты/hydra"));
+    assert_eq!(fit_cwd(p, |t| t.chars().count() <= 6), None, "too tight: no chip rather than a useless stub");
+}

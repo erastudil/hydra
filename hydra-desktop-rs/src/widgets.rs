@@ -143,13 +143,14 @@ pub fn dashed_rounded(ui: &Ui, rect: Rect, r: f32, stroke: Stroke) {
 }
 
 
+#[derive(Clone)]
 pub enum Part {
     Text(String, f32, bool, Color32),
     Dot(bool),
 }
 
-/// Bordered chip made of text runs and an optional status dot; measured first so it lays out the same in any direction.
-pub fn chip_parts(ui: &mut Ui, pad: (f32, f32), gap: f32, parts: &[Part], time: f64) {
+/// Width of each part and the outer size of the chip `chip_parts` would draw, so callers can fit chips before drawing them.
+pub fn chip_measure(ui: &Ui, pad: (f32, f32), gap: f32, parts: &[Part]) -> (Vec<f32>, egui::Vec2) {
     let mut widths = Vec::new();
     for p in parts {
         widths.push(match p {
@@ -162,7 +163,12 @@ pub fn chip_parts(ui: &mut Ui, pad: (f32, f32), gap: f32, parts: &[Part], time: 
         });
     }
     let inner: f32 = widths.iter().sum::<f32>() + gap * (parts.len() as f32 - 1.0);
-    let size = vec2(inner + pad.0 * 2.0 + 2.0, 17.0 + pad.1 * 2.0 + 2.0);
+    (widths, vec2(inner + pad.0 * 2.0 + 2.0, 17.0 + pad.1 * 2.0 + 2.0))
+}
+
+/// Bordered chip made of text runs and an optional status dot; measured first so it lays out the same in any direction.
+pub fn chip_parts(ui: &mut Ui, pad: (f32, f32), gap: f32, parts: &[Part], time: f64) {
+    let (widths, size) = chip_measure(ui, pad, gap, parts);
     let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
     ui.painter().rect_filled(rect, cr(12), BG3);
     ui.painter().rect_stroke(rect, cr(12), Stroke::new(1.0, BORDER), egui::StrokeKind::Inside);
