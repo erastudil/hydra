@@ -13682,6 +13682,71 @@ def stdio_interrupted_prompt_gets_an_explicit_reply():
         httpd.shutdown()
 
 
+@check
+def tankbench_runners():
+    """Idle and reset runners take TANKBENCH_SRC and still print --help without it."""
+    scripts = {
+        "idle_compute_worker.py": ("idle_worker", "run_worker_cli"),
+        "reset_day_blast.py": ("reset_blast", "run_blast_cli"),
+    }
+    env = os.environ.copy()
+    env.pop("TANKBENCH_SRC", None)
+    env["PYTHONIOENCODING"] = "utf-8"
+
+    for name in scripts:
+        help_run = subprocess.run(
+            [sys.executable, "-I", os.path.join(REPO, "scripts", name), "--help"],
+            cwd=REPO,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        assert help_run.returncode == 0, help_run.stderr
+        assert name[:-3] in help_run.stdout
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pkg = os.path.join(tmp, "src", "tankbench")
+        os.makedirs(pkg)
+        open(os.path.join(pkg, "__init__.py"), "w", encoding="utf-8").write("")
+        for module, fn_name in scripts.values():
+            open(os.path.join(pkg, module + ".py"), "w", encoding="utf-8").write(
+                f"def {fn_name}(**_kwargs):\n"
+                "    print('hydra-tankbench-ok')\n"
+                "    return 0\n"
+            )
+        found = dict(env)
+        found["TANKBENCH_SRC"] = os.path.join(tmp, "src")
+        for name in scripts:
+            ran = subprocess.run(
+                [sys.executable, "-I", os.path.join(REPO, "scripts", name), "--dry-run"],
+                cwd=REPO,
+                env=found,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            assert ran.returncode == 0, ran.stderr
+            assert ran.stdout.strip() == "hydra-tankbench-ok"
+
+        empty = os.path.join(tmp, "empty")
+        os.makedirs(empty)
+        missing_env = dict(env)
+        missing_env["TANKBENCH_SRC"] = empty
+        for name, (module, fn_name) in scripts.items():
+            missing = subprocess.run(
+                [sys.executable, "-I", os.path.join(REPO, "scripts", name), "--dry-run"],
+                cwd=REPO,
+                env=missing_env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+            assert missing.returncode == 1, missing.stdout + missing.stderr
+            assert f"{module}.{fn_name} is not importable" in missing.stderr
+            assert "TANKBENCH_SRC" in missing.stderr
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")
