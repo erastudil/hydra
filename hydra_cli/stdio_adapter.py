@@ -268,7 +268,10 @@ class Adapter:
             if msg.get("decision") == "allow_always" and t.asked is not None:
                 problem = self._add_rule(t.asked, msg.get("prefix"), msg.get("scope", "thread"))
                 if problem:
-                    self.error(problem, "bad_request", turn=t.id, req=req)
+                    # The call itself is still allowed below. Report the
+                    # unsaved rule without the turn id, so the app logs it
+                    # instead of failing the turn bubble with a red card.
+                    self.error(f"approval rule not saved: {problem}; the call itself was allowed", "bad_request", req=req)
             t.release(decision)
 
     # checkpoints: a shadow git repository outside the project, so the project's own repository is never touched
@@ -432,7 +435,9 @@ class Adapter:
         thread, tool, args_json = asked
         if scope not in ("thread", "project"):
             return "scope must be thread or project"
-        if prefix is not None and (not isinstance(prefix, str) or not prefix.strip() or tool != "run_command"):
+        if isinstance(prefix, str) and not prefix.strip():
+            prefix = None  # an empty prefix means every command of the tool
+        if prefix is not None and (not isinstance(prefix, str) or tool != "run_command"):
             return "prefix must be a non-empty string and only applies to run_command"
         if prefix is not None:
             args = _args(args_json)

@@ -1,5 +1,7 @@
 //! The Hydra agent as a child process. Protocol: docs/STDIO_PROTOCOL.md, one JSON object per line over pipes.
 
+pub mod update;
+
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};

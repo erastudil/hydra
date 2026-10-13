@@ -71,10 +71,10 @@ CARDS: List[Dict[str, str]] = [
         "kind": "hydra",
         "topic": "hydra mcp",
         "keys": "mcp",
-        "cues": "filesystem fetch sqlite git github brave memory playwright",
+        "cues": "filesystem fetch sqlite git github searxng memory playwright",
         "comment": (
-            "hydra mcp init installs filesystem, fetch, sqlite, git, GitHub, Brave search, memory, and Playwright. "
-            "Sqlite opens ~/.hydra/workspace.db, not emap.db. Brave and fetch are not the stack whitelist. "
+            "hydra mcp init installs filesystem, fetch, sqlite, git, GitHub, SearXNG search, memory, and Playwright. "
+            "Sqlite opens ~/.hydra/workspace.db, not emap.db. SearXNG and fetch are not the stack whitelist. "
             "Provider keys are not passed into MCP server processes."
         ),
     },

@@ -38,12 +38,12 @@ The Python package and the Node package share one alias catalog. The Node packag
 - Error messages show provider hosts only. URL paths, account ids, and key values are redacted. MCP servers no longer inherit your API keys.
 - Model ids that no provider serves were removed. Single-provider models (Vercel-only fast variants, GLM on CheaperInference) route straight to that provider.
 - `hydra swarm` waits up to 600s for pro or high-effort heads, honors `--max-tokens`, runs the auditor after the other heads so it reviews their code, and prints the provider, model, and cost for each head.
-- Default MCP servers updated: `uvx mcp-server-fetch`, GitHub's official server, `@brave/brave-search-mcp-server`, Playwright instead of Puppeteer, PostgreSQL removed, SQLite and memory data kept in `~/.hydra`.
+- Default MCP servers updated: `uvx mcp-server-fetch`, GitHub's official server, SearXNG search via `mcp-searxng` (no Brave API key), Playwright instead of Puppeteer, PostgreSQL removed, SQLite and memory data kept in `~/.hydra`.
 
 ## New in v1.2.0
 
 - **Autonomous ReAct Agent Loop (`hydra agent`)**: Multi-turn tool execution loop grounded in real-time environment actions.
-- **Model Context Protocol (MCP) Client (`hydra mcp`)**: Zero-dependency stdio JSON-RPC 2.0 client supporting Filesystem, Fetch, SQLite, Git, GitHub, Brave Search, PostgreSQL, and Memory.
+- **Model Context Protocol (MCP) Client (`hydra mcp`)**: Zero-dependency stdio JSON-RPC 2.0 client supporting Filesystem, Fetch, SQLite, Git, GitHub, SearXNG Search, PostgreSQL, and Memory.
 - **Sovereign OpenAI Gateway Server (`hydra serve`)**: Host an OpenAI-compatible local endpoint (`http://127.0.0.1:7777/v1`) for external agents like Hermes and Pi with transparent alias resolution and tool passthrough.
 - **External Agent Runners (Hermes & Pi)**: Swarm heads can delegate execution directly to `hermes` and `pi` CLI binaries (`--heads architect:hermes,coder:pi,auditor`).
 - **Phosphor Green TUI Banner (`hydra banner`)**: 3-head hydra splash plus the classic HYDRA title wordmark.
@@ -128,7 +128,7 @@ Registered servers in `~/.hydra/mcp_servers.json` (or `./.hydra/mcp_servers.json
 | `sqlite` | `uvx --with "mcp<2" mcp-server-sqlite --db-path ${HYDRA_HOME}/workspace.db` | Schema inspection and SQL queries (database in `~/.hydra`; archived upstream, so it is pinned to `mcp<2`) |
 | `git` | `uvx mcp-server-git` | Git status, diff, log, and commits |
 | `github` | `docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server` | GitHub's official server: issues, PRs, repositories (needs Docker) |
-| `brave-search` | `npx -y @brave/brave-search-mcp-server` | Live web search via Brave Search API |
+| `searxng` | `npx -y mcp-searxng` | Live web search via SearXNG metasearch (set `SEARXNG_URL`, default http://localhost:8080) |
 | `memory` | `npx -y @modelcontextprotocol/server-memory` | Knowledge graph persistence (stored in `~/.hydra/memory.jsonl`) |
 | `playwright` | `npx -y @playwright/mcp@latest --headless` | Headless browser automation and screenshots |
 
@@ -208,7 +208,7 @@ Credentials live in `~/.hydra/.env` or system environment:
 | `CLOUDFLARE_API_TOKEN` & `CLOUDFLARE_ACCOUNT_ID` | Workers AI credentials for `hydra free`. |
 | `OLLAMA_HOST`, `LLAMACPP_HOST`, `LOCAL_AI_BASE` | Local inference engine host endpoints. |
 | `GITHUB_TOKEN` | Token for GitHub MCP server integration. |
-| `BRAVE_API_KEY` | Key for Brave Search MCP server integration. |
+| `SEARXNG_URL` | SearXNG instance for the search MCP server (default http://localhost:8080). |
 
 ## Context modes
 
