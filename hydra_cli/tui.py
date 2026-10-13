@@ -621,6 +621,7 @@ class HydraTUI:
         self._ready = threading.Event()
         self._failed: Optional[BaseException] = None
         self._proxy: Optional[StdoutProxy] = None
+        self._token_gate: Optional[_LineGate] = None
         self._saved_streams: Optional[Tuple[Any, Any]] = None
         self._atexit_registered = False
 
@@ -736,6 +737,7 @@ class HydraTUI:
     def _restore_streams(self) -> None:
         if self._proxy is None or self._saved_streams is None:
             return
+        self._drain_tokens()
         for stream in (sys.stdout, sys.stderr):
             if isinstance(stream, _LineGate):
                 stream.drain()
@@ -856,23 +858,40 @@ class HydraTUI:
         self.write_token(painted)
 
     def write_token(self, text: str) -> None:
-        """Paint generated text immediately. Partial tokens skip the line gate."""
+        """Paint generated text one complete line at a time.
+
+        A partial line written straight to the StdoutProxy sits on the composer
+        row, and the next composer redraw erases it. That dropped the head of
+        every streamed line, so progen 'topic : comment' rows showed only the
+        comment. Tokens wait in a line gate until their newline arrives.
+        """
         if not text:
             return
         if self._history_scroll < 0:
             self._pin_prompt()
         proxy = self._proxy
         if proxy is not None:
-            proxy.write(text)
+            gate = self._token_gate
+            if gate is None or gate._proxy is not proxy:
+                gate = self._token_gate = _LineGate(proxy, sys.stdout)
+            gate.write(text)
             proxy.flush()
             return
         target = sys.stdout
         target.write(text)
         target.flush()
 
+    def _drain_tokens(self) -> None:
+        gate = self._token_gate
+        if gate is not None and self._proxy is gate._proxy:
+            gate.drain()
+            self._proxy.flush()
+        self._token_gate = None
+
     def end_stream(self) -> None:
         self._streaming = False
         self.write_token("\n\n")
+        self._drain_tokens()
         self._pin_prompt()
 
     def print_answer(self, answer: str) -> None:

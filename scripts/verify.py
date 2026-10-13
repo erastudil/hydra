@@ -1655,7 +1655,20 @@ def tui_composer():
         tui._proxy = Proxy()
         tui.write_token("hel")
         tui.write_token("lo")
-        assert chunks == ["hel", "<flush>", "lo", "<flush>"]
+        assert "".join(c for c in chunks if c != "<flush>") == ""
+        # Regression: progen topics vanished because partial lines reached the
+        # proxy and the composer redraw erased them. Split mid-topic on purpose.
+        for piece in ("\n", "git ", ": ", "3 unpushed ", "commits.\n\nre-", "emit : C:\\Users\\jpm05", "\\solidblender.\nstages : 27"):
+            tui.write_token(piece)
+        tui.end_stream()
+        painted = [c for c in chunks if c != "<flush>"]
+        assert all(c.endswith("\n") for c in painted), painted
+        lines = "".join(painted).split("\n")
+        assert "hello" in lines, lines
+        assert "git : 3 unpushed commits." in lines, lines
+        assert "re-emit : C:\\Users\\jpm05\\solidblender." in lines, lines
+        assert "stages : 27" in lines, lines
+        assert tui._token_gate is None
         tui._waiting = "main"
         tui._buffer.text = "draft"
         tui._on_interrupt()
