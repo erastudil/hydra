@@ -13,22 +13,32 @@ pub struct Check {
 }
 
 pub fn run() -> Vec<Check> {
-    let mut out = vec![];
-    // agent runtime
-    let mut py_detail = String::from("no interpreter found");
-    let mut py_ok = false;
-    for (prog, lead) in python_candidates() {
-        match proc::command(&prog).args(&lead).arg("--version").output() {
-            Ok(o) if o.status.success() => {
-                let v = String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).trim().to_string();
-                py_detail = format!("{v} ({prog})");
-                py_ok = true;
-                break;
+    static STATIC_CHECKS: std::sync::OnceLock<(bool, String, bool, String)> = std::sync::OnceLock::new();
+    let (py_ok, py_detail, git_ok, git_detail) = STATIC_CHECKS
+        .get_or_init(|| {
+            let mut py_detail = String::from("no interpreter found");
+            let mut py_ok = false;
+            for (prog, lead) in python_candidates() {
+                match proc::command(&prog).args(&lead).arg("--version").output() {
+                    Ok(o) if o.status.success() => {
+                        let v = String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).trim().to_string();
+                        py_detail = format!("{v} ({prog})");
+                        py_ok = true;
+                        break;
+                    }
+                    Ok(o) => py_detail = format!("{prog} exited with {}", o.status),
+                    Err(e) => py_detail = format!("{prog}: {e}"),
+                }
             }
-            Ok(o) => py_detail = format!("{prog} exited with {}", o.status),
-            Err(e) => py_detail = format!("{prog}: {e}"),
-        }
-    }
+            let git = proc::command("git").arg("--version").output();
+            let (git_ok, git_detail) = match git {
+                Ok(o) if o.status.success() => (true, String::from_utf8_lossy(&o.stdout).trim().into()),
+                _ => (false, "git not found on PATH; git panel, worktrees and rewind are unavailable until it is installed".into()),
+            };
+            (py_ok, py_detail, git_ok, git_detail)
+        })
+        .clone();
+    let mut out = vec![];
     out.push(Check { name: "Agent runtime (Python)", ok: py_ok, detail: py_detail, fatal: true });
     let repo = repo_dir();
     out.push(Check {
@@ -37,12 +47,7 @@ pub fn run() -> Vec<Check> {
         detail: repo.unwrap_or_else(|| "not found next to Hydra.exe (expected an app\\hydra_cli folder)".into()),
         fatal: true,
     });
-    // git
-    let git = proc::command("git").arg("--version").output();
-    out.push(match git {
-        Ok(o) if o.status.success() => Check { name: "Git", ok: true, detail: String::from_utf8_lossy(&o.stdout).trim().into(), fatal: false },
-        _ => Check { name: "Git", ok: false, detail: "git not found on PATH; git panel, worktrees and rewind are unavailable until it is installed".into(), fatal: false },
-    });
+    out.push(Check { name: "Git", ok: git_ok, detail: git_detail, fatal: false });
     // state dir writable
     let dir = state_dir();
     let probe = dir.join(".write-test");

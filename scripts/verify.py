@@ -13458,6 +13458,9 @@ def stdio_two_agents_write_one_thread_without_loss():
                             with open(path, "rb") as handle:
                                 data = handle.read()
                             json.loads(data)
+                        except PermissionError:
+                            if os.name != "nt":
+                                torn.append("permission")
                         except FileNotFoundError:
                             torn.append("missing")
                         except ValueError:
@@ -13667,17 +13670,13 @@ def stdio_interrupted_prompt_gets_an_explicit_reply():
             assert third.close() == 0
 
             from hydra_cli.context import SessionContextLedger
-            saved = os.environ.get("HOME")
-            os.environ["HOME"] = home
-            try:
+            with _env(HOME=home, USERPROFILE=home):
                 ledger = SessionContextLedger(session_id="ir-tools")
                 ledger.append_turn(role="user", content="run it")
                 ledger.append_turn(role="assistant", content="", tool_calls=[{"id": "c", "function": {"name": "list_dir", "arguments": "{}"}}])
                 assert ledger.close_unanswered(INTERRUPTED_TEXT), "a tool call round counted as a reply"
                 assert not ledger.close_unanswered(INTERRUPTED_TEXT), "a marker was written twice"
                 ledger.end_turn()
-            finally:
-                os.environ["HOME"] = saved
     finally:
         httpd.shutdown()
 

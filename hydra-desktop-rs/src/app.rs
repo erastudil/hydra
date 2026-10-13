@@ -3428,16 +3428,21 @@ impl HydraApp {
         if self.respawn_at.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
-        if let Ok(c) = self.health_rx.try_recv() {
+        if self.started < 0.0 {
+            self.started = time;
+        }
+        let recv = if self.checks.is_empty() && time - self.started >= 1.0 {
+            self.health_rx.recv_timeout(std::time::Duration::from_secs(5)).ok()
+        } else {
+            self.health_rx.try_recv().ok()
+        };
+        if let Some(c) = recv {
             self.checks = c;
             // first run without any key: take the user straight to the place where one is entered
             if !self.settings_auto && self.checks.iter().any(|c| c.name == "Model access" && !c.ok) {
                 self.settings_auto = true;
                 self.open_settings();
             }
-        }
-        if self.started < 0.0 {
-            self.started = time;
         }
         // Idle means idle: backend events, input and the workspace watcher wake us. Only animate while something runs.
         let animating = self.m.any_busy() || self.checks.is_empty() || time - self.started < 2.0;

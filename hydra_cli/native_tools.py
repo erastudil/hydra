@@ -1,4 +1,4 @@
-﻿"""
+"""
 Native coding tools and registry for Hydra autonomous coding agents.
 Provides zero-dependency built-in tools: read_file, write_file, edit_file, list_dir,
 grep_search, find_files, run_command, invoke_subagent, and swarm_fanout.
@@ -2287,7 +2287,16 @@ def atomic_write_json(path: str, data: Any) -> None:
     try:
         with open(tmp, "w", encoding="utf-8") as handle:
             json.dump(data, handle)
-        os.replace(tmp, path)
+        for attempt in range(40):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if os.name != "nt" or attempt == 39:
+                    raise
+                import time as _time
+
+                _time.sleep(0.005)
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -2473,6 +2482,10 @@ class BackgroundTasks:
         task = f"t{_time.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
         log, exit_file = os.path.join(folder, task + ".log"), os.path.join(folder, task + ".exit")
         program, shell, extra = task_launch(command, exit_file, self.platform)
+        if os.name == "nt" and isinstance(program, list) and program[:1] == ["/bin/sh"] and not os.path.exists("/bin/sh"):
+            import shutil
+
+            program = [shutil.which("sh") or "/bin/sh", *program[1:]]
         try:
             with open(log, "wb") as out:
                 proc = subprocess.Popen(program, shell=shell, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,

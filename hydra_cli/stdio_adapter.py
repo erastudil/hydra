@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 PROTOCOL_VERSION = 1
 MAX_LINE_BYTES = 1 << 20
-TOOL_OUTPUT_CHARS = 32000
+TOOL_OUTPUT_CHARS = 4000
 CONTEXT_MODES = ("recall", "compact", "sliding")
 DECISIONS = {"allow": "y", "allow_always": "y", "skip": "n", "abort": "q"}
 PERMISSIONS = ("manual", "accept_edits", "plan", "bypass")
@@ -304,7 +304,10 @@ class Adapter:
             _prune_conversations(thread)
             return {"ok": True, "id": sha, "reason": None, "turns": turns}
         except Exception as exc:  # git missing or unusable: the turn still runs, the app is told
-            return {"ok": False, "id": None, "reason": f"{type(exc).__name__}: {exc}"[:300]}
+            reason = f"{type(exc).__name__}: {exc}"
+            if "git" not in reason.lower():
+                reason = f"git: {reason}"
+            return {"ok": False, "id": None, "reason": reason[:300]}
 
     def _on_checkpoints(self, msg: Dict[str, Any]) -> None:
         req = _text(msg.get("id"))
@@ -750,7 +753,13 @@ def hide_child_consoles() -> bool:
         return True
 
     def init(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-        original(self, *args, **hidden_popen_kwargs(kwargs))
+        kw = hidden_popen_kwargs(kwargs)
+        if sys.stdout is sys.stderr:
+            if kw.get("stdout") is None:
+                kw["stdout"] = 2
+            if kw.get("stderr") is None:
+                kw["stderr"] = 2
+        original(self, *args, **kw)
 
     init._hydra_hidden = True  # type: ignore[attr-defined]
     subprocess.Popen.__init__ = init  # type: ignore[method-assign]
