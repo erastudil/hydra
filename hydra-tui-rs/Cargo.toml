@@ -1,0 +1,18 @@
+[package]
+name = "hydra-tui"
+version = "1.2.2"
+edition = "2021"
+description = "Hydra terminal. Rust event loop, Rust layout, shared stdio client."
+license = "MIT"
+
+[[bin]]
+name = "hydra-tui"
+path = "src/main.rs"
+
+[dependencies]
+hydra-stdio = { path = "../hydra-stdio" }
+ratatui = { version = "0.30.2", features = ["crossterm"] }
+crossterm = "0.29"
+serde_json = "1"
+unicode-width = "0.2"
+ureq = { version = "2.12", default-features = false, features = ["native-tls"] }

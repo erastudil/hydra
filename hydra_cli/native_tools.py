@@ -2238,6 +2238,378 @@ class AstFstringModernizer:
 
 
 
+def file_lock(path: str, wait: bool = True) -> Any:
+    """Context manager for an exclusive lock on path across processes: fcntl.flock on POSIX, msvcrt.locking on
+    Windows. The OS drops it when its holder dies, so a crashed process never leaves it stuck. With wait false,
+    entering raises BlockingIOError at once when another holder has it."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def held() -> Any:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        handle = open(path, "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+                import time as _time
+
+                handle.seek(0)
+                while True:
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        if not wait:
+                            raise BlockingIOError(f"{path} is locked by another process")
+                        _time.sleep(0.05)
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+    return held()
+
+
+def atomic_write_json(path: str, data: Any) -> None:
+    """Write JSON through a temp file unique to this writer, then os.replace, so a reader sees the old or the new file."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = f"{path}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+
+CREATE_NEW_PROCESS_GROUP = 0x00000200
+CREATE_NO_WINDOW = 0x08000000
+# the shell runs the command in a subshell, so `exit` inside it still lets the wrapper write the exit code
+_TASK_WRAPPER = '(eval "$HYDRA_TASK_CMD"); c=$?; printf %s "$c" > "$HYDRA_TASK_EXIT"; exit $c'
+
+
+def task_spawn_options(platform: str) -> Dict[str, Any]:
+    """Popen options that put a task in a process group of its own, so a stop reaches every process it started."""
+    if platform == "nt":
+        return {"creationflags": CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW}
+    return {"start_new_session": True}
+
+
+def task_launch(command: str, exit_file: str, platform: str) -> Tuple[Any, bool, Dict[str, str]]:
+    """Program, shell flag and extra environment for a task. POSIX tasks record their exit code in exit_file."""
+    if platform == "nt":
+        return command, True, {}
+    return ["/bin/sh", "-c", _TASK_WRAPPER], False, {"HYDRA_TASK_CMD": command, "HYDRA_TASK_EXIT": exit_file}
+
+
+def task_kill_commands(pid: int) -> List[List[str]]:
+    """Windows stop: taskkill of the whole tree, then the same with /F when the polite one did not end it."""
+    return [["taskkill", "/PID", str(int(pid)), "/T"], ["taskkill", "/PID", str(int(pid)), "/T", "/F"]]
+
+
+def process_identity(pid: int, platform: Optional[str] = None) -> Optional[str]:
+    """A string that names this process and no later process with the same pid. None when it is gone."""
+    platform = platform or os.name
+    if platform == "nt":
+        return _windows_process_identity(pid)
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{int(pid)}/stat", "rb") as handle:
+                stat = handle.read().decode("ascii", "replace")
+        except OSError:
+            return None
+        fields = stat[stat.rindex(")") + 2:].split()
+        if fields[0] in ("Z", "X"):
+            return None
+        return "linux:" + fields[19]
+    import subprocess
+
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return "ps:" + out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else None
+
+
+def _windows_process_identity(pid: int) -> Optional[str]:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        code = wintypes.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) or code.value != 259:  # STILL_ACTIVE
+            return None
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel32.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]):
+            return None
+        return f"nt:{times[0].dwHighDateTime}:{times[0].dwLowDateTime}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+class BackgroundTasks:
+    """Shell commands the agent leaves running between tool calls. Each task has a record under ~/.hydra/tasks, so a
+    new agent process can adopt the tasks a killed one left running. Listeners hear every start, adoption and end."""
+
+    TAIL_CHARS = 4000
+    POLL_SECONDS = 0.2
+
+    def __init__(self, platform: Optional[str] = None, runner: Optional[Callable[..., Any]] = None) -> None:
+        import contextvars
+        import subprocess
+        import threading
+
+        self.platform = platform or os.name
+        self._runner = runner or subprocess.run
+        self._lock = threading.Lock()
+        self._tasks: Dict[str, Dict[str, Any]] = {}
+        self._procs: Dict[str, Any] = {}
+        self._ended: Dict[str, Any] = {}
+        self._listeners: List[Callable[[Dict[str, Any]], None]] = []
+        self.owner: "contextvars.ContextVar[Dict[str, Any]]" = contextvars.ContextVar("hydra_task_owner", default={})
+
+    @staticmethod
+    def folder() -> str:
+        path = os.path.join(os.path.expanduser("~"), ".hydra", "tasks")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def add_listener(self, listener: Callable[[Dict[str, Any]], None]) -> None:
+        with self._lock:
+            self._listeners.append(listener)
+
+    def me(self) -> Dict[str, Any]:
+        """This agent process as a task owner."""
+        return {"pid": os.getpid(), "identity": process_identity(os.getpid(), self.platform)}
+
+    def _owner_alive_elsewhere(self, info: Dict[str, Any]) -> bool:
+        owner = info.get("owner") or {}
+        if not owner.get("pid") or owner.get("pid") == os.getpid():
+            return False
+        return bool(owner.get("identity")) and process_identity(owner["pid"], self.platform) == owner["identity"]
+
+    def _folder_lock(self) -> Any:
+        """The exclusive lock on ~/.hydra/tasks/.lock that every task claim and prune holds."""
+        return file_lock(os.path.join(self.folder(), ".lock"))
+
+    def _read_record(self, task: str) -> Optional[Dict[str, Any]]:
+        try:
+            with open(os.path.join(self.folder(), task + ".json"), "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return None
+
+    def prune(self, now: Optional[float] = None) -> List[str]:
+        """Delete ended task records, logs and exit files older than HYDRA_TASK_KEEP_DAYS, default 7, then the oldest
+        beyond HYDRA_TASK_KEEP, default 200. Running tasks, tasks this agent tracks and tasks a live agent owns stay.
+        The caller holds the folder lock."""
+        import glob
+        import time as _time
+
+        now = _time.time() if now is None else now
+        keep_days = float(os.environ.get("HYDRA_TASK_KEEP_DAYS", "7"))
+        keep = max(0, int(os.environ.get("HYDRA_TASK_KEEP", "200")))
+        ended = []
+        for path in glob.glob(os.path.join(self.folder(), "*.json")):
+            try:
+                with open(path, "r", encoding="utf-8") as handle:
+                    info = json.load(handle)
+            except (OSError, ValueError):
+                continue
+            if info.get("state") == "running" or info.get("task") in self._tasks or self._owner_alive_elsewhere(info):
+                continue
+            ended.append(info)
+        ended.sort(key=lambda x: x.get("ended") or 0, reverse=True)
+        doomed = [x for i, x in enumerate(ended) if i >= keep or (x.get("ended") or 0) < now - keep_days * 86400]
+        for info in doomed:
+            for suffix in (".json", ".log", ".exit"):
+                try:
+                    os.remove(os.path.join(self.folder(), info["task"] + suffix))
+                except OSError:
+                    pass
+        return [x["task"] for x in doomed]
+
+    def _tell(self, info: Dict[str, Any]) -> None:
+        for listener in list(self._listeners):
+            try:
+                listener(dict(info))
+            except Exception:
+                pass
+
+    def _save(self, info: Dict[str, Any]) -> None:
+        atomic_write_json(os.path.join(self.folder(), info["task"] + ".json"), info)
+
+    @staticmethod
+    def _exit_code(info: Dict[str, Any]) -> Optional[int]:
+        try:
+            with open(info.get("exit_file") or "", "r", encoding="utf-8") as handle:
+                return int(handle.read().strip())
+        except (OSError, ValueError):
+            return None
+
+    def start(self, command: str, cwd: str) -> Dict[str, Any]:
+        import subprocess
+        import threading
+        import time as _time
+
+        if not isinstance(command, str) or not command.strip():
+            return {"isError": True, "error": "command required"}
+        folder = self.folder()
+        task = f"t{_time.strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
+        log, exit_file = os.path.join(folder, task + ".log"), os.path.join(folder, task + ".exit")
+        program, shell, extra = task_launch(command, exit_file, self.platform)
+        try:
+            with open(log, "wb") as out:
+                proc = subprocess.Popen(program, shell=shell, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
+                                        stderr=subprocess.STDOUT, env={**os.environ, **extra},
+                                        **task_spawn_options(self.platform))
+        except OSError as exc:
+            return {"isError": True, "error": f"could not start: {exc}"}
+        owner = self.owner.get()
+        info = {"task": task, "command": command, "cwd": cwd, "pid": proc.pid, "pgid": proc.pid,
+                "identity": process_identity(proc.pid, self.platform), "state": "running", "exit_code": None,
+                "started": _time.time(), "ended": None, "thread": owner.get("thread"), "turn": owner.get("turn"),
+                "adopted": False, "log": log, "exit_file": exit_file, "owner": self.me()}
+        with self._lock:
+            self._tasks[task] = info
+            self._procs[task] = proc
+            self._ended[task] = threading.Event()
+            self._save(info)
+        self._tell(info)
+        threading.Thread(target=self._watch, args=(task, proc), daemon=True, name=f"hydra-task-{task}").start()
+        return {"isError": False, "task": task, "state": "running", "pid": proc.pid}
+
+    def adopt(self) -> List[Dict[str, Any]]:
+        """Take over the running tasks a dead agent left on disk, then prune old records. Tasks whose process is gone
+        are marked ended. A task whose owner is another live agent is left to it. The folder lock makes every claim
+        atomic across agents on one home."""
+        import glob
+        import threading
+        import time as _time
+
+        found, live = [], []
+        me = self.me()
+        with self._folder_lock():
+            for path in sorted(glob.glob(os.path.join(self.folder(), "*.json"))):
+                try:
+                    with open(path, "r", encoding="utf-8") as handle:
+                        info = json.load(handle)
+                except (OSError, ValueError):
+                    continue
+                with self._lock:
+                    if info.get("state") != "running" or info.get("task") in self._tasks or self._owner_alive_elsewhere(info):
+                        continue
+                    info["adopted"], info["owner"] = True, me
+                    alive = info.get("identity") and process_identity(info["pid"], self.platform) == info["identity"]
+                    if not alive:
+                        info["state"], info["exit_code"], info["ended"] = "exited", self._exit_code(info), _time.time()
+                    self._tasks[info["task"]] = info
+                    self._ended[info["task"]] = threading.Event()
+                    if not alive:
+                        self._ended[info["task"]].set()
+                    self._save(info)
+                found.append(dict(info))
+                if alive:
+                    live.append(info["task"])
+            self.prune()
+        for info in found:
+            self._tell(info)
+        for task in live:
+            threading.Thread(target=self._poll, args=(task,), daemon=True, name=f"hydra-task-{task}").start()
+        return found
+
+    def _finish(self, task: str, code: Optional[int]) -> None:
+        import time as _time
+
+        with self._lock:
+            info = self._tasks[task]
+            info["exit_code"] = code
+            info["ended"] = _time.time()
+            if info["state"] == "running":
+                info["state"] = "exited"
+            self._save(info)
+            snapshot = dict(info)
+        self._ended[task].set()
+        self._tell(snapshot)
+
+    def _watch(self, task: str, proc: Any) -> None:
+        self._finish(task, proc.wait())
+
+    def _poll(self, task: str) -> None:
+        import time as _time
+
+        info = self._tasks[task]
+        while process_identity(info["pid"], self.platform) == info["identity"]:
+            _time.sleep(self.POLL_SECONDS)
+        self._finish(task, self._exit_code(info))
+
+    def list(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [dict(info) for info in self._tasks.values()]
+
+    def output(self, task: str, tail: int = TAIL_CHARS) -> Dict[str, Any]:
+        with self._lock:
+            info = dict(self._tasks[task]) if task in self._tasks else None
+        if info is None:
+            return {"isError": True, "error": f"no task {task!r}"}
+        limit = max(1, min(int(tail or self.TAIL_CHARS), 100000))
+        with open(info["log"], "rb") as handle:
+            data = handle.read().decode("utf-8", "replace")
+        return {"isError": False, "task": task, "state": info["state"], "exit_code": info["exit_code"],
+                "output": data[-limit:], "truncated": len(data) > limit}
+
+    def stop(self, task: str, grace: float = 3.0) -> Dict[str, Any]:
+        import signal
+
+        with self._folder_lock():
+            record = self._read_record(task)
+            if record is not None and self._owner_alive_elsewhere(record):
+                return {"isError": True, "error": f"task {task!r} belongs to agent pid {record['owner']['pid']}"}
+        with self._lock:
+            info = self._tasks.get(task)
+            if info is None:
+                return {"isError": True, "error": f"no task {task!r}"}
+            if info["state"] != "running":
+                return {"isError": False, "task": task, "state": info["state"], "exit_code": info["exit_code"]}
+            info["state"] = "stopped"
+        ended = self._ended[task]
+        for force in (False, True):
+            try:
+                if self.platform == "nt":
+                    self._runner(task_kill_commands(info["pid"])[int(force)], capture_output=True, timeout=30)
+                else:
+                    os.killpg(info["pgid"], signal.SIGKILL if force else signal.SIGTERM)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            if ended.wait(grace):
+                break
+        with self._lock:
+            return {"isError": False, "task": task, "state": "stopped", "exit_code": info["exit_code"]}
+
+    def stop_all(self) -> None:
+        for info in self.list():
+            if info["state"] == "running":
+                self.stop(info["task"], grace=1.0)
+
+
+BACKGROUND_TASKS = BackgroundTasks()
+
+
 class NativeToolRegistry:
     """
     Built-in coding tool registry providing file operations, search, execution sandboxing,
@@ -2363,6 +2735,13 @@ class NativeToolRegistry:
             "capture_active_window": self.computer_capture_active_window,
             "computer_safe_key_sequence": self.computer_safe_key_sequence,
             "safe_key_sequence": self.computer_safe_key_sequence,
+            "start_background_task": lambda command: BACKGROUND_TASKS.start(command, self.cwd),
+            "task_output": lambda task, tail=BackgroundTasks.TAIL_CHARS: BACKGROUND_TASKS.output(task, tail),
+            "stop_background_task": lambda task: BACKGROUND_TASKS.stop(task),
+            "git_status": self.git_status,
+            "git_diff": self.git_diff,
+            "git_commit": self.git_commit,
+            "git_branch": self.git_branch,
             "git_commit_and_push": self.git_commit_and_push,
             "git_push": self.git_commit_and_push,
             "trigger_vercel_deploy": self.trigger_vercel_deploy,
@@ -2659,6 +3038,107 @@ class NativeToolRegistry:
         if res.status != "SUCCESS" or res.exit_code != 0:
             out["isError"] = True
         return out
+
+    PROTECTED_BRANCHES = ("main", "master")
+
+    def _git(self, *args: str, stdin: Optional[str] = None) -> Tuple[int, str, str]:
+        """Run git in the workspace with an argument list, never through a shell."""
+        import subprocess
+
+        try:
+            proc = subprocess.run(["git", "-C", self.cwd, *args], input=stdin, capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace", timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return 127, "", f"{type(exc).__name__}: {exc}"
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def _git_current_branch(self) -> Optional[str]:
+        code, out, _ = self._git("symbolic-ref", "--quiet", "--short", "HEAD")
+        return out.strip() if code == 0 and out.strip() else None
+
+    def git_status(self) -> Dict[str, Any]:
+        """Branch and changed files of the workspace repository."""
+        code, out, err = self._git("status", "--porcelain=v1", "-z", "--untracked-files=all")
+        if code != 0:
+            return {"isError": True, "error": f"git status failed: {err.strip() or out.strip()}"}
+        files = []
+        entries = out.split("\0")
+        i = 0
+        while i < len(entries):
+            entry = entries[i]
+            i += 1
+            if len(entry) < 4:
+                continue
+            item = {"status": entry[:2], "path": entry[3:]}
+            if entry[0] in "RC":
+                item["from"] = entries[i] if i < len(entries) else ""
+                i += 1
+            files.append(item)
+        return {"isError": False, "branch": self._git_current_branch(), "clean": not files, "files": files}
+
+    def git_diff(self, path: Optional[str] = None, staged: bool = False, max_chars: int = 100000) -> Dict[str, Any]:
+        """Unified diff of the workspace against the index, or of the index against HEAD when staged is true."""
+        args = ["diff", "--no-color"] + (["--cached"] if staged else [])
+        if path:
+            resolved, err = self._resolve_confined_path(path)
+            if err:
+                return {"isError": True, "error": err}
+            args += ["--", resolved]
+        code, out, err = self._git(*args)
+        if code != 0:
+            return {"isError": True, "error": f"git diff failed: {err.strip() or out.strip()}"}
+        limit = max(1, int(max_chars))
+        return {"isError": False, "diff": out[:limit], "truncated": len(out) > limit}
+
+    def git_commit(self, message: str, paths: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Stage the given paths, or every change, and commit them. Refuses to commit on main or master."""
+        if not isinstance(message, str) or not message.strip():
+            return {"isError": True, "error": "commit message required"}
+        branch = self._git_current_branch()
+        if branch is None:
+            return {"isError": True, "error": "HEAD is not on a branch, switch to a branch first"}
+        if branch in self.PROTECTED_BRANCHES:
+            return {"isError": True, "error": f"refusing to commit on {branch}, create a branch with git_branch first"}
+        if paths:
+            resolved = []
+            for item in paths:
+                target, err = self._resolve_confined_path(str(item))
+                if err:
+                    return {"isError": True, "error": err}
+                resolved.append(target)
+            code, out, err = self._git("add", "-A", "--", *resolved)
+        else:
+            code, out, err = self._git("add", "-A")
+        if code != 0:
+            return {"isError": True, "error": f"git add failed: {err.strip() or out.strip()}"}
+        if self._git("diff", "--cached", "--quiet")[0] == 0:
+            return {"isError": True, "error": "nothing to commit"}
+        code, out, err = self._git("commit", "-F", "-", stdin=message.strip() + "\n")
+        if code != 0:
+            return {"isError": True, "error": f"git commit failed: {err.strip() or out.strip()}"}
+        sha = self._git("rev-parse", "HEAD")[1].strip()
+        return {"isError": False, "branch": branch, "commit": sha}
+
+    def git_branch(self, op: str = "list", name: Optional[str] = None) -> Dict[str, Any]:
+        """List branches, create and switch to a new branch, or switch to an existing one."""
+        if op == "list":
+            code, out, err = self._git("branch", "--format=%(refname:short)")
+            if code != 0:
+                return {"isError": True, "error": f"git branch failed: {err.strip() or out.strip()}"}
+            return {"isError": False, "current": self._git_current_branch(), "branches": out.split()}
+        if op not in ("create", "switch"):
+            return {"isError": True, "error": "op must be list, create or switch"}
+        if not isinstance(name, str) or not name.strip() or name.startswith("-"):
+            return {"isError": True, "error": "branch name required"}
+        if self._git("check-ref-format", "--branch", name)[0] != 0:
+            return {"isError": True, "error": f"{name!r} is not a valid branch name"}
+        if op == "create" and name in self.PROTECTED_BRANCHES:
+            return {"isError": True, "error": f"refusing to create {name}"}
+        args = ("switch", "-c", name) if op == "create" else ("switch", name)
+        code, out, err = self._git(*args)
+        if code != 0:
+            return {"isError": True, "error": f"git switch failed: {err.strip() or out.strip()}"}
+        return {"isError": False, "current": self._git_current_branch()}
 
     def git_commit_and_push(
         self,
@@ -4520,6 +5000,86 @@ class NativeToolRegistry:
     def get_openai_tools(self) -> List[Dict[str, Any]]:
         """Generate standard OpenAI function calling tool schemas for all native tools."""
         return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "start_background_task",
+                    "description": "Start a shell command that keeps running after this call, such as a dev server or a watcher. Returns a task id at once.",
+                    "parameters": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "task_output",
+                    "description": "State, exit code and the last output of a background task.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"task": {"type": "string"}, "tail": {"type": "integer", "description": "Characters from the end, default 4000."}},
+                        "required": ["task"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "stop_background_task",
+                    "description": "Stop a background task and every process it started.",
+                    "parameters": {"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "git_status",
+                    "description": "Current branch and changed files of the workspace git repository.",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "git_diff",
+                    "description": "Unified diff of uncommitted changes. staged true shows what the next commit holds.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Optional file or directory to limit the diff to."},
+                            "staged": {"type": "boolean", "description": "Diff the index against HEAD instead of the worktree against the index."},
+                        },
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "git_commit",
+                    "description": "Stage paths, or every change when paths is omitted, and commit with the message. Refuses on main or master.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string", "description": "Commit message."},
+                            "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional paths to stage."},
+                        },
+                        "required": ["message"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "git_branch",
+                    "description": "List branches, create and switch to a new branch, or switch to an existing one.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "op": {"type": "string", "enum": ["list", "create", "switch"]},
+                            "name": {"type": "string", "description": "Branch name for create and switch."},
+                        },
+                        "required": ["op"],
+                    },
+                },
+            },
             {
                 "type": "function",
                 "function": {

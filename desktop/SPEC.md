@@ -1,12 +1,10 @@
-﻿# hydra desktop specification
+# hydra desktop specification
 
-scope : contract for the native hydra desktop app. there is no server and no http route.
+scope : contract for the native hydra desktop app. there is no server and no http route. the wire format is docs/STDIO_PROTOCOL.md.
 
-entry : `hydra_cli.gui.app.main(argv)` creates one QApplication and one MainWindow, returns the Qt exit code.
-store : `hydra_cli.gui.store.Store` reads and writes `~/.hydra/desktop/state.json` atomically; projects own threads; threads own messages and diffs.
-worker : `AgentWorker.run_turn(req)` runs in a QThread; req keys are prompt, alias, session_id, cwd, mode, approve.
-signals : token, tool, diff, approval, finished(text, ok).
-approval : with approve on, each tool call blocks the worker until `answer_approval` receives y, n, s or q.
-cancel : `request_cancel` makes the next token, tool call or turn boundary raise `TurnCancelled`.
-modes : recall is dynamic threading, compact is compaction; both come from `hydra_cli.context.CONTEXT_MODES`.
-windowless : under pythonw or a windowed exe, stdout and stderr go to `~/.hydra/desktop.log`.
+entry : `hydra-desktop-rs/src/main.rs` opens one eframe window and spawns the agent child.
+model : `hydra-desktop-rs/src/model.rs` folds agent events and action replies into UI state without any window code, so tests drive it directly.
+turns : chat and Agent ReAct Loop send `turn`; Stop sends `cancel`; tool approval answers `approval`.
+actions : terminal, swarm, computer use, agent runner, templates and jobs go through `action`.
+tally : the Tokens and Cost readout sums `usage` messages, which carry the provider's own numbers. nothing is estimated.
+missing : see INVENTORY notes in the progen report; swarm heads need gateway credentials, computer use is simulated off Windows.

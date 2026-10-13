@@ -10,10 +10,11 @@ from hydra_cli.context import (
     register_label,
     resolve_context_mode,
 )
-from hydra_cli.ui import StreamWrap, clean_pasted_text, approve_tool, diff_sink, drain_steering, prompt_input, tool_sink, render_prompt_box, wrap_text
+from hydra_cli.ui import StreamWrap, clean_pasted_text, approve_tool, diff_sink, drain_steering, prompt_input, tool_sink, tool_start_sink, render_prompt_box, wrap_text
 from hydra_cli._version import __version__
 
 from datetime import datetime, timezone
+import contextvars
 import json
 import os
 import shutil
@@ -69,6 +70,8 @@ from hydra_cli.providers import (
     reasoning_fields,
     redact,
     stream_chat_completion,
+    retry_wait,
+    transient_reason,
 )
 from hydra_cli.ui import (
     GREEN_BOLD,
@@ -232,7 +235,14 @@ DEFAULT_AGENT_SYSTEM_PROMPT = os.environ.get(
         "- Use write_file for creating new files or complete rewrites.\n"
         "- Use run_command to execute test suites, linters, and verification scripts.\n"
         "- Drive tasks to verifiable completion. Do not halt prematurely, do not leave placeholders, stubs, or TODO comments.\n"
-        "- If an execution step fails, analyze the error output and iteratively fix the issue until all tests pass."
+        "- If an execution step fails, analyze the error output and iteratively fix the issue until all tests pass.\n\n"
+        "HARDWIRED AGENT INVARIANTS & SOVEREIGN GENOME:\n"
+        "- Truth Gate: Target software either executes successfully with exit code 0 against real interfaces or target is rejected. Synthetic mocks carry zero truth value.\n"
+        "- Ponytail Wu Wei: Consolidate runnable verification into single-grip deterministic runners; select shortest deterministic transform path.\n"
+        "- Git Discipline: Local work carries zero persistence value until pushed to remote origin. Require trunk convergence and remote synchronization.\n"
+        "- Live Intelligence: For tasks involving AI tools, models, harnesses, or ML, search live web/documentation first; zero reliance on obsolete training weights.\n"
+        "- Software Implementation Language: Require all new software authoring execute in Rust and only Rust until further notice.\n"
+        "- Pool Number Invariant: If asked about the pool number, read kb/reference/beaufort-force-notes.md from the documents root (C:\\Users\\jpm05\\Documents). When speaking or outputting the pool number, speak pool number as integer formatted per active dialect (e.g., 'pool number : 125.' in Progen syntax, or '125' in plain text)."
     ),
 )
 
@@ -268,6 +278,25 @@ def progen_paths(text: str) -> List[str]:
         if path and os.path.isfile(path) and path not in found:
             found.append(path)
     return found
+
+
+def find_project_rules(cwd: Optional[str] = None) -> Optional[str]:
+    """Path of the guidance file detect_project_rules loads for this directory, or None."""
+    curr = os.path.abspath(cwd or os.getcwd())
+    for _ in range(6):
+        for fname in PROJECT_RULE_FILES:
+            target = os.path.join(curr, fname)
+            try:
+                with open(target, "r", encoding="utf-8", errors="replace") as handle:
+                    if handle.read().strip():
+                        return target
+            except OSError:
+                continue
+        parent = os.path.dirname(curr)
+        if parent == curr:
+            break
+        curr = parent
+    return None
 
 
 def detect_project_rules(cwd: Optional[str] = None) -> Optional[str]:
@@ -308,6 +337,34 @@ def detect_project_rules(cwd: Optional[str] = None) -> Optional[str]:
         if parent == curr:
             break
         curr = parent
+
+    # Fallback to sovereign documents root and global ~/.hydra
+    fallback_targets = [
+        os.path.join(os.path.expanduser("~"), "Documents", "AGENTS.md"),
+        os.path.join(os.path.expanduser("~"), ".hydra", "AGENTS.md"),
+    ]
+    for target in fallback_targets:
+        if not os.path.isfile(target):
+            continue
+        try:
+            with open(target, "r", encoding="utf-8", errors="replace") as handle:
+                content = handle.read()
+            if not content.strip():
+                continue
+            paths = progen_paths(content)
+            chunks = []
+            for path in paths:
+                try:
+                    body = _read_capped(path).strip()
+                    if body:
+                        chunks.append(f"[PROGEN READ FIRST: {os.path.basename(path)}]\n{body}")
+                except OSError:
+                    continue
+            chunks.append(f"[SOVEREIGN CONTEXT & RULES: {os.path.basename(target)}]\n{content}")
+            return "\n\n".join(chunks)
+        except OSError:
+            continue
+
     return None
 
 
@@ -448,15 +505,20 @@ def format_model_picker(active_alias: str, active_summon: str) -> str:
 
 def dialect_instruction(name: str) -> str:
     """Session register block appended after project rules."""
-    key = (name or "progen").strip().lower()
+    key = (name or "slack").strip().lower()
     if key == "syntax":
         key = "progen"
     blocks = {
         "progen": (
             "[REGISTER: progen]\n"
-            "Every unit is topic : comment.\n"
-            "One blank line between units.\n"
-            "Zero leading copula."
+            "Every output statement must strictly follow topic : comment syntax.\n"
+            "Unit structure: exactly one topic : comment per line.\n"
+            "Blank line delimiter: exactly one blank line between each topic : comment statement.\n"
+            "Zero leading copula: never emit leading is, are, was, were in comments; assert raw predicates directly.\n"
+            "Never emit bare numbers, unformatted single words, or raw tokens without topic : comment structure.\n"
+            "Example direct answer query:\n"
+            "pool number : 125.\n\n"
+            "status : operation successful."
         ),
         "instruct": (
             "[REGISTER: instruct]\n"
@@ -468,10 +530,47 @@ def dialect_instruction(name: str) -> str:
         ),
         "slack": (
             "[REGISTER: slack]\n"
-            "Conversational prose permitted."
+            "Standard conversational prose and markdown permitted."
         ),
     }
-    return blocks.get(key, blocks["progen"])
+    return blocks.get(key, blocks["slack"])
+
+
+def _enforce_progen_answer(answer: str, prompt: str = "") -> str:
+    """Format and normalize answer into valid Progen syntax when active."""
+    raw = (answer or "").strip()
+    if not raw:
+        return raw
+
+    m_num = re.fullmatch(r"(\d+(?:\.\d+)?)[\.\s]*", raw)
+    if m_num:
+        val = m_num.group(1)
+        p_lower = prompt.lower()
+        if "pool" in p_lower:
+            return f"pool number : {val}.\n"
+        return f"result : {val}.\n"
+
+    m_pool = re.match(r"(?i)^(?:the\s+)?pool\s+number\s+(?:is\s+|:\s*)(\d+)\.?$", raw)
+    if m_pool:
+        return f"pool number : {m_pool.group(1)}.\n"
+
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    all_topic_comment = True
+    for ln in lines:
+        if not re.match(r"^[^:]+\s*:\s*.+$", ln):
+            all_topic_comment = False
+            break
+
+    if all_topic_comment and lines:
+        normalized = []
+        for ln in lines:
+            top, com = ln.split(":", 1)
+            c_str = com.strip()
+            c_str = re.sub(r"^(?:is|are|was|were)\s+", "", c_str, flags=re.IGNORECASE)
+            normalized.append(f"{top.strip()} : {c_str}")
+        return "\n\n".join(normalized) + "\n"
+
+    return raw
 
 
 def parse_heat(arg: str) -> Optional[float]:
@@ -2798,10 +2897,37 @@ def _empty_stream_state() -> Dict[str, Any]:
 
 
 CANCELLED_TEXT = "[Turn cancelled by user]"
+# stored as the reply of a prompt whose turn ended without one, for example when the agent process was killed
+INTERRUPTED_TEXT = "[Turn interrupted before a reply]"
 
 
 class TurnCancelled(Exception):
     """Raised inside a model call when the caller set the cancel event."""
+
+
+_USAGE_SINK: "contextvars.ContextVar[Optional[Callable[[Dict[str, Any]], None]]]" = contextvars.ContextVar("hydra_usage", default=None)
+
+
+def set_usage_sink(sink: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+    """Receive the provider usage object (prompt_tokens, completion_tokens) of each completion round of the calling thread."""
+    _USAGE_SINK.set(sink)
+
+
+_RETRY_SINK: "contextvars.ContextVar[Optional[Callable[[Dict[str, Any]], None]]]" = contextvars.ContextVar("hydra_retry", default=None)
+
+
+def set_retry_sink(sink: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+    """Receive attempt, wait and reason each time the calling thread retries a provider request."""
+    _RETRY_SINK.set(sink)
+
+
+def _report_usage(usage: Any) -> None:
+    sink = _USAGE_SINK.get()
+    if sink is not None and isinstance(usage, dict) and usage:
+        try:
+            sink(usage)
+        except Exception:
+            pass
 
 
 def _consume_completion_body(
@@ -2836,6 +2962,7 @@ def _consume_completion_body(
                 raise ProviderError(f"Empty completion from {where}")
             message = choices[0].get("message") or {}
             _emit_message_content(message, on_token, state)
+            _report_usage(parsed.get("usage"))
             return parsed
         if line.startswith("data:"):
             data = line[5:].strip()
@@ -2850,10 +2977,14 @@ def _consume_completion_body(
                 err = chunk["error"]
                 message = err.get("message") if isinstance(err, dict) else str(err)
                 raise ProviderError(redact(f"Provider error from {where}: {message}"))
+            if isinstance(chunk, dict) and chunk.get("usage"):
+                state["usage"] = chunk["usage"]
             choices = chunk.get("choices") or []
             if not choices:
                 continue
             choice = choices[0]
+            if choice.get("finish_reason"):
+                state["finished"] = True
             message = choice.get("message") or {}
             delta = choice.get("delta") or {}
             if delta:
@@ -2879,8 +3010,48 @@ def _consume_completion_body(
                 return parsed
     if not saw_done and not state["content"] and not state["tools"] and not state["reasoning"] and not state.get("reasoning_details"):
         raise ProviderError(f"Stream from {where} ended before data: [DONE]")
+    if not saw_done and not state.get("finished"):
+        # the connection closed mid-reply: never present half an answer as a finished one
+        raise ProviderError(f"Reply from {where} was cut off before it finished (connection closed after {len(''.join(state['content']))} characters)")
     finish = "tool_calls" if state["tools"] else "stop"
+    _report_usage(state.get("usage"))
     return {"choices": [{"message": _message_from_stream_state(state), "finish_reason": finish}]}
+
+
+def _stream_request(req: Any, timeout: int, callbacks: Any, where: str, on_action: Any, on_reasoning: Any, cancel: Any) -> Dict[str, Any]:
+    on_token, on_action, on_reasoning = callbacks
+    with urlopen(req, timeout=timeout) as resp:
+        return _consume_completion_body(resp, on_token, where, on_action=on_action, on_reasoning=on_reasoning, cancel=cancel)
+
+
+def _run_cancellable(work: Callable[[Any], Dict[str, Any]], on_token: Any, on_action: Any, on_reasoning: Any, cancel: threading.Event) -> Dict[str, Any]:
+    """Run a blocking provider read on a helper thread so Stop returns within a fraction of a second even when the
+    socket is silent. An abandoned read can no longer emit anything and ends on its own at the socket timeout."""
+    box: Dict[str, Any] = {}
+    abandoned = threading.Event()
+
+    def gate(fn: Any) -> Any:
+        if fn is None:
+            return None
+        return lambda *a, **k: None if abandoned.is_set() else fn(*a, **k)
+
+    def run() -> None:
+        try:
+            box["result"] = work((gate(on_token), gate(on_action), gate(on_reasoning)))
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            box["error"] = exc
+
+    ctx = contextvars.copy_context()  # the read reports usage to this turn's sink, so it must see this thread's hooks
+    worker = threading.Thread(target=lambda: ctx.run(run), daemon=True, name="hydra-provider-read")
+    worker.start()
+    while worker.is_alive():
+        worker.join(0.1)
+        if cancel.is_set():
+            abandoned.set()
+            raise TurnCancelled()
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
 
 
 def _fetch_streaming_completion(
@@ -2896,12 +3067,62 @@ def _fetch_streaming_completion(
     """Stream one chat completion and return the assembled message JSON."""
     body = dict(payload)
     body["stream"] = True
+    if os.environ.get("HYDRA_STREAM_USAGE", "1") != "0":
+        body.setdefault("stream_options", {"include_usage": True})
     data = json.dumps(body).encode("utf-8")
     req = Request(url, data=data, headers=headers, method="POST")
     where = describe_endpoint(url)
+    timeout = min(timeout, 60)  # no byte for a minute is a dead provider, not a slow one
+    retries = max(0, int(os.environ.get("HYDRA_PROVIDER_RETRIES", "2")))
+    base_wait = float(os.environ.get("HYDRA_BACKOFF_BASE", "0.5"))
+    emitted = threading.Event()
+
+    def mark(fn: Any) -> Any:
+        if fn is None:
+            return None
+
+        def call(*a: Any, **k: Any) -> Any:
+            emitted.set()
+            return fn(*a, **k)
+        return call
+
+    on_token, on_reasoning = mark(on_token), mark(on_reasoning)
+    attempt = 0
+    while True:
+        try:
+            return _fetch_streaming_once(req, timeout, where, on_token, on_action, on_reasoning, cancel)
+        except (HTTPError, URLError, OSError) as e:
+            reason = transient_reason(e)
+            # a retry after the first token would show the user the start of the reply twice
+            if reason is None or attempt >= retries or emitted.is_set():
+                _raise_stream_error(e, where)
+            wait = retry_wait(e, attempt, base_wait, cap=4.0)
+            attempt += 1
+            sink = _RETRY_SINK.get()
+            if sink is not None:
+                try:
+                    sink({"attempt": attempt, "of": retries, "wait": wait, "reason": reason})
+                except Exception:
+                    pass
+            if cancel is not None:
+                if cancel.wait(wait):
+                    raise TurnCancelled()
+            else:
+                time.sleep(wait)
+
+
+def _fetch_streaming_once(req: Any, timeout: int, where: str, on_token: Any, on_action: Any, on_reasoning: Any, cancel: Any) -> Dict[str, Any]:
     try:
-        with urlopen(req, timeout=timeout) as resp:
-            return _consume_completion_body(resp, on_token, where, on_action=on_action, on_reasoning=on_reasoning, cancel=cancel)
+        if cancel is not None:
+            return _run_cancellable(lambda cb: _stream_request(req, timeout, cb, where, on_action, on_reasoning, cancel), on_token, on_action, on_reasoning, cancel)
+        return _stream_request(req, timeout, (on_token, on_action, on_reasoning), where, on_action, on_reasoning, cancel)
+    except json.JSONDecodeError as e:
+        raise ProviderError(f"Invalid JSON from {where}: {e}") from e
+
+
+def _raise_stream_error(e: BaseException, where: str) -> None:
+    try:
+        raise e
     except HTTPError as e:
         error_body = ""
         try:
@@ -2911,8 +3132,6 @@ def _fetch_streaming_completion(
         raise ProviderError(redact(f"HTTP {e.code} from {where}: {error_body}")) from e
     except URLError as e:
         raise ProviderError(redact(f"Connection failed to {where}: {e.reason}")) from e
-    except json.JSONDecodeError as e:
-        raise ProviderError(f"Invalid JSON from {where}: {e}") from e
 
 
 def tool_result_text(result: Any) -> str:
@@ -3058,6 +3277,7 @@ def _run_agent_loop(
     on_reasoning: Optional[Callable[[str], None]] = None,
     max_context_chars: Optional[int] = None,
     cancel: Optional[threading.Event] = None,
+    extra_context: Optional[str] = None,
 ) -> str:
     """
     Execute autonomous agent loop with native coding tools and MCP tool invocation until completion or max turns.
@@ -3124,9 +3344,19 @@ def _run_agent_loop(
         effective_sys = f"{base_sys}\n\n{rules_context}"
     else:
         effective_sys = base_sys
+    if dialect is None:
+        env_d = os.environ.get("HYDRA_DIALECT", "").lower().strip()
+        if env_d in DIALECTS or env_d == "syntax":
+            dialect = "progen" if env_d in ("syntax", "progen") else env_d
+        elif rules_context and ("dialect : progen" in rules_context.lower() or "dialect: progen" in rules_context.lower() or "default register : progen" in rules_context.lower()):
+            dialect = "progen"
+        else:
+            dialect = "slack"
     register = dialect_instruction(dialect) if dialect else ""
     if register and register not in effective_sys:
         effective_sys = f"{effective_sys}\n\n{register}"
+    if extra_context and extra_context.strip():
+        effective_sys = f"{effective_sys}\n\n{extra_context.strip()}"
     effective_sys = f"{effective_sys}\n\n{_memory_block(target_cwd)}"
 
     original_prompt = prompt
@@ -3193,6 +3423,7 @@ def _run_agent_loop(
             raise ProviderError(redact(f"Compaction failed on every provider: {failure}"))
 
         ledger.compact_if_needed(window_tokens, summarize, len(sys_text) + len(prompt) + schema_chars(tools))
+    ledger.close_unanswered(INTERRUPTED_TEXT)
     prior = ledger.render_prior(original_prompt, mode)
     if prior:
         messages[1]["content"] = prior + "\n\n" + original_prompt
@@ -3345,6 +3576,7 @@ def _run_agent_loop(
         checkpointer.transition("COMPLETED")
         checkpointer.final_response = CANCELLED_TEXT
         checkpointer.save()
+        ledger.close_unanswered(CANCELLED_TEXT)
         return CANCELLED_TEXT
 
     while turn_idx < max_turns:
@@ -3422,6 +3654,8 @@ def _run_agent_loop(
         if not tool_calls:
             # Model emitted final answer -> statechart transition to COMPLETED
             final_content = message.get("content", "") or ""
+            if dialect == "progen":
+                final_content = _enforce_progen_answer(final_content, original_prompt)
             checkpointer.final_response = final_content
             checkpointer.transition("COMPLETED")
             ledger.append_turn(
@@ -3583,6 +3817,10 @@ def _run_agent_loop(
                             orig_file_content = f_orig.read()
                     except Exception:
                         orig_file_content = None
+
+            _start_sink = tool_start_sink()
+            if _start_sink is not None:
+                _start_sink(fn_name, args_str)
 
             result_content: Any = None
             interrupted_during_tool = False
@@ -3795,6 +4033,8 @@ def _run_agent_loop(
     sys.stderr.write(f"\n{c_tool_head} Reached maximum iterations ({max_turns}).\n")
     checkpointer.transition("MAX_TURNS")
     last_content = messages[-1].get("content", "Agent loop reached maximum turns without termination.")
+    if dialect == "progen":
+        last_content = _enforce_progen_answer(last_content, original_prompt)
     checkpointer.final_response = last_content
     checkpointer.save()
     return last_content
@@ -3829,6 +4069,11 @@ class HydraReplCompleter:
         "/stack",
         "/skills",
         "/route",
+        "/endpoints",
+        "/budgets",
+        "/credits",
+        "/usage",
+        "/dialect",
         "/help",
         "/exit",
         "/quit",
@@ -4018,11 +4263,21 @@ def run_interactive_agent(
     c_reset = RESET if color_on else ""
 
     target_cwd = os.path.abspath(cwd or os.getcwd())
+    rules_msg = detect_project_rules(target_cwd)
+    rules_label = "Detected (AGENTS.md / .cursorrules / CLAUDE.md)" if rules_msg else "None"
+
+    env_dialect = os.environ.get("HYDRA_DIALECT", "").lower().strip()
+    if env_dialect in DIALECTS or env_dialect == "syntax":
+        active_dialect = "progen" if env_dialect in ("syntax", "progen") else env_dialect
+    elif rules_msg and ("dialect : progen" in rules_msg.lower() or "dialect: progen" in rules_msg.lower() or "default register : progen" in rules_msg.lower()):
+        active_dialect = "progen"
+    else:
+        active_dialect = "slack"
+
     active_alias = DEFAULT_ORCHESTRATOR_MODEL if alias in ("agent", "auto", "orchestrator") else alias
     active_tier = tier
     active_session_id = session_id or f"session_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     active_steer_mode = steer_mode
-    active_dialect = "progen"
     active_effort: Optional[str] = None
     boot_route = resolve_route(active_alias)
     active_runner = boot_route.get("runner")
@@ -4044,9 +4299,6 @@ def run_interactive_agent(
     skip_next_tool = False
     turns_history: List[Tuple[str, str]] = []
     active_ledger = SessionContextLedger(session_id=active_session_id)
-
-    rules_msg = detect_project_rules(target_cwd)
-    rules_label = "Detected (AGENTS.md / .cursorrules / CLAUDE.md)" if rules_msg else "None"
 
     tui = _create_tui()
     if tui is not None:
@@ -4603,6 +4855,11 @@ def run_interactive_agent(
                     sys.stdout.write(f"{c_mid}[Invalid dialect '{arg}'. Valid: {', '.join(DIALECTS)}]{c_reset}\n")
                 sys.stdout.flush()
 
+            elif cmd in ("/endpoints", "/budgets", "/credits", "/usage"):
+                from hydra_cli.endpoints_report import generate_endpoints_report
+                sys.stdout.write(generate_endpoints_report(active_dialect) + "\n")
+                sys.stdout.flush()
+
             elif cmd == "/effort":
                 if not arg:
                     sys.stdout.write(format_effort_picker(active_effort) + "\n")
@@ -4705,6 +4962,10 @@ def run_interactive_agent(
   /skills          Written skill index
   /route           Last gate action, brain, and summon target
   /tier [tier]     Display or switch active tier (free, local, paid, frontier, none)
+  /dialect [name]  Display or set response dialect (progen, slack, instruct, gfc)
+  /endpoints       Query all local endpoints, free quota usage, and credit balances
+  /budgets         Query inference credit balances and rate limits
+  /usage           Display free endpoint quota usage remaining
   /steer [opts]    Toggle or set step-by-step confirmation mode (on/off/status)
   /skip            Skip the next tool call in the next agent turn
   /retry [guide]   Retry the previous turn with optional additional guidance

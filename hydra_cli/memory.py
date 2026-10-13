@@ -78,8 +78,11 @@ def _now() -> str:
 
 
 def git(repo: str, *args: str, env: Optional[Dict[str, str]] = None, stdin: Optional[str] = None) -> Tuple[int, str]:
-    proc = subprocess.run(["git", "-C", repo, *args], input=stdin, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", env=env)
+    try:
+        proc = subprocess.run(["git", "-C", repo, *args], input=stdin, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", env=env)
+    except OSError as exc:  # no git on this machine: callers see a failed command, a turn must not die of it
+        return 127, f"git unavailable: {exc}"
     return proc.returncode, proc.stdout.strip("\n") if proc.stdout else ""
 
 
@@ -768,7 +771,7 @@ def restore(move_id: str) -> str:
         raise GateError(f"restore : {move_id} is not a sweep_move line")
     if any(e["kind"] == "event" and e["subject"] == "sweep_restore" and e.get("move") == move_id for e in entries):
         raise GateError(f"restore : {move_id} was already restored")
-    target = os.path.join(event["repo"], event["old"])
+    target = os.path.normpath(os.path.join(event["repo"], event["old"]))
     if os.path.exists(target):
         raise GateError(f"restore : {event['old']} exists again, refusing to overwrite")
     if not os.path.isfile(event["new"]) or _sha256(event["new"]) != event["sha256"]:

@@ -34,6 +34,7 @@ MODEL_PRICING: Dict[str, Dict[str, Any]] = {
 
     # Free tier ($ / 1M tokens)
     "free": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
+    "local": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
     "qwen": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
     "qwen-3.8-27b:free": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},
     "deepseek-chat:free": {"tier": "free", "prompt_rate": 0.0, "completion_rate": 0.0},

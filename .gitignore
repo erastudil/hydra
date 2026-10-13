@@ -56,3 +56,7 @@ tmp*
 purgatory/
 *.log
 .venv/
+**/target/
+target/
+dist/
+
