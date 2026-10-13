@@ -339,6 +339,7 @@ pub struct HydraApp {
     focus_input: bool,
     composer_rect: egui::Rect,
     health_rx: std::sync::mpsc::Receiver<Vec<Check>>,
+    update_rx: std::sync::mpsc::Receiver<String>,
     checks: Vec<Check>,
     crash_note: Option<String>,
     panel_dismissed: bool,
@@ -492,6 +493,7 @@ impl HydraApp {
             focus_input: std::env::var("HYDRA_SHOT").is_err() || std::env::var("HYDRA_INPUT").is_ok(),
             composer_rect: egui::Rect::NOTHING,
             health_rx: { let (tx, rx) = std::sync::mpsc::channel(); std::thread::spawn(move || { let _ = tx.send(health::run()); }); rx },
+            update_rx: hydra_stdio::update::spawn_launch_check(),
             checks: vec![],
             crash_note: crate::crash::take_last_crash().map(|c| c.1),
             panel_dismissed: std::env::var("HYDRA_OPEN").as_deref() == Ok("dismiss"),
@@ -1360,14 +1362,26 @@ impl HydraApp {
             if focused && !self.slash_menu(ui) && ui.input_mut(|i| !i.modifiers.shift && !i.modifiers.alt && i.consume_key(Modifiers::NONE, Key::Enter)) {
                 do_send = true;
             }
-            if focused && self.composer_rect.is_positive() {
-                widgets::shadow(ui, self.composer_rect, 16, SHADOW_GLOW);
+            let thinking = self.m.active_busy();
+            if self.composer_rect.is_positive() && (focused || thinking) {
+                if thinking && !motion::reduced_motion() {
+                    // TUI prompt-bar pulse: border breathes between dim and
+                    // full phosphor green on a sin(ms / 240) wave while busy.
+                    let wave = ((ui.ctx().input(|i| i.time) * 1000.0 / 240.0).sin() * 0.5 + 0.5) as f32;
+                    let glow_color = Color32::from_rgba_unmultiplied(0, 255, 102, (40.0 + 90.0 * wave) as u8);
+                    widgets::glow(ui, self.composer_rect, 16, glow_color, (10.0 + 10.0 * wave).round() as u8);
+                } else if focused {
+                    widgets::shadow(ui, self.composer_rect, 16, SHADOW_GLOW);
+                }
             }
             let resp = egui::Frame::new()
                 .fill(BG3)
                 .corner_radius(cr(16))
                 .inner_margin(Margin::symmetric(16, 12))
-                .stroke(Stroke::new(1.0, if focused { ACCENT } else { BORDER }))
+                .stroke(Stroke::new(1.0, if thinking {
+                    let wave = ((ui.ctx().input(|i| i.time) * 1000.0 / 240.0).sin() * 0.5 + 0.5) as f32;
+                    motion::mix(Color32::from_rgb(31, 122, 69), ACCENT, if motion::reduced_motion() { 1.0 } else { wave })
+                } else if focused { ACCENT } else { BORDER }))
                 .show(ui, |ui| {
                     ui.set_width(width - 34.0);
                     let hint = match self.m.nav {
@@ -2537,7 +2551,10 @@ impl HydraApp {
                 }
             }
             if let (Some(d), Some(be)) = (decision, &mut self.be) {
-                let p = if is_cmd { Some(self.always_prefix.1.clone()) } else { None };
+                let p = if is_cmd {
+                    let trimmed = self.always_prefix.1.trim();
+                    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+                } else { None };
                 match d {
                     "always_thread" => {
                         self.m.approve_always(be, &a.id, "thread", p.as_deref());
@@ -3115,10 +3132,19 @@ impl HydraApp {
         }
     }
 
+}
+
+/// Screen-border glow predicate: computer use must be running, never merely
+/// open. A pending screen action always counts; a busy turn counts only on
+/// the Computer Use page or with the Live Screen drawer in front.
+pub fn computer_use_glow(nav: &str, drawer_tab: &str, any_busy: bool, pending_computer: bool) -> bool {
+    pending_computer || (any_busy && (nav == "computer" || drawer_tab == "screen"))
+}
+
+impl HydraApp {
     pub fn is_computer_use_active(&self) -> bool {
-        self.m.nav == "computer"
-            || self.m.pending.values().any(|p| matches!(p, Pending::Screen | Pending::Click | Pending::Type | Pending::Window))
-            || (self.m.drawer_tab == "screen" && self.m.any_busy())
+        let pending_computer = self.m.pending.values().any(|p| matches!(p, Pending::Screen | Pending::Click | Pending::Type | Pending::Window));
+        computer_use_glow(self.m.nav, self.m.drawer_tab, self.m.any_busy(), pending_computer)
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -3436,6 +3462,10 @@ impl HydraApp {
         } else {
             self.health_rx.try_recv().ok()
         };
+        if let Ok(line) = self.update_rx.try_recv() {
+            self.m.notice = format!("Update: {line}");
+            self.toast = Some((format!("Update: {line}"), f64::NAN));
+        }
         if let Some(c) = recv {
             self.checks = c;
             // first run without any key: take the user straight to the place where one is entered
@@ -3693,6 +3723,21 @@ mod tests {
         let empty = format_prompt_with_attachments("", &[vid]);
         assert!(empty.starts_with("Inspect attached files."));
         assert!(empty.contains("recording.mp4"));
+    }
+
+    #[test]
+    fn computer_use_glow_only_while_running() {
+        // Idle on the Computer Use page: no glow.
+        assert!(!computer_use_glow("computer", "screen", false, false));
+        // Idle in chat with the screen drawer closed: no glow.
+        assert!(!computer_use_glow("chat", "files", false, false));
+        // Busy turn away from any screen surface: no glow.
+        assert!(!computer_use_glow("chat", "files", true, false));
+        // Busy on Computer Use, or with Live Screen open: glow.
+        assert!(computer_use_glow("computer", "files", true, false));
+        assert!(computer_use_glow("chat", "screen", true, false));
+        // A screen action in flight always counts.
+        assert!(computer_use_glow("chat", "files", false, true));
     }
 
     #[test]

@@ -33,6 +33,7 @@ pub struct App {
     pub agents: Vec<AgentRow>,
     pub approval: Option<(String, String)>,
     pub be: Option<Backend>,
+    pub update_rx: Option<std::sync::mpsc::Receiver<String>>,
     pub thread: String,
     pub cwd: String,
     pub turn_n: u64,
@@ -73,6 +74,7 @@ impl App {
             agents: Vec::new(),
             approval: None,
             be: None,
+            update_rx: Some(hydra_stdio::update::spawn_launch_check()),
             thread: "tui-main".into(),
             cwd,
             turn_n: 0,
@@ -102,6 +104,11 @@ impl App {
     }
 
     pub fn tick(&mut self) {
+        if let Some(rx) = &self.update_rx {
+            while let Ok(line) = rx.try_recv() {
+                self.transcript.push(format!("update : {line}"));
+            }
+        }
         if self.busy_turn.is_some() {
             self.spin_i = self.spin_i.wrapping_add(1);
         }

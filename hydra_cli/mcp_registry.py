@@ -26,6 +26,56 @@ DEFAULT_HOME_CONFIG = get_default_home_config()
 DEFAULT_CWD_CONFIG = get_default_cwd_config()
 DEFAULT_CONFIG_PATH = DEFAULT_HOME_CONFIG
 
+SEARXNG_SERVER: Dict[str, Any] = {
+    "command": "npx",
+    "args": ["-y", "mcp-searxng"],
+    "env": {"SEARXNG_URL": "${SEARXNG_URL:-http://localhost:8080}"},
+    "description": "Web search via SearXNG metasearch. No Brave API key; point SEARXNG_URL at your instance.",
+}
+
+
+def sanitize_server_configs(servers: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Repair known-broken server entries in configs written by older Hydra
+    versions, so an upgrade never needs a hand edit of ~/.hydra:
+
+    - Brave search servers are dropped; SearXNG covers web search and
+      needs no API key. A `searxng` server takes the dropped slot.
+    - `fetch` launched through the npm package
+      `@modelcontextprotocol/server-fetch` never existed (npm 404); the
+      fetch server ships as the Python `mcp-server-fetch` under uvx.
+    - `mcp-server-sqlite` crashes against mcp>=2 (`Server.list_resources`
+      removed upstream); the launch gains the `--with mcp==1.*` pin.
+    """
+    out: Dict[str, Any] = {}
+    dropped_brave = False
+    for name, cfg in servers.items():
+        if not isinstance(cfg, dict):
+            out[name] = cfg
+            continue
+        blob = json.dumps(cfg).lower()
+        if "brave" in name.lower() or "brave" in blob:
+            dropped_brave = True
+            continue
+        cfg = dict(cfg)
+        args = [str(a) for a in cfg.get("args", [])]
+        joined = " ".join(args).lower()
+        if "@modelcontextprotocol/server-fetch" in joined:
+            cfg["command"] = "uvx"
+            cfg["args"] = ["mcp-server-fetch"]
+        elif "mcp-server-sqlite" in joined:
+            # mcp<2 cannot survive a Windows shell launch: cmd.exe reads
+            # the < as redirection and the server never starts. The same
+            # pin spelled mcp==1.* carries no shell metacharacters.
+            args = ["mcp==1.*" if a == "mcp<2" else a for a in args]
+            if "mcp==1.*" not in args:
+                args = ["--with", "mcp==1.*", *args]
+            cfg["args"] = args
+        out[name] = cfg
+    if dropped_brave and "searxng" not in out:
+        out["searxng"] = dict(SEARXNG_SERVER)
+    return out
+
 
 def interpolate_env_vars(obj: Any) -> Any:
     """
@@ -84,7 +134,7 @@ class McpRegistry:
                 self.config_path = discovered or get_default_home_config()
 
         if servers:
-            interpolated = interpolate_env_vars(self._extract_servers(servers))
+            interpolated = sanitize_server_configs(interpolate_env_vars(self._extract_servers(servers)))
             for name, srv_conf in interpolated.items():
                 self.register_server(name, srv_conf)
 
@@ -125,7 +175,7 @@ class McpRegistry:
             raw_data = json.load(f)
 
         interpolated = interpolate_env_vars(raw_data)
-        servers = self._extract_servers(interpolated)
+        servers = sanitize_server_configs(self._extract_servers(interpolated))
         for name, srv_conf in servers.items():
             self.register_server(name, srv_conf)
         return servers

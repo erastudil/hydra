@@ -6,7 +6,7 @@ mod layout;
 use std::io::{self, stdout};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -40,12 +40,19 @@ fn main() -> io::Result<()> {
     result
 }
 
+/// Press and Repeat act; Release never does. Release-reporting terminals
+/// deliver both for one keystroke, and acting on both doubled every character.
+fn handles_key(kind: KeyEventKind) -> bool {
+    kind != KeyEventKind::Release
+}
+
 fn run(terminal: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
     loop {
         terminal.draw(|frame| draw(frame, app))?;
         if event::poll(Duration::from_millis(50))? {
+            // Release events fall through: acting on Press and Release inserted every character twice.
             match event::read()? {
-                Event::Key(key) => {
+                Event::Key(key) if handles_key(key.kind) => {
                     match key.code {
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -371,4 +378,19 @@ fn probe() -> io::Result<()> {
         println!("{} {} {state}", row.name, row.target);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod key_kind_tests {
+    use super::*;
+
+    #[test]
+    fn release_events_are_not_key_actions() {
+        // One physical keystroke arrives as Press (+Repeat while held)
+        // and Release on release-reporting terminals. Only non-Release
+        // events may mutate the input.
+        assert!(handles_key(KeyEventKind::Press));
+        assert!(handles_key(KeyEventKind::Repeat));
+        assert!(!handles_key(KeyEventKind::Release));
+    }
 }
