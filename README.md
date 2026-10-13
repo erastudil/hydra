@@ -24,7 +24,7 @@
 
 Hydra is a sovereign multi-headed command-line AI engine and model router. It dispatches single prompts, autonomous agentic loops, and multi-agent swarms across frontier models, free cloud tiers, local inference backends, and public Model Context Protocol (MCP) servers.
 
-The Python package and the Node package share one alias catalog and operate with **zero external dependencies**, strictly utilizing runtime standard libraries.
+The Python package and the Node package share one alias catalog. The Node package uses the runtime standard library only. The Python terminal UI depends on prompt_toolkit.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-brightgreen.svg)](pyproject.toml)
@@ -235,5 +235,5 @@ Apache-2.0. Source and issues: https://github.com/erastudil/hydra
 
 ## Desktop app
 
-Native PySide6 app, no browser. Install with `pip install -e .[desktop]`, run `python -m hydra_cli.gui` or `hydra desktop`. Build the exe with `pip install -e .[build]` then `python scripts/build_exe.py` (writes `dist/Hydra/Hydra.exe`). `python scripts/create_desktop_shortcut.py` makes the Desktop shortcut.
+Native Rust app (`hydra-desktop-rs/`), no browser, no web view, no local server. It spawns `python -m hydra_cli stdio` and talks JSON lines over pipes (docs/STDIO_PROTOCOL.md). Build with `scripts/check_rust.sh` (cargo test, release build, Windows GNU cross build), copy `hydra-desktop-rs/target/release/Hydra.exe` to `dist/Hydra/Hydra.exe`, run `hydra desktop`, or make the Desktop shortcut with `python scripts/create_desktop_shortcut.py`.
 

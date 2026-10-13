@@ -14,13 +14,14 @@ import argparse
 import sys
 from pathlib import Path
 
-TANKBENCH_SRC = Path("C:/Users/jpm05/Documents/tankbench/src")
-if TANKBENCH_SRC.exists():
-    sys.path.insert(0, str(TANKBENCH_SRC))
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-from tankbench.idle_worker import run_worker_cli
+from tankbench_src import load_attr
 
-if __name__ == "__main__":
+
+def main() -> int:
     parser = argparse.ArgumentParser(
         prog="idle_compute_worker",
         description="Run opportunistic idle compute tasks across weighted sovereign ecosystem sectors.",
@@ -32,12 +33,15 @@ if __name__ == "__main__":
     parser.add_argument("--json", action="store_true", help="Output raw JSON execution trace")
     args = parser.parse_args()
 
-    sys.exit(
-        run_worker_cli(
-            max_cycles=args.cycles,
-            dry_run=args.dry_run,
-            as_json=args.json,
-            sample_interval_s=args.interval,
-            continuous=args.continuous,
-        )
+    run_worker_cli = load_attr("tankbench.idle_worker", "run_worker_cli")
+    return run_worker_cli(
+        max_cycles=args.cycles,
+        dry_run=args.dry_run,
+        as_json=args.json,
+        sample_interval_s=args.interval,
+        continuous=args.continuous,
     )
+
+
+if __name__ == "__main__":
+    sys.exit(main())

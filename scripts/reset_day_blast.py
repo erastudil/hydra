@@ -13,13 +13,14 @@ import argparse
 import sys
 from pathlib import Path
 
-TANKBENCH_SRC = Path("C:/Users/jpm05/Documents/tankbench/src")
-if TANKBENCH_SRC.exists():
-    sys.path.insert(0, str(TANKBENCH_SRC))
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
 
-from tankbench.reset_blast import run_blast_cli
+from tankbench_src import load_attr
 
-if __name__ == "__main__":
+
+def main() -> int:
     parser = argparse.ArgumentParser(
         prog="reset_day_blast",
         description="Execute Reset Day Blast workflow to consume expiring subscription quotas under safety fences.",
@@ -41,10 +42,13 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    sys.exit(
-        run_blast_cli(
-            blast_authorized=args.blast_authorized,
-            dry_run=args.dry_run,
-            as_json=args.json,
-        )
+    run_blast_cli = load_attr("tankbench.reset_blast", "run_blast_cli")
+    return run_blast_cli(
+        blast_authorized=args.blast_authorized,
+        dry_run=args.dry_run,
+        as_json=args.json,
     )
+
+
+if __name__ == "__main__":
+    sys.exit(main())
