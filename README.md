@@ -24,7 +24,7 @@
 
 Hydra is a sovereign multi-headed command-line AI engine and model router. It dispatches single prompts, autonomous agentic loops, and multi-agent swarms across frontier models, free cloud tiers, local inference backends, and public Model Context Protocol (MCP) servers.
 
-The Python package and the Node package share one alias catalog and operate with **zero external dependencies**, strictly utilizing runtime standard libraries.
+The Python package and the Node package share one alias catalog. The Node package uses the runtime standard library only. The Python terminal UI depends on prompt_toolkit.
 
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8+-brightgreen.svg)](pyproject.toml)
