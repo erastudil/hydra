@@ -10,8 +10,9 @@ readme = "README.md"
 authors = [
   { name = "erastudil" }
 ]
-license = "Apache-2.0"
-license-files = ["LICENSE"]
+# Table form: setuptools 68 (Ubuntu 24.04) rejects an SPDX license string.
+# setuptools>=77 still accepts the table until 2027-02-18.
+license = { text = "Apache-2.0" }
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
@@ -44,6 +45,9 @@ hydra = "hydra_cli.cli:main"
 Homepage = "https://github.com/erastudil/hydra"
 Repository = "https://github.com/erastudil/hydra"
 "Bug Tracker" = "https://github.com/erastudil/hydra/issues"
+
+[tool.setuptools]
+license-files = ["LICENSE"]
 
 [tool.setuptools.packages.find]
 include = ["hydra_cli*"]

@@ -243,6 +243,29 @@ def manifests():
 
 
 @check
+def project_metadata_egg_info():
+    """egg_info accepts the license table on the system setuptools and records prompt_toolkit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        result = subprocess.run(
+            [sys.executable, "setup.py", "egg_info", "--egg-base", tmp],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+        info = os.path.join(tmp, "hydra_ai_cli.egg-info")
+        pkg = open(os.path.join(info, "PKG-INFO"), encoding="utf-8").read()
+        requires = open(os.path.join(info, "requires.txt"), encoding="utf-8").read()
+        sources = open(os.path.join(info, "SOURCES.txt"), encoding="utf-8").read()
+        assert "\nLicense: Apache-2.0\n" in pkg
+        assert "\nLicense-File: LICENSE\n" in pkg
+        assert "prompt_toolkit>=" in requires
+        assert "hydra_cli/skills/hydra.md" in sources.splitlines()
+        assert "hydra_cli/data/stacks_cards.jsonl" in sources.splitlines()
+
+
+@check
 def release_archive_urls():
     """Install docs may only name release assets that GitHub actually serves."""
     import re
@@ -11519,6 +11542,54 @@ def knowledge_runtime_deps():
     with open(os.path.join(REPO, "package.json"), encoding="utf-8") as handle:
         package = json.load(handle)
     assert "dependencies" not in package, "Node package gained a dependency; update the README"
+
+
+@check
+def mcp_registry_sanitize():
+    """Stale MCP configs from older Hydra versions load repaired."""
+    from hydra_cli.mcp_registry import McpRegistry, sanitize_server_configs
+
+    stale = {
+        "mcpServers": {
+            "fetch": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-fetch"]},
+            "sqlite": {"command": "uvx", "args": ["mcp-server-sqlite", "--db-path", "x.db"]},
+            "brave-search": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+                "env": {"BRAVE_API_KEY": "${BRAVE_API_KEY}"},
+            },
+            "memory": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"]},
+        }
+    }
+    out = sanitize_server_configs(stale["mcpServers"])
+    assert "brave-search" not in out
+    assert out["searxng"]["args"] == ["-y", "mcp-searxng"]
+    assert "BRAVE" not in json.dumps(out)
+    assert out["fetch"] == {"command": "uvx", "args": ["mcp-server-fetch"]}
+    assert out["sqlite"]["args"][:3] == ["--with", "mcp==1.*", "mcp-server-sqlite"]
+    assert out["memory"]["args"] == ["-y", "@modelcontextprotocol/server-memory"]
+
+    current = {
+        "fetch": {"command": "uvx", "args": ["mcp-server-fetch"]},
+        "sqlite": {"command": "uvx", "args": ["--with", "mcp==1.*", "mcp-server-sqlite"]},
+        "searxng": {"command": "npx", "args": ["-y", "mcp-searxng"]},
+    }
+    assert sanitize_server_configs(current) == current
+
+    unsafe_pin = {"sqlite": {"command": "uvx", "args": ["--with", "mcp<2", "mcp-server-sqlite"]}}
+    out_pin = sanitize_server_configs(unsafe_pin)
+    assert out_pin["sqlite"]["args"] == ["--with", "mcp==1.*", "mcp-server-sqlite"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = os.path.join(tmp, "mcp_servers.json")
+        with open(cfg, "w", encoding="utf-8") as handle:
+            json.dump(stale, handle)
+        registry = McpRegistry(config_path=cfg, auto_load=False)
+        names = set(registry._server_configs)
+        assert "brave-search" not in names
+        assert "searxng" in names
+        assert registry._server_configs["fetch"]["command"] == "uvx"
+        assert registry._server_configs["sqlite"]["args"][1] == "mcp==1.*"
 
 
 @check
