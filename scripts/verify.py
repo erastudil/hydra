@@ -11545,6 +11545,54 @@ def knowledge_runtime_deps():
 
 
 @check
+def mcp_registry_sanitize():
+    """Stale MCP configs from older Hydra versions load repaired."""
+    from hydra_cli.mcp_registry import McpRegistry, sanitize_server_configs
+
+    stale = {
+        "mcpServers": {
+            "fetch": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-fetch"]},
+            "sqlite": {"command": "uvx", "args": ["mcp-server-sqlite", "--db-path", "x.db"]},
+            "brave-search": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+                "env": {"BRAVE_API_KEY": "${BRAVE_API_KEY}"},
+            },
+            "memory": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"]},
+        }
+    }
+    out = sanitize_server_configs(stale["mcpServers"])
+    assert "brave-search" not in out
+    assert out["searxng"]["args"] == ["-y", "mcp-searxng"]
+    assert "BRAVE" not in json.dumps(out)
+    assert out["fetch"] == {"command": "uvx", "args": ["mcp-server-fetch"]}
+    assert out["sqlite"]["args"][:3] == ["--with", "mcp==1.*", "mcp-server-sqlite"]
+    assert out["memory"]["args"] == ["-y", "@modelcontextprotocol/server-memory"]
+
+    current = {
+        "fetch": {"command": "uvx", "args": ["mcp-server-fetch"]},
+        "sqlite": {"command": "uvx", "args": ["--with", "mcp==1.*", "mcp-server-sqlite"]},
+        "searxng": {"command": "npx", "args": ["-y", "mcp-searxng"]},
+    }
+    assert sanitize_server_configs(current) == current
+
+    unsafe_pin = {"sqlite": {"command": "uvx", "args": ["--with", "mcp<2", "mcp-server-sqlite"]}}
+    out_pin = sanitize_server_configs(unsafe_pin)
+    assert out_pin["sqlite"]["args"] == ["--with", "mcp==1.*", "mcp-server-sqlite"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = os.path.join(tmp, "mcp_servers.json")
+        with open(cfg, "w", encoding="utf-8") as handle:
+            json.dump(stale, handle)
+        registry = McpRegistry(config_path=cfg, auto_load=False)
+        names = set(registry._server_configs)
+        assert "brave-search" not in names
+        assert "searxng" in names
+        assert registry._server_configs["fetch"]["command"] == "uvx"
+        assert registry._server_configs["sqlite"]["args"][1] == "mcp==1.*"
+
+
+@check
 def no_pytest_tree():
     root = os.path.join(REPO, "tests")
     if not os.path.isdir(root):
