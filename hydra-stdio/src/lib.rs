@@ -60,27 +60,56 @@ pub struct Backend {
     next: u64,
 }
 
-/// The checkout that holds `hydra_cli`: HYDRA_REPO, else a parent of the exe or of the working directory.
-pub fn repo_dir() -> Option<String> {
-    if let Ok(r) = std::env::var("HYDRA_REPO") {
-        return Some(r);
-    }
-    let mut starts = vec![];
+fn candidate_repo_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
-        starts.push(exe);
+        for dir in exe.ancestors().skip(1).take(8) {
+            dirs.push(dir.to_path_buf());
+        }
+        if let Some(parent) = exe.parent() {
+            dirs.push(parent.join("repo"));
+            dirs.push(parent.join("app"));
+        }
     }
     if let Ok(cwd) = std::env::current_dir() {
-        starts.push(cwd);
+        for dir in cwd.ancestors().take(8) {
+            dirs.push(dir.to_path_buf());
+        }
+        dirs.push(cwd.join("hydra"));
     }
-    for start in starts {
-        for dir in start.ancestors().skip(1).take(8) {
-            if dir.join("hydra_cli").join("__init__.py").is_file() {
-                return Some(dir.display().to_string());
-            }
+    for var in ["USERPROFILE", "HOME"] {
+        if let Ok(home) = std::env::var(var) {
+            let hp = std::path::PathBuf::from(home);
+            dirs.push(hp.join("Documents").join("hydra"));
+            dirs.push(hp.join("documents").join("hydra"));
+            dirs.push(hp.join("hydra"));
+            dirs.push(hp.join("Hydra").join("repo"));
+        }
+    }
+    dirs
+}
+
+/// The checkout that holds `hydra_cli`: HYDRA_REPO, else a git checkout with `hydra_cli`, else a parent/bundle folder with `hydra_cli`.
+pub fn repo_dir() -> Option<String> {
+    if let Ok(r) = std::env::var("HYDRA_REPO") {
+        if !r.trim().is_empty() {
+            return Some(r);
+        }
+    }
+    let cands = candidate_repo_dirs();
+    for dir in &cands {
+        if dir.join(".git").exists() && dir.join("hydra_cli").join("__init__.py").is_file() {
+            return Some(dir.display().to_string());
+        }
+    }
+    for dir in &cands {
+        if dir.join("hydra_cli").join("__init__.py").is_file() {
+            return Some(dir.display().to_string());
         }
     }
     None
 }
+
 
 /// Interpreters to try, in order, as (program, leading args).
 pub fn python_candidates() -> Vec<(String, Vec<String>)> {

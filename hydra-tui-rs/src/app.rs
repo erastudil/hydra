@@ -95,6 +95,7 @@ impl App {
             || std::path::Path::new(&self.cwd).join("CLAUDE.md").exists();
         vec![
             ("Session", self.thread.clone()),
+            ("Version", hydra_stdio::update::status_line()),
             ("Model", format!("{} (frontier)", self.model)),
             ("Dialect", self.dialect.clone()),
             ("Project", if rules_detected { "Detected (AGENTS.md)".into() } else { "None".into() }),
@@ -188,6 +189,7 @@ impl App {
             ("/mode", "switch context strategy: compact, sliding, recall"),
             ("/window", "set context window size in tokens"),
             ("/agents", "list active runner tasks"),
+            ("/update", "check version and pull latest from github"),
             ("/allow", "approve pending tool call"),
             ("/skip", "skip pending tool call"),
             ("/abort", "abort running turn"),
@@ -285,6 +287,7 @@ impl App {
                     ("/mode [compact|sliding|recall]", "switch context strategy"),
                     ("/window [tokens]", "set context window size in tokens"),
                     ("/agents", "list active runner tasks"),
+                    ("/update", "check version and pull latest from github"),
                     ("/allow", "approve pending tool call"),
                     ("/skip", "skip pending tool call"),
                     ("/abort", "abort running turn"),
@@ -361,6 +364,14 @@ impl App {
                 for row in &self.agents {
                     self.transcript.push(format!("{} : {} {}", row.id, row.state, row.label));
                 }
+            }
+            "update" => {
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(hydra_stdio::update::check_now());
+                });
+                self.update_rx = Some(rx);
+                self.transcript.push("update : checking github origin/main...".into());
             }
             "cancel" => self.cancel(),
             "allow" => self.decide("allow"),
