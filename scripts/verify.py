@@ -243,6 +243,29 @@ def manifests():
 
 
 @check
+def project_metadata_egg_info():
+    """egg_info accepts the license table on the system setuptools and records prompt_toolkit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        result = subprocess.run(
+            [sys.executable, "setup.py", "egg_info", "--egg-base", tmp],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+        info = os.path.join(tmp, "hydra_ai_cli.egg-info")
+        pkg = open(os.path.join(info, "PKG-INFO"), encoding="utf-8").read()
+        requires = open(os.path.join(info, "requires.txt"), encoding="utf-8").read()
+        sources = open(os.path.join(info, "SOURCES.txt"), encoding="utf-8").read()
+        assert "\nLicense: Apache-2.0\n" in pkg
+        assert "\nLicense-File: LICENSE\n" in pkg
+        assert "prompt_toolkit>=" in requires
+        assert "hydra_cli/skills/hydra.md" in sources.splitlines()
+        assert "hydra_cli/data/stacks_cards.jsonl" in sources.splitlines()
+
+
+@check
 def release_archive_urls():
     """Install docs may only name release assets that GitHub actually serves."""
     import re
