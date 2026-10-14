@@ -81,6 +81,7 @@ enum Cmd {
     Help,
     Search,
     EditInstructions,
+    Update,
 }
 
 /// True when the current agent child has not said hello 20 s after it was spawned. Counts from the latest spawn,
@@ -113,6 +114,7 @@ pub const SLASH: &[(&str, &str)] = &[
     ("/agents", "Edit this project's AGENTS.md"),
     ("/search", "Search every chat"),
     ("/settings", "Provider keys"),
+    ("/update", "Check version and sync with GitHub"),
     ("/help", "Keyboard shortcuts"),
 ];
 
@@ -141,6 +143,7 @@ fn slash_cmd(name: &str) -> Option<Cmd> {
         "/agents" => Cmd::EditInstructions,
         "/search" => Cmd::Search,
         "/settings" => Cmd::Settings,
+        "/update" => Cmd::Update,
         "/help" => Cmd::Help,
         _ => return None,
     })
@@ -307,6 +310,7 @@ fn palette_entries() -> Vec<(&'static str, &'static str, Cmd)> {
         ("Open Skills", "/skills", Cmd::Tab("skills")),
         ("Open MCP Servers", "/mcp", Cmd::Tab("mcp")),
         ("Open Background Tasks", "/tasks", Cmd::Tab("tasks")),
+        ("Check for Updates (Sync with GitHub)", "/update", Cmd::Update),
     ]
 }
 
@@ -493,7 +497,7 @@ impl HydraApp {
             focus_input: std::env::var("HYDRA_SHOT").is_err() || std::env::var("HYDRA_INPUT").is_ok(),
             composer_rect: egui::Rect::NOTHING,
             health_rx: { let (tx, rx) = std::sync::mpsc::channel(); std::thread::spawn(move || { let _ = tx.send(health::run()); }); rx },
-            update_rx: hydra_stdio::update::spawn_launch_check(),
+            update_rx: { let u_ctx = ctx0.clone(); hydra_stdio::update::spawn_launch_check_with(move || u_ctx.request_repaint()) },
             checks: vec![],
             crash_note: crate::crash::take_last_crash().map(|c| c.1),
             panel_dismissed: std::env::var("HYDRA_OPEN").as_deref() == Ok("dismiss"),
@@ -617,6 +621,14 @@ impl HydraApp {
             Cmd::Memories => {
                 self.memories_entries = read_memory_ledger(&memory_ledger_path());
                 self.memories_open = true;
+            }
+            Cmd::Update => {
+                self.toast = Some(("Checking GitHub for updates and syncing local install...".into(), f64::NAN));
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(hydra_stdio::update::check_now());
+                });
+                self.update_rx = rx;
             }
         }
     }
@@ -796,11 +808,15 @@ impl HydraApp {
             }
             // narrow windows give the badge's width to the cost chip
             if !narrow {
-                let (r, _) = ui.allocate_exact_size(vec2(66.0, 22.0), Sense::hover());
+                let (r, resp) = ui.allocate_exact_size(vec2(66.0, 22.0), Sense::click());
                 widgets::glow(ui, r, 11, ACCENT_DIM, 8);
                 ui.painter().rect_filled(r, cr(11), ACCENT_DIM);
                 ui.painter().rect_stroke(r, cr(11), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
-                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "v1.2.2", egui::FontId::new(TYPE_BADGE, egui::FontFamily::Name(BOLD.into())), ACCENT);
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, concat!("v", env!("CARGO_PKG_VERSION")), egui::FontId::new(TYPE_BADGE, egui::FontFamily::Name(BOLD.into())), ACCENT);
+                let clicked = resp.on_hover_text(format!("{}\nClick to check GitHub & sync local install", hydra_stdio::update::status_line())).clicked();
+                if clicked {
+                    self.run(Cmd::Update);
+                }
             }
         });
         let brand_right = brand.response.rect.right();
@@ -3749,5 +3765,8 @@ mod tests {
         let entries = palette_entries();
         assert!(entries.iter().any(|e| e.0.contains("Options")));
         assert!(entries.iter().any(|e| e.0.contains("Memory")));
+        assert!(entries.iter().any(|e| e.1 == "/update" && e.2 == Cmd::Update));
+        assert!(SLASH.iter().any(|s| s.0 == "/update"));
+        assert!(slash_cmd("/update") == Some(Cmd::Update));
     }
 }

@@ -318,7 +318,7 @@ pub fn build_banner_lines(cols: usize, info: &[(&str, &str)]) -> Vec<Line<'stati
 
     let tagline_spans = vec![
         Span::styled("Sovereign Multi-Headed AI Shell · ", Style::default().fg(to_color(DIM_RGB))),
-        Span::styled("v1.2.2", Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD)),
+        Span::styled(concat!("v", env!("CARGO_PKG_VERSION")), Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD)),
     ];
 
     let card_rows = render_session_card(info);
