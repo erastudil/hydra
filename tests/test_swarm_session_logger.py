@@ -10,7 +10,7 @@ import shutil
 import tempfile
 from typing import Any, Dict
 
-import pytest
+import unittest
 
 from hydra_cli.config import (
     DEFAULT_AGENT_MODEL,
@@ -283,3 +283,16 @@ def test_docstring_p018_linter_on_new_modules():
         res = linter.analyze_source(src)
         violations = res.get("violations", [])
         assert len(violations) == 0, f"Docstring violations in {rel_path}: {violations}"
+
+
+class SwarmSessionLoggerUnittestSuite(unittest.TestCase):
+    """Standard library unittest harness for SwarmSessionLogger and routing checks."""
+
+    def test_all_swarm_session_logger_checks(self):
+        """Run all swarm session logger, routing, and docstring linter checks."""
+        test_mimo_26_model_routing_and_cheaperinference_defaults()
+        test_swarm_fanout_aliases_and_adaptation()
+        test_context_window_sizing_and_ai_ml_invariant()
+        test_swarm_session_logger_lifecycle_and_writeup()
+        test_native_tool_implementations()
+        test_docstring_p018_linter_on_new_modules()

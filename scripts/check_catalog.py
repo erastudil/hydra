@@ -36,11 +36,35 @@ def fetch_ids(url, token=None, field="id"):
     return {item.get(field) for item in items}
 
 
+def verify_offline_schema():
+    required_keys = ("aliases", "swarm", "model_providers", "free_models", "default_cloudflare_model")
+    for key in required_keys:
+        if key not in CATALOG:
+            print(f"MISSING required catalog key: {key}")
+            return 1
+    models = {spec["model"] for spec in CATALOG["aliases"].values() if "model" in spec}
+    models |= {head["model"] for head in CATALOG["swarm"].values() if "model" in head}
+    for model in sorted(models):
+        for prov, url in URLS.items():
+            adapted = adapt_model_for_url(url, model)
+            if not adapted or not isinstance(adapted, str):
+                print(f"INVALID adapted model id for {model} on {prov}")
+                return 1
+    print(f"offline catalog schema verified: {len(models)} routed models, {len(CATALOG['free_models'])} free models")
+    return 0
+
+
 def main():
-    lists = {
-        "openrouter": fetch_ids("https://openrouter.ai/api/v1/models"),
-        "vercel": fetch_ids("https://ai-gateway.vercel.sh/v1/models"),
-    }
+    if "--offline" in sys.argv:
+        return verify_offline_schema()
+    try:
+        lists = {
+            "openrouter": fetch_ids("https://openrouter.ai/api/v1/models"),
+            "vercel": fetch_ids("https://ai-gateway.vercel.sh/v1/models"),
+        }
+    except Exception as exc:
+        print(f"network unreachable ({exc}); falling back to offline catalog schema verification")
+        return verify_offline_schema()
     ci_key = os.environ.get("CHEAPERINFERENCE_API_KEY", "").strip()
     if ci_key:
         lists["cheaperinference"] = fetch_ids("https://api.cheaperinference.com/v1/models", ci_key)
