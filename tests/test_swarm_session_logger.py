@@ -81,15 +81,15 @@ def test_swarm_fanout_aliases_and_adaptation():
     ci_url = "https://api.cheaperinference.com/v1/chat/completions"
     or_url = "https://openrouter.ai/api/v1/chat/completions"
 
-    assert adapt_model_for_url(ci_url, "mimo-2.6-pro") == "mimo-2.6-pro"
-    assert adapt_model_for_url(ci_url, "mimo-2.6-flash") == "mimo-2.6-flash"
-    assert adapt_model_for_url(ci_url, "xiaomi/mimo-2.6-pro") == "mimo-2.6-pro"
-    assert adapt_model_for_url(ci_url, "xiaomi/mimo-2.6-flash") == "mimo-2.6-flash"
+    assert adapt_model_for_url(ci_url, "mimo-2.6-pro") == "mimo-v2.6-pro"
+    assert adapt_model_for_url(ci_url, "mimo-2.6-flash") == "mimo-v2.6-flash"
+    assert adapt_model_for_url(ci_url, "xiaomi/mimo-2.6-pro") == "mimo-v2.6-pro"
+    assert adapt_model_for_url(ci_url, "xiaomi/mimo-2.6-flash") == "mimo-v2.6-flash"
 
-    assert adapt_model_for_url(or_url, "mimo-2.6-pro") == "xiaomi/mimo-2.6-pro"
-    assert adapt_model_for_url(or_url, "mimo-2.6-flash") == "xiaomi/mimo-2.6-flash"
+    assert adapt_model_for_url(or_url, "mimo-2.6-pro") == "xiaomi/mimo-v2.6-pro"
+    assert adapt_model_for_url(or_url, "mimo-2.6-flash") == "xiaomi/mimo-v2.6-flash"
     assert adapt_model_for_url(or_url, "glm-5.3-flash") == "z-ai/glm-5.3-flash"
-    assert adapt_model_for_url(or_url, "deepseek-4.1-flash") == "deepseek/deepseek-4.1-flash"
+    assert adapt_model_for_url(or_url, "deepseek-4.1-flash") == "deepseek/deepseek-v4.1-flash"
 
 
 def test_context_window_sizing_and_ai_ml_invariant():

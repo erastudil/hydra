@@ -76,12 +76,14 @@ def main():
     if hf_key:
         lists["huggingface"] = fetch_ids("https://router.huggingface.co/v1/models", hf_key)
 
-    models = {spec["model"] for spec in CATALOG["aliases"].values()}
-    models |= {head["model"] for head in CATALOG["swarm"].values()}
+    models = {spec["model"] for spec in CATALOG["aliases"].values() if "model" in spec}
+    models |= {head["model"] for head in CATALOG["swarm"].values() if "model" in head}
     restricted = CATALOG.get("model_providers", {})
     problems = 0
     for model in sorted(models):
-        allowed = restricted.get(model) or ["openrouter", "vercel", "cheaperinference"]
+        allowed = restricted.get(model) or (
+            ["local"] if ":" in model and not model.endswith(":free") else ["openrouter", "vercel", "cheaperinference"]
+        )
         found = [p for p in allowed if p in lists and adapt_model_for_url(URLS[p], model) in lists[p]]
         unchecked = [p for p in allowed if p not in lists]
         if found:
