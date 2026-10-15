@@ -54,6 +54,9 @@ MUTATIONS = [
     ("unchanged fields resent", M, "if last.as_ref().map(|l| l[i] == now_meta[i]).unwrap_or(false) { None }", "if false { None }", ["--test", "concurrency"]),
     ("D08 diff rows reserve item spacing", "src/app.rs", "                    ui.spacing_mut().item_spacing.y = 0.0;\n                    ScrollArea::vertical().id_salt((\"diffrows\", &key)).max_height(460.0).auto_shrink([false, true]).show_rows(ui, row_h, lines.len(), |ui, range| {\n", "                    ScrollArea::vertical().id_salt((\"diffrows\", &key)).max_height(460.0).auto_shrink([false, true]).show_rows(ui, row_h, lines.len(), |ui, range| {\n                        ui.spacing_mut().item_spacing.y = 0.0;\n", ["--test", "ui", "a_long_diff"]),
     ("header chips not fitted", "src/app.rs", "let mut room = ui.available_rect_before_wrap().right() - brand_right - gap;", "let mut room = f32::INFINITY;", ["--test", "ui", "header_chips"]),
+    ("D19 no library check", "src/main.rs", "if let Some(msg) = hydra_desktop::syslibs::preflight() {", "if let Some(msg) = None::<String> {", ["--test", "syslibs_real"]),
+    ("D19 xkb-x11 not checked", "src/syslibs.rs", "    lib(\"libxkbcommon-x11.so.0\", \"keyboard input on X11\", \"libxkbcommon-x11-0\", \"libxkbcommon-x11\"),\n", "", ["--test", "syslibs_real"]),
+    ("D19 wayland gaps hide x11", "src/syslibs.rs", "        if w.is_empty() || !set(env(\"DISPLAY\")) {", "        if true {", ["--lib", "syslibs"]),
 ]
 
 

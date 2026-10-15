@@ -3,6 +3,8 @@ pub mod backend;
 pub mod model;
 pub mod proc;
 pub mod crash;
+#[cfg(target_os = "linux")]
+pub mod syslibs;
 pub mod health;
 pub mod fsx;
 pub mod git;
