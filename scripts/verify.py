@@ -263,6 +263,7 @@ def project_metadata_egg_info():
         assert "prompt_toolkit>=" in requires
         assert "hydra_cli/skills/hydra.md" in sources.splitlines()
         assert "hydra_cli/data/stacks_cards.jsonl" in sources.splitlines()
+        assert "hydra_cli/getting_started.md" in sources.splitlines()
 
 
 @check
@@ -298,8 +299,8 @@ def cli_processes():
         (["--version"], 0, __version__, ""),
         (["-v"], 0, "hydra ", ""),
         (["banner"], 0, "Sovereign Multi-Headed AI Shell", ""),
-        (["setup"], 0, "HYDRA SETUP & INTEGRATION GUIDE", ""),
-        (["guide"], 0, "HYDRA SETUP & INTEGRATION GUIDE", ""),
+        (["setup"], 0, "Getting started with Hydra", ""),
+        (["guide"], 0, "Getting started with Hydra", ""),
         (["--list-models"], 0, "Hydra Registered Models & Aliases", ""),
         (["--list-models", "--verbose"], 0, "anthropic/claude-sonnet-5.5", ""),
         (["mcp", "list"], 0, "MCP", ""),
@@ -348,6 +349,52 @@ def cli_processes():
     assert "hydra :" in out
     assert "New session:" in out
     assert "Exiting Hydra agent session" in out
+
+
+@check
+def setup_guide_for_new_users():
+    """hydra setup prints the packaged beginner guide from Python and from Node."""
+    guide_path = os.path.join(REPO, "hydra_cli", "getting_started.md")
+    guide = open(guide_path, encoding="utf-8").read()
+    for phrase in (
+        "Getting started with Hydra",
+        "Open a terminal",
+        "Add python.exe to PATH",
+        "hydra auth",
+        "OPENROUTER_API_KEY",
+        "Cloudflare",
+        "10,000 Neurons",
+        "Credits, in plain words",
+        "Cheaper Inference",
+        "Hugging Face",
+        "RunPod",
+        "Modal",
+        "Ollama",
+        "Windows",
+        "Mac",
+        "Linux",
+        "/credits",
+        "HYDRA_TRUST_CWD_ENV",
+    ):
+        assert phrase in guide, phrase
+    proc = run_cli(["setup"])
+    assert proc.returncode == 0, proc.stderr
+    expected = guide if guide.endswith("\n") else guide + "\n"
+    assert proc.stdout == expected
+    node = shutil.which("node")
+    if not node:
+        return
+    node_proc = subprocess.run(
+        [node, os.path.join(REPO, "bin", "hydra.js"), "setup"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+    )
+    assert node_proc.returncode == 0, node_proc.stderr
+    assert node_proc.stdout == proc.stdout
 
 
 @check

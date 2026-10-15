@@ -1,6 +1,8 @@
 # Hydra setup and integration
 
-This page is the longer install and embed guide for Hydra 1.1.0. The command is `hydra`. The Python distribution name is `hydra-ai-cli`. The Node distribution name is `hydra-agent-cli`.
+People who are new to the terminal should start with [Getting started](hydra_cli/getting_started.md). `hydra setup` prints that guide. This page is the integration note for embedding Hydra in another program.
+
+The command is `hydra`. The Python distribution name is `hydra-ai-cli`. The Node distribution name is `hydra-agent-cli`.
 
 ## Install
 

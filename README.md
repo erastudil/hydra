@@ -30,6 +30,10 @@ The Python package and the Node package share one alias catalog. The Node packag
 [![Python](https://img.shields.io/badge/python-3.8+-brightgreen.svg)](pyproject.toml)
 [![Node](https://img.shields.io/badge/node-18+-success.svg)](package.json)
 
+## New here?
+
+If you have used ChatGPT, Claude, or Gemini in a browser, start with [Getting started](hydra_cli/getting_started.md). It walks through Windows, Mac, and Linux in everyday language: installing Hydra, opening a free account, topping up credits, and saving keys safely. After Hydra is installed, `hydra setup` prints that same guide.
+
 ## Fixed in v1.2.1
 
 - `hydra agent` sends the model id (not the endpoint URL) and falls back across providers like single prompts do.
@@ -194,6 +198,8 @@ function callHydra(alias, prompt) {
 ```
 
 ## Settings & Credentials
+
+The plain-language walkthrough for creating these accounts and saving the keys is [Getting started](hydra_cli/getting_started.md).
 
 Credentials live in `~/.hydra/.env` or system environment:
 

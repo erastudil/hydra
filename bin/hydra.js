@@ -884,7 +884,7 @@ USAGE:
     hydra mcp list                       # List configured community MCP servers & tools
     hydra banner                         # Display 3-head TUI Hydra + title wordmark
     hydra / hydra chat / hydra tui       # Interactive REPL with slash commands (Python)
-    hydra setup                          # Interactive setup & app/agent integration guide
+    hydra setup                          # Plain-language setup: accounts, credits, and keys
     cat file.txt | hydra <alias>         # The pipe is the prompt
     cat file.txt | hydra <alias> - "instruction"
     hydra <alias> -- <prompt>            # Keep prompt words that match an alias
@@ -909,50 +909,15 @@ OPTIONS:
 `;
 
 function printSetupGuide() {
-  console.log(`
-================================================================================
-  HYDRA SETUP & INTEGRATION GUIDE · v${VERSION} (Node.js)
-================================================================================
-
-1. CREDENTIALS
---------------------------------------------------------------------------------
-Hydra reads the process environment, then ~/.hydra/.env.
-A project .env may set ordinary settings such as HYDRA_FREE_MODEL.
-Keys, tokens, and host URLs in a project .env stay unloaded unless HYDRA_TRUST_CWD_ENV=1.
-
-  export AI_GATEWAY_API_KEY="your-token"
-  # VERCEL_AI_GATEWAY_TOKEN is accepted as an alias.
-  export OPENROUTER_API_KEY="sk-or-v1-..."
-  export CHEAPERINFERENCE_API_KEY="your-key"
-  export RUNPOD_API_KEY="..."
-  export RUNPOD_ENDPOINT_ID="..." # or RUNPOD_ENDPOINT_URL
-  export MODAL_ENDPOINT_URL="..."
-  export CLOUDFLARE_API_TOKEN="..."
-  export CLOUDFLARE_ACCOUNT_ID="..."
-
-hydra free needs Cloudflare or OpenRouter. hydra local needs no cloud key.
-
-2. NODE INTEGRATION
---------------------------------------------------------------------------------
-  import { execFileSync } from 'node:child_process';
-
-  function callHydra(alias, prompt) {
-    return execFileSync('hydra', [alias, prompt, '--no-stream'], {
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
+  const guidePath = path.join(__dirname, '..', 'hydra_cli', 'getting_started.md');
+  let text;
+  try {
+    text = fs.readFileSync(guidePath, 'utf8');
+  } catch (err) {
+    console.error(`[ERROR] Setup guide missing at ${guidePath}`);
+    return;
   }
-
-3. SWARM
---------------------------------------------------------------------------------
-Specialists run in parallel. One synthesizer runs after their text exists.
-
-  hydra swarm "Architect a low-latency order book"
-  hydra swarm "Design the consensus loop" --heads architect,auditor
-
-Docs & Source: https://github.com/erastudil/hydra
-================================================================================
-`);
+  process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
 }
 
 function printModels(verbose = false) {

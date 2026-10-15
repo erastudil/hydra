@@ -77,7 +77,7 @@ USAGE:
     hydra sandbox run "<cmd>"            # Isolated zero-trust command execution
     hydra banner                         # Display 3-head TUI Hydra + title wordmark
     hydra / hydra chat / hydra tui       # Interactive REPL with slash commands
-    hydra setup                          # Interactive setup & app/agent integration guide
+    hydra setup                          # Plain-language setup: accounts, credits, and keys
     hydra auth                           # Interactive credential onboarding wizard & provider status
     hydra auth status                    # Inspect configured model providers without leaking secrets
     cat file.txt | hydra <alias>         # The pipe is the prompt
@@ -211,108 +211,15 @@ def launch_desktop() -> int:
 
 
 def print_setup_guide():
-    """Print a comprehensive setup and application/agent integration guide."""
-    guide = f"""
-================================================================================
-  HYDRA SETUP & INTEGRATION GUIDE · v{__version__}
-================================================================================
-
-1. QUICK SETUP & CREDENTIALS
---------------------------------------------------------------------------------
-Hydra reads the process environment first, then ~/.hydra/.env.
-A project .env may set ordinary settings such as HYDRA_FREE_MODEL.
-Keys, tokens, and host URLs in a project .env stay unloaded unless HYDRA_TRUST_CWD_ENV=1.
-Supported providers:
-
-  A. Cloudflare Workers AI (Zero cost or your existing paid plan):
-     export CLOUDFLARE_API_TOKEN="your-token"
-     export CLOUDFLARE_ACCOUNT_ID="your-account-id"
-
-  B. OpenRouter (Access to 200+ models with unified billing or free tiers):
-     export OPENROUTER_API_KEY="sk-or-v1-..."
-
-  C. Vercel AI Gateway:
-     export AI_GATEWAY_API_KEY="your-token"
-     # VERCEL_AI_GATEWAY_TOKEN is accepted as an alias of the same key.
-
-  D. CheaperInference (Discounted frontier & open-weight routing, GLM models):
-     export CHEAPERINFERENCE_API_KEY="ci_live_..."
-
-  E. RunPod (Serverless vLLM endpoints and GPU pods):
-     export RUNPOD_API_KEY="rpa_..."
-     export RUNPOD_ENDPOINT_ID="your-endpoint-id" # or export RUNPOD_ENDPOINT_URL="..."
-
-  F. Modal (Serverless vLLM / OpenAI endpoints):
-     export MODAL_ENDPOINT_URL="https://<app>.modal.run/v1"
-     export MODAL_API_KEY="your-key"
-
-  G. Local mode needs no cloud key:
-     • hydra local "<prompt>"  -> Ollama (11434), llama.cpp (8080), or EasyLM (8000)
-     • hydra free "<prompt>"   -> Cloudflare or OpenRouter free-tier models. A key is required.
-
-2. SHELL SCRIPTS & UNIX PIPES
---------------------------------------------------------------------------------
-Pipe outputs directly from your shell into any model:
-
-  # Review recent git diff with Sonnet 5.5
-  git diff | hydra sonnet 5.5 - "Audit for security issues and edge cases"
-
-  # The pipe alone is the prompt
-  cat build.log | hydra free --no-stream
-
-  # Words after -- stay in the prompt, even when they look like an alias
-  hydra opus 5.5 -- high ground rules
-
-3. INTEGRATING INTO PYTHON APPLICATIONS & AGENTS
---------------------------------------------------------------------------------
-A. Direct Import:
-   from hydra_cli import complete
-
-   print(complete("sonnet 5.5", "Analyze memory ordering in lock-free rings"))
-
-B. Subprocess / Agent Tool Pattern (LangChain, AutoGen, CrewAI, Antigravity):
-   import subprocess
-
-   def hydra_tool(model_alias: str, query: str) -> str:
-       proc = subprocess.run(
-           ["hydra", model_alias, query, "--no-stream"],
-           capture_output=True,
-           text=True,
-           check=True
-       )
-       return proc.stdout.strip()
-
-   # Or structured JSON:
-   # proc = subprocess.run(["hydra", "sonnet 5.5", query, "--json", "--no-stream"], ...)
-
-4. INTEGRATING INTO NODE.JS / TYPESCRIPT APPLICATIONS
---------------------------------------------------------------------------------
-Run via global CLI or npx with zero npm install:
-
-  import {{ execFileSync }} from 'node:child_process';
-
-  function callHydra(alias, prompt) {{
-    return execFileSync('hydra', [alias, prompt, '--no-stream'], {{
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }}).trim();
-  }}
-
-  const analysis = callHydra('sonnet 5.5', 'Analyze this payload');
-
-5. MULTI-AGENT SWARMS
---------------------------------------------------------------------------------
-Spawn specialist heads in parallel, then one synthesizer after they finish:
-
-  hydra swarm "Architect a low-latency tick-by-tick orderbook"
-
-Custom heads:
-  hydra swarm "Design consensus loop" --heads architect,auditor
-
-Docs & Source: https://github.com/erastudil/hydra
-================================================================================
-"""
-    print(guide)
+    """Print the plain-language setup guide shipped beside this module."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "getting_started.md")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        sys.stderr.write(f"[ERROR] Setup guide missing at {path} ({exc}).\n")
+        return
+    print(text.rstrip("\n"))
 
 
 def _parse_number(flag: str, raw: str, integer: bool) -> Tuple[Optional[float], Optional[str]]:

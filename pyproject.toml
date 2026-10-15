@@ -53,5 +53,5 @@ license-files = ["LICENSE"]
 include = ["hydra_cli*"]
 
 [tool.setuptools.package-data]
-hydra_cli = ["catalog.json", "invariants.json", "mcp_servers.default.json", "data/*.jsonl", "skills/*.md"]
+hydra_cli = ["catalog.json", "invariants.json", "mcp_servers.default.json", "getting_started.md", "data/*.jsonl", "skills/*.md"]
 
