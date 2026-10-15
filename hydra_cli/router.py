@@ -210,6 +210,24 @@ def launch_desktop() -> int:
     return 0
 
 
+def launch_rust_tui(argv: Optional[List[str]] = None) -> int:
+    """Launch the native Rust TUI binary (hydra-tui.exe / hydra-tui) in the current terminal."""
+    import subprocess
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    names = ("hydra-tui.exe", "hydra-tui")
+    candidates = [os.environ.get("HYDRA_TUI_EXE", "")]
+    for sub in (("dist", "Hydra"), ("dist",), ("hydra-tui-rs", "target", "release")):
+        candidates += [os.path.join(root, *sub, n) for n in names]
+    exe = next((c for c in candidates if c and os.path.isfile(c)), "")
+    if not exe:
+        print("Native Rust TUI binary not built. Run `cargo build --release` inside hydra-tui-rs.", file=sys.stderr)
+        return 1
+    pass_args = [a for a in (argv or []) if a != "--rust"]
+    proc = subprocess.run([exe, *pass_args], cwd=root, env={**os.environ, "HYDRA_REPO": root})
+    return proc.returncode
+
+
 def print_setup_guide():
     """Print the plain-language setup guide shipped beside this module."""
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "getting_started.md")
@@ -254,7 +272,11 @@ def route_command(argv: List[str]) -> int:
         from hydra_cli.ui import print_banner
         print_banner(detailed=True, version=__version__)
         return 0
+    if argv and argv[0].lower() in ("rust-tui", "tui-rs", "--rust"):
+        return launch_rust_tui(argv[1:])
     if argv and argv[0].lower() in ("chat", "tui", "repl", "interactive"):
+        if "--rust" in argv[1:] or (argv[0].lower() == "tui" and os.environ.get("HYDRA_RUST_TUI", "").strip() == "1"):
+            return launch_rust_tui(argv[1:])
         from hydra_cli.repl import run_repl
         return run_repl(initial_argv=argv[1:])
     if argv and argv[0] in ("setup", "guide", "--setup", "--guide"):

@@ -2277,7 +2277,7 @@ def open_swarm_and_catalog():
     assert model_providers("deepseek 4.1 flash") == ["cheaperinference", "vercel", "openrouter"]
     assert model_providers("mimo 2.6 flash") == ["cheaperinference", "vercel", "openrouter"]
     assert model_providers("mimo 2.6 pro") == ["cheaperinference", "vercel", "openrouter"]
-    assert resolve_route("orchestrator")["model"] == "mimo-2.6-pro"
+    assert resolve_route("orchestrator")["model"] == "mimo-2.6-flash"
 
     ci_url = "https://api.cheaperinference.com/v1/chat/completions"
     or_url = "https://openrouter.ai/api/v1/chat/completions"
@@ -10867,13 +10867,14 @@ def wave22_session_logger_and_mimo_routing():
     )
     from hydra_cli.native_tools import NativeToolRegistry
 
-    assert DEFAULT_MODEL == "mimo 2.6 pro"
-    assert DEFAULT_ORCHESTRATOR_MODEL == "mimo 2.6 pro"
-    assert DEFAULT_AGENT_MODEL == "mimo 2.6 pro"
+    assert DEFAULT_MODEL == "mimo 2.6 flash"
+    assert DEFAULT_ORCHESTRATOR_MODEL == "mimo 2.6 flash"
+    assert DEFAULT_AGENT_MODEL == "mimo 2.6 flash"
     assert resolve_model("mimo 2.6 pro") == "mimo-2.6-pro"
     assert resolve_model("mimo") == "mimo-2.6-pro"
-    assert resolve_model("daily driver") == "mimo-2.6-pro"
+    assert resolve_model("daily driver") == "mimo-2.6-flash"
     assert resolve_model("mimo 2.6 flash") == "mimo-2.6-flash"
+    assert resolve_model("mimo.2.6 flash") == "mimo-2.6-flash"
 
     assert set(DEFAULT_FANOUT_SWARM_ALIASES) == {"glm 5.3 flash", "deepseek 4.1 flash", "mimo 2.6 flash"}
     assert model_providers("mimo 2.6 pro")[0] == "cheaperinference"

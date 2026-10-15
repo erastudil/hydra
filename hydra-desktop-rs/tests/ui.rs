@@ -439,3 +439,23 @@ fn cwd_chip_elides_from_the_left_on_char_boundaries() {
     assert_eq!(fit_cwd(p, |t| t.chars().count() <= 20).as_deref(), Some("cwd: …/проекты/hydra"));
     assert_eq!(fit_cwd(p, |t| t.chars().count() <= 6), None, "too tight: no chip rather than a useless stub");
 }
+
+#[test]
+fn default_model_is_mimo_flash_and_computer_use_renders_screen_gradient_mesh() {
+    let mut h = harness("cu_gradient");
+    settle(&mut h);
+    assert_eq!(MODELS[app(&mut h).model().model].0, "mimo 2.6 flash");
+    // Switch to Computer Use mode and start a busy turn so both the composer pulse and screen border gradient activate
+    app(&mut h).model_mut().set_nav("computer");
+    say(&mut h, "SLOW inspect screen");
+    assert!(app(&mut h).model().active_busy());
+    assert!(app(&mut h).is_computer_use_active());
+    h.run_steps(3);
+    h.get_by_label_contains("Thinking · working...");
+    let has_gradient_mesh = h.output().shapes.iter().any(|c| match &c.shape {
+        egui::Shape::Mesh(m) => m.vertices.len() == 64 * 3 && m.indices.len() == 64 * 4 * 3,
+        _ => false,
+    });
+    assert!(has_gradient_mesh, "Computer Use active state must paint the 64-segment inward screen-border gradient mesh");
+}
+

@@ -7,8 +7,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub const MODELS: &[(&str, &str)] = &[
-    ("mimo 2.6 pro", "Xiaomi MiMo 2.6 Pro (Daily Driver)"),
-    ("mimo 2.6 flash", "Xiaomi MiMo 2.6 Flash"),
+    ("mimo 2.6 flash", "Xiaomi MiMo 2.6 Flash (Daily Driver)"),
+    ("mimo 2.6 pro", "Xiaomi MiMo 2.6 Pro (Speed Dial)"),
+    ("glm 5.3 flash", "GLM 5.3 Flash (Fallback)"),
+    ("deepseek 4.1 flash", "DeepSeek 4.1 Flash"),
     ("sonnet 5.5", "Claude Sonnet 5.5"),
     ("claude-3-7-sonnet", "Claude 3.7 Sonnet"),
     ("gemini-2.5-flash", "Gemini 2.5 Flash"),
@@ -17,11 +19,21 @@ pub const MODELS: &[(&str, &str)] = &[
     ("llama-3.3-70b-instruct:free", "Llama 3.3 70B (Free)"),
     ("opus 5.5", "Claude Opus 5.5"),
     ("sol 6.1 pro", "GPT-6.1 Sol Pro"),
-    ("glm 5.3 flash", "GLM 5.3 Flash"),
-    ("deepseek 4.1 flash", "DeepSeek 4.1 Flash"),
     ("free", "Free Forge Routing"),
     ("local", "Offline Local (Ollama)"),
 ];
+
+/// Normalize user/env model strings such as `"mimo.2.6 flash"` to canonical `MODELS` keys.
+pub fn normalize_model_key(raw: &str) -> String {
+    let s = raw.trim().to_lowercase();
+    match s.as_str() {
+        "mimo.2.6 flash" | "mimo-2.6-flash" | "mimo_2_6_flash" | "mimo" | "mimo flash" => "mimo 2.6 flash".into(),
+        "mimo.2.6 pro" | "mimo-2.6-pro" | "mimo_2_6_pro" | "mimo pro" => "mimo 2.6 pro".into(),
+        "glm.5.3 flash" | "glm-5.3-flash" | "glm_5_3_flash" | "glm" | "glm flash" => "glm 5.3 flash".into(),
+        _ => s,
+    }
+}
+
 pub const NAV: &[(&str, &str)] = &[
     ("chat", "Chat Mode"),
     ("agent", "Agent ReAct Loop"),

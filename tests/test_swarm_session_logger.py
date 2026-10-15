@@ -39,11 +39,11 @@ from hydra_cli.session_logger import (
 
 
 def test_mimo_26_model_routing_and_cheaperinference_defaults():
-    """Verify Mimo 2.6 Pro daily driver and CheaperInference provider precedence."""
+    """Verify Mimo 2.6 Flash daily driver and CheaperInference provider precedence."""
     # Default daily driver resolution
-    assert DEFAULT_MODEL == "mimo 2.6 pro"
-    assert DEFAULT_ORCHESTRATOR_MODEL == "mimo 2.6 pro"
-    assert DEFAULT_AGENT_MODEL == "mimo 2.6 pro"
+    assert DEFAULT_MODEL == "mimo 2.6 flash"
+    assert DEFAULT_ORCHESTRATOR_MODEL == "mimo 2.6 flash"
+    assert DEFAULT_AGENT_MODEL == "mimo 2.6 flash"
 
     # Alias resolution
     assert resolve_model("mimo 2.6 pro") == "mimo-2.6-pro"
@@ -51,9 +51,10 @@ def test_mimo_26_model_routing_and_cheaperinference_defaults():
     assert resolve_model("mimo") == "mimo-2.6-pro"
     assert resolve_model("mimo 2.6") == "mimo-2.6-pro"
     assert resolve_model("mimo pro") == "mimo-2.6-pro"
-    assert resolve_model("daily driver") == "mimo-2.6-pro"
+    assert resolve_model("daily driver") == "mimo-2.6-flash"
 
     assert resolve_model("mimo 2.6 flash") == "mimo-2.6-flash"
+    assert resolve_model("mimo.2.6 flash") == "mimo-2.6-flash"
     assert resolve_model("mimo-2.6-flash") == "mimo-2.6-flash"
     assert resolve_model("mimo flash") == "mimo-2.6-flash"
 
@@ -70,7 +71,7 @@ def test_mimo_26_model_routing_and_cheaperinference_defaults():
     assert DEFAULT_MODEL_ALIASES["mimo"] == "mimo 2.6 pro"
     assert DEFAULT_MODEL_ALIASES["mimo pro"] == "mimo 2.6 pro"
     assert DEFAULT_MODEL_ALIASES["mimo flash"] == "mimo 2.6 flash"
-    assert DEFAULT_MODEL_ALIASES["daily driver"] == "mimo 2.6 pro"
+    assert DEFAULT_MODEL_ALIASES["daily driver"] == "mimo 2.6 flash"
 
 
 def test_swarm_fanout_aliases_and_adaptation():
