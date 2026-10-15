@@ -20,6 +20,19 @@ pub enum Ev {
     Done { turn: String, text: String, ok: bool, cancelled: bool },
     Error { code: String, message: String, turn: Option<String>, id: Option<String> },
     ActionResult { id: String, action: String, result: Value },
+    Checkpoint { turn: String, ok: bool, id: Option<String>, reason: String },
+    CheckpointList { id: String, thread: String, checkpoints: Vec<Value> },
+    RewindResult { id: String, backup: String, restored: Vec<String>, removed: Vec<String>, conversation: bool, turns: Option<u64> },
+    RulesResult { id: String, thread: String, rules: Vec<Value> },
+    Context { turn: String, rules: Option<String>, skills: Vec<String>, mcp_tools: Vec<String>, mcp_errors: Value },
+    Retry { turn: String, attempt: u64, of: u64, wait: f64, reason: String },
+    AutoDecision { turn: String, tool: String, allow: bool, reason: String },
+    SkillList { id: String, skills: Vec<Value> },
+    McpStatus { id: String, config: Option<String>, servers: Vec<Value> },
+    TaskList { id: String, tasks: Vec<Value> },
+    TaskUpdate { task: Value },
+    SessionList { id: String, sessions: Vec<Value> },
+    HistoryResult { id: String, thread: String, turns: Vec<Value> },
     Exited(String),
 }
 
@@ -28,6 +41,13 @@ pub fn parse_line(line: &str) -> Option<Ev> {
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     let b = |k: &str| v.get(k).and_then(|x| x.as_bool()).unwrap_or(false);
     let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+    let arr = |k: &str| v.get(k).and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    let str_arr = |k: &str| -> Vec<String> {
+        v.get(k)
+            .and_then(|x| x.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    };
     Some(match v.get("type")?.as_str()? {
         "hello" => Ev::Hello,
         "token" => Ev::Token { turn: s("turn"), text: s("text") },
@@ -49,6 +69,75 @@ pub fn parse_line(line: &str) -> Option<Ev> {
             id: v.get("id").and_then(|x| x.as_str()).map(String::from),
         },
         "action_result" => Ev::ActionResult { id: s("id"), action: s("action"), result: v.get("result").cloned().unwrap_or(Value::Null) },
+        "checkpoint" => Ev::Checkpoint {
+            turn: s("turn"),
+            ok: b("ok"),
+            id: v.get("id").and_then(|x| x.as_str()).map(String::from),
+            reason: s("reason"),
+        },
+        "checkpoint_list" => Ev::CheckpointList {
+            id: s("id"),
+            thread: s("thread"),
+            checkpoints: arr("checkpoints"),
+        },
+        "rewind_result" => Ev::RewindResult {
+            id: s("id"),
+            backup: s("backup"),
+            restored: str_arr("restored"),
+            removed: str_arr("removed"),
+            conversation: b("conversation"),
+            turns: v.get("turns").and_then(|x| x.as_u64()),
+        },
+        "rules_result" => Ev::RulesResult {
+            id: s("id"),
+            thread: s("thread"),
+            rules: arr("rules"),
+        },
+        "context" => Ev::Context {
+            turn: s("turn"),
+            rules: v.get("rules").and_then(|x| x.as_str()).map(String::from),
+            skills: str_arr("skills"),
+            mcp_tools: str_arr("mcp_tools"),
+            mcp_errors: v.get("mcp_errors").cloned().unwrap_or(Value::Null),
+        },
+        "retry" => Ev::Retry {
+            turn: s("turn"),
+            attempt: n("attempt"),
+            of: v.get("of").or_else(|| v.get("max_attempts")).and_then(|x| x.as_u64()).unwrap_or(0),
+            wait: v.get("wait").or_else(|| v.get("delay")).and_then(|x| x.as_f64()).unwrap_or(0.0),
+            reason: s("reason"),
+        },
+        "auto_decision" => Ev::AutoDecision {
+            turn: s("turn"),
+            tool: s("tool"),
+            allow: v.get("allow").and_then(|x| x.as_bool()).unwrap_or_else(|| s("decision") == "allow"),
+            reason: s("reason"),
+        },
+        "skill_list" => Ev::SkillList {
+            id: s("id"),
+            skills: arr("skills"),
+        },
+        "mcp_status" => Ev::McpStatus {
+            id: s("id"),
+            config: v.get("config").and_then(|x| x.as_str()).map(String::from),
+            servers: arr("servers"),
+        },
+        "task_list" => Ev::TaskList {
+            id: s("id"),
+            tasks: arr("tasks"),
+        },
+        "task_update" => Ev::TaskUpdate {
+            task: v.clone(),
+        },
+        "session_list" => Ev::SessionList {
+            id: s("id"),
+            sessions: arr("sessions"),
+        },
+        "history_result" => Ev::HistoryResult {
+            id: s("id"),
+            thread: s("thread"),
+            turns: arr("turns"),
+        },
         _ => return None,
     })
 }
@@ -227,11 +316,118 @@ impl Backend {
         self.send(json!({"type": "approval", "id": id, "decision": decision}));
     }
 
+    pub fn approve_always(&mut self, id: &str, scope: &str, prefix: Option<&str>) {
+        let mut msg = json!({"type": "approval", "id": id, "decision": "allow_always", "scope": scope});
+        if let Some(p) = prefix {
+            if let Some(obj) = msg.as_object_mut() {
+                obj.insert("prefix".into(), json!(p));
+            }
+        }
+        self.send(msg);
+    }
+
+    pub fn turn_with_options(
+        &mut self,
+        turn: &str,
+        prompt: &str,
+        thread: &str,
+        cwd: &str,
+        model: &str,
+        permission: &str,
+        mode: Option<&str>,
+        skills: &[String],
+    ) {
+        let mut msg = json!({
+            "type": "turn",
+            "turn": turn,
+            "prompt": prompt,
+            "thread": thread,
+            "cwd": cwd,
+            "model": model,
+            "permission": permission,
+            "skills": skills,
+        });
+        if let Some(m) = mode {
+            if let Some(obj) = msg.as_object_mut() {
+                obj.insert("mode".into(), json!(m));
+            }
+        }
+        self.send(msg);
+    }
+
+    fn next_req_id(&mut self) -> String {
+        self.next += 1;
+        format!("r{}", self.next)
+    }
+
     /// Fire an `action`; the reply comes back as Ev::ActionResult with the returned id.
     pub fn action(&mut self, name: &str, params: Value) -> String {
-        self.next += 1;
-        let id = format!("r{}", self.next);
+        let id = self.next_req_id();
         self.send(json!({"type": "action", "id": id, "action": name, "params": params}));
+        id
+    }
+
+    pub fn rules(&mut self, thread: &str, remove: Option<&str>) -> String {
+        let id = self.next_req_id();
+        if let Some(rule_id) = remove {
+            self.send(json!({"type": "rules", "id": id, "thread": thread, "op": "remove", "rule": rule_id}));
+        } else {
+            self.send(json!({"type": "rules", "id": id, "thread": thread, "op": "list"}));
+        }
+        id
+    }
+
+    pub fn checkpoints(&mut self, thread: &str) -> String {
+        let id = self.next_req_id();
+        self.send(json!({"type": "checkpoints", "id": id, "thread": thread}));
+        id
+    }
+
+    pub fn rewind(&mut self, thread: &str, checkpoint: &str, conversation: bool) -> String {
+        let id = self.next_req_id();
+        self.send(json!({"type": "rewind", "id": id, "thread": thread, "checkpoint": checkpoint, "conversation": conversation}));
+        id
+    }
+
+    pub fn skills(&mut self) -> String {
+        let id = self.next_req_id();
+        self.send(json!({"type": "skills", "id": id}));
+        id
+    }
+
+    pub fn mcp(&mut self, cwd: &str, refresh: bool) -> String {
+        let id = self.next_req_id();
+        self.send(json!({"type": "mcp", "id": id, "cwd": cwd, "refresh": refresh}));
+        id
+    }
+
+    pub fn mcp_toggle(&mut self, cwd: &str, server: &str, enabled: bool) -> String {
+        let id = self.next_req_id();
+        self.send(json!({"type": "mcp_toggle", "id": id, "cwd": cwd, "server": server, "enabled": enabled}));
+        id
+    }
+
+    pub fn tasks(&mut self) -> String {
+        let id = self.next_req_id();
+        self.send(json!({"type": "tasks", "id": id}));
+        id
+    }
+
+    pub fn task_stop(&mut self, task: &str) -> String {
+        let id = self.next_req_id();
+        self.send(json!({"type": "task_stop", "id": id, "task": task}));
+        id
+    }
+
+    pub fn sessions(&mut self) -> String {
+        let id = self.next_req_id();
+        self.send(json!({"type": "sessions", "id": id}));
+        id
+    }
+
+    pub fn history(&mut self, thread: &str, limit: u64) -> String {
+        let id = self.next_req_id();
+        self.send(json!({"type": "history", "id": id, "thread": thread, "limit": limit}));
         id
     }
 
@@ -252,5 +448,28 @@ impl Drop for Backend {
         if !matches!(self.child.try_wait(), Ok(Some(_))) {
             self.shutdown();
         }
+    }
+}
+
+#[cfg(test)]
+mod proto_tests {
+    use super::*;
+
+    #[test]
+    fn parse_extended_protocol_events() {
+        let cp = parse_line(r#"{"type":"checkpoint","turn":"t1","ok":true,"id":"abc123","reason":""}"#).unwrap();
+        assert!(matches!(cp, Ev::Checkpoint { ok: true, id: Some(ref id), .. } if id == "abc123"));
+
+        let cpl = parse_line(r#"{"type":"checkpoint_list","id":"r1","thread":"main","checkpoints":[{"id":"abc"}]}"#).unwrap();
+        assert!(matches!(cpl, Ev::CheckpointList { ref checkpoints, .. } if checkpoints.len() == 1));
+
+        let rw = parse_line(r#"{"type":"rewind_result","id":"r2","backup":"bak","restored":["a.rs"],"removed":["b.rs"],"conversation":true,"turns":4}"#).unwrap();
+        assert!(matches!(rw, Ev::RewindResult { conversation: true, turns: Some(4), .. }));
+
+        let auto = parse_line(r#"{"type":"auto_decision","turn":"t1","tool":"read_file","decision":"allow","reason":"accept_edits mode"}"#).unwrap();
+        assert!(matches!(auto, Ev::AutoDecision { allow: true, ref tool, .. } if tool == "read_file"));
+
+        let retry = parse_line(r#"{"type":"retry","turn":"t1","attempt":1,"of":3,"wait":1.5,"reason":"429"}"#).unwrap();
+        assert!(matches!(retry, Ev::Retry { attempt: 1, of: 3, .. }));
     }
 }

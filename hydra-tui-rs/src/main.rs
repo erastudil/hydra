@@ -6,7 +6,10 @@ mod layout;
 use std::io::{self, stdout};
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -15,7 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
 
-use app::{log_layout, App};
+use app::{log_layout, read_clipboard_text, App};
 use banner::{
     lerp_rgb, to_color, ACCENT_RGB, AMBER_RGB, BG_DARK, BRAILLE_SPIN, DIM_RGB, HOT_RGB,
     MARK_FROM_RGB, MARK_TO_RGB, SCALE_STOPS,
@@ -30,12 +33,17 @@ fn main() -> io::Result<()> {
     let mut app = App::new();
     enable_raw_mode()?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, crossterm::event::EnableMouseCapture)?;
+    execute!(out, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = ratatui::backend::CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
     let result = run(&mut terminal, &mut app);
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), crossterm::event::DisableMouseCapture, LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     result
 }
@@ -50,38 +58,94 @@ fn run(terminal: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>, 
     loop {
         terminal.draw(|frame| draw(frame, app))?;
         if event::poll(Duration::from_millis(50))? {
-            // Release events fall through: acting on Press and Release inserted every character twice.
             match event::read()? {
+                Event::Paste(text) => {
+                    app.paste_text(&text);
+                }
                 Event::Key(key) if handles_key(key.kind) => {
+                    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                    let alt = key.modifiers.contains(KeyModifiers::ALT);
+                    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+                    if app.approval.is_some() && app.input.is_empty() && !ctrl && !alt {
+                        match key.code {
+                            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                                app.decide("allow");
+                                continue;
+                            }
+                            KeyCode::Char('a') | KeyCode::Char('A') => {
+                                app.decide_always("thread", None);
+                                continue;
+                            }
+                            KeyCode::Char('p') | KeyCode::Char('P') => {
+                                app.decide_always("project", None);
+                                continue;
+                            }
+                            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('s') | KeyCode::Char('S') => {
+                                app.decide("skip");
+                                continue;
+                            }
+                            KeyCode::Esc => {
+                                app.cancel();
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+
                     match key.code {
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('c') if ctrl => break,
+                        KeyCode::Char('d') if ctrl => {
                             if app.input.is_empty() {
                                 break;
                             } else {
                                 app.delete();
                             }
                         }
-                        KeyCode::Char('l') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        KeyCode::Char('l') if ctrl => {
                             app.transcript.clear();
                         }
+                        KeyCode::Char('v') if ctrl => {
+                            if let Some(txt) = read_clipboard_text() {
+                                app.paste_text(&txt);
+                            }
+                        }
+                        KeyCode::Char('j') if ctrl => app.insert_newline(),
+                        KeyCode::Char('a') if ctrl => app.cursor_home(),
+                        KeyCode::Char('e') if ctrl => app.cursor_end(),
+                        KeyCode::Char('u') if ctrl => app.delete_to_line_start(),
+                        KeyCode::Char('k') if ctrl => app.delete_to_line_end(),
+                        KeyCode::Char('w') if ctrl => app.delete_word_back(),
+                        KeyCode::Char('b') if alt => app.cursor_word_left(),
+                        KeyCode::Char('f') if alt => app.cursor_word_right(),
                         KeyCode::Tab => app.complete(),
-                        KeyCode::Char(c) => app.on_char(c),
+                        KeyCode::Enter if alt => app.insert_newline(),
+                        KeyCode::Enter if ctrl => app.steer(),
+                        KeyCode::Enter => app.submit(),
+                        KeyCode::Backspace if alt => app.delete_word_back(),
                         KeyCode::Backspace => app.backspace(),
                         KeyCode::Delete => app.delete(),
+                        KeyCode::Left if ctrl || alt => app.cursor_word_left(),
+                        KeyCode::Right if ctrl || alt => app.cursor_word_right(),
                         KeyCode::Left => app.cursor_left(),
                         KeyCode::Right => app.cursor_right(),
-                        KeyCode::Enter => app.submit(),
                         KeyCode::Esc => app.cancel(),
-                        KeyCode::Up => app.scroll_by(-1),
-                        KeyCode::Down => app.scroll_by(1),
+                        KeyCode::Up if shift => app.scroll_by(-3),
+                        KeyCode::Down if shift => app.scroll_by(3),
+                        KeyCode::Up => app.on_up(),
+                        KeyCode::Down => app.on_down(),
                         KeyCode::PageUp => app.scroll_by(-10),
                         KeyCode::PageDown => app.scroll_by(10),
-                        KeyCode::Home => {
+                        KeyCode::Home if ctrl => {
                             app.autoscroll = false;
                             app.scroll = 0;
                         }
-                        KeyCode::End => app.autoscroll = true,
+                        KeyCode::End if ctrl => {
+                            app.autoscroll = true;
+                        }
+                        KeyCode::Home => app.cursor_home(),
+                        KeyCode::End => app.cursor_end(),
+                        KeyCode::Char(c) if !ctrl && !alt => app.on_char(c),
                         _ => {}
                     }
                 }
@@ -109,8 +173,8 @@ fn format_transcript_line(text: &str) -> Line<'static> {
         ])
     } else if let Some(tool_name) = text.strip_prefix("tool : ") {
         Line::from(vec![
-            Span::styled("[TOOL] ", Style::default().fg(to_color(AMBER_RGB)).add_modifier(Modifier::BOLD)),
-            Span::styled(tool_name.to_string(), Style::default().fg(to_color(DIM_RGB))),
+            Span::styled("  ▸ ", Style::default().fg(to_color(AMBER_RGB)).add_modifier(Modifier::BOLD)),
+            Span::styled(tool_name.to_string(), Style::default().fg(to_color(HOT_RGB))),
         ])
     } else if text.starts_with("tool ") && (text.contains(" ok") || text.contains(" error")) {
         let is_err = text.contains(" error");
@@ -138,14 +202,15 @@ fn format_transcript_line(text: &str) -> Line<'static> {
         Line::from(vec![
             Span::styled(text.to_string(), Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD)),
         ])
-    } else if text.starts_with('+') {
+    } else if text.starts_with("  @@") || text.starts_with("@@") {
+        Line::from(vec![Span::styled(text.to_string(), Style::default().fg(to_color(MARK_TO_RGB)))])
+    } else if text.starts_with("  +") || text.starts_with('+') {
         Line::from(vec![Span::styled(text.to_string(), Style::default().fg(to_color(ACCENT_RGB)))])
-    } else if text.starts_with('-') {
+    } else if text.starts_with("  -") || text.starts_with('-') {
         Line::from(vec![Span::styled(text.to_string(), Style::default().fg(Color::Rgb(255, 107, 107)))])
     } else if text.starts_with('#') {
         Line::from(vec![Span::styled(text.to_string(), Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD))])
     } else if let Some((topic, comment)) = text.split_once(" : ") {
-        // Progen unit format: topic : comment
         Line::from(vec![
             Span::styled(topic.to_string(), Style::default().fg(to_color(MARK_FROM_RGB)).add_modifier(Modifier::BOLD)),
             Span::styled(" : ", Style::default().fg(to_color(DIM_RGB))),
@@ -156,22 +221,56 @@ fn format_transcript_line(text: &str) -> Line<'static> {
     }
 }
 
+fn build_composer_lines(input: &str, cursor_pos: usize) -> Vec<Line<'static>> {
+    if input.is_empty() {
+        return vec![Line::from(vec![
+            Span::styled("❯ ", Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "Ask anything, @file to mention, or / for commands",
+                Style::default().fg(Color::Rgb(77, 106, 96)).add_modifier(Modifier::ITALIC),
+            ),
+        ])];
+    }
+
+    let pos = cursor_pos.min(input.len());
+    let (left, right) = input.split_at(pos);
+    let combined = format!("{left}█{right}");
+    let mut lines = Vec::new();
+    for (idx, raw_line) in combined.split('\n').enumerate() {
+        let prefix = if idx == 0 { "❯ " } else { "  " };
+        let mut spans = vec![Span::styled(
+            prefix,
+            Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD),
+        )];
+        if let Some((before_cur, after_cur)) = raw_line.split_once('█') {
+            spans.push(Span::styled(before_cur.to_string(), Style::default().fg(to_color(HOT_RGB))));
+            spans.push(Span::styled("█", Style::default().fg(to_color(ACCENT_RGB))));
+            spans.push(Span::styled(after_cur.to_string(), Style::default().fg(to_color(HOT_RGB))));
+        } else {
+            spans.push(Span::styled(raw_line.to_string(), Style::default().fg(to_color(HOT_RGB))));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
 fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     let area = frame.area();
     let width = area.width as usize;
 
     frame.render_widget(Block::default().style(Style::default().bg(to_color(BG_DARK))), area);
 
-    let has_popup = !app.input.is_empty()
-        && app.input.starts_with('/')
-        && !app.input.contains(' ')
-        && !app.candidates().is_empty();
+    let cands = app.candidates();
+    let has_popup = !app.input.is_empty() && !cands.is_empty();
+
+    let input_line_count = app.input.split('\n').count().max(1);
+    let composer_height = (input_line_count as u16 + 2).clamp(3, 10);
 
     let chunks = Layout::vertical([
-        Constraint::Min(1),    // 0: Transcript (Banner + Conversation)
-        Constraint::Length(1), // 1: Live Status Line
-        Constraint::Length(3), // 2: Rounded Input Box
-        Constraint::Length(1), // 3: Footer Bar
+        Constraint::Min(1),                   // 0: Transcript (Banner + Conversation)
+        Constraint::Length(1),                // 1: Live Status Line
+        Constraint::Length(composer_height),  // 2: Rounded Input Box
+        Constraint::Length(1),                // 3: Footer Bar
     ])
     .split(area);
 
@@ -230,15 +329,21 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     let status_line = if let Some((_, tool)) = &app.approval {
         Line::from(vec![
             Span::styled(" ◆ ", Style::default().fg(to_color(AMBER_RGB)).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("APPROVAL REQUIRED: {tool} "), Style::default().fg(to_color(HOT_RGB)).add_modifier(Modifier::BOLD)),
-            Span::styled("· type /allow, /skip, or /abort", Style::default().fg(to_color(DIM_RGB))),
+            Span::styled(format!("Approval required for {tool} "), Style::default().fg(to_color(HOT_RGB)).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "· [y] allow · [a] always thread · [p] always project · [n] skip · [Esc] abort",
+                Style::default().fg(to_color(DIM_RGB)),
+            ),
         ])
     } else if app.busy_turn.is_some() {
         let elapsed = app.busy_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
         Line::from(vec![
             Span::styled(format!(" {braille_spin} "), Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD)),
-            Span::styled(format!("Thinking {elapsed}s · working... "), Style::default().fg(Color::Rgb(169, 201, 188))),
-            Span::styled("· esc to cancel", Style::default().fg(to_color(DIM_RGB))),
+            Span::styled(
+                format!("Thinking {elapsed}s · {}... ", app.status_label),
+                Style::default().fg(Color::Rgb(169, 201, 188)),
+            ),
+            Span::styled("· Enter queues · Ctrl+Enter steers · Esc interrupts", Style::default().fg(to_color(DIM_RGB))),
         ])
     } else {
         Line::from(vec![
@@ -262,37 +367,39 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         Color::Rgb(31, 122, 69)
     };
 
-    let title_left = Line::from(vec![
-        Span::styled(" hydra ", Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD)),
-    ]);
-    let title_right = Line::from(vec![
-        Span::styled(format!(" {} · {} ", app.model, app.dialect), Style::default().fg(to_color(DIM_RGB))),
-    ]);
-
-    let input_content = if app.input.is_empty() {
-        Line::from(vec![
-            Span::styled("❯ ", Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD)),
-            Span::styled("Ask anything, or / for commands", Style::default().fg(Color::Rgb(77, 106, 96)).add_modifier(Modifier::ITALIC)),
-        ])
+    let state_tag = if app.approval.is_some() {
+        " hydra · approval required "
+    } else if app.busy_turn.is_some() {
+        " hydra · working "
     } else {
-        let pos = app.cursor_pos.min(app.input.len());
-        let (left, right) = app.input.split_at(pos);
-        Line::from(vec![
-            Span::styled("❯ ", Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD)),
-            Span::styled(left.to_string(), Style::default().fg(to_color(HOT_RGB))),
-            Span::styled("█", Style::default().fg(to_color(ACCENT_RGB))),
-            Span::styled(right.to_string(), Style::default().fg(to_color(HOT_RGB))),
-        ])
+        " hydra "
     };
+    let mut left_spans = vec![Span::styled(
+        state_tag,
+        Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD),
+    )];
+    if !app.queued.is_empty() {
+        left_spans.push(Span::styled(
+            format!("· {} queued ", app.queued.len()),
+            Style::default().fg(to_color(AMBER_RGB)).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let title_left = Line::from(left_spans);
+    let title_right = Line::from(vec![Span::styled(
+        format!(" {} · {} · {} ", app.model, app.permission, app.mode),
+        Style::default().fg(to_color(DIM_RGB)),
+    )]);
 
-    let input_widget = Paragraph::new(input_content)
+    let input_lines = build_composer_lines(&app.input, app.cursor_pos);
+    let input_widget = Paragraph::new(input_lines)
         .block(
             Block::bordered()
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(border_color))
                 .title(title_left)
-                .title(title_right.alignment(ratatui::layout::Alignment::Right))
-        );
+                .title(title_right.alignment(ratatui::layout::Alignment::Right)),
+        )
+        .wrap(Wrap { trim: false });
     frame.render_widget(input_widget, chunks[2]);
 
     // ------------------------------------------------------------- 3: Footer Bar
@@ -306,10 +413,14 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         Span::raw(" "),
         Span::styled(" enter ", Style::default().fg(Color::Rgb(214, 239, 228)).bg(Color::Rgb(28, 45, 37)).add_modifier(Modifier::BOLD)),
         Span::styled(" send   ", Style::default().fg(Color::Rgb(95, 125, 114))),
+        Span::styled(" alt+enter ", Style::default().fg(Color::Rgb(214, 239, 228)).bg(Color::Rgb(28, 45, 37)).add_modifier(Modifier::BOLD)),
+        Span::styled(" newline   ", Style::default().fg(Color::Rgb(95, 125, 114))),
         Span::styled(" esc ", Style::default().fg(Color::Rgb(214, 239, 228)).bg(Color::Rgb(28, 45, 37)).add_modifier(Modifier::BOLD)),
         Span::styled(" cancel   ", Style::default().fg(Color::Rgb(95, 125, 114))),
         Span::styled(" / ", Style::default().fg(Color::Rgb(214, 239, 228)).bg(Color::Rgb(28, 45, 37)).add_modifier(Modifier::BOLD)),
-        Span::styled(" commands", Style::default().fg(Color::Rgb(95, 125, 114))),
+        Span::styled(" commands   ", Style::default().fg(Color::Rgb(95, 125, 114))),
+        Span::styled(" @ ", Style::default().fg(Color::Rgb(214, 239, 228)).bg(Color::Rgb(28, 45, 37)).add_modifier(Modifier::BOLD)),
+        Span::styled(" files", Style::default().fg(Color::Rgb(95, 125, 114))),
     ];
 
     let left_w: usize = footer_spans.iter().map(|s| s.content.len()).sum();
@@ -328,39 +439,42 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
 
     // ------------------------------------------------------------- Autocomplete Popup
     if has_popup {
-        let cands = app.candidates();
-        let popup_h = (cands.len() as u16 + 2).min(8);
-        let popup_w = 66.min(chunks[2].width.saturating_sub(4));
+        let popup_h = (cands.len() as u16 + 2).min(10);
+        let popup_w = 74.min(chunks[2].width.saturating_sub(4));
         let popup_y = chunks[2].y.saturating_sub(popup_h);
         let popup_area = Rect::new(chunks[2].x + 2, popup_y, popup_w, popup_h);
 
         frame.render_widget(Clear, popup_area);
 
+        let selected = app.popup_idx.min(cands.len().saturating_sub(1));
+        let max_rows = (popup_h.saturating_sub(2)) as usize;
+        let start = if selected >= max_rows { selected + 1 - max_rows } else { 0 };
+
         let mut lines = Vec::new();
-        for (i, (cmd, desc)) in cands.iter().enumerate().take(6) {
-            let is_first = i == 0;
+        for (i, (cmd, desc)) in cands.iter().enumerate().skip(start).take(max_rows) {
+            let is_sel = i == selected;
             let spans = vec![
-                Span::styled(if is_first { " > " } else { "   " }, Style::default().fg(to_color(ACCENT_RGB))),
+                Span::styled(if is_sel { " ▸ " } else { "   " }, Style::default().fg(to_color(ACCENT_RGB))),
                 Span::styled(
-                    format!("{cmd:14} "),
+                    format!("{cmd:22} "),
                     Style::default()
-                        .fg(if is_first { to_color(ACCENT_RGB) } else { to_color(HOT_RGB) })
-                        .add_modifier(if is_first { Modifier::BOLD } else { Modifier::empty() }),
+                        .fg(if is_sel { to_color(ACCENT_RGB) } else { to_color(HOT_RGB) })
+                        .add_modifier(if is_sel { Modifier::BOLD } else { Modifier::empty() }),
                 ),
                 Span::styled(desc.to_string(), Style::default().fg(to_color(DIM_RGB))),
             ];
             lines.push(Line::from(spans));
         }
 
-        let popup_block = Paragraph::new(lines)
-            .block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(to_color(SCALE_STOPS[2])))
-                    .title(Line::from(vec![
-                        Span::styled(" Suggestions (Tab to complete) ", Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD)),
-                    ]))
-            );
+        let popup_block = Paragraph::new(lines).block(
+            Block::bordered()
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(to_color(SCALE_STOPS[2])))
+                .title(Line::from(vec![Span::styled(
+                    " Suggestions (↑/↓ select · Tab complete) ",
+                    Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD),
+                )])),
+        );
         frame.render_widget(popup_block, popup_area);
     }
 }
@@ -386,9 +500,6 @@ mod key_kind_tests {
 
     #[test]
     fn release_events_are_not_key_actions() {
-        // One physical keystroke arrives as Press (+Repeat while held)
-        // and Release on release-reporting terminals. Only non-Release
-        // events may mutate the input.
         assert!(handles_key(KeyEventKind::Press));
         assert!(handles_key(KeyEventKind::Repeat));
         assert!(!handles_key(KeyEventKind::Release));

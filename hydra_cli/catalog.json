@@ -262,7 +262,7 @@
       "model": "glm-5.3-flash"
     },
     "orchestrator": {
-      "model": "mimo-2.6-pro"
+      "model": "mimo-2.6-flash"
     },
     "alice": {
       "model": "glm-5.3-flash",
@@ -275,6 +275,9 @@
       "model": "deepseek-4.1-flash"
     },
     "mimo 2.6 flash": {
+      "model": "mimo-2.6-flash"
+    },
+    "mimo.2.6 flash": {
       "model": "mimo-2.6-flash"
     },
     "mimo-2.6-flash": {
@@ -306,6 +309,9 @@
     "mimo 2.6 pro": {
       "model": "mimo-2.6-pro"
     },
+    "mimo.2.6 pro": {
+      "model": "mimo-2.6-pro"
+    },
     "mimo-2.6-pro": {
       "model": "mimo-2.6-pro"
     },
@@ -328,10 +334,13 @@
       "model": "mimo-2.6-flash"
     },
     "daily driver": {
-      "model": "mimo-2.6-pro"
+      "model": "mimo-2.6-flash"
     },
     "driver": {
-      "model": "mimo-2.6-pro"
+      "model": "mimo-2.6-flash"
+    },
+    "fallback": {
+      "model": "glm-5.3-flash"
     }
   },
   "model_providers": {
@@ -517,8 +526,8 @@
     "gemma-e4b": 131072,
     "google/gemma-4-26b-a4b-it": 131072
   },
-  "default_orchestrator_model": "mimo 2.6 pro",
-  "default_agent_model": "mimo 2.6 pro",
+  "default_orchestrator_model": "mimo 2.6 flash",
+  "default_agent_model": "mimo 2.6 flash",
   "swarm_combos": {
     "open swarm": {
       "title": "Open Swarm",
@@ -552,7 +561,7 @@
       ]
     }
   },
-  "default_model": "mimo 2.6 pro",
+  "default_model": "mimo 2.6 flash",
   "default_fanout_aliases": [
     "glm 5.3 flash",
     "deepseek 4.1 flash",

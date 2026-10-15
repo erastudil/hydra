@@ -30,6 +30,36 @@ pub fn glow(ui: &Ui, rect: Rect, radius: u8, color: Color32, blur: u8) {
     ui.painter().add(shadow.as_shape(rect, cr(radius)));
 }
 
+/// Multi-ring outer + inner phosphor/amber/crimson halo painted over the composer rect so `BG3` fill never masks it.
+pub fn composer_halo(ui: &Ui, rect: Rect, radius: u8, base: Color32, pulse: f32) {
+    let p = pulse.clamp(0.0, 1.0);
+    let r_f = radius as f32;
+    let [r, g, b, _] = base.to_array();
+    let c_with_a = |a: f32| Color32::from_rgba_unmultiplied(r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8);
+    // Outer soft halo rings expanding outward with pulse
+    let outer_spread = 1.5 + 3.5 * p;
+    ui.painter().rect_stroke(
+        rect.expand(outer_spread),
+        cr((r_f + outer_spread).round() as u8),
+        Stroke::new(3.0 + 2.0 * p, c_with_a(0.07 + 0.14 * p)),
+        StrokeKind::Outside,
+    );
+    ui.painter().rect_stroke(
+        rect.expand(0.6 + 1.4 * p),
+        cr((r_f + 1.0 + p).round() as u8),
+        Stroke::new(1.8 + 1.2 * p, c_with_a(0.16 + 0.26 * p)),
+        StrokeKind::Outside,
+    );
+    // Inner crisp phosphor rim inside BG3 fill
+    ui.painter().rect_stroke(
+        rect.shrink(1.2),
+        cr(radius.saturating_sub(1)),
+        Stroke::new(1.2 + 0.8 * p, c_with_a(0.14 + 0.24 * p)),
+        StrokeKind::Inside,
+    );
+}
+
+
 /// Polyline around a rounded rectangle, for dashed borders.
 pub fn rounded_outline(rect: Rect, r: f32) -> Vec<Pos2> {
     let mut pts = Vec::new();

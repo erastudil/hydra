@@ -80,7 +80,7 @@ DEFAULT_HF_BASE = os.environ.get("HF_INFERENCE_BASE", "https://router.huggingfac
 DEFAULT_HF_MODEL = os.environ.get("HYDRA_HF_MODEL", CATALOG.get("default_hf_model", "meta-llama/Llama-3.1-8B-Instruct"))
 DEFAULT_MODEL = os.environ.get(
     "HYDRA_DEFAULT_MODEL",
-    CATALOG.get("default_model", "mimo 2.6 pro"),
+    CATALOG.get("default_model", "mimo 2.6 flash"),
 )
 DEFAULT_ORCHESTRATOR_MODEL = os.environ.get(
     "HYDRA_ORCHESTRATOR_MODEL",

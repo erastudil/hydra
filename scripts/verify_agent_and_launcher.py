@@ -18,7 +18,7 @@ def verify():
 
     assert r'set "PYTHONPATH=C:\Users\jpm05\Documents\hydra;%PYTHONPATH%"' in bat_content
     assert r'cd /d "C:\Users\jpm05\Documents"' in bat_content
-    assert 'python -m hydra_cli agent --model "mimo 2.6 pro"' in bat_content
+    assert 'python -m hydra_cli agent --model "mimo 2.6 flash"' in bat_content
     assert 'cmd /k' in bat_content
     print("launcher invariant verification : exit 0.")
 
@@ -31,11 +31,11 @@ def verify():
     assert "run_command" in DEFAULT_AGENT_SYSTEM_PROMPT
     print("agent system prompt verification : exit 0.")
 
-    print("\n--- 3. Testing interactive agent REPL launch with MiMo 2.6 Pro ---")
+    print("\n--- 3. Testing interactive agent REPL launch with MiMo 2.6 Flash ---")
     env = os.environ.copy()
     env["PYTHONPATH"] = hydra_dir + os.pathsep + env.get("PYTHONPATH", "")
     proc = subprocess.run(
-        [sys.executable, "-m", "hydra_cli", "agent", "-i", "--model", "mimo 2.6 pro"],
+        [sys.executable, "-m", "hydra_cli", "agent", "-i", "--model", "mimo 2.6 flash"],
         input="/exit\n",
         capture_output=True,
         text=True,
@@ -45,7 +45,7 @@ def verify():
     )
     assert proc.returncode == 0, f"Process failed with exit {proc.returncode}, stderr: {proc.stderr}"
     assert "HYDRA CODING AGENT" in proc.stdout
-    assert "mimo 2.6 pro" in proc.stdout
+    assert "mimo 2.6 flash" in proc.stdout
     assert "Detected (AGENTS.md / .cursorrules / CLAUDE.md)" in proc.stdout
     assert "Exiting Hydra agent session" in proc.stdout
     print("interactive agent REPL execution : exit 0.")
