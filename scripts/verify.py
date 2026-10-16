@@ -13801,6 +13801,33 @@ def stdio_interrupted_prompt_gets_an_explicit_reply():
 
 
 @check
+def no_shipped_agent_logs():
+    """Product sources do not append a debug-session log on the layout path."""
+    roots = (
+        os.path.join(REPO, "hydra-tui-rs", "src"),
+        os.path.join(REPO, "hydra-desktop-rs", "src"),
+        os.path.join(REPO, "hydra-stdio", "src"),
+        os.path.join(REPO, "hydra_cli"),
+    )
+    markers = ("#region " + "agent log", "hypothesis" + "Id")
+    hits = []
+    for root in roots:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d not in {"__pycache__", "target"}]
+            for name in filenames:
+                if not name.endswith((".rs", ".py", ".js")):
+                    continue
+                path = os.path.join(dirpath, name)
+                with open(path, encoding="utf-8", errors="replace") as handle:
+                    text = handle.read()
+                rel = os.path.relpath(path, REPO).replace(os.sep, "/")
+                for marker in markers:
+                    if marker in text:
+                        hits.append(f"{rel} contains {marker!r}")
+    assert not hits, "; ".join(hits)
+
+
+@check
 def tankbench_runners():
     """Idle and reset runners take TANKBENCH_SRC and still print --help without it."""
     scripts = {
