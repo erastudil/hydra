@@ -49,6 +49,24 @@ SECRET_KEYS = (
     "HF_INFERENCE_BASE",
     "CLOUDFLARE_API_TOKEN",
     "CLOUDFLARE_ACCOUNT_ID",
+    "GROQ_API_KEY",
+    "GROQ_API_BASE",
+    "OVHCLOUD_API_KEY",
+    "OVHCLOUD_API_BASE",
+    "NVIDIA_API_KEY",
+    "NVIDIA_API_BASE",
+    "MISTRAL_API_KEY",
+    "MISTRAL_API_BASE",
+    "SCW_SECRET_KEY",
+    "SCALEWAY_API_BASE",
+    "COHERE_API_KEY",
+    "COHERE_API_BASE",
+    "HYDRA_GROQ_MODEL",
+    "HYDRA_OVHCLOUD_MODEL",
+    "HYDRA_NVIDIA_MODEL",
+    "HYDRA_MISTRAL_MODEL",
+    "HYDRA_SCALEWAY_MODEL",
+    "HYDRA_COHERE_MODEL",
     "HYDRA_FREE_MODEL",
     "HYDRA_CLOUDFLARE_MODEL",
     "HYDRA_TRUST_CWD_ENV",
@@ -454,12 +472,18 @@ def providers():
         adapt_model_for_url,
         detect_local_endpoint,
         get_cheaperinference_provider,
+        get_cohere_provider,
         get_free_candidates,
         get_free_provider,
         get_frontier_providers,
+        get_groq_provider,
         get_huggingface_provider,
+        get_mistral_provider,
         get_modal_provider,
+        get_nvidia_provider,
+        get_ovhcloud_provider,
         get_runpod_provider,
+        get_scaleway_provider,
         is_port_open,
         providers_for_model,
         redact,
@@ -482,7 +506,15 @@ def providers():
         assert get_runpod_provider() is None
         assert get_modal_provider() is None
         assert get_huggingface_provider() is None
-        assert get_frontier_providers() == []
+        assert get_groq_provider() is None
+        assert get_nvidia_provider() is None
+        assert get_mistral_provider() is None
+        assert get_scaleway_provider() is None
+        assert get_cohere_provider() is None
+        ovh_anon = get_ovhcloud_provider()
+        assert ovh_anon["url"] == "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/chat/completions"
+        assert "Authorization" not in ovh_anon["headers"]
+        assert [item["name"] for item in get_frontier_providers()] == ["OVHcloud AI Endpoints"]
         try:
             get_free_provider()
             raise AssertionError("missing free credentials should fail")
@@ -490,10 +522,10 @@ def providers():
             pass
         os.environ["OPENROUTER_API_KEY"] = "sk-or-v1-test"
         names = [item["name"] for item in get_frontier_providers()]
-        assert names == ["OpenRouter"]
+        assert names == ["OpenRouter", "OVHcloud AI Endpoints"]
         os.environ["AI_GATEWAY_API_KEY"] = "vercel-test-key"
         names = [item["name"] for item in get_frontier_providers()]
-        assert names == ["Vercel AI Gateway", "OpenRouter"]
+        assert names == ["Vercel AI Gateway", "OpenRouter", "OVHcloud AI Endpoints"]
         os.environ["CHEAPERINFERENCE_API_KEY"] = "ci-test-key"
         os.environ["CHEAPERINFERENCE_API_BASE"] = "https://custom.cheaperinference.com/v1"
         custom = get_cheaperinference_provider()
@@ -513,7 +545,20 @@ def providers():
         assert get_huggingface_provider()["url"] == "https://router.huggingface.co/v1/chat/completions"
         os.environ["HF_ENDPOINT_URL"] = "https://custom-endpoint.endpoints.huggingface.cloud/v1"
         assert get_huggingface_provider()["url"].startswith("https://custom-endpoint.endpoints.huggingface.cloud/v1")
-        assert len(get_frontier_providers()) == 6
+        assert len(get_frontier_providers()) == 7
+        os.environ["GROQ_API_KEY"] = "gsk-test-key"
+        assert get_groq_provider()["url"] == "https://api.groq.com/openai/v1/chat/completions"
+        os.environ["NVIDIA_API_KEY"] = "nvapi-test-key"
+        assert get_nvidia_provider()["url"] == "https://integrate.api.nvidia.com/v1/chat/completions"
+        os.environ["MISTRAL_API_KEY"] = "mistral-test-key"
+        assert get_mistral_provider()["url"] == "https://api.mistral.ai/v1/chat/completions"
+        os.environ["SCW_SECRET_KEY"] = "scw-test-secret"
+        assert get_scaleway_provider()["url"] == "https://api.scaleway.ai/v1/chat/completions"
+        os.environ["COHERE_API_KEY"] = "cohere-test-key"
+        assert get_cohere_provider()["url"] == "https://api.cohere.com/compatibility/v1/chat/completions"
+        os.environ["OVHCLOUD_API_KEY"] = "ovh-test-key"
+        assert get_ovhcloud_provider()["headers"]["Authorization"] == "Bearer ovh-test-key"
+        assert len(get_frontier_providers()) == 12
         os.environ["CLOUDFLARE_API_TOKEN"] = "cf-token-123"
         os.environ["CLOUDFLARE_ACCOUNT_ID"] = "cf-account-456"
         free_info, _model = get_free_provider()
@@ -560,6 +605,10 @@ def providers():
         assert [item["id"] for item in general] == ["cheaperinference", "vercel", "openrouter"]
         pinned = providers_for_model("meta-llama/Llama-3.1-8B-Instruct", health_aware=False)
         assert [item["id"] for item in pinned] == ["huggingface"]
+        groq_pinned = providers_for_model("openai/gpt-oss-120b", health_aware=False)
+        assert [item["id"] for item in groq_pinned] == ["groq"]
+        ovh_pinned = providers_for_model("Meta-Llama-3_3-70B-Instruct", health_aware=False)
+        assert [item["id"] for item in ovh_pinned] == ["ovhcloud"]
 
     try:
         list(
@@ -1158,6 +1207,9 @@ def auth_and_gateway():
     assert probe_credential("modal", "https://app.modal.run/v1")[0] is True
     assert probe_credential("vercel", "tiny")[0] is False
     assert probe_credential("vercel", "long-enough-token")[0] is True
+    assert probe_credential("ovhcloud", "")[0] is True
+    assert probe_credential("scaleway", "tiny")[0] is False
+    assert probe_credential("scaleway", "long-enough-secret")[0] is True
     assert open_registration_page("unknown_provider") is False
     with tempfile.TemporaryDirectory() as tmp:
         env_file = os.path.join(tmp, ".env")
@@ -1183,6 +1235,8 @@ def auth_and_gateway():
         assert status["openrouter"]["configured"] is True
         assert status["openrouter"]["keys"]["OPENROUTER_API_KEY"]["masked"] == "sk-o...3456"
         assert status["cloudflare"]["configured"] is False
+        assert status["ovhcloud"]["configured"] is True
+        assert status["ovhcloud"]["keys"]["OVHCLOUD_API_KEY"]["optional"] is True
         capture = io.StringIO()
         old = sys.stdout
         try:
