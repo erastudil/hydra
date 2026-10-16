@@ -58,6 +58,7 @@ MUTATIONS = [
     ("D19 xkb-x11 not checked", "src/syslibs.rs", "    lib(\"libxkbcommon-x11.so.0\", \"keyboard input on X11\", \"libxkbcommon-x11-0\", \"libxkbcommon-x11\"),\n", "", ["--test", "syslibs_real"]),
     ("D19 wayland gaps hide x11", "src/syslibs.rs", "        if w.is_empty() || !set(env(\"DISPLAY\")) {", "        if true {", ["--lib", "syslibs"]),
     ("composer status row only while busy", "src/app.rs", "        {\n            const BRAILLE", "        if recording || waiting_approval || thinking {\n            const BRAILLE", ["--test", "ui_real", "the_composer"]),
+    ("a color hard-coded outside the tokens", "src/app.rs", '"PAUSED" => PAUSED,', '"PAUSED" => Color32::from_rgb(234, 179, 8),', ["--test", "tokens_only"]),
     ("composer layout follows the pulse stroke", "src/app.rs", ".stroke(Stroke::new(stroke_max, Color32::TRANSPARENT))", ".stroke(Stroke::new(stroke_w, border_col))", ["--test", "ui_real", "the_composer"]),
 ]
 

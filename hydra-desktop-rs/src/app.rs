@@ -1058,7 +1058,7 @@ impl HydraApp {
             if active {
                 ui.painter().rect_filled(rect, cr(8), BG3);
             } else if resp.hovered() {
-                ui.painter().rect_filled(rect, cr(8), Color32::from_white_alpha(6));
+                ui.painter().rect_filled(rect, cr(8), ROW_HOVER);
             }
             ui.painter().text(rect.left_center() + vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, if active { "▾" } else { "▸" }, egui::FontId::new(11.0, egui::FontFamily::Proportional), MUTED);
             let mut label = name.clone();
@@ -1077,7 +1077,7 @@ impl HydraApp {
                     if i == self.m.active {
                         ui.painter().rect_filled(rect, cr(8), ACCENT_DIM);
                     } else if resp.hovered() {
-                        ui.painter().rect_filled(rect, cr(8), Color32::from_white_alpha(6));
+                        ui.painter().rect_filled(rect, cr(8), ROW_HOVER);
                     }
                     status_dot(ui, rect.left_center() + vec2(22.0, 0.0), self.m.status(i), 3.5);
                     let mut label = t.name.clone();
@@ -1418,11 +1418,11 @@ impl HydraApp {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
                 if recording {
-                    let c = motion::mix(Color32::from_rgb(180, 48, 48), Color32::from_rgb(255, 84, 84), rec_pulse);
+                    let c = motion::mix(REC_MID, REC_HI, rec_pulse);
                     ui.label(rtb("● REC", 11.5, c));
                     ui.label(rt("listening… · Esc cancels", 11.5, TEXT2));
                 } else if waiting_approval {
-                    let c = Color32::from_rgb(255, 184, 48);
+                    let c = AMBER_HI;
                     ui.label(rtb("◆", 11.5, c));
                     ui.label(rt("hydra is waiting on your answer · Enter allows · Esc skips", 11.5, c));
                 } else if thinking {
@@ -1452,11 +1452,11 @@ impl HydraApp {
                 do_send = true;
             }
 
-            let tui_forest = Color32::from_rgb(31, 122, 69);
-            let amber_lo = Color32::from_rgb(180, 120, 20);
-            let amber_hi = Color32::from_rgb(255, 184, 48);
-            let rec_lo = Color32::from_rgb(150, 32, 32);
-            let rec_hi = Color32::from_rgb(255, 84, 84);
+            let tui_forest = TUI_FOREST;
+            let amber_lo = AMBER_LO;
+            let amber_hi = AMBER_HI;
+            let rec_lo = REC_LO;
+            let rec_hi = REC_HI;
 
             let stroke_max = 1.6 + 0.8; // the widest of the pulse widths below
             let (border_col, stroke_w) = if recording {
@@ -1473,13 +1473,13 @@ impl HydraApp {
 
             if self.composer_rect.is_positive() {
                 if recording {
-                    let glow_c = Color32::from_rgba_unmultiplied(255, 84, 84, (55.0 + 95.0 * rec_pulse) as u8);
+                    let glow_c = with_alpha(REC_HI, (55.0 + 95.0 * rec_pulse) as u8);
                     widgets::glow(ui, self.composer_rect, 16, glow_c, (12.0 + 10.0 * rec_pulse).round() as u8);
                 } else if waiting_approval {
-                    let glow_c = Color32::from_rgba_unmultiplied(255, 184, 48, (50.0 + 85.0 * pulse) as u8);
+                    let glow_c = with_alpha(AMBER_HI, (50.0 + 85.0 * pulse) as u8);
                     widgets::glow(ui, self.composer_rect, 16, glow_c, (10.0 + 10.0 * pulse).round() as u8);
                 } else if thinking {
-                    let glow_c = Color32::from_rgba_unmultiplied(0, 255, 102, (55.0 + 110.0 * pulse) as u8);
+                    let glow_c = with_alpha(ACCENT, (55.0 + 110.0 * pulse) as u8);
                     widgets::glow(ui, self.composer_rect, 16, glow_c, (12.0 + 12.0 * pulse).round() as u8);
                 } else if focused {
                     widgets::shadow(ui, self.composer_rect, 16, SHADOW_GLOW);
@@ -1555,7 +1555,7 @@ impl HydraApp {
             );
 
             // Paint TUI top-border embedded title pill (top-left) and model/permission pill (top-right)
-            let pill_bg = Color32::from_rgb(8, 8, 8);
+            let pill_bg = BG2;
             let font_bold = egui::FontId::new(11.0, egui::FontFamily::Name(BOLD.into()));
             let font_reg = egui::FontId::new(11.0, egui::FontFamily::Proportional);
             let left_runs: Vec<(String, egui::FontId, Color32)> = if recording {
@@ -2546,7 +2546,7 @@ impl HydraApp {
                         ui.label(rtb(&agent.name, 12.0, TEXT));
                         let c = match agent.status.as_str() {
                             "RUNNING" => ACCENT,
-                            "PAUSED" => Color32::from_rgb(234, 179, 8),
+                            "PAUSED" => PAUSED,
                             "FAILED" => ERROR,
                             _ => MUTED,
                         };
@@ -3752,7 +3752,7 @@ impl HydraApp {
 
         egui::Panel::top("header")
             .exact_size(header_h)
-            .frame(egui::Frame::new().fill(Color32::from_rgb(8, 8, 8)).inner_margin(Margin::symmetric(24, 0)))
+            .frame(egui::Frame::new().fill(BG2).inner_margin(Margin::symmetric(24, 0)))
             .show_separator_line(false)
             .show(root, |ui| {
                 self.header(ui, time, narrow);
@@ -3811,7 +3811,7 @@ impl HydraApp {
             });
         egui::Panel::bottom("composer")
             .show_separator_line(false)
-            .frame(egui::Frame::new().fill(Color32::from_rgb(8, 8, 8)).inner_margin(Margin::symmetric(24, 16)))
+            .frame(egui::Frame::new().fill(BG2).inner_margin(Margin::symmetric(24, 16)))
             .show(root, |ui| {
                 ui.painter().hline(ui.max_rect().x_range().expand(24.0), ui.max_rect().top() - 15.5, border);
                 self.composer(ui);
@@ -3896,8 +3896,8 @@ pub fn build_screen_border_gradient_mesh(rect: egui::Rect, time: f64) -> egui::M
         let outer_alpha = (180.0 * intensity).round().clamp(1.0, 255.0) as u8;
         let mid_alpha = (64.0 * intensity).round().clamp(1.0, 255.0) as u8;
 
-        let c_outer = Color32::from_rgba_unmultiplied(0, 255, 102, outer_alpha);
-        let c_mid = Color32::from_rgba_unmultiplied(0, 230, 90, mid_alpha);
+        let c_outer = with_alpha(ACCENT, outer_alpha);
+        let c_mid = with_alpha(ACCENT_HOVER, mid_alpha);
         let c_inner = Color32::TRANSPARENT;
 
         mesh.colored_vertex(point_on_rect(r0, i), c_outer);

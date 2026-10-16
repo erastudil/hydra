@@ -57,7 +57,7 @@
   },
   "accent_hover": {
    "hex": "#00e65c",
-   "role": "declared hover accent (unused by v1.2.2 rules)"
+   "role": "screen-border glow middle band (declared hover accent in v1.2.2)"
   },
   "accent_dim": {
    "hex": "#00ff66",
@@ -138,6 +138,51 @@
   "shadow_black": {
    "hex": "#000000",
    "role": "base for drop shadows"
+  },
+  "text_on_accent": {
+   "hex": "#000000",
+   "role": "text on the phosphor primary button fill"
+  },
+  "warn": {
+   "hex": "#ffc440",
+   "role": "amber needs-you markers outside the composer"
+  },
+  "amber_hi": {
+   "hex": "#ffb830",
+   "role": "composer and status row while an approval waits (bright end of the pulse)"
+  },
+  "amber_lo": {
+   "hex": "#b47814",
+   "role": "composer border while an approval waits (dim end of the pulse)"
+  },
+  "rec_hi": {
+   "hex": "#ff5454",
+   "role": "dictation composer border, halo and chevron (bright end of the pulse)"
+  },
+  "rec_mid": {
+   "hex": "#b43030",
+   "role": "dictation REC label (dim end of its pulse)"
+  },
+  "rec_lo": {
+   "hex": "#962020",
+   "role": "dictation composer border (dim end of the pulse)"
+  },
+  "tui_forest": {
+   "hex": "#1f7a45",
+   "role": "idle composer border and dim end of the working pulse, from the TUI prompt bar"
+  },
+  "status_off": {
+   "hex": "#4b5563",
+   "role": "status dot when the thing is not live"
+  },
+  "paused": {
+   "hex": "#eab308",
+   "role": "PAUSED job status"
+  },
+  "row_hover": {
+   "hex": "#ffffff",
+   "role": "faint fill under a hovered sidebar row",
+   "alpha": 0.0235
   }
  },
  "typography": {

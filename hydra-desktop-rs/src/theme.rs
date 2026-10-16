@@ -18,15 +18,16 @@ pub const USER_BUBBLE: Color32 = USER_BUBBLE_BG;
 
 /// rgba(0, 255, 102, a) over any background.
 pub fn accent_a(a: f32) -> Color32 {
-    Color32::from_rgba_unmultiplied(0, 255, 102, (a * 255.0).round() as u8)
+    with_alpha(ACCENT, (a * 255.0).round() as u8)
+}
+/// An opaque token color at the given alpha, for glows and pulses.
+pub fn with_alpha(c: Color32, a: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
 }
 /// --accent-dim
 pub fn accent_dim() -> Color32 {
     ACCENT_DIM
 }
-
-/// Amber for "needs you" markers; not part of the retired page's tokens.
-pub const WARN: Color32 = Color32::from_rgb(255, 196, 64);
 
 pub const BOLD: &str = "mono_bold";
 

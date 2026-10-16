@@ -34,8 +34,7 @@ pub fn glow(ui: &Ui, rect: Rect, radius: u8, color: Color32, blur: u8) {
 pub fn composer_halo(ui: &Ui, rect: Rect, radius: u8, base: Color32, pulse: f32) {
     let p = pulse.clamp(0.0, 1.0);
     let r_f = radius as f32;
-    let [r, g, b, _] = base.to_array();
-    let c_with_a = |a: f32| Color32::from_rgba_unmultiplied(r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8);
+    let c_with_a = |a: f32| with_alpha(base, (a.clamp(0.0, 1.0) * 255.0).round() as u8);
     // Outer soft halo rings expanding outward with pulse
     let outer_spread = 1.5 + 3.5 * p;
     ui.painter().rect_stroke(
@@ -90,7 +89,7 @@ pub fn button(ui: &mut Ui, text: &str, kind: Kind, size: f32, pad: (f32, f32), w
     };
     let text = text.as_str();
     let color = match kind {
-        Kind::Primary => Color32::BLACK,
+        Kind::Primary => TEXT_ON_ACCENT,
         Kind::Danger => ERROR,
         _ => TEXT,
     };
@@ -112,7 +111,7 @@ pub fn button(ui: &mut Ui, text: &str, kind: Kind, size: f32, pad: (f32, f32), w
     };
     let rect = rect.translate(vec2(0.0, -lift * t));
     let (fill, stroke, tcolor) = match kind {
-        Kind::Primary => (motion::mix(ACCENT, ACCENT2, t), Stroke::NONE, Color32::BLACK),
+        Kind::Primary => (motion::mix(ACCENT, ACCENT2, t), Stroke::NONE, TEXT_ON_ACCENT),
         Kind::Secondary => (
             motion::mix(BG3, ELEV, t),
             Stroke::new(1.0, motion::mix(BORDER, accent_a(0.4), t)),
@@ -159,9 +158,9 @@ pub fn status_dot(ui: &mut Ui, live: bool, time: f64) {
     let (rect, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
     let phase = ((time * std::f64::consts::PI).cos() as f32 * 0.5 + 0.5).clamp(0.0, 1.0); // 2s cycle
     let a = 0.6 + 0.4 * phase;
-    let c = if live { ACCENT } else { Color32::from_rgb(0x4b, 0x55, 0x63) };
+    let c = if live { ACCENT } else { STATUS_OFF };
     if live {
-        glow(ui, rect.expand(1.0), 4, Color32::from_rgba_unmultiplied(0, 255, 102, (110.0 * a) as u8), 10);
+        glow(ui, rect.expand(1.0), 4, with_alpha(ACCENT, (110.0 * a) as u8), 10);
     }
     let r = 4.0 * (0.9 + 0.1 * phase);
     ui.painter().circle_filled(rect.center(), r, c.gamma_multiply(if live { a } else { 1.0 }));
@@ -209,9 +208,9 @@ pub fn chip_parts(ui: &mut Ui, pad: (f32, f32), gap: f32, parts: &[Part], time: 
                 let r = egui::Rect::from_center_size(egui::pos2(x + 4.0, rect.center().y), vec2(8.0, 8.0));
                 let phase = ((time * std::f64::consts::PI).cos() as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
                 if *live {
-                    glow(ui, r.expand(1.0), 4, Color32::from_rgba_unmultiplied(0, 255, 102, (110.0 * (0.6 + 0.4 * phase)) as u8), 10);
+                    glow(ui, r.expand(1.0), 4, with_alpha(ACCENT, (110.0 * (0.6 + 0.4 * phase)) as u8), 10);
                 }
-                ui.painter().circle_filled(r.center(), 4.0, if *live { ACCENT } else { Color32::from_rgb(0x4b, 0x55, 0x63) });
+                ui.painter().circle_filled(r.center(), 4.0, if *live { ACCENT } else { STATUS_OFF });
             }
             Part::Text(t, size, bold, c) => {
                 let fam = if *bold { egui::FontFamily::Name(BOLD.into()) } else { egui::FontFamily::Proportional };
