@@ -250,6 +250,25 @@ Supported providers:
      • hydra local "<prompt>"  -> Ollama (11434), llama.cpp (8080), or EasyLM (8000)
      • hydra free "<prompt>"   -> Cloudflare or OpenRouter free-tier models. A key is required.
 
+  H. Groq (Recurring free tier: 30 RPM, 1K RPD, 200K TPD per model; no card):
+     export GROQ_API_KEY="gsk_..."
+
+  I. OVHcloud AI Endpoints (Anonymous free access, 2 RPM per IP per model; no signup):
+     # No key required. An optional project key unlocks the authenticated tier:
+     export OVHCLOUD_API_KEY="your-key"
+
+  J. NVIDIA NIM (Free hosted endpoints via the NVIDIA Developer Program):
+     export NVIDIA_API_KEY="nvapi-..."
+
+  K. Mistral AI (Recurring free plan; the free tier trains on submitted data):
+     export MISTRAL_API_KEY="your-key"
+
+  L. Scaleway Generative APIs (1M tokens free on the serverless tier):
+     export SCW_SECRET_KEY="your-secret-key"
+
+  M. Cohere (Trial keys never expire, 1,000 calls/month; non-commercial use only):
+     export COHERE_API_KEY="your-key"
+
 2. SHELL SCRIPTS & UNIX PIPES
 --------------------------------------------------------------------------------
 Pipe outputs directly from your shell into any model:
