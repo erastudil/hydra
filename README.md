@@ -203,6 +203,12 @@ Credentials live in `~/.hydra/.env` or system environment:
 | `AI_GATEWAY_API_KEY` | Vercel AI Gateway API key. |
 | `VERCEL_AI_GATEWAY_TOKEN` | Fallback token for Vercel AI Gateway. |
 | `CHEAPERINFERENCE_API_KEY` | CheaperInference key for discounted frontier models and the GLM aliases. |
+| `GROQ_API_KEY` | Groq key. Recurring free tier (30 RPM, 1K RPD, 200K TPD per model), no card. |
+| `OVHCLOUD_API_KEY` | Optional OVHcloud AI Endpoints key. Anonymous access (2 RPM per IP per model) works with no key at all. |
+| `NVIDIA_API_KEY` | NVIDIA NIM key for the free hosted endpoints (Developer Program). |
+| `MISTRAL_API_KEY` | Mistral AI key. Recurring free plan; the free tier trains on submitted data. |
+| `SCW_SECRET_KEY` | Scaleway secret key. Generative APIs serverless tier carries 1M free tokens. |
+| `COHERE_API_KEY` | Cohere trial key (never expires, 1,000 calls/month). Non-commercial use only. |
 | `RUNPOD_API_KEY` | RunPod API key for serverless endpoints and pod workers. |
 | `MODAL_ENDPOINT_URL` | Modal vLLM endpoint URL for private open-weights deployments. |
 | `CLOUDFLARE_API_TOKEN` & `CLOUDFLARE_ACCOUNT_ID` | Workers AI credentials for `hydra free`. |
