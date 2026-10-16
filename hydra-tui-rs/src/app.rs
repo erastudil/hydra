@@ -7,7 +7,6 @@ use hydra_stdio::{Backend, Ev};
 use serde_json::{json, Value};
 
 use crate::endpoints::{budgets, free_usage, local_endpoints};
-use crate::layout::SPIN;
 
 pub const DEFAULT_FLASH_MODEL: &str = "mimo 2.6 flash";
 pub const SPEED_DIAL_PRO_MODEL: &str = "mimo 2.6 pro";
@@ -79,7 +78,6 @@ pub struct App {
     pub thread: String,
     pub cwd: String,
     pub turn_n: u64,
-    pub log_once: bool,
     pub quit: bool,
     assistant_at: Option<usize>,
 }
@@ -141,7 +139,6 @@ impl App {
             thread: "tui-main".into(),
             cwd,
             turn_n: 0,
-            log_once: false,
             quit: false,
             assistant_at: None,
         };
@@ -1366,10 +1363,6 @@ impl App {
         self.quit
     }
 
-    pub fn frame(&self) -> char {
-        SPIN[self.spin_i % SPIN.len()]
-    }
-
     #[allow(dead_code)]
     pub fn footer(&self) -> String {
         let used = self.prompt_tokens.saturating_add(self.completion_tokens);
@@ -1538,34 +1531,6 @@ pub fn read_clipboard_text() -> Option<String> {
         }
         None
     }
-}
-
-pub fn log_layout(width: u16, fit_spin: usize, fit_label: usize, overflow: bool, thinking_in_status: bool, same_row: bool) {
-    // #region agent log
-    let path = r"C:\Users\jpm05\documents\debug-ada62c.log";
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-    let rows = [
-        ("A", "status row width", serde_json::json!({"width": width, "spin_cols": fit_spin, "label_cols": fit_label, "overflow": overflow})),
-        ("B", "thinking stays off the status row", serde_json::json!({"thinking_in_status": thinking_in_status})),
-        ("C", "spinner column width", serde_json::json!({"spin_cols": fit_spin})),
-        ("D", "status and footer are separate rows", serde_json::json!({"same_row": same_row})),
-    ];
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        use std::io::Write;
-        for (id, message, data) in rows {
-            let line = serde_json::json!({
-                "sessionId": "ada62c",
-                "timestamp": now,
-                "location": "hydra-tui-rs/src/app.rs",
-                "message": message,
-                "data": data,
-                "hypothesisId": id,
-                "runId": "tui-layout"
-            });
-            let _ = writeln!(f, "{line}");
-        }
-    }
-    // #endregion
 }
 
 #[cfg(test)]

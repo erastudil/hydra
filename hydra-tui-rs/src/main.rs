@@ -18,7 +18,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 use ratatui::Terminal;
 
-use app::{log_layout, read_clipboard_text, App};
+use app::{read_clipboard_text, App};
 use banner::{
     lerp_rgb, to_color, ACCENT_RGB, AMBER_RGB, BG_DARK, BRAILLE_SPIN, DIM_RGB, HOT_RGB,
     MARK_FROM_RGB, MARK_TO_RGB, SCALE_STOPS,
@@ -274,14 +274,6 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     ])
     .split(area);
 
-    let fit = fit_status(width, app.frame(), &app.status_label);
-    let overflow = layout::status_overflow(width, &fit);
-    let thinking_in_status = fit.label.contains('\n');
-    if !app.log_once {
-        log_layout(chunks[1].width, fit.spin_cols, fit.label_cols, overflow, thinking_in_status, chunks[1].y == chunks[3].y);
-        app.log_once = true;
-    }
-
     // ------------------------------------------------------------- 0: Transcript
     let info_raw = app.session_info();
     let info_refs: Vec<(&str, &str)> = info_raw.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -483,7 +475,6 @@ fn probe() -> io::Result<()> {
     for width in [20usize, 40, 80] {
         let fit = fit_status(width, '|', "working");
         let overflow = layout::status_overflow(width, &fit);
-        log_layout(width as u16, fit.spin_cols, fit.label_cols, overflow, false, false);
         println!("width {width} spin {} label {} overflow {overflow}", fit.spin_cols, fit.label_cols);
     }
     println!("endpoints");
