@@ -1410,7 +1410,9 @@ impl HydraApp {
         let recording = self.voice_recording;
         let q_count = self.queue.get(&self.m.sessions[self.m.active].id).map(|q| q.len()).unwrap_or(0);
 
-        if recording || waiting_approval || thinking {
+        // The status row is always laid out, idle included, so the composer never moves when a turn starts or ends:
+        // a click aimed at the box in the frame a turn finishes would otherwise land where the box used to be.
+        {
             const BRAILLE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let spin = BRAILLE[((time * 12.0) as usize) % BRAILLE.len()];
             ui.horizontal(|ui| {
@@ -1423,9 +1425,12 @@ impl HydraApp {
                     let c = Color32::from_rgb(255, 184, 48);
                     ui.label(rtb("◆", 11.5, c));
                     ui.label(rt("hydra is waiting on your answer · Enter allows · Esc skips", 11.5, c));
-                } else {
+                } else if thinking {
                     ui.label(rtb(spin, 12.0, ACCENT));
                     ui.label(rt("Thinking · working... · Enter queues · Ctrl+Enter steers · Esc interrupts", 11.5, TEXT2));
+                } else {
+                    ui.label(rtb("❯", 12.0, MUTED));
+                    ui.label(rt("Ready · Enter sends · Shift+Enter new line · / commands", 11.5, MUTED));
                 }
             });
             ui.add_space(4.0);
@@ -1453,6 +1458,7 @@ impl HydraApp {
             let rec_lo = Color32::from_rgb(150, 32, 32);
             let rec_hi = Color32::from_rgb(255, 84, 84);
 
+            let stroke_max = 1.6 + 0.8; // the widest of the pulse widths below
             let (border_col, stroke_w) = if recording {
                 (motion::mix(rec_lo, rec_hi, rec_pulse), 1.6 + 0.8 * rec_pulse)
             } else if waiting_approval {
@@ -1484,7 +1490,9 @@ impl HydraApp {
                 .fill(BG3)
                 .corner_radius(cr(16))
                 .inner_margin(Margin { left: 32, right: 16, top: 14, bottom: 12 })
-                .stroke(Stroke::new(stroke_w, border_col))
+                // layout always reserves the widest pulse stroke, so the breathing border never moves the text box;
+                // the visible border is painted below at its current width
+                .stroke(Stroke::new(stroke_max, Color32::TRANSPARENT))
                 .show(ui, |ui| {
                     ui.set_width((width - 48.0).max(40.0));
                     let hint = if recording {
@@ -1517,6 +1525,7 @@ impl HydraApp {
             }
             let rect = resp.response.rect;
             self.composer_rect = rect;
+            ui.painter().rect_stroke(rect, cr(16), Stroke::new(stroke_w, border_col), StrokeKind::Inside);
 
             // Paint multi-ring outer + inner glow AFTER/OVER `rect` so `BG3` fill never obscures the pulsing halo
             if recording {

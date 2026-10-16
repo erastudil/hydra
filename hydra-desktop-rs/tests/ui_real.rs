@@ -172,6 +172,32 @@ fn respawn_kill_9_drops_the_handle_restarts_with_backoff_and_shows_adopted_tasks
     unsafe { libc_kill(pid as i32, 9) };
 }
 
+/// Top edge of the composer's text box as laid out in the last frame.
+fn composer_top(h: &mut Harness<'static, HydraApp>) -> f32 {
+    h.get_by_role(egui::accesskit::Role::MultilineTextInput).rect().min.y
+}
+
+#[test]
+fn the_composer_does_not_move_when_a_turn_starts_or_ends() {
+    let (mut h, _dir) = harness("still");
+    h.run_steps(5);
+    let idle = composer_top(&mut h);
+    say(&mut h, "SLOW keep the box still");
+    assert!(wait(&mut h, 20, |a| a.model().sessions[0].messages.last().is_some_and(|m| m.text.contains("tick"))), "turn streams");
+    h.run_steps(2);
+    assert!((composer_top(&mut h) - idle).abs() < 0.5, "busy box moved: idle {idle}, busy {}", composer_top(&mut h));
+    assert!(wait(&mut h, 30, |a| !a.model().any_busy()), "turn ends");
+    // every frame right after the turn, not only once the layout settles: a click lands where the box was drawn
+    for frame in 0..4 {
+        let y = composer_top(&mut h);
+        assert!((y - idle).abs() < 0.5, "frame {frame} after the turn: box at {y}, idle {idle}");
+        h.step();
+    }
+    // the click that a moving box made miss: straight after the turn, click and type, and the text goes in
+    say(&mut h, "second marker-two");
+    assert!(wait(&mut h, 20, |a| a.model().sessions[0].messages.iter().any(|m| m.user && m.text.contains("marker-two"))), "second prompt sent");
+}
+
 #[test]
 fn bug5_a_reply_cut_by_kill_9_is_marked_unsaved_and_the_thread_reloads_from_the_agent() {
     let (mut h, _dir) = harness("bug5");
