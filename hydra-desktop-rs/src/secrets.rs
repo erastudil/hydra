@@ -53,9 +53,7 @@ pub fn is_set(name: &str, file: &Path) -> bool {
 
 /// Set or replace one variable, keeping every other line (including comments) as it was. Atomic; owner-only on unix.
 pub fn set_in(path: &Path, name: &str, value: &str) -> Result<(), String> {
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return Err(format!("bad variable name {name}"));
-    }
+    check_name(name)?;
     if value.contains('\n') || value.contains('\r') {
         return Err("the value must be a single line".into());
     }
@@ -63,8 +61,7 @@ pub fn set_in(path: &Path, name: &str, value: &str) -> Result<(), String> {
     let mut lines: Vec<String> = Vec::new();
     let mut done = false;
     for line in old.lines() {
-        let probe = line.trim().strip_prefix("export ").unwrap_or(line.trim());
-        if probe.split_once('=').map(|(k, _)| k.trim() == name).unwrap_or(false) {
+        if defines(line, name) {
             if !done {
                 lines.push(format!("{name}={value}"));
                 done = true;
@@ -76,6 +73,36 @@ pub fn set_in(path: &Path, name: &str, value: &str) -> Result<(), String> {
     if !done {
         lines.push(format!("{name}={value}"));
     }
+    write_lines(path, &lines)
+}
+
+/// D24: delete every line that defines the variable, so it is gone rather than set to an empty value. Every other
+/// line stays as it was. Atomic; owner-only on unix. A missing file or variable is not an error and writes nothing.
+pub fn remove_in(path: &Path, name: &str) -> Result<(), String> {
+    check_name(name)?;
+    let Ok(old) = std::fs::read_to_string(path) else { return Ok(()) };
+    if !old.lines().any(|l| defines(l, name)) {
+        return Ok(());
+    }
+    let lines: Vec<String> = old.lines().filter(|l| !defines(l, name)).map(str::to_string).collect();
+    write_lines(path, &lines)
+}
+
+fn check_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(format!("bad variable name {name}"));
+    }
+    Ok(())
+}
+
+/// True when the line assigns `name`, with or without a leading `export `.
+fn defines(line: &str, name: &str) -> bool {
+    let probe = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+    probe.split_once('=').map(|(k, _)| k.trim() == name).unwrap_or(false)
+}
+
+/// Replace the file with these lines through a temp file and a rename, so a crash never leaves half a file.
+fn write_lines(path: &Path, lines: &[String]) -> Result<(), String> {
     let mut text = lines.join("\n");
     text.push('\n');
     if let Some(dir) = path.parent() {
@@ -95,7 +122,6 @@ pub fn set_in(path: &Path, name: &str, value: &str) -> Result<(), String> {
     std::fs::rename(&tmp, path).map_err(|e| format!("cannot replace {}: {e}", path.display()))
 }
 
-/// Show that something is stored without revealing it: first 3 and last 2 characters of long values.
 /// D22: check a settings value before anything is written. The message names the bad value for non-secret
 /// fields (a URL), and only its masked form for keys, so a typo is visible without leaking a secret.
 pub fn validate(name: &str, value: &str) -> Result<(), String> {
@@ -129,6 +155,7 @@ pub fn validate(name: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Show that something is stored without revealing it: first 3 and last 2 characters of long values.
 pub fn mask(value: &str) -> String {
     let n = value.chars().count();
     if n <= 8 {
@@ -197,6 +224,29 @@ mod tests {
         let p = tmp("mode");
         set_in(&p, "HF_TOKEN", "hf_secret_value").unwrap();
         assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn remove_deletes_every_definition_keeps_other_lines_and_stays_owner_only() {
+        let p = tmp("remove");
+        std::fs::write(&p, "# mine\nFOO=1\nexport OPENROUTER_API_KEY=\"sk-or-old\"\nHF_TOKEN=hf_keep_me\nOPENROUTER_API_KEY=dup\n").unwrap();
+        remove_in(&p, "OPENROUTER_API_KEY").unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(!text.contains("OPENROUTER_API_KEY"), "the variable is gone, not left empty: {text}");
+        assert_eq!(text, "# mine\nFOO=1\nHF_TOKEN=hf_keep_me\n");
+        assert!(!read_from(&p).contains_key("OPENROUTER_API_KEY"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // removing what is not there changes nothing, and a missing file is not created
+        remove_in(&p, "RUNPOD_API_KEY").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "# mine\nFOO=1\nHF_TOKEN=hf_keep_me\n");
+        let missing = p.with_file_name("absent.env");
+        remove_in(&missing, "HF_TOKEN").unwrap();
+        assert!(!missing.exists());
+        assert!(remove_in(&p, "A B").is_err());
     }
 
     #[test]

@@ -2772,7 +2772,7 @@ impl HydraApp {
             if let Some(st) = &mut self.settings {
                 modal_frame(ctx, "settings", 560.0, |ui| {
                     ui.label(rtb("SETTINGS: MODEL ACCESS", 13.0, ACCENT));
-                    ui.add(egui::Label::new(rt(format!("Keys are stored in {} (readable only by you) and never shown again. Leave a field empty to keep what is stored.", file.display()), 11.0, MUTED)).wrap());
+                    ui.add(egui::Label::new(rt(format!("Keys are stored in {} (readable only by you) and never shown again. Leave a field empty to keep what is stored; Clear removes it.", file.display()), 11.0, MUTED)).wrap());
                     for (i, (name, label, secret)) in secrets::PROVIDERS.iter().enumerate() {
                         ui.label(rt(*label, 12.0, TEXT2));
                         let have = stored.get(*name).filter(|v| !v.is_empty()).map(|v| if *secret { secrets::mask(v) } else { v.clone() });
@@ -2807,11 +2807,20 @@ impl HydraApp {
             }
             if let (Some(i), Some(st)) = (clear, &mut self.settings) {
                 let (name, label, _) = secrets::PROVIDERS[i];
-                match secrets::set_in(&file, name, "") {
+                // D24: the line is deleted, not left as `NAME=`, which the agent would load as an empty value
+                match secrets::remove_in(&file, name) {
                     Ok(()) => {
                         st.ok = true;
-                        st.message = format!("{label} removed. Agent restarted.");
-                        if !self.m.any_busy() {
+                        st.inputs[i].clear();
+                        st.message = if std::env::var(name).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+                            format!("{label} removed from {}. {name} is also set in the environment Hydra was started from, so the agent still gets it until you unset it there.", file.display())
+                        } else {
+                            format!("{label} removed from {}.", file.display())
+                        };
+                        if self.m.any_busy() {
+                            st.message.push_str(" Running threads keep the old keys; the agent restarts when you press Retry or relaunch.");
+                        } else {
+                            st.message.push_str(" Agent restarted.");
                             self.retry_backend(ctx);
                         }
                     }

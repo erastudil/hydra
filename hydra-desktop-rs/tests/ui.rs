@@ -122,8 +122,12 @@ fn each_mode_changes_the_centre_pane() {
     assert!(h.query_by_label_contains("TERMINAL SANDBOX").is_none());
 }
 
+/// Settings tests point HYDRA_HOME at their own folder; the variable is process-wide, so they take turns.
+static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn settings_opens_with_ctrl_comma_and_saves_a_key_without_echoing_it() {
+    let _turn = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = std::env::temp_dir().join(format!("hydra-ui-home-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::env::set_var("HYDRA_HOME", &home);
@@ -143,6 +147,58 @@ fn settings_opens_with_ctrl_comma_and_saves_a_key_without_echoing_it() {
     let text = std::fs::read_to_string(home.join(".env")).expect("env file written");
     assert!(text.contains("OPENROUTER_API_KEY=sk-test-123456789"), "{text}");
     assert!(h.query_by_label_contains("sk-test-123456789").is_none(), "the key is not displayed back");
+    std::env::remove_var("HYDRA_HOME");
+}
+
+/// Click the Clear button on the same row as the painted hint that starts with `hint`.
+fn clear_row(h: &mut Harness<'static, HydraApp>, hint: &str) {
+    let row = *painted_texts(h, hint).first().unwrap_or_else(|| panic!("hint {hint:?} is painted"));
+    let node = h.get_all_by_label("Clear").find(|n| (n.rect().center().y - row.center().y).abs() < row.height()).unwrap_or_else(|| panic!("a Clear button beside {hint:?}"));
+    node.click();
+    h.run_steps(4);
+}
+
+fn open_settings(h: &mut Harness<'static, HydraApp>) {
+    settle(h);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Comma);
+    h.run_steps(10);
+    h.get_by_label_contains("SETTINGS: MODEL ACCESS");
+}
+
+#[test]
+fn d24_clear_deletes_a_stored_key_from_the_file_and_it_stays_gone_after_a_restart() {
+    let _turn = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = std::env::temp_dir().join(format!("hydra-ui-home-clear-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let file = home.join(".env");
+    std::fs::write(&file, "# mine\nOPENROUTER_API_KEY=sk-or-v1-storedkey42\nHF_TOKEN=hf_keepthisone77\nLOCAL_AI_BASE=http://10.0.0.5:8000\n").unwrap();
+    std::env::set_var("HYDRA_HOME", &home);
+    let mut h = harness("clear");
+    open_settings(&mut h);
+    clear_row(&mut h, "saved: sk-");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(text, "# mine\nHF_TOKEN=hf_keepthisone77\nLOCAL_AI_BASE=http://10.0.0.5:8000\n", "the key line is deleted, not left as an empty value");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600, "still readable only by the owner");
+    }
+    h.run_steps(2);
+    assert!(painted_texts(&h, "saved: sk-").is_empty(), "the dialog no longer shows a stored OpenRouter key");
+    assert!(!painted_texts(&h, "saved: hf_").is_empty(), "the other key is untouched");
+    h.get_by_label_contains("OpenRouter key removed from");
+    assert!(h.query_by_label_contains("also set in the environment").is_none(), "OPENROUTER_API_KEY is not in the environment");
+    // the endpoint is also in the environment this test runs in, so removing it from the file is not the whole story
+    clear_row(&mut h, "saved: http://10.0.0.5");
+    h.get_by_label_contains("LOCAL_AI_BASE is also set in the environment");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "# mine\nHF_TOKEN=hf_keepthisone77\n");
+    drop(h);
+    // a fresh window reads the same file: the removed values stay removed
+    let mut h = harness("clear-again");
+    open_settings(&mut h);
+    assert!(painted_texts(&h, "saved: sk-").is_empty() && painted_texts(&h, "saved: http").is_empty(), "removed values stay removed after a restart");
+    assert!(!painted_texts(&h, "saved: hf_").is_empty());
     std::env::remove_var("HYDRA_HOME");
 }
 
