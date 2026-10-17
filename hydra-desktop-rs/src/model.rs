@@ -296,6 +296,32 @@ struct Saved {
     local_ai_base: String,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// The model by name, so a reordered model list cannot turn a saved choice into another model. `model` (the
+    /// index) stays for state files written before this field existed and for older builds reading this one.
+    #[serde(default)]
+    model_key: String,
+    #[serde(default = "default_zoom")]
+    zoom: f32,
+}
+
+fn default_zoom() -> f32 {
+    1.0
+}
+
+/// The design step closest to `z` (the Settings text-size choices); anything unreadable is the design size.
+pub fn snap_zoom(z: f32) -> f32 {
+    let steps = crate::theme::ZOOM_STEPS;
+    if !z.is_finite() {
+        return default_zoom();
+    }
+    steps.iter().copied().min_by(|a, b| (a - z).abs().total_cmp(&(b - z).abs())).unwrap_or(default_zoom())
+}
+
+/// One text-size step up (`dir` > 0) or down from `z`, held at the smallest and largest step.
+pub fn step_zoom(z: f32, dir: i32) -> f32 {
+    let steps = crate::theme::ZOOM_STEPS;
+    let i = steps.iter().position(|s| *s == snap_zoom(z)).unwrap_or(0) as i32;
+    steps[(i + dir.signum()).clamp(0, steps.len() as i32 - 1) as usize]
 }
 
 pub struct Model {
@@ -307,6 +333,8 @@ pub struct Model {
     /// Set by HYDRA_TAB: incoming diffs must not switch the drawer away.
     pub tab_pinned: bool,
     pub model: usize,
+    /// Whole-window scale (egui zoom factor), one of the design steps; set in Settings or with Ctrl+= / Ctrl+-.
+    pub zoom: f32,
     pub tokens: u64,
     pub cost: f64,
     pub prompt_tokens: u64,
@@ -429,6 +457,7 @@ impl Model {
             drawer_tab: "screen",
             tab_pinned: false,
             model: 0,
+            zoom: default_zoom(),
             tokens: 0,
             cost: 0.0,
             prompt_tokens: 0,
@@ -486,7 +515,8 @@ impl Model {
                     m.sessions = saved.sessions;
                     m.counter = saved.counter;
                     m.nav = nav_key(&saved.nav);
-                    m.model = saved.model.min(MODELS.len() - 1);
+                    m.model = MODELS.iter().position(|x| x.0 == saved.model_key).unwrap_or(saved.model.min(MODELS.len() - 1));
+                    m.zoom = snap_zoom(saved.zoom);
                     m.tokens = saved.tokens;
                     m.cost = saved.cost;
                     m.prompt_tokens = saved.prompt_tokens;
@@ -594,6 +624,8 @@ impl Model {
             llamacpp_host: self.llamacpp_host.clone(),
             local_ai_base: self.local_ai_base.clone(),
             cwd: Some(self.cwd.clone()),
+            model_key: MODELS[self.model].0.into(),
+            zoom: self.zoom,
         };
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -2024,6 +2056,57 @@ mod tests {
         assert_eq!((b.tokens, b.model, b.nav), (1234, 3, "swarm"));
         assert_eq!(b.sessions[0].thread, a.sessions[0].thread);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn d24_the_model_is_restored_by_name_and_the_text_size_by_design_step() {
+        let dir = std::env::temp_dir().join(format!("hydra-general-{}", std::process::id()));
+        let path = dir.join("state.json");
+        let mut a = Model::new(Some(path.clone()), ".".into());
+        a.model = 2;
+        a.zoom = 1.3;
+        a.save();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!((v["model_key"].as_str(), v["zoom"].as_f64()), (Some(MODELS[2].0), Some(1.3)), "saved by name, and the size as written");
+        let b = Model::new(Some(path.clone()), ".".into());
+        assert_eq!((b.model, b.zoom), (2, 1.3));
+        // the list was reordered since the save: the stale index points elsewhere, the name still finds the model
+        let rewrite = |f: &dyn Fn(&mut Value)| {
+            let mut v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            f(&mut v);
+            std::fs::write(&path, v.to_string()).unwrap();
+        };
+        rewrite(&|v| v["model"] = json!(4));
+        assert_eq!(Model::new(Some(path.clone()), ".".into()).model, 2, "found by name, not by the stale index");
+        // a name this build does not know, or a file from before the name was saved, falls back to the index
+        rewrite(&|v| v["model_key"] = json!("a model that was removed"));
+        assert_eq!(Model::new(Some(path.clone()), ".".into()).model, 4);
+        rewrite(&|v| {
+            v.as_object_mut().unwrap().remove("model_key");
+            v.as_object_mut().unwrap().remove("zoom");
+        });
+        let old = Model::new(Some(path.clone()), ".".into());
+        assert_eq!((old.model, old.zoom), (4, 1.0), "an old state file loads with the design size");
+        // a hand-edited size lands on the nearest design step
+        rewrite(&|v| v["zoom"] = json!(9.0));
+        assert_eq!(Model::new(Some(path.clone()), ".".into()).zoom, 1.5);
+        rewrite(&|v| v["zoom"] = json!(1.27));
+        assert_eq!(Model::new(Some(path), ".".into()).zoom, 1.3);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn text_size_steps_walk_the_design_steps_and_stop_at_the_ends() {
+        let steps = crate::theme::ZOOM_STEPS;
+        assert!(steps.contains(&1.0), "the design size is a step");
+        assert!(steps.windows(2).all(|w| w[0] < w[1]), "steps go up");
+        let (lo, hi) = (steps[0], steps[steps.len() - 1]);
+        assert_eq!(step_zoom(1.0, 1), steps[steps.iter().position(|s| *s == 1.0).unwrap() + 1]);
+        assert_eq!(step_zoom(1.0, -1), steps[steps.iter().position(|s| *s == 1.0).unwrap() - 1]);
+        assert_eq!(step_zoom(hi, 1), hi);
+        assert_eq!(step_zoom(lo, -1), lo);
+        assert_eq!(snap_zoom(f32::NAN), 1.0);
+        assert_eq!(snap_zoom(0.1), lo);
     }
 
     #[test]

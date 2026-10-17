@@ -163,6 +163,7 @@ pub const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+B", "Toggle the sidebar"),
     ("Ctrl+S", "Save the open file"),
     ("Ctrl+,", "Settings"),
+    ("Ctrl+= / Ctrl+- / Ctrl+0", "Text size: larger, smaller, design size"),
     ("Alt+1 / 2 / 3", "Chat, Agent, Swarm"),
     ("F1 or Ctrl+/", "This sheet"),
     ("Esc", "Close a dialog"),
@@ -430,6 +431,10 @@ impl HydraApp {
         motion::install(ctx0);
         let shot = std::env::var("HYDRA_SHOT").ok().map(|path| ShotPlan { path, frames: 0, requested: false });
         let mut m = Model::new(state, cwd);
+        // D24: the saved text size applies from the first frame. Ctrl+= / Ctrl+- are handled in shortcuts(), so they
+        // walk the design sizes and are saved, instead of egui's own unsaved 10% steps.
+        ctx0.options_mut(|o| o.zoom_with_keyboard = false);
+        ctx0.set_zoom_factor(m.zoom);
         let wake_ctx = ctx0.clone();
         let mut work = Work::new(PathBuf::from(m.work_path()), move || wake_ctx.request_repaint());
         let ctx = ctx0.clone();
@@ -677,6 +682,16 @@ impl HydraApp {
                 ui.add(egui::Label::new(rt(text.as_str(), 12.0, TEXT)).wrap());
             });
         });
+    }
+
+    /// Scale the whole window to the design step nearest `z` and remember it for the next launch.
+    fn set_zoom(&mut self, ctx: &egui::Context, z: f32) {
+        let z = snap_zoom(z);
+        ctx.set_zoom_factor(z);
+        if z != self.m.zoom {
+            self.m.zoom = z;
+            self.m.save();
+        }
     }
 
     fn open_settings(&mut self) {
@@ -2769,26 +2784,51 @@ impl HydraApp {
             let (mut save, mut close) = (false, ctx.input(|i| i.key_pressed(Key::Escape)));
             let mut clear: Option<usize> = None;
             let stored = secrets::read_from(&file);
+            // D24: general settings, saved in the desktop state file with the rest of the window state
+            let (mut model, mut zoom) = (self.m.model, self.m.zoom);
             if let Some(st) = &mut self.settings {
                 modal_frame(ctx, "settings", 560.0, |ui| {
-                    ui.label(rtb("SETTINGS: MODEL ACCESS", 13.0, ACCENT));
-                    ui.add(egui::Label::new(rt(format!("Keys are stored in {} (readable only by you) and never shown again. Leave a field empty to keep what is stored; Clear removes it.", file.display()), 11.0, MUTED)).wrap());
-                    for (i, (name, label, secret)) in secrets::PROVIDERS.iter().enumerate() {
-                        ui.label(rt(*label, 12.0, TEXT2));
-                        let have = stored.get(*name).filter(|v| !v.is_empty()).map(|v| if *secret { secrets::mask(v) } else { v.clone() });
-                        let hint = match &have {
-                            Some(h) => format!("saved: {h}"),
-                            None => "not set".into(),
-                        };
-                        ui.horizontal(|ui| {
-                            let w = if have.is_some() { ui.available_width() - 70.0 } else { ui.available_width() };
-                            ui.add(egui::TextEdit::singleline(&mut st.inputs[i]).password(*secret).hint_text(rt(hint, 12.0, MUTED)).desired_width(w));
-                            // D24: a stored value can be removed, not only replaced
-                            if have.is_some() && widgets::button(ui, "Clear", Kind::Danger, 11.0, (8.0, 3.0), None).on_hover_text("Remove the stored value").clicked() {
-                                clear = Some(i);
+                    ui.label(rtb("SETTINGS: GENERAL", 13.0, ACCENT));
+                    ui.horizontal(|ui| {
+                        ui.label(rt("Model for new turns", 12.0, TEXT2));
+                        style_combo(ui);
+                        egui::ComboBox::from_id_salt("settings-model").selected_text(rt(MODELS[model].1, 12.0, TEXT)).show_ui(ui, |ui| {
+                            for (i, (_, name)) in MODELS.iter().enumerate() {
+                                ui.selectable_value(&mut model, i, rt(*name, 12.0, TEXT));
                             }
                         });
-                    }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(rt("Text size", 12.0, TEXT2));
+                        for z in ZOOM_STEPS {
+                            let kind = if z == zoom { Kind::Primary } else { Kind::Secondary };
+                            if widgets::button(ui, &format!("{:.0}%", z * 100.0), kind, 11.0, (8.0, 3.0), None).clicked() {
+                                zoom = z;
+                            }
+                        }
+                    });
+                    ui.label(rtb("SETTINGS: MODEL ACCESS", 13.0, ACCENT));
+                    ui.add(egui::Label::new(rt(format!("Keys are stored in {} (readable only by you) and never shown again. Leave a field empty to keep what is stored; Clear removes it.", file.display()), 11.0, MUTED)).wrap());
+                    // the key list scrolls in a short window (or at a large text size), so Save and Close stay on screen
+                    let cap = (ui.ctx().content_rect().height() * 0.45).max(160.0);
+                    ScrollArea::vertical().id_salt("settings_keys").max_height(cap).auto_shrink([false, true]).show(ui, |ui| {
+                        for (i, (name, label, secret)) in secrets::PROVIDERS.iter().enumerate() {
+                            ui.label(rt(*label, 12.0, TEXT2));
+                            let have = stored.get(*name).filter(|v| !v.is_empty()).map(|v| if *secret { secrets::mask(v) } else { v.clone() });
+                            let hint = match &have {
+                                Some(h) => format!("saved: {h}"),
+                                None => "not set".into(),
+                            };
+                            ui.horizontal(|ui| {
+                                let w = if have.is_some() { ui.available_width() - 70.0 } else { ui.available_width() };
+                                ui.add(egui::TextEdit::singleline(&mut st.inputs[i]).password(*secret).hint_text(rt(hint, 12.0, MUTED)).desired_width(w));
+                                // D24: a stored value can be removed, not only replaced
+                                if have.is_some() && widgets::button(ui, "Clear", Kind::Danger, 11.0, (8.0, 3.0), None).on_hover_text("Remove the stored value").clicked() {
+                                    clear = Some(i);
+                                }
+                            });
+                        }
+                    });
                     if !st.message.is_empty() {
                         ui.add(egui::Label::new(rt(&st.message, 11.0, if st.ok { ACCENT } else { ERROR })).wrap());
                     }
@@ -2801,6 +2841,13 @@ impl HydraApp {
                         }
                     });
                 });
+            }
+            if model != self.m.model {
+                self.m.model = model;
+                self.m.save();
+            }
+            if zoom != self.m.zoom {
+                self.set_zoom(ctx, zoom);
             }
             if save {
                 self.save_settings(ctx);
@@ -3365,6 +3412,18 @@ impl HydraApp {
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Comma)) {
             self.open_settings();
+        }
+        {
+            use egui::gui_zoom::kb_shortcuts::{ZOOM_IN, ZOOM_IN_SECONDARY, ZOOM_OUT, ZOOM_RESET};
+            if ctx.input_mut(|i| i.consume_shortcut(&ZOOM_IN) || i.consume_shortcut(&ZOOM_IN_SECONDARY)) {
+                self.set_zoom(ctx, step_zoom(self.m.zoom, 1));
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&ZOOM_OUT)) {
+                self.set_zoom(ctx, step_zoom(self.m.zoom, -1));
+            }
+            if ctx.input_mut(|i| i.consume_shortcut(&ZOOM_RESET)) {
+                self.set_zoom(ctx, 1.0);
+            }
         }
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Comma)) {
             self.run(Cmd::Options);

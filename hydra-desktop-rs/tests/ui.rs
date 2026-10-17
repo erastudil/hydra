@@ -10,13 +10,18 @@ fn harness(name: &str) -> Harness<'static, HydraApp> {
 }
 
 fn harness_sized(name: &str, w: f32, hgt: f32) -> Harness<'static, HydraApp> {
+    harness_with_state(name, w, hgt, None)
+}
+
+/// A window that loads and saves its state at `state`, as the real app does with ~/.hydra/desktop/state.json.
+fn harness_with_state(name: &str, w: f32, hgt: f32, state: Option<std::path::PathBuf>) -> Harness<'static, HydraApp> {
     let dir = std::env::temp_dir().join(format!("hydra-ui-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let cwd = dir.display().to_string();
     // the fake agent speaks the real stdio protocol; a missing python fails these tests loudly
     std::env::set_var("LOCAL_AI_BASE", "http://127.0.0.1:9"); // counts as a configured model, so first-run Settings stays closed
     std::env::set_var("HYDRA_REPO", format!("{}/tests/fake_agent", env!("CARGO_MANIFEST_DIR")));
-    Harness::builder().with_size(egui::vec2(w, hgt)).build_eframe(move |cc| HydraApp::build(&cc.egui_ctx, None, cwd, true))
+    Harness::builder().with_size(egui::vec2(w, hgt)).build_eframe(move |cc| HydraApp::build(&cc.egui_ctx, state, cwd, true))
 }
 
 fn app<'a>(h: &'a mut Harness<'static, HydraApp>) -> &'a mut HydraApp {
@@ -200,6 +205,54 @@ fn d24_clear_deletes_a_stored_key_from_the_file_and_it_stays_gone_after_a_restar
     assert!(painted_texts(&h, "saved: sk-").is_empty() && painted_texts(&h, "saved: http").is_empty(), "removed values stay removed after a restart");
     assert!(!painted_texts(&h, "saved: hf_").is_empty());
     std::env::remove_var("HYDRA_HOME");
+}
+
+#[test]
+fn d24_general_settings_set_the_model_and_text_size_and_both_survive_a_restart() {
+    let dir = std::env::temp_dir().join(format!("hydra-ui-general-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let state = dir.join("state.json");
+    let mut h = harness_with_state("general", 1280.0, 800.0, Some(state.clone()));
+    open_settings(&mut h);
+    h.get_by_label_contains("SETTINGS: GENERAL");
+    assert_eq!(h.ctx.zoom_factor(), 1.0);
+    h.get_by_label("130%").click();
+    h.run_steps(4);
+    assert_eq!(h.ctx.zoom_factor(), 1.3, "the window scales at once");
+    let target = 2; // a model near the top of the list, so its row is inside the open picker without scrolling
+    assert_ne!(app(&mut h).model().model, target);
+    // the Settings picker, not the one in the header
+    let header_h = hydra_desktop::layout::frame(1280.0).header_height;
+    let picker = h.get_all_by_role(egui::accesskit::Role::ComboBox).find(|n| n.rect().min.y > header_h).expect("model picker in Settings");
+    picker.click();
+    h.run_steps(3);
+    h.get_by_label(MODELS[target].1).click();
+    h.run_steps(3);
+    assert_eq!(app(&mut h).model().model, target, "the Settings picker sets the model");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Minus);
+    h.run_steps(3);
+    assert_eq!(h.ctx.zoom_factor(), 1.15, "Ctrl+- goes one design step down");
+    drop(h);
+    let mut h = harness_with_state("general-again", 1280.0, 800.0, Some(state));
+    settle(&mut h);
+    assert_eq!(h.ctx.zoom_factor(), 1.15, "the text size is back after a restart");
+    assert_eq!(app(&mut h).model().model, target, "the model is back after a restart");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn d24_settings_buttons_stay_on_screen_in_a_small_window() {
+    // 1280x800 at the largest text size leaves about 853x533 points for the dialog
+    for (w, hgt) in [(853.0, 533.0), (820.0, 560.0)] {
+        let mut h = harness_sized(&format!("settings-small{w}"), w, hgt);
+        open_settings(&mut h);
+        for label in ["Save", "Close", "150%"] {
+            let r = h.get_by_label(label).rect();
+            assert!(on_screen(r, w, hgt), "{label} at {r:?} is off a {w}x{hgt} window");
+        }
+    }
 }
 
 #[test]

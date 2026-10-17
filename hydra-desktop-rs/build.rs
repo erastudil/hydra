@@ -52,6 +52,8 @@ fn main() {
         out += &format!("pub const TYPE_{}: f32 = {:?};\n", name.to_uppercase(), v["size"].as_f64().unwrap());
     }
     out += &format!("pub const LETTER_SPACING_BODY: f32 = {:?};\n", t["typography"]["letter_spacing_body"].as_f64().unwrap());
+    let zs: Vec<String> = t["typography"]["zoom_steps"].as_array().unwrap().iter().map(|z| format!("{:?}", z.as_f64().unwrap() as f32)).collect();
+    out += &format!("pub const ZOOM_STEPS: [f32; {}] = [{}];\n", zs.len(), zs.join(", "));
     let l = &t["layout"];
     out += &format!("pub const LAYOUT_SIDEBAR_WIDTH: f32 = {:?};\n", l["sidebar"]["width"].as_f64().unwrap());
     out += &format!("pub const LAYOUT_DRAWER_WIDTH_DESIGN: f32 = {:?};\n", l["side_drawer"]["width"].as_f64().unwrap());

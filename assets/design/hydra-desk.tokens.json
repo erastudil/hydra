@@ -200,6 +200,8 @@
   ],
   "note": "The old page used one monospace stack for every element. No proportional font anywhere.",
   "letter_spacing_body": -0.2,
+  "zoom_steps_note": "Text size choices in Settings and for Ctrl+= / Ctrl+-: the whole window scales, 1.0 is the design size.",
+  "zoom_steps": [0.85, 1.0, 1.15, 1.3, 1.5],
   "scale": {
    "msg_header": {
     "size": 11,
