@@ -190,6 +190,8 @@ function checkPortOpen(host, port, timeoutMs = 400) {
 
 function chatUrl(base) {
   let root = String(base || '').trim().replace(/\/+$/, '');
+  // OLLAMA_HOST is documented as host:port. A missing scheme is http.
+  if (root && !root.includes('://')) root = `http://${root}`;
   if (root.endsWith('/chat/completions')) return root;
   if (!root.endsWith('/v1')) root += '/v1';
   return `${root}/chat/completions`;
@@ -1241,6 +1243,7 @@ module.exports = {
   redact,
   sanitizeStreamText,
   createTokenStreamWriter,
+  chatUrl,
 };
 
 if (require.main === module) {
