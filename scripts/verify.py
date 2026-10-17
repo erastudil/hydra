@@ -522,6 +522,7 @@ def providers():
         CredentialsMissingError,
         ProviderError,
         adapt_model_for_url,
+        chat_completions_url,
         detect_local_endpoint,
         get_cheaperinference_provider,
         get_free_candidates,
@@ -597,9 +598,16 @@ def providers():
         url, name = detect_local_endpoint()
         assert name == "Custom Local AI" and "9090/v1/chat/completions" in url
         os.environ.pop("LOCAL_AI_BASE", None)
+        assert chat_completions_url("127.0.0.1:11434") == "http://127.0.0.1:11434/v1/chat/completions"
+        assert chat_completions_url("[::1]:11434") == "http://[::1]:11434/v1/chat/completions"
+        assert chat_completions_url("https://example.test/v1") == "https://example.test/v1/chat/completions"
+        assert chat_completions_url("http://127.0.0.1:11434/v1/chat/completions") == "http://127.0.0.1:11434/v1/chat/completions"
+        os.environ["OLLAMA_HOST"] = "127.0.0.1:11434"
+        url, name = detect_local_endpoint()
+        assert name == "Ollama" and url == "http://127.0.0.1:11434/v1/chat/completions"
         os.environ["OLLAMA_HOST"] = "http://127.0.0.1:11434"
         url, name = detect_local_endpoint()
-        assert name == "Ollama" and "11434" in url
+        assert name == "Ollama" and url == "http://127.0.0.1:11434/v1/chat/completions"
         os.environ.pop("OLLAMA_HOST", None)
         url, name = detect_local_endpoint()
         if is_port_open("127.0.0.1", 11434):
@@ -1569,6 +1577,10 @@ assert.equal(Object.hasOwn(hydra.CATALOG.aliases, 'alice-emap'), false);
 assert.equal(hydra.resolveRoute('muse').model, 'meta/muse-spark-1.3');
 assert.equal(hydra.resolveRoute('llama 3.1 8b').model, 'meta-llama/Llama-3.1-8B-Instruct');
 assert.equal(hydra.sanitizeStreamText('a\rb\x1b[?1000hc'), 'abc');
+assert.equal(hydra.chatUrl('127.0.0.1:11434'), 'http://127.0.0.1:11434/v1/chat/completions');
+assert.equal(hydra.chatUrl('[::1]:11434'), 'http://[::1]:11434/v1/chat/completions');
+assert.equal(hydra.chatUrl('https://example.test/v1'), 'https://example.test/v1/chat/completions');
+assert.equal(hydra.chatUrl('http://127.0.0.1:11434/v1/chat/completions'), 'http://127.0.0.1:11434/v1/chat/completions');
 """
 
 
