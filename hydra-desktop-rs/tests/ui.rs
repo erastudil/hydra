@@ -444,7 +444,7 @@ fn cwd_chip_elides_from_the_left_on_char_boundaries() {
 fn default_model_is_mimo_flash_and_computer_use_renders_screen_gradient_mesh() {
     let mut h = harness("cu_gradient");
     settle(&mut h);
-    assert_eq!(MODELS[app(&mut h).model().model].0, "mimo 2.6 flash");
+    assert_eq!(MODELS[app(&mut h).model().model].0, "bonsai 2 9b");
     // Switch to Computer Use mode and start a busy turn so both the composer pulse and screen border gradient activate
     app(&mut h).model_mut().set_nav("computer");
     say(&mut h, "SLOW inspect screen");

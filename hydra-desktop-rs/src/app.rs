@@ -4237,9 +4237,15 @@ mod tests {
 
     #[test]
     fn test_default_model_and_screen_border_gradient_mesh() {
-        assert_eq!(MODELS[0].0, "mimo 2.6 flash");
-        assert_eq!(MODELS[1].0, "mimo 2.6 pro");
-        assert_eq!(MODELS[2].0, "glm 5.3 flash");
+        assert_eq!(MODELS[0].0, "bonsai 2 9b");
+        assert_eq!(MODELS[1].0, "bonsai 2 2b");
+        assert_eq!(MODELS[2].0, "bonsai 2 4b");
+        assert_eq!(MODELS[3].0, "bonsai 2 27b");
+        assert_eq!(MODELS[4].0, "mimo 2.6 flash");
+        assert_eq!(MODELS[5].0, "mimo 2.6 pro");
+        assert_eq!(MODELS[6].0, "glm 5.3 flash");
+        assert_eq!(normalize_model_key("bonsai"), "bonsai 2 9b");
+        assert_eq!(normalize_model_key("bonsai-2-9b"), "bonsai 2 9b");
         assert_eq!(normalize_model_key("mimo.2.6 flash"), "mimo 2.6 flash");
         assert_eq!(normalize_model_key("mimo.2.6 pro"), "mimo 2.6 pro");
 

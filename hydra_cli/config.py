@@ -80,7 +80,7 @@ DEFAULT_HF_BASE = os.environ.get("HF_INFERENCE_BASE", "https://router.huggingfac
 DEFAULT_HF_MODEL = os.environ.get("HYDRA_HF_MODEL", CATALOG.get("default_hf_model", "meta-llama/Llama-3.1-8B-Instruct"))
 DEFAULT_MODEL = os.environ.get(
     "HYDRA_DEFAULT_MODEL",
-    CATALOG.get("default_model", "mimo 2.6 flash"),
+    CATALOG.get("default_model", "bonsai 2 9b"),
 )
 DEFAULT_ORCHESTRATOR_MODEL = os.environ.get(
     "HYDRA_ORCHESTRATOR_MODEL",
@@ -118,6 +118,7 @@ DEFAULT_CONTEXT_WINDOW = 1048576
 DEFAULT_CONTEXT_MODE = os.environ.get("HYDRA_CONTEXT_MODE", "recall")
 CONTEXT_PROFILES: Dict[str, int] = dict(CATALOG.get("context_profiles") or {"default": 1048576, "128k": 131072, "1m": 1048576})
 
+
 # JSON and source tokenize denser than prose. Three characters per token keeps the
 # live window inside the provider window after tool schemas are attached.
 CHARS_PER_TOKEN = 3
@@ -130,8 +131,11 @@ def get_context_window(model: Optional[str] = None) -> int:
         return DEFAULT_CONTEXT_WINDOW
     key = model.strip()
     spec = (CATALOG.get("aliases") or {}).get(key.lower())
-    if isinstance(spec, dict) and spec.get("model"):
-        key = spec["model"]
+    if isinstance(spec, dict):
+        if spec.get("context_window"):
+            return int(spec["context_window"])
+        if spec.get("model"):
+            key = spec["model"]
     return CONTEXT_PROFILES.get(key, CONTEXT_PROFILES.get("default", DEFAULT_CONTEXT_WINDOW))
 
 
@@ -252,13 +256,28 @@ def resolve_route(alias: str) -> Dict[str, Any]:
     cleaned = alias.strip().lower()
     spec = CATALOG["aliases"].get(cleaned)
     if not spec:
-        return {"model": alias, "effort": None, "reasoning_mode": None, "runner": None, "swarm": None, "providers": model_providers(alias)}
+        return {
+            "model": alias,
+            "effort": None,
+            "reasoning_mode": None,
+            "runner": None,
+            "swarm": None,
+            "adapter": None,
+            "hydra_adapter": None,
+            "memory_mb": None,
+            "context_window": None,
+            "providers": model_providers(alias),
+        }
     return {
         "model": spec["model"],
         "effort": spec.get("effort"),
         "reasoning_mode": spec.get("reasoning_mode"),
         "runner": spec.get("runner"),
         "swarm": spec.get("swarm"),
+        "adapter": spec.get("adapter"),
+        "hydra_adapter": spec.get("hydra_adapter"),
+        "memory_mb": spec.get("memory_mb"),
+        "context_window": spec.get("context_window"),
         "providers": model_providers(spec["model"]),
     }
 

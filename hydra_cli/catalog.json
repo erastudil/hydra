@@ -6,7 +6,7 @@
   ],
   "default_free_model": "google/gemma-4-26b-a4b-it:free",
   "default_cloudflare_model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-  "default_local_model": "qwen2.5-coder:7b",
+  "default_local_model": "prism-ml/Ternary-Bonsai-2-9B-gguf",
   "free_models": [
     "google/gemma-4-26b-a4b-it:free",
     "google/gemma-4-31b-it:free",
@@ -14,6 +14,88 @@
     "nvidia/nemotron-3.5-lightning:free"
   ],
   "aliases": {
+    "bonsai 2 9b": {
+      "model": "prism-ml/Ternary-Bonsai-2-9B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-9b",
+      "hydra_adapter": "Bluebarrels/easylm-hydra-bonsai-2-9b",
+      "memory_mb": 2000,
+      "context_window": 262144
+    },
+    "bonsai-2-9b": {
+      "model": "prism-ml/Ternary-Bonsai-2-9B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-9b",
+      "hydra_adapter": "Bluebarrels/easylm-hydra-bonsai-2-9b",
+      "memory_mb": 2000,
+      "context_window": 262144
+    },
+    "bonsai 9b": {
+      "model": "prism-ml/Ternary-Bonsai-2-9B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-9b",
+      "hydra_adapter": "Bluebarrels/easylm-hydra-bonsai-2-9b",
+      "memory_mb": 2000,
+      "context_window": 262144
+    },
+    "bonsai": {
+      "model": "prism-ml/Ternary-Bonsai-2-9B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-9b",
+      "hydra_adapter": "Bluebarrels/easylm-hydra-bonsai-2-9b",
+      "memory_mb": 2000,
+      "context_window": 262144
+    },
+    "bonsai 2 2b": {
+      "model": "prism-ml/Ternary-Bonsai-2-2B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-2b",
+      "memory_mb": 500,
+      "context_window": 262144
+    },
+    "bonsai-2-2b": {
+      "model": "prism-ml/Ternary-Bonsai-2-2B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-2b",
+      "memory_mb": 500,
+      "context_window": 262144
+    },
+    "bonsai 2b": {
+      "model": "prism-ml/Ternary-Bonsai-2-2B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-2b",
+      "memory_mb": 500,
+      "context_window": 262144
+    },
+    "bonsai 2 4b": {
+      "model": "prism-ml/Ternary-Bonsai-2-4B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-4b",
+      "memory_mb": 1000,
+      "context_window": 262144
+    },
+    "bonsai-2-4b": {
+      "model": "prism-ml/Ternary-Bonsai-2-4B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-4b",
+      "memory_mb": 1000,
+      "context_window": 262144
+    },
+    "bonsai 4b": {
+      "model": "prism-ml/Ternary-Bonsai-2-4B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-4b",
+      "memory_mb": 1000,
+      "context_window": 262144
+    },
+    "bonsai 2 27b": {
+      "model": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-27b",
+      "memory_mb": 5950,
+      "context_window": 262144
+    },
+    "bonsai-2-27b": {
+      "model": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-27b",
+      "memory_mb": 5950,
+      "context_window": 262144
+    },
+    "bonsai 27b": {
+      "model": "prism-ml/Ternary-Bonsai-2-27B-gguf",
+      "adapter": "Bluebarrels/easylm-bonsai-2-27b",
+      "memory_mb": 5950,
+      "context_window": 262144
+    },
     "hermes": {
       "model": "anthropic/claude-opus-5.5",
       "effort": "high"
@@ -524,10 +606,18 @@
     "qwen2.5-coder:latest": 131072,
     "qwen/qwen-2.5-coder-32b-instruct": 131072,
     "gemma-e4b": 131072,
-    "google/gemma-4-26b-a4b-it": 131072
+    "google/gemma-4-26b-a4b-it": 131072,
+    "prism-ml/Ternary-Bonsai-2-9B-gguf": 262144,
+    "prism-ml/Ternary-Bonsai-2-4B-gguf": 262144,
+    "prism-ml/Ternary-Bonsai-2-2B-gguf": 262144,
+    "prism-ml/Ternary-Bonsai-2-27B-gguf": 262144,
+    "bonsai 2 9b": 262144,
+    "bonsai 2 4b": 262144,
+    "bonsai 2 2b": 262144,
+    "bonsai 2 27b": 262144
   },
-  "default_orchestrator_model": "mimo 2.6 flash",
-  "default_agent_model": "mimo 2.6 flash",
+  "default_orchestrator_model": "bonsai 2 9b",
+  "default_agent_model": "bonsai 2 9b",
   "swarm_combos": {
     "open swarm": {
       "title": "Open Swarm",
@@ -561,7 +651,7 @@
       ]
     }
   },
-  "default_model": "mimo 2.6 flash",
+  "default_model": "bonsai 2 9b",
   "default_fanout_aliases": [
     "glm 5.3 flash",
     "deepseek 4.1 flash",
