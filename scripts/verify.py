@@ -10851,6 +10851,7 @@ def desktop_rag_reranker_and_replay_debugger_contracts():
 @check
 def wave22_session_logger_and_mimo_routing():
     from hydra_cli.config import (
+        CATALOG,
         DEFAULT_MODEL,
         DEFAULT_ORCHESTRATOR_MODEL,
         DEFAULT_AGENT_MODEL,
@@ -10858,18 +10859,48 @@ def wave22_session_logger_and_mimo_routing():
         DEFAULT_CONTEXT_WINDOW,
         IMMUTABLE_AGENT_INVARIANTS,
         resolve_model,
+        resolve_route,
         get_context_window,
         model_providers,
     )
+    from hydra_cli.repl import ReplSession
     from hydra_cli.session_logger import (
         SwarmSessionLogger,
         get_swarm_session_logger,
     )
     from hydra_cli.native_tools import NativeToolRegistry
 
-    assert DEFAULT_MODEL == "mimo 2.6 flash"
-    assert DEFAULT_ORCHESTRATOR_MODEL == "mimo 2.6 flash"
-    assert DEFAULT_AGENT_MODEL == "mimo 2.6 flash"
+    assert CATALOG["default_model"] == "bonsai 2 9b"
+    assert CATALOG["default_agent_model"] == "bonsai 2 9b"
+    assert CATALOG["default_orchestrator_model"] == "bonsai 2 9b"
+    assert DEFAULT_MODEL == "bonsai 2 9b"
+    assert DEFAULT_ORCHESTRATOR_MODEL == "bonsai 2 9b"
+    assert DEFAULT_AGENT_MODEL == "bonsai 2 9b"
+    route_9b = resolve_route("bonsai 2 9b")
+    assert route_9b["model"] == "prism-ml/Ternary-Bonsai-2-9B-gguf"
+    assert route_9b["adapter"] == "Bluebarrels/easylm-bonsai-2-9b"
+    assert route_9b["hydra_adapter"] == "Bluebarrels/easylm-hydra-bonsai-2-9b"
+    assert route_9b["memory_mb"] == 2000
+    assert route_9b["context_window"] == 262144
+    assert get_context_window("bonsai 2 9b") == 262144
+    assert resolve_model("bonsai") == "prism-ml/Ternary-Bonsai-2-9B-gguf"
+    saved_alias = os.environ.pop("HYDRA_DEFAULT_ALIAS", None)
+    try:
+        assert ReplSession().alias == DEFAULT_MODEL
+        os.environ["HYDRA_DEFAULT_ALIAS"] = "   "
+        assert ReplSession().alias == DEFAULT_MODEL
+        os.environ["HYDRA_DEFAULT_ALIAS"] = "opus 5.5"
+        assert ReplSession().alias == "opus 5.5"
+    finally:
+        if saved_alias is None:
+            os.environ.pop("HYDRA_DEFAULT_ALIAS", None)
+        else:
+            os.environ["HYDRA_DEFAULT_ALIAS"] = saved_alias
+    with open(os.path.join(REPO, "hydra-tui-rs", "src", "app.rs"), encoding="utf-8") as tui_fh:
+        tui_src = tui_fh.read()
+    assert '("/model", "switch active model alias (default: bonsai 2 9b)")' in tui_src
+    assert '("/model [alias]", "switch active model (default: bonsai 2 9b)")' in tui_src
+    assert "default: mimo 2.6 flash" not in tui_src
     assert resolve_model("mimo 2.6 pro") == "mimo-2.6-pro"
     assert resolve_model("mimo") == "mimo-2.6-pro"
     assert resolve_model("daily driver") == "mimo-2.6-flash"
