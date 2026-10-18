@@ -16,7 +16,7 @@ import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from hydra_cli import __version__
-from hydra_cli.config import DEFAULT_SYSTEM_PROMPT, MODEL_MAP, resolve_route
+from hydra_cli.config import DEFAULT_MODEL, DEFAULT_SYSTEM_PROMPT, MODEL_MAP, resolve_route
 from hydra_cli.ui import GREEN_BRIGHT, GREEN_DIM, RESET, print_banner, supports_color
 
 
@@ -1290,7 +1290,7 @@ class ReplSession:
         self.history: ReplHistoryDedup = get_default_history_dedup()
         self.menu_pager: ReplMenuPager = get_default_menu_pager()
         self.exit_confirm: ReplExitConfirm = get_default_exit_confirm()
-        self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "mimo 2.6 flash").strip() or "mimo 2.6 flash"
+        self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "").strip() or DEFAULT_MODEL
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.effort: Optional[str] = None
         self.reasoning_mode: Optional[str] = None

@@ -468,7 +468,7 @@ impl App {
         }
 
         let cmds: &[(&str, &str)] = &[
-            ("/model", "switch active model alias (default: mimo 2.6 flash)"),
+            ("/model", "switch active model alias (default: bonsai 2 9b)"),
             ("/pro", "speed dial heavy frontier model (mimo 2.6 pro)"),
             ("/flash", "switch back to default fast coding model (mimo 2.6 flash)"),
             ("/fallback", "switch to fallback model (glm 5.3 flash)"),
@@ -734,7 +734,7 @@ impl App {
             "help" => {
                 self.transcript.push("--- hydra slash commands ---".into());
                 for (cmd, desc) in [
-                    ("/model [alias]", "switch active model (default: mimo 2.6 flash)"),
+                    ("/model [alias]", "switch active model (default: bonsai 2 9b)"),
                     ("/pro", "speed dial heavy frontier model (mimo 2.6 pro)"),
                     ("/flash", "switch to fast daily driver (mimo 2.6 flash)"),
                     ("/fallback", "switch to fallback model (glm 5.3 flash)"),
@@ -1589,6 +1589,17 @@ mod tests {
         assert_eq!(app.model, "bonsai 2 9b");
         assert_eq!(app.fallback_model, "glm 5.3 flash");
         assert_eq!(app.speed_dial_model, "mimo 2.6 pro");
+        app.input = "/m".into();
+        app.cursor_pos = app.input.len();
+        assert!(app.candidates().iter().any(|(cmd, desc)| {
+            cmd == "/model" && desc.contains("default: bonsai 2 9b")
+        }));
+        app.input.clear();
+        app.cursor_pos = 0;
+        app.command("help");
+        assert!(app.transcript.iter().any(|line| {
+            line.contains("/model [alias]") && line.contains("default: bonsai 2 9b")
+        }));
 
         for ch in "/fallback".chars() {
             app.on_char(ch);
