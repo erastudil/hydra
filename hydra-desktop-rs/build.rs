@@ -65,6 +65,10 @@ fn main() {
     out += &format!("pub const MOTION_TRANSITION_MS: f32 = {:?};\n", m["durations_ms"]["transition"].as_f64().unwrap());
     out += &format!("pub const MOTION_FADE_IN_MS: f32 = {:?};\n", m["message_arrival"]["duration_ms"].as_f64().unwrap());
     out += &format!("pub const MOTION_FADE_FROM_Y: f32 = {:?};\n", m["message_arrival"]["from_translate_y"].as_f64().unwrap());
+    let pulse = &m["keyframes"]["phosphorPulse"];
+    out += &format!("pub const MOTION_PULSE_MS: f32 = {:?};\n", pulse["duration_ms"].as_f64().unwrap());
+    out += &format!("pub const MOTION_PULSE_MIN_OPACITY: f32 = {:?};\n", pulse["50%"]["opacity"].as_f64().unwrap());
+    out += &format!("pub const MOTION_PULSE_MIN_SCALE: f32 = {:?};\n", pulse["50%"]["scale"].as_f64().unwrap());
     let r = &l["responsive"];
     for (k, name) in [("header_narrow_below", "HEADER_NARROW_BELOW"), ("sidebar_overlay_below", "SIDEBAR_OVERLAY_BELOW"), ("drawer_width_pct", "DRAWER_PCT"), ("drawer_min", "DRAWER_MIN"), ("drawer_max", "DRAWER_MAX"), ("message_max_width_pct", "MESSAGE_MAX_PCT")] {
         out += &format!("pub const RESP_{name}: f32 = {:?};\n", r[k].as_f64().unwrap());

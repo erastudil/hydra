@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """D21 check on the real build under Xvfb: after input and a finished turn, the presented frame must already be current.
 Grab the screen 3 s after Enter, nudge the pointer (which forces a repaint), grab again: the two must match.
+Runs with reduced motion, so the whole screen is compared (a fixed-pixel mask for the pulsing dot went stale when the header moved).
 Needs mss and pillow (python -m venv /tmp/qa-venv && /tmp/qa-venv/bin/pip install mss pillow). usage: stale_frame.py [runs]"""
 import os, subprocess, sys, tempfile, time
 import mss
@@ -25,14 +26,21 @@ def main(runs):
     time.sleep(1)
     h = tempfile.mkdtemp(prefix="hydra-stale-")
     os.makedirs(os.path.join(h, "proj"))
-    env = dict(os.environ, DISPLAY=disp, HOME=h, HYDRA_REPO=ROOT, HYDRA_MODEL="local", LOCAL_AI_BASE=f"http://127.0.0.1:{PORT}", HYDRA_SIZE="1280x800", HYDRA_CWD=os.path.join(h, "proj"))
+    env = dict(os.environ, DISPLAY=disp, HOME=h, HYDRA_REPO=ROOT, HYDRA_MODEL="local", LOCAL_AI_BASE=f"http://127.0.0.1:{PORT}", HYDRA_SIZE="1280x800", HYDRA_CWD=os.path.join(h, "proj"),
+               HYDRA_NO_ANIM="1")  # reduced motion: the status dot holds still, so any pixel change is stale state, with no mask to drift
     app = subprocess.Popen([BIN], cwd=os.path.join(h, "proj"), env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     xd = lambda *a: subprocess.run(["xdotool", *a], env=env, capture_output=True)
     stale = 0
     try:
         time.sleep(4)
+        # with no window manager nothing gives the window keyboard focus, and typed keys would go nowhere
+        for wid in xd("search", "--name", "Hydra").stdout.split():
+            xd("windowfocus", wid)
         for i in range(runs):
-            xd("mousemove", "400", "570", "click", "1")
+            xd("mousemove", "1270", "790")
+            time.sleep(0.6)
+            before = grab(disp)
+            xd("mousemove", "500", "708", "click", "1")  # the composer at 1280x800
             time.sleep(0.3)
             ask = i % 2 == 1  # odd runs open the approval modal (the case Violet saw), even runs finish a plain turn
             xd("type", f"WRITE file {i}" if ask else f"hello {i}")
@@ -43,20 +51,19 @@ def main(runs):
             xd("mousemove", "1260", "780")
             time.sleep(0.6)
             b = grab(disp)
-            # the header status dot glows with time on every frame it is drawn; it is not state, so mask it out
-            for im in (a, b):
-                im.paste((0, 0, 0), (570, 10, 616, 50))
             diff = ImageChops.difference(a, b).getbbox()
-            if diff and os.environ.get("KEEP"):
-                a.save(f"/tmp/stale_a{i}.png"); b.save(f"/tmp/stale_b{i}.png")
-            print(f"run {i}: {'STALE ' + str(diff) if diff else 'current'}", flush=True)
-            stale += bool(diff)
+            sent = ImageChops.difference(before, b).getbbox() is not None
+            if os.environ.get("KEEP"):
+                keep = os.environ["KEEP"]; a.save(f"{keep}_a{i}.png"); b.save(f"{keep}_b{i}.png")
+            # a run whose input never reached the app proves nothing, so it fails the check instead of passing it
+            print(f"run {i}: {'INPUT NOT DELIVERED' if not sent else 'STALE ' + str(diff) if diff else 'current'}", flush=True)
+            stale += bool(diff) or not sent
             if ask:
                 xd("key", "Escape")
                 time.sleep(1.5)
     finally:
         app.kill(); x.kill(); stub.kill()
-    print(f"stale frames: {stale}/{runs}")
+    print(f"stale or undelivered: {stale}/{runs}")
     return 1 if stale else 0
 
 

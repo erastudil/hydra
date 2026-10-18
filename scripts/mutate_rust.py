@@ -64,6 +64,8 @@ MUTATIONS = [
     ("D09 command does not say where it ran", "src/app.rs", "match NAV.iter().find(|n| m.user && n.0 == m.mode) {", "match None::<&(&str, &str)> {", ["--test", "ui_real", "d09"]),
     ("D09 shell output under a model name", M, 'let header = if self.nav == "terminal" { "SHELL".to_string() } else {', 'let header = if false { "SHELL".to_string() } else {', ["--test", "ui_real", "d09"]),
     ("D09 old state files fail to load", M, '#[serde(default, skip_serializing_if = "String::is_empty")]\n    pub mode: String,', '#[serde(skip_serializing_if = "String::is_empty")]\n    pub mode: String,', ["--lib", "d09"]),
+    ("status pulse ignores reduced motion", "src/motion.rs", "    if reduced {\n        return 1.0;\n    }\n    let period", "    let _ = reduced;\n    let period", ["--lib", "pulse"]),
+    ("caret blinks under reduced motion", "src/theme.rs", "v.text_cursor.blink = !reduced_motion;", "v.text_cursor.blink = true;", ["--lib", "text_cursor"]),
     ("composer layout follows the pulse stroke", "src/app.rs", ".stroke(Stroke::new(stroke_max, Color32::TRANSPARENT))", ".stroke(Stroke::new(stroke_w, border_col))", ["--test", "ui_real", "the_composer"]),
 ]
 

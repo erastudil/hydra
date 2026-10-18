@@ -73,7 +73,22 @@ pub fn apply(ctx: &egui::Context) {
     ctx.data_mut(|d| d.insert_temp(done, true));
     install_fonts(ctx);
     ctx.set_pixels_per_point(ctx.pixels_per_point());
+    ctx.set_visuals(visuals(crate::motion::reduced_motion()));
+    ctx.all_styles_mut(|s| {
+        s.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        s.spacing.button_padding = egui::vec2(16.0, 8.0);
+        s.spacing.scroll.bar_width = 8.0;
+        s.spacing.scroll.floating = false;
+        s.text_styles.insert(egui::TextStyle::Body, FontId::new(13.0, FontFamily::Proportional));
+        s.text_styles.insert(egui::TextStyle::Button, FontId::new(13.0, FontFamily::Proportional));
+        s.text_styles.insert(egui::TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace));
+    });
+}
+
+/// The dark visuals from the tokens. With reduced motion the text cursor holds still instead of blinking.
+pub fn visuals(reduced_motion: bool) -> egui::Visuals {
     let mut v = egui::Visuals::dark();
+    v.text_cursor.blink = !reduced_motion;
     v.panel_fill = BG;
     v.window_fill = BG2;
     v.extreme_bg_color = BG3;
@@ -98,16 +113,7 @@ pub fn apply(ctx: &egui::Context) {
     v.widgets.open.weak_bg_fill = BG3;
     v.widgets.open.bg_stroke = Stroke::new(1.0, ACCENT);
     v.widgets.open.corner_radius = cr(12);
-    ctx.set_visuals(v);
-    ctx.all_styles_mut(|s| {
-        s.spacing.item_spacing = egui::vec2(8.0, 8.0);
-        s.spacing.button_padding = egui::vec2(16.0, 8.0);
-        s.spacing.scroll.bar_width = 8.0;
-        s.spacing.scroll.floating = false;
-        s.text_styles.insert(egui::TextStyle::Body, FontId::new(13.0, FontFamily::Proportional));
-        s.text_styles.insert(egui::TextStyle::Button, FontId::new(13.0, FontFamily::Proportional));
-        s.text_styles.insert(egui::TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace));
-    });
+    v
 }
 
 pub fn window_icon() -> Option<egui::IconData> {
@@ -115,4 +121,16 @@ pub fn window_icon() -> Option<egui::IconData> {
     let img = image::load_from_memory(bytes).ok()?.into_rgba8();
     let (width, height) = img.dimensions();
     Some(egui::IconData { rgba: img.into_raw(), width, height })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_text_cursor_blinks_only_when_motion_is_allowed() {
+        assert!(visuals(false).text_cursor.blink);
+        assert!(!visuals(true).text_cursor.blink, "reduced motion: a blinking caret is motion too");
+        assert_eq!(visuals(true).panel_fill, BG, "the rest of the look does not change");
+    }
 }

@@ -1,6 +1,6 @@
 //! Motion: the page's cubic-bezier easing and duration tokens, applied through egui's animate_* so nothing blocks the UI thread.
 
-use crate::theme::{EASING_APPLE, MOTION_FADE_IN_MS, MOTION_TRANSITION_MS};
+use crate::theme::{EASING_APPLE, MOTION_FADE_IN_MS, MOTION_PULSE_MS, MOTION_TRANSITION_MS};
 use eframe::egui::{Color32, Context, Id};
 
 /// CSS cubic-bezier(x1, y1, x2, y2) evaluated at progress t in [0, 1]. Bisection on x, then y.
@@ -34,6 +34,21 @@ pub fn reduced_motion() -> bool {
         Ok(v) => !matches!(v.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no"),
         Err(_) => system_reduced_motion(),
     }
+}
+
+/// The phosphorPulse keyframe at `time` seconds: 1 at its 0%/100% frame, 0 at its 50% frame.
+/// Reduced motion skips keyframes (tokens: motion.reduced_motion), so the dot rests at its 100% frame.
+pub fn pulse_phase(time: f64, reduced: bool) -> f32 {
+    if reduced {
+        return 1.0;
+    }
+    let period = MOTION_PULSE_MS as f64 / 1000.0;
+    ((time * std::f64::consts::TAU / period).cos() as f32 * 0.5 + 0.5).clamp(0.0, 1.0)
+}
+
+/// `pulse_phase` with the user's motion setting.
+pub fn pulse(time: f64) -> f32 {
+    pulse_phase(time, reduced_motion())
 }
 
 #[cfg(windows)]
@@ -133,6 +148,18 @@ mod tests {
         assert_eq!(arrival(10.0, 10.0), 1.0);
         std::env::set_var("HYDRA_NO_ANIM", "0");
         assert!(!reduced_motion());
+    }
+
+    #[test]
+    fn the_status_pulse_follows_its_keyframe_and_rests_under_reduced_motion() {
+        assert_eq!(MOTION_PULSE_MS, 2000.0, "phosphorPulse duration from the tokens");
+        let period = MOTION_PULSE_MS as f64 / 1000.0;
+        assert_eq!(pulse_phase(0.0, false), 1.0);
+        assert!(pulse_phase(period / 2.0, false) < 0.001, "50% frame");
+        assert!((pulse_phase(period, false) - 1.0).abs() < 0.001, "loops");
+        for t in [0.0, 0.3, period / 2.0, 1.7, 1234.5] {
+            assert_eq!(pulse_phase(t, true), 1.0, "reduced motion: no keyframes, the dot holds still at t={t}");
+        }
     }
 
     #[test]

@@ -156,13 +156,13 @@ pub fn chip<R>(ui: &mut Ui, pad: (f32, f32), add: impl FnOnce(&mut Ui) -> R) -> 
 /// Pulsing 8px phosphor dot.
 pub fn status_dot(ui: &mut Ui, live: bool, time: f64) {
     let (rect, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-    let phase = ((time * std::f64::consts::PI).cos() as f32 * 0.5 + 0.5).clamp(0.0, 1.0); // 2s cycle
-    let a = 0.6 + 0.4 * phase;
+    let phase = motion::pulse(time);
+    let a = MOTION_PULSE_MIN_OPACITY + (1.0 - MOTION_PULSE_MIN_OPACITY) * phase;
     let c = if live { ACCENT } else { STATUS_OFF };
     if live {
         glow(ui, rect.expand(1.0), 4, with_alpha(ACCENT, (110.0 * a) as u8), 10);
     }
-    let r = 4.0 * (0.9 + 0.1 * phase);
+    let r = 4.0 * (MOTION_PULSE_MIN_SCALE + (1.0 - MOTION_PULSE_MIN_SCALE) * phase);
     ui.painter().circle_filled(rect.center(), r, c.gamma_multiply(if live { a } else { 1.0 }));
 }
 
@@ -206,9 +206,9 @@ pub fn chip_parts(ui: &mut Ui, pad: (f32, f32), gap: f32, parts: &[Part], time: 
         match p {
             Part::Dot(live) => {
                 let r = egui::Rect::from_center_size(egui::pos2(x + 4.0, rect.center().y), vec2(8.0, 8.0));
-                let phase = ((time * std::f64::consts::PI).cos() as f32 * 0.5 + 0.5).clamp(0.0, 1.0);
+                let phase = motion::pulse(time);
                 if *live {
-                    glow(ui, r.expand(1.0), 4, with_alpha(ACCENT, (110.0 * (0.6 + 0.4 * phase)) as u8), 10);
+                    glow(ui, r.expand(1.0), 4, with_alpha(ACCENT, (110.0 * (MOTION_PULSE_MIN_OPACITY + (1.0 - MOTION_PULSE_MIN_OPACITY) * phase)) as u8), 10);
                 }
                 ui.painter().circle_filled(r.center(), 4.0, if *live { ACCENT } else { STATUS_OFF });
             }

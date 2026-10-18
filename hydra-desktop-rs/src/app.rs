@@ -3501,7 +3501,8 @@ fn status_dot(ui: &egui::Ui, c: egui::Pos2, status: Status, r: f32) {
     match status {
         Status::Running => {
             let t = ui.input(|i| i.time) as f32;
-            p.circle_filled(c, r - 1.0 + (t * 4.0).sin().abs(), ACCENT);
+            let grow = if motion::reduced_motion() { 1.0 } else { (t * 4.0).sin().abs() };
+            p.circle_filled(c, r - 1.0 + grow, ACCENT);
         }
         Status::NeedsApproval => {
             p.circle_filled(c, r, WARN);
