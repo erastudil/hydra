@@ -59,6 +59,11 @@ MUTATIONS = [
     ("D19 wayland gaps hide x11", "src/syslibs.rs", "        if w.is_empty() || !set(env(\"DISPLAY\")) {", "        if true {", ["--lib", "syslibs"]),
     ("composer status row only while busy", "src/app.rs", "        {\n            const BRAILLE", "        if recording || waiting_approval || thinking {\n            const BRAILLE", ["--test", "ui_real", "the_composer"]),
     ("a color hard-coded outside the tokens", "src/app.rs", '"PAUSED" => PAUSED,', '"PAUSED" => Color32::from_rgb(234, 179, 8),', ["--test", "tokens_only"]),
+    ("D09 messages drawn as the mode on screen", "src/app.rs", 'let terminal = m.mode == "terminal";', 'let terminal = nav == "terminal";', ["--test", "ui_real", "d09"]),
+    ("D09 mode not kept on send", M, 'let mode = if self.nav == "chat" { String::new() } else { self.nav.to_string() };', "let mode = String::new();", ["--test", "ui_real", "d09"]),
+    ("D09 command does not say where it ran", "src/app.rs", "match NAV.iter().find(|n| m.user && n.0 == m.mode) {", "match None::<&(&str, &str)> {", ["--test", "ui_real", "d09"]),
+    ("D09 shell output under a model name", M, 'let header = if self.nav == "terminal" { "SHELL".to_string() } else {', 'let header = if false { "SHELL".to_string() } else {', ["--test", "ui_real", "d09"]),
+    ("D09 old state files fail to load", M, '#[serde(default, skip_serializing_if = "String::is_empty")]\n    pub mode: String,', '#[serde(skip_serializing_if = "String::is_empty")]\n    pub mode: String,', ["--lib", "d09"]),
     ("composer layout follows the pulse stroke", "src/app.rs", ".stroke(Stroke::new(stroke_max, Color32::TRANSPARENT))", ".stroke(Stroke::new(stroke_w, border_col))", ["--test", "ui_real", "the_composer"]),
 ]
 

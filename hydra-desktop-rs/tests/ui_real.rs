@@ -247,3 +247,36 @@ unsafe fn libc_kill(pid: i32, _sig: i32) -> i32 {
         .output();
     0
 }
+
+/// Every painted text that starts with `prefix`, with its font size.
+fn painted(h: &Harness<'static, HydraApp>, prefix: &str) -> Vec<(String, f32)> {
+    h.output().shapes.iter().filter_map(|c| match &c.shape {
+        egui::Shape::Text(t) if t.galley.text().starts_with(prefix) => Some((t.galley.text().to_string(), t.galley.job.sections.first().map(|s| s.format.font_id.size).unwrap_or(0.0))),
+        _ => None,
+    }).collect()
+}
+
+#[test]
+fn d09_each_message_keeps_the_look_of_the_mode_it_was_sent_in() {
+    let (mut h, _dir) = harness("d09");
+    say(&mut h, "hello from chat mode");
+    assert!(wait(&mut h, 20, |a| !a.model().any_busy()), "chat turn done");
+    h.state_mut().model_mut().set_nav("terminal");
+    h.run_steps(3);
+    say(&mut h, "echo d09-terminal-output");
+    assert!(wait(&mut h, 20, |a| !a.model().any_busy() && a.model().sessions[0].messages.last().is_some_and(|m| m.text == "d09-terminal-output")), "the real sandbox ran the command");
+    let msgs = h.state_mut().model().sessions[0].messages.clone();
+    let modes: Vec<(bool, &str)> = msgs.iter().skip(1).map(|m| (m.user, m.mode.as_str())).collect();
+    assert_eq!(modes, vec![(true, ""), (false, ""), (true, "terminal"), (false, "terminal")], "{msgs:?}");
+    for nav in ["terminal", "chat"] {
+        h.state_mut().model_mut().set_nav(nav);
+        h.run_steps(5);
+        assert!(painted(&h, "$ hello").is_empty(), "in {nav} mode the chat prompt is not drawn as a shell command");
+        assert_eq!(painted(&h, "hello from chat mode"), vec![("hello from chat mode".to_string(), hydra_desktop::theme::TYPE_MESSAGE_BODY)], "in {nav} mode the chat prompt is a chat bubble");
+        assert_eq!(painted(&h, "alpha beta gamma").first().map(|p| p.1), Some(hydra_desktop::theme::TYPE_MESSAGE_BODY), "in {nav} mode the model reply is a chat bubble");
+        assert_eq!(painted(&h, "$ echo"), vec![("$ echo d09-terminal-output".to_string(), hydra_desktop::theme::TYPE_TERMINAL)], "in {nav} mode the command stays a command");
+        assert_eq!(painted(&h, "d09-terminal-output").first().map(|p| p.1), Some(hydra_desktop::theme::TYPE_TERMINAL), "in {nav} mode the output stays terminal output");
+        assert_eq!(painted(&h, "YOU · TERMINAL SANDBOX").len(), 1, "in {nav} mode the command says where it ran");
+        assert_eq!(painted(&h, "SHELL").len(), 1, "the output is from the shell, not from a model");
+    }
+}

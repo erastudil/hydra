@@ -263,9 +263,9 @@ fn long_messages_collapse_and_the_window_stays_fast_with_thousands_of_messages()
         let m = app(&mut h).model_mut();
         let big: String = (0..5000).map(|i| format!("line {i}\n")).collect();
         for i in 0..3200 {
-            m.sessions[0].messages.push(Msg { user: i % 2 == 0, header: "X".into(), text: format!("message number {i}"), actions: vec![] });
+            m.sessions[0].messages.push(Msg { user: i % 2 == 0, header: "X".into(), text: format!("message number {i}"), actions: vec![], ..Default::default() });
         }
-        m.sessions[0].messages.push(Msg { user: false, header: "X".into(), text: big, actions: vec![] });
+        m.sessions[0].messages.push(Msg { user: false, header: "X".into(), text: big, actions: vec![], ..Default::default() });
     }
     h.run_steps(12);
     h.get_by_label_contains("Show 4987 more lines");
@@ -389,7 +389,7 @@ fn f1_shows_the_shortcuts_sheet_and_ctrl_shift_f_searches_every_chat() {
     h.run();
     {
         let m = app(&mut h).model_mut();
-        m.sessions[0].messages.push(Msg { user: true, header: String::new(), text: "the zebra parser is broken".into(), actions: vec![] });
+        m.sessions[0].messages.push(Msg { user: true, header: String::new(), text: "the zebra parser is broken".into(), actions: vec![], ..Default::default() });
         m.new_session();
     }
     h.run();

@@ -1237,13 +1237,12 @@ impl HydraApp {
         }
         self.births_seen = true;
         if count == 0 {
-            self.empty_state(ui, "No messages yet", "Ask anything, pick a model, and send. Ctrl+K opens the command palette.");
+            self.empty_state(ui, "No messages yet", &format!("{} Ctrl+K opens the command palette.", mode_greeting(self.m.nav)));
             return;
         }
         let mut rewind_pick: Option<usize> = None;
         let mut toggle: Option<(u32, usize)> = None;
         let nav = self.m.nav;
-        let terminal = nav == "terminal";
         let busy = self.m.active_busy();
         let width_key = ui.available_width() as i32;
         if self.heights_width != width_key {
@@ -1282,6 +1281,8 @@ impl HydraApp {
                     ui.scope(|ui| {
                         ui.set_opacity(p);
                         ui.add_space(MOTION_FADE_FROM_Y * (1.0 - p));
+                        // D09: drawn as the mode it was sent in, so a chat prompt never reads as a shell command
+                        let terminal = m.mode == "terminal";
                         let layout = if m.user { Layout::top_down(Align::Max) } else { Layout::top_down(Align::Min) };
                         ui.with_layout(layout, |ui| {
                             ui.spacing_mut().item_spacing = vec2(0.0, 8.0);
@@ -1292,7 +1293,11 @@ impl HydraApp {
                                     ui.set_max_width(max_w);
                                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
                                         ui.spacing_mut().item_spacing = vec2(0.0, 8.0);
-                                        ui.label(rt(m.header.to_uppercase(), TYPE_MSG_HEADER, MUTED).extra_letter_spacing(0.3));
+                                        let header = match NAV.iter().find(|n| m.user && n.0 == m.mode) {
+                                            Some(n) => format!("{} · {}", m.header, n.1),
+                                            None => m.header.clone(),
+                                        };
+                                        ui.label(rt(header.to_uppercase(), TYPE_MSG_HEADER, MUTED).extra_letter_spacing(0.3));
                                         let (fill, stroke, radius) = if m.user && !terminal {
                                             (USER_BUBBLE, Stroke::new(1.0, USER_BUBBLE_BORDER), CornerRadius { nw: 16, ne: 16, sw: 16, se: 4 })
                                         } else if terminal {
@@ -3584,7 +3589,7 @@ impl HydraApp {
             p.stage += 1;
             match p.stage {
                 2 => self.nav_open = !self.nav_open,
-                3 => self.m.sessions[self.m.active].messages.push(Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: "Probe message arriving with the fade.".into(), actions: vec![] }),
+                3 => self.m.sessions[self.m.active].messages.push(Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: "Probe message arriving with the fade.".into(), actions: vec![], ..Default::default() }),
                 4 => self.palette = Some((String::new(), 0)),
                 5 => {
                     // release bar 4: a 2,000 message transcript, then stream into it and scroll it
@@ -3597,9 +3602,9 @@ impl HydraApp {
                             2 => format!("{} done.", "Line of a longer answer that wraps across the width of the chat column. ".repeat(3)),
                             _ => format!("- item a{i}\n- item b{i}\n- item c{i}"),
                         };
-                        msgs.push(Msg { user: i % 4 == 0, header: if i % 4 == 0 { String::new() } else { "HYDRA ORCHESTRATOR".into() }, text, actions: vec![] });
+                        msgs.push(Msg { user: i % 4 == 0, header: if i % 4 == 0 { String::new() } else { "HYDRA ORCHESTRATOR".into() }, text, actions: vec![], ..Default::default() });
                     }
-                    msgs.push(Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: String::new(), actions: vec![] });
+                    msgs.push(Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: String::new(), actions: vec![], ..Default::default() });
                 }
                 7 => p.scroll = Some(0.0),
                 _ => {}

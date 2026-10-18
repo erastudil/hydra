@@ -58,6 +58,10 @@ pub struct Msg {
     pub text: String,
     #[serde(default)]
     pub actions: Vec<String>,
+    /// D09: the nav mode it was sent in ("terminal", "swarm", ...); empty for chat and for the app's own notes.
+    /// A message is drawn the way its own mode draws it, not the way the mode on screen now would.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mode: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -425,7 +429,7 @@ pub const UNSAVED: &str = "Not saved: the agent stopped mid-turn, so this partia
 pub const HELD_ELSEWHERE: &str = "This thread is running in another Hydra agent; wait for it to finish.";
 
 fn greeting() -> Msg {
-    Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: "Ask anything, pick a model, and send.".into(), actions: vec![] }
+    Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: "Ask anything, pick a model, and send.".into(), actions: vec![], ..Default::default() }
 }
 
 fn nav_key(s: &str) -> &'static str {
@@ -683,7 +687,7 @@ impl Model {
             id: self.counter,
             thread: format!("desk-{stamp}-{}", self.counter),
             name: format!("Session {}", self.counter),
-            messages: vec![Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text, actions: vec![] }],
+            messages: vec![Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text, actions: vec![], ..Default::default() }],
             project: self.active_project,
             unread: false,
             archived: false,
@@ -903,7 +907,7 @@ impl Model {
         crate::git::restore(root, &cp.sha)?;
         let s = &mut self.sessions[self.active];
         s.pre_rewind = Some(pre);
-        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: format!("Rewound files to before: {}", cp.label), actions: vec!["Undo rewind is available".into()] });
+        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: format!("Rewound files to before: {}", cp.label), actions: vec!["Undo rewind is available".into()], ..Default::default() });
         self.save();
         Ok(cp.label)
     }
@@ -925,7 +929,7 @@ impl Model {
         self.sessions[self.active].pre_rewind = None;
         let cwd = self.work_path();
         crate::git::restore(std::path::Path::new(&cwd), &pre)?;
-        self.sessions[self.active].messages.push(Msg { user: false, header: "HYDRA".into(), text: "Rewind undone: files are back as they were.".into(), actions: vec![] });
+        self.sessions[self.active].messages.push(Msg { user: false, header: "HYDRA".into(), text: "Rewind undone: files are back as they were.".into(), actions: vec![], ..Default::default() });
         self.save();
         Ok(())
     }
@@ -1034,12 +1038,12 @@ impl Model {
             let role = t.get("role").and_then(|x| x.as_str()).unwrap_or("");
             let text = text_of(t.get("content").unwrap_or(&Value::Null));
             match role {
-                "user" => msgs.push(Msg { user: true, header: "YOU".into(), text, actions: vec![] }),
-                "assistant" if !text.is_empty() => msgs.push(Msg { user: false, header: header.clone(), text, actions: vec![] }),
+                "user" => msgs.push(Msg { user: true, header: "YOU".into(), text, actions: vec![], ..Default::default() }),
+                "assistant" if !text.is_empty() => msgs.push(Msg { user: false, header: header.clone(), text, actions: vec![], ..Default::default() }),
                 _ => {}
             }
         }
-        msgs.push(Msg { user: false, header: "HYDRA".into(), text: "Reloaded from the agent after it restarted. The reply cut off by the crash was not saved.".into(), actions: vec![] });
+        msgs.push(Msg { user: false, header: "HYDRA".into(), text: "Reloaded from the agent after it restarted. The reply cut off by the crash was not saved.".into(), actions: vec![], ..Default::default() });
         let n = msgs.len();
         s.messages = msgs;
         s.checkpoints.retain(|c| c.at < n);
@@ -1134,7 +1138,8 @@ impl Model {
         };
         let cwd = self.work_path();
         let model = MODELS[self.model].0;
-        let header = MODELS[self.model].1.to_uppercase();
+        let header = if self.nav == "terminal" { "SHELL".to_string() } else { MODELS[self.model].1.to_uppercase() };
+        let mode = if self.nav == "chat" { String::new() } else { self.nav.to_string() };
         let chat_like = !matches!(self.nav, "terminal" | "swarm");
         let (prompt, attached) = if chat_like { crate::fsx::expand_mentions(text, std::path::Path::new(&cwd)) } else { (text.to_string(), vec![]) };
         let agent_cp = chat_like && self.agent_checkpoints;
@@ -1144,8 +1149,8 @@ impl Model {
         let user_at = self.sessions[self.active].messages.len();
         {
             let s = &mut self.sessions[self.active];
-            s.messages.push(Msg { user: true, header: "YOU".into(), text: text.into(), actions: attached.iter().map(|a| format!("attached {a}")).collect() });
-            s.messages.push(Msg { user: false, header, text: String::new(), actions: vec!["Thinking…".into()] });
+            s.messages.push(Msg { user: true, header: "YOU".into(), text: text.into(), actions: attached.iter().map(|a| format!("attached {a}")).collect(), mode: mode.clone() });
+            s.messages.push(Msg { user: false, header, text: String::new(), actions: vec!["Thinking…".into()], mode });
         }
         self.turn_counter += 1;
         let turn = format!("t{}", self.turn_counter);
@@ -1388,7 +1393,7 @@ impl Model {
                             s.rewound_tail.clear();
                             "files only (this checkpoint kept no conversation)".to_string()
                         };
-                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: format!("Rewound {what} to before: {label}\n{} restored, {} removed.", restored.len(), removed.len()), actions: vec!["Undo rewind is available".into()] });
+                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: format!("Rewound {what} to before: {label}\n{} restored, {} removed.", restored.len(), removed.len()), actions: vec!["Undo rewind is available".into()], ..Default::default() });
                     }
                     self.save();
                 }
@@ -1401,7 +1406,7 @@ impl Model {
                             let tail = std::mem::take(&mut s.rewound_tail);
                             s.messages.extend(tail);
                         }
-                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: if conversation { "Rewind undone: files and conversation are back.".into() } else { "Rewind undone: files are back as they were.".into() }, actions: vec![] });
+                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: if conversation { "Rewind undone: files and conversation are back.".into() } else { "Rewind undone: files are back as they were.".into() }, actions: vec![], ..Default::default() });
                     }
                     self.save();
                 }
@@ -1667,6 +1672,7 @@ impl Model {
                             header: format!("{} · {}", h["title"].as_str().unwrap_or("HEAD"), h["model"].as_str().unwrap_or("")).to_uppercase(),
                             text: body,
                             actions: vec![format!("{}s", h["duration_sec"].as_f64().unwrap_or(0.0))],
+                            mode: "swarm".into(),
                         });
                     }
                     let mut synth = placeholder.unwrap_or_default();
@@ -2052,7 +2058,7 @@ mod tests {
         let path = dir.join("state.json");
         let mut a = Model::new(Some(path.clone()), ".".into());
         a.new_session();
-        a.sessions[0].messages.push(Msg { user: true, header: "YOU".into(), text: "hello".into(), actions: vec![] });
+        a.sessions[0].messages.push(Msg { user: true, header: "YOU".into(), text: "hello".into(), actions: vec![], ..Default::default() });
         a.tokens = 1234;
         a.cost = 0.5;
         a.model = 3;
@@ -2064,6 +2070,17 @@ mod tests {
         assert_eq!((b.tokens, b.model, b.nav), (1234, 3, "swarm"));
         assert_eq!(b.sessions[0].thread, a.sessions[0].thread);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn d09_a_message_keeps_its_mode_across_a_save_and_an_old_file_loads_as_chat() {
+        let m = Msg { user: true, header: "YOU".into(), text: "ls".into(), actions: vec![], mode: "terminal".into() };
+        let back: Msg = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(back.mode, "terminal");
+        let chat = serde_json::to_value(Msg { user: true, header: "YOU".into(), text: "hi".into(), ..Default::default() }).unwrap();
+        assert!(chat.get("mode").is_none(), "chat messages are written as before: {chat}");
+        let old: Msg = serde_json::from_str(r#"{"user":true,"header":"YOU","text":"hi","actions":[]}"#).unwrap();
+        assert_eq!(old.mode, "", "a message saved before modes were kept is a chat message");
     }
 
     #[test]
@@ -2122,7 +2139,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hydra-bak-{}", std::process::id()));
         let path = dir.join("state.json");
         let mut a = Model::new(Some(path.clone()), ".".into());
-        a.sessions[0].messages.push(Msg { user: true, header: "YOU".into(), text: "keep me".into(), actions: vec![] });
+        a.sessions[0].messages.push(Msg { user: true, header: "YOU".into(), text: "keep me".into(), actions: vec![], ..Default::default() });
         a.save();
         a.save(); // second save leaves the first as .bak
         std::fs::write(&path, b"{\"sessions\": [ {tru").unwrap(); // simulated torn write
@@ -2135,7 +2152,7 @@ mod tests {
     fn events_fold_into_the_bubble_and_the_tally() {
         let mut m = Model::new(None, ".".into());
         m.runs.insert("t1".into(), m.sessions[0].id);
-        m.sessions[0].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["Thinking…".into()] });
+        m.sessions[0].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["Thinking…".into()], ..Default::default() });
         m.apply(Ev::Token { turn: "t1".into(), text: "ab".into() });
         m.apply(Ev::Token { turn: "t1".into(), text: "cd".into() });
         assert_eq!(m.sessions[0].messages.last().unwrap().text, "abcd");
@@ -2208,7 +2225,7 @@ mod tests {
 
     fn running_thread(m: &mut Model, idx: usize, turn: &str) {
         let sid = m.sessions[idx].id;
-        m.sessions[idx].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["Thinking…".into()] });
+        m.sessions[idx].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["Thinking…".into()], ..Default::default() });
         m.runs.insert(turn.into(), sid);
     }
 
