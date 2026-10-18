@@ -1,4 +1,4 @@
-﻿---
+---
 title: "hydra — execution genome"
 summary: "sovereign multi-headed model summoning engine and router domain contract. commit discipline, verification gates, and wuwei invariants."
 version: "2.0.0"
@@ -61,6 +61,10 @@ zero stubs : either code executes against real subprocesses and interfaces retur
 ## universal principles
 
 live intelligence : for every task involving AI tools, models, harnesses, context limits, or machine learning, search the web or live documentation first to verify current upstream state; never accept internal training weights regarding AI or ML; treat state older than three months as obsolete; set model context defaults to match true hardware and provider capability; zero undersizing.
+
+ontological identity : a model alias, adapter, or local runner may bear a name only when its physical execution path runs those exact weights; never substitute a system-prompt label, smoke-test sip, or surrogate model without explicit upfront disclosure.
+
+steer at the cheap stage : emit an honest upfront assessment of scope, architectural constraints, compute hours, and dollar cost before executing large builds or training runs.
 
 
 ## memory gate
