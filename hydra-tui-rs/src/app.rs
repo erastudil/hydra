@@ -9,11 +9,16 @@ use serde_json::{json, Value};
 use crate::endpoints::{budgets, free_usage, local_endpoints};
 use crate::layout::SPIN;
 
+pub const DEFAULT_AGENT_MODEL: &str = "bonsai 2 9b";
 pub const DEFAULT_FLASH_MODEL: &str = "mimo 2.6 flash";
 pub const SPEED_DIAL_PRO_MODEL: &str = "mimo 2.6 pro";
 pub const FALLBACK_GLM_MODEL: &str = "glm 5.3 flash";
 
 pub const MODEL_COMPLETIONS: &[(&str, &str)] = &[
+    ("bonsai 2 9b", "Ternary Bonsai 2 9B · 2GB RAM · default agent (Hydra + Progen adapters)"),
+    ("bonsai 2 2b", "Ternary Bonsai 2 2B · 500MB RAM · ultra-light local agent"),
+    ("bonsai 2 4b", "Ternary Bonsai 2 4B · 1GB RAM · compact local agent"),
+    ("bonsai 2 27b", "Ternary Bonsai 2 27B · 6GB RAM · flagship ternary reasoning"),
     ("mimo 2.6 flash", "Xiaomi MiMo-V2-Flash · fast coding default"),
     ("mimo 2.6 pro", "Xiaomi MiMo-V2-Pro · heavy frontier reasoning"),
     ("glm 5.3 flash", "GLM-4.7-Flash · reliable fallback"),
@@ -28,6 +33,10 @@ pub const MODEL_COMPLETIONS: &[(&str, &str)] = &[
 pub fn normalize_model_alias(raw: &str) -> String {
     let trimmed = raw.trim();
     match trimmed.to_lowercase().as_str() {
+        "bonsai" | "bonsai 9b" | "bonsai-2-9b" | "bonsai 2 9b" | "bonsai.2.9b" => DEFAULT_AGENT_MODEL.into(),
+        "bonsai 2b" | "bonsai-2-2b" | "bonsai 2 2b" | "bonsai.2.2b" => "bonsai 2 2b".into(),
+        "bonsai 4b" | "bonsai-2-4b" | "bonsai 2 4b" | "bonsai.2.4b" => "bonsai 2 4b".into(),
+        "bonsai 27b" | "bonsai-2-27b" | "bonsai 2 27b" | "bonsai.2.27b" => "bonsai 2 27b".into(),
         "mimo.2.6 flash" | "mimo-2.6-flash" | "mimo 2.6 flash" => DEFAULT_FLASH_MODEL.into(),
         "mimo.2.6 pro" | "mimo-2.6-pro" | "mimo 2.6 pro" => SPEED_DIAL_PRO_MODEL.into(),
         "glm.5.3 flash" | "glm-5.3-flash" | "glm 5.3 flash" => FALLBACK_GLM_MODEL.into(),
@@ -94,7 +103,7 @@ impl App {
             .unwrap_or_else(|_| if rules_detected { "progen".into() } else { "slack".into() });
         let raw_model = std::env::var("HYDRA_DEFAULT_MODEL")
             .or_else(|_| std::env::var("HYDRA_MODEL"))
-            .unwrap_or_else(|_| DEFAULT_FLASH_MODEL.into());
+            .unwrap_or_else(|_| DEFAULT_AGENT_MODEL.into());
         let model = normalize_model_alias(&raw_model);
         let permission = std::env::var("HYDRA_PERMISSION")
             .ok()
@@ -1577,7 +1586,7 @@ mod tests {
         std::env::remove_var("HYDRA_DEFAULT_MODEL");
         std::env::remove_var("HYDRA_MODEL");
         let mut app = App::new();
-        assert_eq!(app.model, "mimo 2.6 flash");
+        assert_eq!(app.model, "bonsai 2 9b");
         assert_eq!(app.fallback_model, "glm 5.3 flash");
         assert_eq!(app.speed_dial_model, "mimo 2.6 pro");
 
@@ -1610,6 +1619,12 @@ mod tests {
         }
         app.submit();
         assert_eq!(app.model, "mimo 2.6 flash");
+
+        for ch in "/model bonsai 9b".chars() {
+            app.on_char(ch);
+        }
+        app.submit();
+        assert_eq!(app.model, "bonsai 2 9b");
     }
 
     #[test]

@@ -7,6 +7,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub const MODELS: &[(&str, &str)] = &[
+    ("bonsai 2 9b", "Bonsai 2 9B · 2GB (Default Agent)"),
+    ("bonsai 2 2b", "Bonsai 2 2B · 500MB (Ultra-Light)"),
+    ("bonsai 2 4b", "Bonsai 2 4B · 1GB (Compact)"),
+    ("bonsai 2 27b", "Bonsai 2 27B · 6GB (Flagship)"),
     ("mimo 2.6 flash", "Xiaomi MiMo 2.6 Flash (Daily Driver)"),
     ("mimo 2.6 pro", "Xiaomi MiMo 2.6 Pro (Speed Dial)"),
     ("glm 5.3 flash", "GLM 5.3 Flash (Fallback)"),
@@ -27,6 +31,10 @@ pub const MODELS: &[(&str, &str)] = &[
 pub fn normalize_model_key(raw: &str) -> String {
     let s = raw.trim().to_lowercase();
     match s.as_str() {
+        "bonsai" | "bonsai 9b" | "bonsai-2-9b" | "bonsai_2_9b" | "bonsai 2 9b" | "bonsai.2.9b" => "bonsai 2 9b".into(),
+        "bonsai 2b" | "bonsai-2-2b" | "bonsai_2_2b" | "bonsai 2 2b" | "bonsai.2.2b" => "bonsai 2 2b".into(),
+        "bonsai 4b" | "bonsai-2-4b" | "bonsai_2_4b" | "bonsai 2 4b" | "bonsai.2.4b" => "bonsai 2 4b".into(),
+        "bonsai 27b" | "bonsai-2-27b" | "bonsai_2_27b" | "bonsai 2 27b" | "bonsai.2.27b" => "bonsai 2 27b".into(),
         "mimo.2.6 flash" | "mimo-2.6-flash" | "mimo_2_6_flash" | "mimo" | "mimo flash" => "mimo 2.6 flash".into(),
         "mimo.2.6 pro" | "mimo-2.6-pro" | "mimo_2_6_pro" | "mimo pro" => "mimo 2.6 pro".into(),
         "glm.5.3 flash" | "glm-5.3-flash" | "glm_5_3_flash" | "glm" | "glm flash" => "glm 5.3 flash".into(),
