@@ -10867,9 +10867,9 @@ def wave22_session_logger_and_mimo_routing():
     )
     from hydra_cli.native_tools import NativeToolRegistry
 
-    assert DEFAULT_MODEL == "mimo 2.6 flash"
-    assert DEFAULT_ORCHESTRATOR_MODEL == "mimo 2.6 flash"
-    assert DEFAULT_AGENT_MODEL == "mimo 2.6 flash"
+    assert DEFAULT_MODEL == "bonsai 2 9b"
+    assert DEFAULT_ORCHESTRATOR_MODEL == "bonsai 2 9b"
+    assert DEFAULT_AGENT_MODEL == "bonsai 2 9b"
     assert resolve_model("mimo 2.6 pro") == "mimo-2.6-pro"
     assert resolve_model("mimo") == "mimo-2.6-pro"
     assert resolve_model("daily driver") == "mimo-2.6-flash"
