@@ -417,15 +417,45 @@ fn slash_agents_creates_and_opens_the_instruction_file() {
 
 #[test]
 fn d16_narrow_drawer_uses_short_tab_names_that_fit() {
-    let mut h = harness_sized("narrow", 820.0, 560.0);
-    settle(&mut h);
-    app(&mut h).model_mut().drawer_tab = "files";
-    h.run_steps(5);
-    for label in ["Git", "Asks"] {
-        let r = h.get_by_label(label).rect();
-        assert!(r.width() >= 30.0, "{label} cell has room: {r:?}");
+    // D16: at 820/900 the long "Changes"/"Approvals" labels ran together; short names + clip keep cells separate
+    for (w, hgt) in [(820.0, 560.0), (900.0, 700.0)] {
+        let mut h = harness_sized(&format!("narrow{w}"), w, hgt);
+        settle(&mut h);
+        app(&mut h).model_mut().drawer_tab = "files";
+        h.run_steps(5);
+        for label in ["Git", "Asks"] {
+            let r = h.get_by_label(label).rect();
+            assert!(r.width() >= 30.0, "{w}: {label} cell has room: {r:?}");
+        }
+        assert!(h.query_by_label("Approvals").is_none(), "{w}: the long name is not squeezed in");
+        assert!(h.query_by_label("Changes").is_none(), "{w}: Changes yields to Git when tight");
     }
-    assert!(h.query_by_label("Approvals").is_none(), "the long name is not squeezed in");
+}
+
+#[test]
+fn d16_short_names_still_fit_when_git_has_a_change_count() {
+    // the retest saw "Changes (1)Approvals" glued; with a count the short form must stay
+    for (w, hgt) in [(820.0, 560.0), (900.0, 700.0)] {
+        let mut h = harness_sized(&format!("narrowcount{w}"), w, hgt);
+        settle(&mut h);
+        {
+            let a = app(&mut h);
+            a.model_mut().drawer_tab = "files";
+            // paint a fake workspace status with one change so the tab shows "Git (1)"
+            a.work_mut().status = Some(hydra_desktop::git::Status {
+                branch: "main".into(),
+                changes: vec![hydra_desktop::git::Change { path: "a.rs".into(), x: '.', y: 'M' }],
+                ..Default::default()
+            });
+        }
+        h.run_steps(5);
+        let r = h.get_by_label("Git (1)").rect();
+        assert!(r.width() >= 30.0, "{w}: Git (1) cell has room: {r:?}");
+        assert!(h.query_by_label("Changes").is_none(), "{w}: long Changes stays out even with a count");
+        assert!(h.query_by_label("Approvals").is_none(), "{w}: Approvals stays out");
+        let asks = h.get_by_label("Asks").rect();
+        assert!(r.max.x <= asks.min.x + 0.5, "{w}: Git (1) at {r:?} must not overlap Asks at {asks:?}");
+    }
 }
 
 #[test]
@@ -488,7 +518,8 @@ fn painted_texts(h: &Harness<'static, HydraApp>, prefix: &str) -> Vec<egui::Rect
 #[test]
 fn a_long_diff_fills_its_box_with_rows() {
     // D08: rows were packed at the line height while the list reserved line height plus item spacing,
-    // so the bottom third of the diff box stayed empty
+    // so the bottom third of the diff box stayed empty. Also the box must use most of the window
+    // (token window_frac), not a short fixed 460.
     for (w, hgt) in [(1280.0, 800.0), (900.0, 700.0)] {
         let mut h = harness_sized(&format!("diffbox{w}"), w, hgt);
         settle(&mut h);
@@ -510,7 +541,62 @@ fn a_long_diff_fills_its_box_with_rows() {
         }).min_by(|a, b| a.area().total_cmp(&b.area())).expect("diff box frame");
         let gap = boxr.max.y - last;
         assert!(gap < 2.0 * pitch, "{w}x{hgt}: {} rows end at {last}, box ends at {}: {gap:.0} px empty (row pitch {pitch:.0})", rows.len(), boxr.max.y);
+        // taller than Violet's ~230px complaint, and at least the token floor on a desk-sized window
+        assert!(boxr.height() >= 280.0, "{w}x{hgt}: diff box height {} is still short (D08)", boxr.height());
+        if w >= 1280.0 {
+            assert!(boxr.height() >= 400.0, "{w}x{hgt}: desk-sized diff box should use most of the drawer, got {}", boxr.height());
+        }
     }
+}
+
+#[test]
+fn a_long_diff_wheel_scrolls_many_rows_per_burst() {
+    // D08: 60 tiny wheel notches used to move only ~8 lines; the token wheel multiplier must move far more
+    let mut h = harness_sized("diffwheel", 1280.0, 800.0);
+    settle(&mut h);
+    let body: String = (0..5000).map(|i| format!("+line {i}\n")).collect();
+    {
+        let a = app(&mut h);
+        let i = a.model().active;
+        a.model_mut().sessions[i].diffs.push(DiffItem { path: "big.txt".into(), diff: format!("--- /dev/null\n+++ b/big.txt\n@@ -0,0 +1,5000 @@\n{body}") });
+        a.model_mut().drawer_tab = "diff";
+        a.model_mut().tab_pinned = true;
+    }
+    h.run_steps(5);
+    let before = painted_texts(&h, "+ line ");
+    assert!(before.len() > 5, "rows before wheel");
+    let box_center = before[before.len() / 2].center();
+    h.hover_at(box_center);
+    h.run_steps(1);
+    for _ in 0..8 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -3.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(1);
+    }
+    assert!(painted_texts(&h, "+ line ").len() > 5, "rows after wheel");
+    fn top_line_num(h: &Harness<'static, HydraApp>) -> Option<i32> {
+        let mut best: Option<(f32, i32)> = None;
+        for c in h.output().shapes.iter() {
+            if let egui::Shape::Text(t) = &c.shape {
+                let s = t.galley.text();
+                if let Some(rest) = s.strip_prefix("+ line ") {
+                    if let Ok(n) = rest.trim().parse::<i32>() {
+                        let y = t.visual_bounding_rect().min.y;
+                        if best.map(|(by, _)| y < by).unwrap_or(true) {
+                            best = Some((y, n));
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(_, n)| n)
+    }
+    let n0 = top_line_num(&h).unwrap_or(-1);
+    assert!(n0 >= 20, "after 8 wheel bursts the top visible line is {n0}, expected >= 20 (multiplier should move many rows)");
 }
 
 #[test]

@@ -75,6 +75,12 @@ fn main() {
     }
     let mw = r["min_window"].as_array().unwrap();
     out += &format!("pub const RESP_MIN_WINDOW: [f32; 2] = [{:?}, {:?}];\n", mw[0].as_f64().unwrap(), mw[1].as_f64().unwrap());
+    let ds = &t["components"]["diff_card"]["scroll"];
+    out += &format!("pub const DIFF_SCROLL_WINDOW_FRAC: f32 = {:?};\n", ds["window_frac"].as_f64().unwrap());
+    out += &format!("pub const DIFF_SCROLL_MIN: f32 = {:?};\n", ds["min_height"].as_f64().unwrap());
+    out += &format!("pub const DIFF_SCROLL_MAX: f32 = {:?};\n", ds["max_height"].as_f64().unwrap());
+    out += &format!("pub const DIFF_WHEEL_MULT: f32 = {:?};\n", ds["wheel_multiplier_y"].as_f64().unwrap());
+    out += &format!("pub const DRAWER_TAB_SHORT_BELOW: f32 = {:?};\n", l["drawer_tabs"]["short_name_below"].as_f64().unwrap());
     let dest = Path::new(&env::var("OUT_DIR").unwrap()).join("tokens.rs");
     fs::write(dest, out).unwrap();
 }

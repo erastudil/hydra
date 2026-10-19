@@ -201,7 +201,13 @@
   "note": "The old page used one monospace stack for every element. No proportional font anywhere.",
   "letter_spacing_body": -0.2,
   "zoom_steps_note": "Text size choices in Settings and for Ctrl+= / Ctrl+-: the whole window scales, 1.0 is the design size.",
-  "zoom_steps": [0.85, 1.0, 1.15, 1.3, 1.5],
+  "zoom_steps": [
+   0.85,
+   1.0,
+   1.15,
+   1.3,
+   1.5
+  ],
   "scale": {
    "msg_header": {
     "size": 11,
@@ -700,7 +706,9 @@
    ],
    "gap": 4,
    "bg": "$colors.bg_primary",
-   "border_bottom": "$colors.border"
+   "border_bottom": "$colors.border",
+   "short_name_below": 96,
+   "short_name_note": "D16: when a secondary-tab cell is narrower than this, Changes\u2192Git and Approvals\u2192Asks so labels never run together."
   },
   "drawer_body": {
    "padding": 16,
@@ -774,7 +782,7 @@
    "label_color": "$colors.text_secondary",
    "value_color": "$colors.text_primary",
    "cost_color": "$colors.accent",
-   "separator": "•",
+   "separator": "\u2022",
    "separator_color": "$colors.border"
   },
   "status_pill": {
@@ -890,7 +898,7 @@
     "size": 14,
     "color": "$colors.text_muted",
     "hover_color": "$colors.error",
-    "glyph": "×"
+    "glyph": "\u00d7"
    }
   },
   "add_session": {
@@ -1114,6 +1122,13 @@
     "ctx": {
      "color": "$colors.text_muted"
     }
+   },
+   "scroll": {
+    "window_frac": 0.7,
+    "min_height": 280,
+    "max_height": 720,
+    "wheel_multiplier_y": 4.0,
+    "note": "D08: the Diffs list fills most of the drawer height; one wheel notch moves several rows (egui ScrollArea::wheel_scroll_multiplier)."
    }
   },
   "agent_panel": {

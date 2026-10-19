@@ -2105,7 +2105,7 @@ impl HydraApp {
             let n = row.len() as f32;
             ui.horizontal(|ui| {
                 // D16: on a narrow drawer the long names ran together; use short ones when a cell is too small
-                let tight = (width - 17.0 - 12.0) / n - 4.0 < 96.0;
+                let tight = (width - 17.0 - 12.0) / n - 4.0 < DRAWER_TAB_SHORT_BELOW;
                 for &(key, label) in row {
                     let active = self.m.drawer_tab == key;
                     let label = if tight { match key { "git" => "Git", "approvals" => "Asks", _ => label } } else { label };
@@ -2134,7 +2134,8 @@ impl HydraApp {
                         ui.painter().rect_filled(rect, cr(10), BG3);
                     }
                     let fam = if active { egui::FontFamily::Name(BOLD.into()) } else { egui::FontFamily::Proportional };
-                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::new(TYPE_DRAWER_TAB, fam), if active { ACCENT } else if resp.hovered() { TEXT } else { MUTED });
+                    // clip so a count like "Git (12)" cannot paint into the next cell (D16)
+                    ui.painter().with_clip_rect(rect).text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::new(TYPE_DRAWER_TAB, fam), if active { ACCENT } else if resp.hovered() { TEXT } else { MUTED });
                     if resp.clicked() {
                         self.m.drawer_tab = key;
                     }
@@ -2144,6 +2145,8 @@ impl HydraApp {
         });
         let y = ui.cursor().top();
         ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, BORDER));
+        // height left for the tab body (before the outer ScrollArea claims infinite space)
+        let body_h = ui.available_height();
         ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             egui::Frame::new().inner_margin(Margin::same(16)).show(ui, |ui| {
                 ui.set_width(width - 33.0);
@@ -2151,7 +2154,7 @@ impl HydraApp {
                 match self.m.drawer_tab {
                     "screen" => self.screen_tab(ui, width - 33.0),
                     "term" => self.term_tab(ui),
-                    "diff" => self.diff_tab(ui),
+                    "diff" => self.diff_tab(ui, body_h),
                     "files" => self.files_tab(ui),
                     "git" => self.git_tab(ui),
                     "approvals" => self.approvals_tab(ui),
@@ -2478,7 +2481,7 @@ impl HydraApp {
         }
     }
 
-    fn diff_tab(&mut self, ui: &mut egui::Ui) {
+    fn diff_tab(&mut self, ui: &mut egui::Ui, body_h: f32) {
         let sid = self.m.sessions[self.m.active].id;
         let n = self.m.sessions[self.m.active].diffs.len();
         if n == 0 {
@@ -2521,11 +2524,20 @@ impl HydraApp {
             }
             state.show_body_unindented(ui, |ui| {
                 let row_h = TYPE_DIFF + 5.0;
+                // D08: fill most of the remaining drawer body (token floor/ceiling), not a short fixed 460 box
+                let token_cap = (ui.ctx().content_rect().height() * DIFF_SCROLL_WINDOW_FRAC).clamp(DIFF_SCROLL_MIN, DIFF_SCROLL_MAX);
+                // body_h is the drawer remainder above; leave a little for the file header above the box
+                let max_h = (body_h - 72.0).clamp(DIFF_SCROLL_MIN, token_cap);
                 egui::Frame::new().fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(10)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     // show_rows reserves row height plus the item spacing in effect here, so zero it first or the rows stop short of the box (D08)
                     ui.spacing_mut().item_spacing.y = 0.0;
-                    ScrollArea::vertical().id_salt(("diffrows", &key)).max_height(460.0).auto_shrink([false, true]).show_rows(ui, row_h, lines.len(), |ui, range| {
+                    ScrollArea::vertical()
+                        .id_salt(("diffrows", &key))
+                        .max_height(max_h)
+                        .wheel_scroll_multiplier(egui::vec2(1.0, DIFF_WHEEL_MULT))
+                        .auto_shrink([false, true])
+                        .show_rows(ui, row_h, lines.len(), |ui, range| {
                         for l in &lines[range] {
                             let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
                             let (bg, fg) = match l.kind {
@@ -3651,6 +3663,10 @@ impl HydraApp {
 
     pub fn model_mut(&mut self) -> &mut Model {
         &mut self.m
+    }
+
+    pub fn work_mut(&mut self) -> &mut crate::workspace::Work {
+        &mut self.work
     }
 
     /// Process id of the live agent child, None while it is down.
