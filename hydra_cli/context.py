@@ -233,54 +233,57 @@ class SessionContextLedger:
         return dict(self._conn.execute("SELECT category, COUNT(*) FROM turns GROUP BY category").fetchall())
 
     def compact_session(self, max_history_turns: int = 5) -> Dict[str, Any]:
-        """Commit and unload. Turn text stays verbatim. Prune unpinned history if bounded."""
+        """Fold older live turns into a summary turn. Nothing is deleted:
+        every turn stays verbatim in this ledger (the archive), and the
+        summary turn's coverage marker is what takes the folded turns out
+        of the live window. They remain recallable verbatim by keyword."""
         conn = self._conn
         total_on_disk = conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
 
-        pruned_messages: List[Dict[str, Any]] = []
-        if max_history_turns > 0:
-            unpinned_rows = conn.execute(
-                "SELECT id, role, body FROM turns WHERE pinned = 0 ORDER BY id ASC"
-            ).fetchall()
-            if len(unpinned_rows) > max_history_turns:
-                excess_count = len(unpinned_rows) - max_history_turns
-                to_prune = unpinned_rows[:excess_count]
-                prune_ids = [r[0] for r in to_prune]
-                for row_id, role, body in to_prune:
-                    data = json.loads(body)
-                    snippet = str(data.get("content") or "")[:120].strip() or "[tool round]"
-                    pruned_messages.append({
-                        "turn_index": row_id,
-                        "role": role,
-                        "summary": snippet,
-                    })
-                placeholders = ",".join("?" * len(prune_ids))
-                conn.execute(f"DELETE FROM turns WHERE id IN ({placeholders})", tuple(prune_ids))
-                conn.execute(f"DELETE FROM kw WHERE rowid IN ({placeholders})", tuple(prune_ids))
-                conn.commit()
+        live = self.live_window()
+        content = [t for t in live if t["role"] != "summary"]
+        covered_messages: List[Dict[str, Any]] = []
+        if max_history_turns > 0 and len(content) > max_history_turns:
+            to_cover = content[: len(content) - max_history_turns]
+            lines = []
+            for t in to_cover:
+                snippet = str(t.get("content") or "")[:200].strip() or "[tool round]"
+                covered_messages.append({
+                    "turn_index": t["id"],
+                    "role": t["role"],
+                    "summary": snippet,
+                })
+                lines.append(f"{t['role']}: {snippet}")
+            digest = (
+                "Earlier turns folded by compaction. The verbatim originals "
+                "remain in the ledger archive and are recalled by keyword.\n"
+                + "\n".join(lines)
+            )
+            self.append_turn("summary", digest, covers=to_cover[-1]["id"])
 
-        retained_count = conn.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
-        pruned_count = len(pruned_messages)
+        covered_count = len(covered_messages)
         cats = ", ".join(f"{name} {n}" for name, n in sorted(self.categories().items()))
         self.end_turn()
         summary = (
             "topic: session ledger\n"
-            "state: verbatim on disk\n"
+            "state: verbatim on disk, nothing deleted\n"
             f"path: {self.ledger_path}\n"
             f"turns: {total_on_disk}\n"
             f"turns_on_disk: {total_on_disk}\n"
-            f"turns_retained: {retained_count}\n"
-            f"turns_pruned: {pruned_count}\n"
+            f"turns_retained: {total_on_disk}\n"
+            f"turns_covered_by_summary: {covered_count}\n"
+            "turns_pruned: 0\n"
             f"categories: {cats or 'none'}\n"
-            "live: unloaded\n"
+            "live: newest summary plus the turns after it\n"
             "instructions: pinned outside the ledger"
         )
         return {
             "summary": summary,
-            "pruned_messages": pruned_messages,
+            "covered_messages": covered_messages,
             "turns_on_disk": total_on_disk,
-            "turns_retained": retained_count,
-            "turns_pruned": pruned_count,
+            "turns_retained": total_on_disk,
+            "turns_covered": covered_count,
+            "turns_pruned": 0,
             "ledger": str(self.ledger_path),
         }
 
@@ -333,12 +336,27 @@ class SessionContextLedger:
             return "[PRIOR TURNS]\n" + "\n".join(lines) if lines else ""
         if key == "compact":
             lines = []
-            for t in self.live_window():
+            live = self.live_window()
+            live_ids = {t["id"] for t in live}
+            for t in live:
                 body = str(t.get("content") or "")
                 if t["role"] == "summary":
                     lines.append(f"summary of earlier turns : {body}")
                 elif t["role"] in ("user", "assistant") and body.strip() and not body.startswith("[IN-FLIGHT"):
                     lines.append(f"{t['role']} : {body}")
+            # The archive stays recallable in compact mode too: verbatim
+            # turns the summary folded away come back, labeled as archive,
+            # when the current prompt's keywords reach them.
+            extra = []
+            for hit in self.retrieve_verbatim(self.extract_keywords(prompt), max_turns=3):
+                if hit["id"] in live_ids:
+                    continue
+                body = str(hit.get("content") or "")
+                if body.strip():
+                    extra.append(f"{hit.get('role') or 'turn'} [archive, verbatim] : {body}")
+            if extra:
+                lines.append("[RETRIEVED FROM ARCHIVE]")
+                lines.extend(extra)
             return "[CONVERSATION SO FAR]\n" + "\n".join(lines) if lines else ""
         bodies = []
         for hit in self.retrieve_verbatim(self.extract_keywords(prompt), max_turns=4):

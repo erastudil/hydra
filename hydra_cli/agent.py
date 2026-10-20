@@ -3412,6 +3412,9 @@ def _run_agent_loop(
     reserve_tokens = 16384 if (route_effort or "").lower() == "high" else OUTPUT_RESERVE_TOKENS
     if max_context_chars is None:
         window_tokens = get_context_window(requested_model)
+        env_window = os.environ.get("HYDRA_CONTEXT_WINDOW_TOKENS", "").strip()
+        if env_window.isdigit():
+            window_tokens = max(256, int(env_window))
     else:
         window_tokens = max(1024, max_context_chars // 4)
     context_chars = input_char_budget(window_tokens, tools, reserve_tokens)
@@ -4935,7 +4938,7 @@ def run_interactive_agent(
                 active_strategy = "recall"
                 get_default_progen_reanchor_controller().record_compaction(
                     active_session_id,
-                    unloaded_rounds=summary.get("turns_pruned", 0),
+                    unloaded_rounds=summary.get("turns_covered", 0),
                 )
                 sys.stdout.write(f"{c_mid}[{summary['summary']}]{c_reset}\n")
                 sys.stdout.write(f"{c_mid}[Live window set to recall. Ledger turns stay verbatim.]{c_reset}\n")
