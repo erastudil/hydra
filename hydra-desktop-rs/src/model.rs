@@ -211,8 +211,10 @@ fn default_context() -> String {
 }
 
 fn default_permission() -> String {
-    // a new thread asks before anything that changes files or runs a command; the chip next to the prompt changes it
-    "manual".into()
+    // Owner ruling (2026-10-20): YOLO by default — a new thread runs with
+    // bypass approvals; the chip next to the prompt changes it per thread.
+    // Revert: return "manual" here.
+    "bypass".into()
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
