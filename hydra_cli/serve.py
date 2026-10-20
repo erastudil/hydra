@@ -89,15 +89,34 @@ def get_registered_models() -> Dict[str, Any]:
                 "parent": None,
             })
 
-    # 3. Free models
-    for model_id in FREE_MODELS:
+    # 3. Live provider listings (each provider's own /models) and the local
+    # enumeration. Nothing baked: a provider that cannot be read contributes
+    # nothing here instead of invented entries.
+    from hydra_cli.providers import list_live_models
+
+    live = list_live_models()
+    for provider_id, ids in live["providers"].items():
+        for model_id in ids:
+            if model_id not in seen:
+                seen.add(model_id)
+                models.append({
+                    "id": model_id,
+                    "object": "model",
+                    "created": 1700000000,
+                    "owned_by": provider_id,
+                    "permission": [],
+                    "root": model_id,
+                    "parent": None,
+                })
+    for entry in live["local"]:
+        model_id = entry["id"]
         if model_id not in seen:
             seen.add(model_id)
             models.append({
                 "id": model_id,
                 "object": "model",
                 "created": 1700000000,
-                "owned_by": "hydra-free",
+                "owned_by": entry["engine"],
                 "permission": [],
                 "root": model_id,
                 "parent": None,

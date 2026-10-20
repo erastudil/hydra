@@ -377,20 +377,30 @@ def model_status_label(alias: str) -> str:
     return f"{alias} -> {model_id}"
 
 
-MODEL_PICKER: List[str] = [
-    "alice",
-    "glm 5.3 flash",
-    "glm 5.3",
-    "opus 5.5",
-    "sonnet 5.5",
-    "sol 6.1",
-    "gemini 3.8",
-    "grok 4.7",
-    "qwen 3.8",
-    "deepseek",
-    "llama 4",
-    "qwen2.5-coder:7b",
-]
+def _build_model_picker() -> List[str]:
+    """The picker is the catalog itself: the default first, a stable
+    preferred order for common aliases, then every remaining catalog alias.
+    No hand-typed roster and no raw provider ids."""
+    preferred = [
+        "alice",
+        "mimo 2.6 flash",
+        "glm 5.3 flash",
+        "glm 5.3",
+        "opus 5.5",
+        "sonnet 5.5",
+        "sol 6.1",
+        "gemini 3.8",
+        "grok 4.7",
+        "qwen 3.8",
+        "deepseek",
+        "llama 4",
+    ]
+    head = [name for name in preferred if name in MODEL_MAP]
+    tail = sorted(name for name in MODEL_MAP if name not in head)
+    return head + tail
+
+
+MODEL_PICKER: List[str] = _build_model_picker()
 
 ALIAS_TYPOS = {
     "alise": "alice",

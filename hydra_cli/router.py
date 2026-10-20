@@ -40,6 +40,8 @@ from hydra_cli.providers import (
     get_frontier_providers,
     get_hf_provider,
     get_huggingface_provider,
+    list_live_models,
+    list_local_models,
     providers_for_model,
     reasoning_fields,
     redact,
@@ -169,13 +171,25 @@ def print_registered_models(verbose: bool = False):
     if not verbose:
         print("\n  Tip: hydra --list-models --verbose  # show resolved model ids")
 
-    print("\nFree Forge Tier Models:")
-    for model in FREE_MODELS:
-        print(f"  * {model}")
+    live = list_live_models()
+    print("\nLive Provider Models (each provider's own listing):")
+    for pid in sorted(live["providers"]):
+        ids = live["providers"][pid]
+        print(f"  {pid}: {len(ids)} models live")
+        if verbose:
+            for mid in ids:
+                print(f"    * {mid}")
+    for pid in live["unavailable"]:
+        print(f"  {pid}: listing unavailable (not configured or unreadable)")
+    if not verbose:
+        print("  Tip: --verbose lists every live model id")
 
-    local_url, local_name = detect_local_endpoint()
-    print(f"\nLocal Engine Detection:")
-    print(f"  Detected: {local_name} at {local_url}")
+    print("\nLocal Models (enumerated from the local servers):")
+    if live["local"]:
+        for entry in live["local"]:
+            print(f"  * {entry['id']}  ({entry['engine']})")
+    else:
+        print("  (no local server answering: Ollama /api/tags and llama.cpp /v1/models both silent)")
 
     hf_prov = get_huggingface_provider()
     print(f"\nHugging Face Inference Provider:")
@@ -1034,6 +1048,12 @@ def execute_local(
     """Execute inference against local engine (Ollama, llama.cpp, EasyLM)."""
     url, provider_name = detect_local_endpoint()
     model_id = model_override or DEFAULT_LOCAL_MODEL
+    available_local = list_local_models()
+    if available_local and model_id not in {entry["id"] for entry in available_local}:
+        names = ", ".join(sorted({entry["id"] for entry in available_local}))
+        raise ProviderError(
+            f"Unknown local model '{model_id}'. The local servers actually have: {names}"
+        )
     headers = {"Content-Type": "application/json"}
 
     messages = [
