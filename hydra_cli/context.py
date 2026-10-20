@@ -279,6 +279,7 @@ class SessionContextLedger:
         )
         return {
             "summary": summary,
+            "pruned_messages": [],
             "covered_messages": covered_messages,
             "turns_on_disk": total_on_disk,
             "turns_retained": total_on_disk,

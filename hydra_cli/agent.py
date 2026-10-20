@@ -214,10 +214,10 @@ DEFAULT_AGENT_SYSTEM_PROMPT = os.environ.get(
         "SUMMON:\n"
         "You are the orchestrator. Do the work locally with the file and shell tools when you can. "
         "Summon another head only when the task needs a different model.\n"
-        "- summon: one completion. Pass a catalog alias and a prompt. "
+        "- summon: one completion. Pass a catalog alias (for example 'opus 5.5') and a prompt. "
         "Aliases are defined only by the model catalog (catalog.json) and the live "
         "model list it feeds; resolve every model name through the catalog. "
-        "This prompt deliberately names no models: a roster written here would rot.\n"
+        "This prompt names no roster: a list written here would rot.\n"
         "- invoke_subagent: a tool-using child for one bounded coding subtask. Pass the same kind of alias.\n"
         "- swarm_fanout: parallel architect, coder, and auditor heads.\n"
         "Pass the alias exactly. An alias that is not in the catalog is refused. "
@@ -383,8 +383,8 @@ def _build_model_picker() -> List[str]:
     No hand-typed roster and no raw provider ids."""
     preferred = [
         "alice",
-        "mimo 2.6 flash",
         "glm 5.3 flash",
+        "mimo 2.6 flash",
         "glm 5.3",
         "opus 5.5",
         "sonnet 5.5",
