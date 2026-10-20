@@ -456,17 +456,40 @@ fn default_model_is_mimo_flash_and_computer_use_renders_screen_gradient_mesh() {
         unavailable: vec![],
     });
     assert_eq!(app(&mut h).model().model, "mimo 2.6 flash");
-    // Switch to Computer Use mode and start a busy turn so both the composer pulse and screen border gradient activate
+    // A busy chat turn — even on the Computer Use page — must NOT light the
+    // screen glow: the glow means the machine is being driven, and a chat
+    // turn's busy signal is the composer's spinner row instead.
     app(&mut h).model_mut().set_nav("computer");
     say(&mut h, "SLOW inspect screen");
     assert!(app(&mut h).model().active_busy());
-    assert!(app(&mut h).is_computer_use_active());
+    assert!(!app(&mut h).is_computer_use_active());
     h.run_steps(3);
     h.get_by_label_contains("Thinking · working...");
     let has_gradient_mesh = h.output().shapes.iter().any(|c| match &c.shape {
         egui::Shape::Mesh(m) => m.vertices.len() == 64 * 3 && m.indices.len() == 64 * 4 * 3,
         _ => false,
     });
-    assert!(has_gradient_mesh, "Computer Use active state must paint the 64-segment inward screen-border gradient mesh");
+    assert!(!has_gradient_mesh, "a busy chat turn must not paint the screen glow mesh");
+    // A computer_* tool call in flight lights it; its result clears it.
+    app(&mut h).model_mut().apply(hydra_desktop::backend::Ev::ToolStart {
+        turn: "t-cu".into(),
+        call: 1,
+        tool: "computer_screenshot".into(),
+        args: serde_json::json!({}),
+    });
+    assert!(app(&mut h).is_computer_use_active());
+    h.run_steps(2);
+    let lit = h.output().shapes.iter().any(|c| match &c.shape {
+        egui::Shape::Mesh(m) => m.vertices.len() == 64 * 3 && m.indices.len() == 64 * 4 * 3,
+        _ => false,
+    });
+    assert!(lit, "a computer tool in flight must paint the screen glow mesh");
+    app(&mut h).model_mut().apply(hydra_desktop::backend::Ev::ToolResult {
+        turn: "t-cu".into(),
+        tool: "computer_screenshot".into(),
+        is_error: false,
+        output: "ok".into(),
+    });
+    assert!(!app(&mut h).is_computer_use_active());
 }
 

@@ -369,6 +369,7 @@ pub struct HydraApp {
     queue: HashMap<u32, Vec<String>>,
     mention_sel: usize,
     was_busy: bool,
+    busy_since: Option<f64>,
     probe: Option<Probe>,
     child_died: bool,
     deaths: Vec<f64>,
@@ -523,6 +524,7 @@ impl HydraApp {
             last_overlay: None,
             births: HashMap::new(),
             births_seen: false,
+            busy_since: None,
             child_died: false,
             deaths: vec![],
             respawn_at: None,
@@ -1259,6 +1261,7 @@ impl HydraApp {
         }
         let mut rewind_pick: Option<usize> = None;
         let mut toggle: Option<(u32, usize)> = None;
+        let mut seg_toggle: Option<(u32, usize, usize)> = None;
         let nav = self.m.nav;
         let terminal = nav == "terminal";
         let busy = self.m.active_busy();
@@ -1304,7 +1307,74 @@ impl HydraApp {
                             ui.spacing_mut().item_spacing = vec2(0.0, 8.0);
                             let greeting = nav != "chat" && !m.user && m.text == "Ask anything, pick a model, and send.";
                             let raw: &str = if greeting { mode_greeting(nav) } else { &m.text };
-                            if !raw.is_empty() || m.actions.is_empty() {
+                            if !m.user && !m.segments.is_empty() {
+                                // Ordered segments: answer text and tool calls in
+                                // turn order, tools folded into the stream.
+                                ui.scope(|ui| {
+                                    ui.set_max_width(max_w);
+                                    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                                        ui.spacing_mut().item_spacing = vec2(0.0, 8.0);
+                                        ui.label(rt(m.header.to_uppercase(), TYPE_MSG_HEADER, MUTED).extra_letter_spacing(0.3));
+                                        for (si, seg) in m.segments.iter().enumerate() {
+                                            match seg {
+                                                Segment::Text(t) => {
+                                                    if t.is_empty() {
+                                                        continue;
+                                                    }
+                                                    let (fill, stroke, radius) = if terminal {
+                                                        (BG, Stroke::new(1.0, TERMINAL_BORDER), cr(10))
+                                                    } else {
+                                                        (BG2, Stroke::new(1.0, BORDER), CornerRadius { nw: 16, ne: 16, sw: 4, se: 16 })
+                                                    };
+                                                    let expanded = self.expanded.contains(&(sid, mi));
+                                                    let (shown, hidden) = clip_text(t, expanded);
+                                                    let slot = ui.painter().add(egui::Shape::Noop);
+                                                    let r = egui::Frame::new().fill(fill).stroke(stroke).corner_radius(radius).inner_margin(Margin::symmetric(18, 14)).show(ui, |ui| {
+                                                        ui.set_max_width(max_w - 38.0);
+                                                        ui.add(egui::Label::new(rt(shown, TYPE_MESSAGE_BODY, TEXT).line_height(Some(TYPE_MESSAGE_BODY * 1.6))).wrap());
+                                                        if hidden > 0 || expanded {
+                                                            let label = if expanded { "Show less".to_string() } else { format!("Show {hidden} more lines") };
+                                                            if ui.add(egui::Label::new(rt(label, 11.0, ACCENT)).sense(Sense::click())).clicked() {
+                                                                toggle = Some((sid, mi));
+                                                            }
+                                                        }
+                                                    });
+                                                    ui.painter().set(slot, widgets::shadow_shape(r.response.rect, 16, SHADOW_CARD));
+                                                }
+                                                Segment::Tool { tool, args, output, is_error, open } => {
+                                                    let (glyph, color) = match output {
+                                                        None => ("▸", ACCENT),
+                                                        Some(_) if *is_error => ("×", ERROR),
+                                                        Some(_) => ("✓", TEXT2),
+                                                    };
+                                                    let summary = match output {
+                                                        None => format!("{tool} {args} · running…"),
+                                                        Some(o) => {
+                                                            let first = o.lines().next().unwrap_or("").chars().take(100).collect::<String>();
+                                                            format!("{tool}: {first}")
+                                                        }
+                                                    };
+                                                    let resp = ui.add(egui::Label::new(rt(format!("{glyph} {summary}"), 12.0, color)).sense(Sense::click()));
+                                                    if resp.clicked() && output.is_some() {
+                                                        seg_toggle = Some((sid, mi, si));
+                                                    }
+                                                    if *open {
+                                                        if let Some(o) = output {
+                                                            egui::Frame::new().fill(BG2).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(10)).inner_margin(Margin::symmetric(14, 10)).show(ui, |ui| {
+                                                                ui.set_max_width(max_w - 30.0);
+                                                                if !args.is_empty() {
+                                                                    ui.add(egui::Label::new(RichText::new(args.as_str()).size(11.5).family(egui::FontFamily::Monospace).color(MUTED)).wrap());
+                                                                }
+                                                                ui.add(egui::Label::new(RichText::new(o.as_str()).size(11.5).family(egui::FontFamily::Monospace).color(TEXT)).wrap());
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+                                });
+                            } else if !raw.is_empty() || m.actions.is_empty() {
                                 ui.scope(|ui| {
                                     ui.set_max_width(max_w);
                                     ui.with_layout(Layout::top_down(Align::Min), |ui| {
@@ -1360,6 +1430,14 @@ impl HydraApp {
                 self.expanded.insert(k);
             }
             self.heights.remove(&k);
+        }
+        if let Some((tsid, tmi, tsi)) = seg_toggle {
+            if let Some(sess) = self.m.sessions.iter_mut().find(|s| s.id == tsid) {
+                if let Some(Segment::Tool { open, .. }) = sess.messages.get_mut(tmi).and_then(|mm| mm.segments.get_mut(tsi)) {
+                    *open = !*open;
+                }
+            }
+            self.heights.remove(&(tsid, tmi));
         }
         if rewind_pick.is_some() {
             self.rewind_confirm = rewind_pick;
@@ -1438,6 +1516,14 @@ impl HydraApp {
             ((time * 3.2).sin() * 0.5 + 0.5) as f32
         };
         let thinking = self.m.active_busy() || self.m.any_busy();
+        if thinking {
+            if self.busy_since.is_none() {
+                self.busy_since = Some(time);
+            }
+        } else {
+            self.busy_since = None;
+        }
+        let busy_elapsed = self.busy_since.map(|s| (time - s).max(0.0)).unwrap_or(0.0);
         let waiting_approval = !self.m.approvals.is_empty();
         let recording = self.voice_recording;
         let q_count = self.queue.get(&self.m.sessions[self.m.active].id).map(|q| q.len()).unwrap_or(0);
@@ -1457,7 +1543,7 @@ impl HydraApp {
                     ui.label(rt("hydra is waiting on your answer · Enter allows · Esc skips", 11.5, c));
                 } else {
                     ui.label(rtb(spin, 12.0, ACCENT));
-                    ui.label(rt("Thinking · working... · Enter queues · Ctrl+Enter steers · Esc interrupts", 11.5, TEXT2));
+                    ui.label(rt(format!("Thinking · working... · {busy_elapsed:.0}s · Enter queues · Ctrl+Enter steers · Esc interrupts"), 11.5, TEXT2));
                 }
             });
             ui.add_space(4.0);
@@ -3354,17 +3440,19 @@ impl HydraApp {
 
 }
 
-/// Screen-border glow predicate: computer use must be running, never merely
-/// open. A pending screen action always counts; a busy turn counts only on
-/// the Computer Use page or with the Live Screen drawer in front.
-pub fn computer_use_glow(nav: &str, drawer_tab: &str, any_busy: bool, pending_computer: bool) -> bool {
-    pending_computer || (any_busy && (nav == "computer" || drawer_tab == "screen"))
+/// Screen-glow predicate: the glow is an occupied signal — it means the
+/// machine is being driven right now. It lights only while a computer-use
+/// action is pending at the backend or a computer_* tool call is in flight
+/// in a turn. Chat busyness, the current page, and the drawer never light
+/// it: a busy chat turn gets the composer's pulsing prompt bar instead.
+pub fn computer_use_glow(pending_computer: bool, cu_in_flight: u32) -> bool {
+    pending_computer || cu_in_flight > 0
 }
 
 impl HydraApp {
     pub fn is_computer_use_active(&self) -> bool {
         let pending_computer = self.m.pending.values().any(|p| matches!(p, Pending::Screen | Pending::Click | Pending::Type | Pending::Window));
-        computer_use_glow(self.m.nav, self.m.drawer_tab, self.m.any_busy(), pending_computer)
+        computer_use_glow(pending_computer, self.m.cu_in_flight)
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -4334,17 +4422,13 @@ mod tests {
 
     #[test]
     fn computer_use_glow_only_while_running() {
-        // Idle on the Computer Use page: no glow.
-        assert!(!computer_use_glow("computer", "screen", false, false));
-        // Idle in chat with the screen drawer closed: no glow.
-        assert!(!computer_use_glow("chat", "files", false, false));
-        // Busy turn away from any screen surface: no glow.
-        assert!(!computer_use_glow("chat", "files", true, false));
-        // Busy on Computer Use, or with Live Screen open: glow.
-        assert!(computer_use_glow("computer", "files", true, false));
-        assert!(computer_use_glow("chat", "screen", true, false));
-        // A screen action in flight always counts.
-        assert!(computer_use_glow("chat", "files", false, true));
+        // Nothing driving the machine: no glow, whatever the UI state.
+        assert!(!computer_use_glow(false, 0));
+        // A computer-use action pending at the backend: glow.
+        assert!(computer_use_glow(true, 0));
+        // A computer_* tool call in flight in a turn: glow.
+        assert!(computer_use_glow(false, 1));
+        assert!(computer_use_glow(true, 2));
     }
 
     #[test]
