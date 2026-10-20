@@ -127,6 +127,60 @@ fn each_mode_changes_the_centre_pane() {
     assert!(h.query_by_label_contains("TERMINAL SANDBOX").is_none());
 }
 
+/// D03: the left column is projects and threads only, as in a Codex-style app, at the wide size and in the narrow
+/// slide-over; the mode is still one click away, in the composer.
+#[test]
+fn d03_left_sidebar_holds_projects_and_threads_not_the_mode_list() {
+    let side = hydra_desktop::theme::LAYOUT_SIDEBAR_WIDTH;
+    for (w, hgt) in [(1280.0, 800.0), (900.0, 700.0), (820.0, 560.0)] {
+        let mut h = harness_sized(&format!("d03-side-{w}"), w, hgt);
+        settle(&mut h);
+        if let Some(menu) = h.query_by_label("Menu") {
+            menu.click(); // the narrow window shows the sidebar as a slide-over
+            h.run_steps(20);
+        }
+        for (_, label) in NAV {
+            let listed = h.query_all_by_label(label).filter(|n| n.rect().min.x < side).count();
+            assert_eq!(listed, 0, "at {w}x{hgt} the sidebar must not list the mode {label}");
+        }
+        let r = h.get_by_label_contains("Mode: Chat").rect();
+        let column_right = w - hydra_desktop::layout::frame(w).drawer_width;
+        assert!(on_screen(r, w, hgt) && r.max.x <= column_right, "the mode picker at {r:?} must sit inside the composer column (right edge {column_right})");
+    }
+}
+
+/// D03 + D09: the composer's mode picker switches the mode (and its drawer tab, as the old list did), and a message
+/// keeps the mode it was sent in after the picker changes it again.
+#[test]
+fn d03_composer_mode_picker_sets_the_mode_and_sent_messages_keep_theirs() {
+    let mut h = harness_sized("d03-picker", 900.0, 700.0);
+    settle(&mut h);
+    assert!(wait(&mut h, 10, |a| a.model().agent_ready), "the agent starts");
+    h.get_by_label_contains("Mode: Chat").click();
+    h.run_steps(3);
+    h.get_by_label_contains("Agent ReAct Loop").click();
+    h.run_steps(3);
+    assert_eq!(app(&mut h).model().nav, "agent", "picking a mode in the composer switches to it");
+    assert_eq!(app(&mut h).model().drawer_tab, "agent", "and opens its drawer tab");
+    h.get_by_label_contains("Mode: Agent");
+    // the Agent Runner tab has its own task box, so pick the composer: the text box left of the drawer
+    h.get_all_by_role(egui::accesskit::Role::MultilineTextInput).min_by(|a, b| a.rect().min.x.total_cmp(&b.rect().min.x)).unwrap().click();
+    h.run();
+    h.event(egui::Event::Text("hello from agent mode".into()));
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run_steps(4);
+    assert!(app(&mut h).model().sessions[0].messages.iter().any(|m| m.user && m.text == "hello from agent mode"), "the message was sent");
+    h.get_by_label_contains("Mode: Agent").click();
+    h.run_steps(3);
+    h.get_by_label_contains("Chat Mode").click();
+    h.run_steps(3);
+    let m = app(&mut h).model();
+    assert_eq!(m.nav, "chat", "the picker switches back");
+    let sent = m.sessions[0].messages.iter().find(|x| x.user && x.text == "hello from agent mode").unwrap();
+    assert_eq!(sent.mode, "agent", "D09: the message keeps the mode it was sent in");
+}
+
 /// Settings tests point HYDRA_HOME at their own folder; the variable is process-wide, so they take turns.
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

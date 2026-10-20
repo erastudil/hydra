@@ -1060,9 +1060,9 @@ impl HydraApp {
         }
     }
 
-    // ---------------------------------------------------------------- projects (left sidebar, under the mode list)
+    // ---------------------------------------------------------------- projects (left sidebar)
+    /// D03: the left column is projects and their threads only, as in a Codex-style app; the mode is picked in the composer.
     fn projects(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(14.0);
         ui.label(rt("PROJECTS", 10.0, MUTED).extra_letter_spacing(1.0));
         ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
         let (mut pick_project, mut pick_thread, mut open) = (None, None, false);
@@ -1127,34 +1127,7 @@ impl HydraApp {
         }
     }
 
-    // ---------------------------------------------------------------- nav
-    fn nav(&mut self, ui: &mut egui::Ui) {
-        ui.spacing_mut().item_spacing = vec2(0.0, 6.0);
-        for (key, label) in NAV {
-            let active = self.m.nav == *key;
-            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 35.5), Sense::click());
-            let t = motion::toggle(ui.ctx(), resp.id.with("hv"), resp.hovered() && !active);
-            let rect = rect.translate(vec2(3.0 * t, 0.0));
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, *label));
-            if active {
-                ui.painter().rect_filled(rect, cr(12), ACCENT_DIM);
-                ui.painter().rect_filled(egui::Rect::from_min_size(rect.min + vec2(0.0, 6.0), vec2(3.0, rect.height() - 12.0)), cr(1), ACCENT);
-            } else if t > 0.0 {
-                ui.painter().rect_filled(rect, cr(12), BG3.gamma_multiply(t));
-            }
-            let family = if active { egui::FontFamily::Name(BOLD.into()) } else { egui::FontFamily::Proportional };
-            let color = if active { ACCENT } else { motion::mix(MUTED, TEXT, t) };
-            ui.painter().text(rect.left_center() + vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::new(TYPE_NAV_ITEM, family), color);
-            if resp.clicked() {
-                self.m.set_nav(key);
-                if self.last_overlay == Some(true) {
-                    self.nav_open = false;
-                }
-            }
-        }
-    }
-
-    /// Slide-over nav for narrow windows. Opens from the Menu chip or Ctrl+B, closes on pick or outside click.
+    /// Slide-over projects sidebar for narrow windows. Opens from the Menu chip or Ctrl+B, closes on outside click.
     fn nav_overlay(&mut self, ctx: &egui::Context, fr: layout::Frame, t: f32) {
         if !fr.overlay_nav || t <= 0.001 {
             return;
@@ -1168,7 +1141,6 @@ impl HydraApp {
             ui.painter().rect_filled(rect, 0, BG2);
             ui.painter().vline(rect.right() - 0.5, rect.y_range(), Stroke::new(1.0, BORDER));
             ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(10.0, 16.0))), |ui| {
-                self.nav(ui);
                 self.projects(ui);
             });
             rect
@@ -1432,26 +1404,37 @@ impl HydraApp {
 
         // The status row is always laid out, idle included, so the composer never moves when a turn starts or ends:
         // a click aimed at the box in the frame a turn finishes would otherwise land where the box used to be.
+        let mut nav_pick: Option<&str> = None;
         {
             const BRAILLE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
             let spin = BRAILLE[((time * 12.0) as usize) % BRAILLE.len()];
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 6.0;
-                if recording {
-                    let c = motion::mix(REC_MID, REC_HI, rec_pulse);
-                    ui.label(rtb("● REC", 11.5, c));
-                    ui.label(rt("listening… · Esc cancels", 11.5, TEXT2));
-                } else if waiting_approval {
-                    let c = AMBER_HI;
-                    ui.label(rtb("◆", 11.5, c));
-                    ui.label(rt("hydra is waiting on your answer · Enter allows · Esc skips", 11.5, c));
-                } else if thinking {
-                    ui.label(rtb(spin, 12.0, ACCENT));
-                    ui.label(rt("Thinking · working... · Enter queues · Ctrl+Enter steers · Esc interrupts", 11.5, TEXT2));
-                } else {
-                    ui.label(rtb("❯", 12.0, MUTED));
-                    ui.label(rt("Ready · Enter sends · Shift+Enter new line · / commands", 11.5, MUTED));
-                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // D03: the mode picker replaces the old sidebar mode list; it sits right, above Send, and the
+                    // hints truncate before it. Each message still keeps the mode it was sent in (D09).
+                    let nav_now = self.m.nav;
+                    pill_menu(ui, format!("Mode: {} ▾", mode_pick(nav_now).0), |ui| {
+                        for (key, name) in NAV {
+                            if ui.selectable_label(nav_now == *key, format!("{name}  ·  {}", mode_pick(key).1)).clicked() {
+                                nav_pick = Some(key);
+                            }
+                        }
+                    });
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        let (mark, hint, color) = if recording {
+                            (rtb("● REC", 11.5, motion::mix(REC_MID, REC_HI, rec_pulse)), "listening… · Esc cancels", TEXT2)
+                        } else if waiting_approval {
+                            (rtb("◆", 11.5, AMBER_HI), "hydra is waiting on your answer · Enter allows · Esc skips", AMBER_HI)
+                        } else if thinking {
+                            (rtb(spin, 12.0, ACCENT), "Thinking · working... · Enter queues · Ctrl+Enter steers · Esc interrupts", TEXT2)
+                        } else {
+                            (rtb("❯", 12.0, MUTED), "Ready · Enter sends · Shift+Enter new line · / commands", MUTED)
+                        };
+                        ui.label(mark);
+                        ui.add(egui::Label::new(rt(hint, 11.5, color)).truncate());
+                    });
+                });
             });
             ui.add_space(4.0);
         }
@@ -1639,20 +1622,19 @@ impl HydraApp {
             let label = PERMISSIONS.iter().find(|p| p.0 == perm).map(|p| p.1).unwrap_or("Ask every time");
             let _ = &mut cycle;
             let mut pick: Option<&str> = None;
-            egui::containers::menu::MenuButton::from_button(egui::Button::new(rtb(format!("Permissions: {label} ▾"), 11.0, TEXT)).fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(10)))
-                .ui(ui, |ui| {
-                    for (key, name) in PERMISSIONS {
-                        let note = match *key {
-                            "manual" => "asks before every tool call",
-                            "accept_edits" => "file edits run, everything else asks",
-                            "plan" => "read only, other tools are skipped",
-                            _ => "nothing asks",
-                        };
-                        if ui.selectable_label(perm == *key, format!("{name}  ·  {note}")).clicked() {
-                            pick = Some(key);
-                        }
+            pill_menu(ui, format!("Permissions: {label} ▾"), |ui| {
+                for (key, name) in PERMISSIONS {
+                    let note = match *key {
+                        "manual" => "asks before every tool call",
+                        "accept_edits" => "file edits run, everything else asks",
+                        "plan" => "read only, other tools are skipped",
+                        _ => "nothing asks",
+                    };
+                    if ui.selectable_label(perm == *key, format!("{name}  ·  {note}")).clicked() {
+                        pick = Some(key);
                     }
-                });
+                }
+            });
             if let Some(p) = pick {
                 self.m.set_permission(p);
             }
@@ -1678,6 +1660,9 @@ impl HydraApp {
                 ui.add(egui::Label::new(rt("@ attaches a file   Ctrl+P finds files   Ctrl+O opens a folder", 11.0, MUTED)).truncate());
             }
         });
+        if let Some(k) = nav_pick {
+            self.m.set_nav(k);
+        }
         if cycle {
             self.m.cycle_permission();
         }
@@ -3496,6 +3481,22 @@ fn action_row(ui: &mut egui::Ui, a: &str, width: f32) {
     }
 }
 
+/// The composer's pill menus (mode, permissions) share one look.
+fn pill_menu(ui: &mut egui::Ui, text: String, add: impl FnOnce(&mut egui::Ui)) {
+    egui::containers::menu::MenuButton::from_button(egui::Button::new(rtb(text, 11.0, TEXT)).fill(BG3).stroke(Stroke::new(1.0, BORDER)).corner_radius(cr(10))).ui(ui, add);
+}
+
+/// Short name for the composer's mode pill and a one-line note for its menu, per NAV key.
+pub fn mode_pick(key: &str) -> (&'static str, &'static str) {
+    match key {
+        "agent" => ("Agent", "plans, calls tools and reports each step"),
+        "swarm" => ("Swarm", "three models answer, a fourth merges them"),
+        "computer" => ("Computer", "looks at the screen, then clicks and types"),
+        "terminal" => ("Terminal", "every message runs as a shell command"),
+        _ => ("Chat", "a plain conversation with the model"),
+    }
+}
+
 fn style_combo(ui: &mut egui::Ui) {
     let v = &mut ui.style_mut().visuals;
     for w in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
@@ -3867,7 +3868,6 @@ impl HydraApp {
                     ui.set_clip_rect(r.expand2(vec2(10.0, 16.0)).intersect(ui.clip_rect()));
                     let full = egui::Rect::from_min_size(r.min, vec2(LAYOUT_SIDEBAR_WIDTH - 20.0, r.height()));
                     ui.scope_builder(egui::UiBuilder::new().max_rect(full), |ui| {
-                        self.nav(ui);
                         self.projects(ui);
                     });
                     ui.painter().vline(r.right() + 10.0 - 0.5, r.y_range(), border);
