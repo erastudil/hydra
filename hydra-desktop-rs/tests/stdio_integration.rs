@@ -36,7 +36,7 @@ fn rig(name: &str) -> Option<Rig> {
     ];
     let be = Backend::spawn_with(&envs, || {}).expect("spawn adapter");
     let mut m = Model::new(None, proj.display().to_string());
-    m.model = MODELS.iter().position(|x| x.0 == "local").unwrap();
+    m.model = "local".into();
     Some(Rig { m, be, dir, envs })
 }
 

@@ -449,11 +449,8 @@ impl HydraApp {
                 m.sessions[m.active].permission = p;
             }
         }
-        if let Some(i) = std::env::var("HYDRA_MODEL").ok().and_then(|k| {
-            let norm = normalize_model_key(&k);
-            MODELS.iter().position(|x| x.0 == norm || x.0 == k.trim())
-        }) {
-            m.model = i;
+        if let Ok(k) = std::env::var("HYDRA_MODEL") {
+            m.model = normalize_model_key(&k);
         }
         if let Ok(n) = std::env::var("HYDRA_NAV") {
             m.set_nav(&n);
@@ -735,10 +732,14 @@ impl HydraApp {
         if let Some(arg) = text.trim().strip_prefix("/model") {
             if arg.is_empty() || arg.starts_with(char::is_whitespace) {
                 let target = normalize_model_key(arg);
-                if let Some(idx) = MODELS.iter().position(|(k, label)| *k == target || label.to_lowercase().contains(&target)) {
-                    self.m.model = idx;
+                let known = match &self.m.catalog {
+                    Some(cat) => cat.contains(&target) || cat.aliases.iter().any(|(a, _)| a.contains(&target)),
+                    None => !target.is_empty(),
+                };
+                if known && !target.is_empty() {
+                    self.m.model = target.clone();
                     self.m.save();
-                    self.toast = Some((format!("Model switched to {}", MODELS[idx].1), f64::NAN));
+                    self.toast = Some((format!("Model switched to {target}"), f64::NAN));
                 } else {
                     self.toast = Some((format!("Unknown model: {}", arg.trim()), f64::NAN));
                 }
@@ -916,14 +917,45 @@ impl HydraApp {
     }
 
     fn model_select(&mut self, ui: &mut egui::Ui, width: f32) {
-        let label = if width < 200.0 { MODELS[self.m.model].0 } else { MODELS[self.m.model].1 };
+        let current = self.m.model.clone();
+        let label = if current.is_empty() { "loading models…".to_string() } else { current.clone() };
+        let catalog = self.m.catalog.clone();
         ui.scope(|ui| {
             ui.spacing_mut().button_padding = vec2(14.0, 8.0);
             style_combo(ui);
-            let before = self.m.model;
-            egui::ComboBox::from_id_salt("model-select").width(width).selected_text(rt(label, 13.0, TEXT)).show_ui(ui, |ui| {
-                for (i, (_, name)) in MODELS.iter().enumerate() {
-                    ui.selectable_value(&mut self.m.model, i, rt(*name, 13.0, TEXT));
+            let before = self.m.model.clone();
+            egui::ComboBox::from_id_salt("model-select").width(width).selected_text(rt(&label, 13.0, TEXT)).show_ui(ui, |ui| {
+                match &catalog {
+                    None => {
+                        ui.label(rt("live catalog loading…", 13.0, MUTED));
+                    }
+                    Some(cat) => {
+                        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                            ui.label(rtb("ALIASES", 11.0, ACCENT));
+                            for (alias, id) in &cat.aliases {
+                                let text = if width < 200.0 { alias.clone() } else { format!("{alias}  →  {id}") };
+                                ui.selectable_value(&mut self.m.model, alias.clone(), rt(&text, 13.0, TEXT));
+                            }
+                            for (pid, ids) in &cat.providers {
+                                ui.separator();
+                                ui.label(rtb(&format!("{} · {} LIVE", pid.to_uppercase(), ids.len()), 11.0, ACCENT));
+                                for id in ids {
+                                    ui.selectable_value(&mut self.m.model, id.clone(), rt(id, 13.0, TEXT));
+                                }
+                            }
+                            ui.separator();
+                            ui.label(rtb("LOCAL", 11.0, ACCENT));
+                            if cat.local.is_empty() {
+                                ui.label(rt("no local server answering", 13.0, MUTED));
+                            }
+                            for (id, engine) in &cat.local {
+                                ui.selectable_value(&mut self.m.model, id.clone(), rt(&format!("{id}  ({engine})"), 13.0, TEXT));
+                            }
+                            for pid in &cat.unavailable {
+                                ui.label(rt(&format!("{pid}: listing unavailable"), 12.0, MUTED));
+                            }
+                        });
+                    }
                 }
             });
             if before != self.m.model {
@@ -1583,7 +1615,7 @@ impl HydraApp {
                 lx += w;
             }
 
-            let model_short = MODELS.get(self.m.model).map(|m| m.0).unwrap_or("mimo 2.6 flash");
+            let model_short = if self.m.model.is_empty() { "…".to_string() } else { self.m.model.clone() };
             let perm_short = self.m.sessions.get(self.m.active).map(|s| s.permission.as_str()).unwrap_or("manual");
             let right_label = format!(" {model_short} · {perm_short} ");
             let right_w = ui.fonts_mut(|fm| fm.layout_no_wrap(right_label.clone(), font_reg.clone(), MUTED).size().x);
@@ -3507,7 +3539,7 @@ impl HydraApp {
             p.stage += 1;
             match p.stage {
                 2 => self.nav_open = !self.nav_open,
-                3 => self.m.sessions[self.m.active].messages.push(Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: "Probe message arriving with the fade.".into(), actions: vec![] }),
+                3 => self.m.sessions[self.m.active].messages.push(Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: "Probe message arriving with the fade.".into(), actions: vec![], segments: vec![] }),
                 4 => self.palette = Some((String::new(), 0)),
                 5 => {
                     // release bar 4: a 2,000 message transcript, then stream into it and scroll it
@@ -3520,9 +3552,9 @@ impl HydraApp {
                             2 => format!("{} done.", "Line of a longer answer that wraps across the width of the chat column. ".repeat(3)),
                             _ => format!("- item a{i}\n- item b{i}\n- item c{i}"),
                         };
-                        msgs.push(Msg { user: i % 4 == 0, header: if i % 4 == 0 { String::new() } else { "HYDRA ORCHESTRATOR".into() }, text, actions: vec![] });
+                        msgs.push(Msg { user: i % 4 == 0, header: if i % 4 == 0 { String::new() } else { "HYDRA ORCHESTRATOR".into() }, text, actions: vec![], segments: vec![] });
                     }
-                    msgs.push(Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: String::new(), actions: vec![] });
+                    msgs.push(Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: String::new(), actions: vec![], segments: vec![] });
                 }
                 7 => p.scroll = Some(0.0),
                 _ => {}
@@ -3630,6 +3662,7 @@ impl HydraApp {
                 self.m.pending_tasks(be);
                 self.m.list_sessions(be);
                 self.m.reload_cut_threads(be);
+                self.m.pending_models(be);
             }
             self.skills_asked = false;
             self.mcp_asked = false;
@@ -4237,13 +4270,13 @@ mod tests {
 
     #[test]
     fn test_default_model_and_screen_border_gradient_mesh() {
-        assert_eq!(MODELS[0].0, "bonsai 2 9b");
-        assert_eq!(MODELS[1].0, "bonsai 2 2b");
-        assert_eq!(MODELS[2].0, "bonsai 2 4b");
-        assert_eq!(MODELS[3].0, "bonsai 2 27b");
-        assert_eq!(MODELS[4].0, "mimo 2.6 flash");
-        assert_eq!(MODELS[5].0, "mimo 2.6 pro");
-        assert_eq!(MODELS[6].0, "glm 5.3 flash");
+        assert_eq!(LEGACY_MODEL_KEYS[0], "bonsai 2 9b");
+        assert_eq!(LEGACY_MODEL_KEYS[1], "bonsai 2 2b");
+        assert_eq!(LEGACY_MODEL_KEYS[2], "bonsai 2 4b");
+        assert_eq!(LEGACY_MODEL_KEYS[3], "bonsai 2 27b");
+        assert_eq!(LEGACY_MODEL_KEYS[4], "mimo 2.6 flash");
+        assert_eq!(LEGACY_MODEL_KEYS[5], "mimo 2.6 pro");
+        assert_eq!(LEGACY_MODEL_KEYS[6], "glm 5.3 flash");
         assert_eq!(normalize_model_key("bonsai"), "bonsai 2 9b");
         assert_eq!(normalize_model_key("bonsai-2-9b"), "bonsai 2 9b");
         assert_eq!(normalize_model_key("mimo.2.6 flash"), "mimo 2.6 flash");

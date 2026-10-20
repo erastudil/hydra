@@ -6,26 +6,52 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-pub const MODELS: &[(&str, &str)] = &[
-    ("bonsai 2 9b", "Bonsai 2 9B · 2GB (Default Agent)"),
-    ("bonsai 2 2b", "Bonsai 2 2B · 500MB (Ultra-Light)"),
-    ("bonsai 2 4b", "Bonsai 2 4B · 1GB (Compact)"),
-    ("bonsai 2 27b", "Bonsai 2 27B · 6GB (Flagship)"),
-    ("mimo 2.6 flash", "Xiaomi MiMo 2.6 Flash (Daily Driver)"),
-    ("mimo 2.6 pro", "Xiaomi MiMo 2.6 Pro (Speed Dial)"),
-    ("glm 5.3 flash", "GLM 5.3 Flash (Fallback)"),
-    ("deepseek 4.1 flash", "DeepSeek 4.1 Flash"),
-    ("sonnet 5.5", "Claude Sonnet 5.5"),
-    ("claude-3-7-sonnet", "Claude 3.7 Sonnet"),
-    ("gemini-2.5-flash", "Gemini 2.5 Flash"),
-    ("qwen-3.8-27b:free", "Qwen 3.8 27B (Free)"),
-    ("deepseek-chat:free", "DeepSeek Chat (Free)"),
-    ("llama-3.3-70b-instruct:free", "Llama 3.3 70B (Free)"),
-    ("opus 5.5", "Claude Opus 5.5"),
-    ("sol 6.1 pro", "GPT-6.1 Sol Pro"),
-    ("free", "Free Forge Routing"),
-    ("local", "Offline Local (Ollama)"),
+/// The pre-live-catalog picker roster, kept ONLY to migrate state files
+/// written when the selection was stored as an index into this list.
+/// It is never a picker source: the picker renders the live catalog the
+/// backend serves (providers' own listings merged with the alias catalog).
+pub const LEGACY_MODEL_KEYS: &[&str] = &[
+    "bonsai 2 9b",
+    "bonsai 2 2b",
+    "bonsai 2 4b",
+    "bonsai 2 27b",
+    "mimo 2.6 flash",
+    "mimo 2.6 pro",
+    "glm 5.3 flash",
+    "deepseek 4.1 flash",
+    "sonnet 5.5",
+    "claude-3-7-sonnet",
+    "gemini-2.5-flash",
+    "qwen-3.8-27b:free",
+    "deepseek-chat:free",
+    "llama-3.3-70b-instruct:free",
+    "opus 5.5",
+    "sol 6.1 pro",
+    "free",
+    "local",
 ];
+
+/// The live catalog as served by the backend's `models` request: alias
+/// catalog merged with each provider's own listing and the local
+/// enumeration. `default` is the catalog's default alias, resolved by the
+/// backend from catalog.json — the binary holds no default of its own.
+#[derive(Clone, Debug, Default)]
+pub struct Catalog {
+    pub default: String,
+    pub aliases: Vec<(String, String)>,
+    pub providers: Vec<(String, Vec<String>)>,
+    pub local: Vec<(String, String)>,
+    pub unavailable: Vec<String>,
+}
+
+impl Catalog {
+    /// Every selectable value: alias keys, live provider ids, local names.
+    pub fn contains(&self, value: &str) -> bool {
+        self.aliases.iter().any(|(a, _)| a == value)
+            || self.providers.iter().any(|(_, ids)| ids.iter().any(|i| i == value))
+            || self.local.iter().any(|(id, _)| id == value)
+    }
+}
 
 /// Normalize user/env model strings such as `"mimo.2.6 flash"` to canonical `MODELS` keys.
 pub fn normalize_model_key(raw: &str) -> String {
@@ -51,6 +77,22 @@ pub const NAV: &[(&str, &str)] = &[
 ];
 pub const PROFILES: &[&str] = &["full_automation", "browser_only", "workspace_only", "minimal"];
 
+/// One ordered piece of a reply: answer text or a tool call with its
+/// result. Segments render in order, so tool output folds into the answer
+/// stream instead of collecting in a block under the final text.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub enum Segment {
+    Text(String),
+    Tool {
+        tool: String,
+        args: String,
+        output: Option<String>,
+        is_error: bool,
+        #[serde(default)]
+        open: bool,
+    },
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 pub struct Msg {
     pub user: bool,
@@ -58,6 +100,49 @@ pub struct Msg {
     pub text: String,
     #[serde(default)]
     pub actions: Vec<String>,
+    #[serde(default)]
+    pub segments: Vec<Segment>,
+}
+
+impl Msg {
+    fn push_text_segment(&mut self, t: &str) {
+        if let Some(Segment::Text(s)) = self.segments.last_mut() {
+            s.push_str(t);
+        } else {
+            self.segments.push(Segment::Text(t.to_string()));
+        }
+    }
+
+    fn streamed_text(&self) -> String {
+        let mut out = String::new();
+        for seg in &self.segments {
+            if let Segment::Text(s) = seg {
+                out.push_str(s);
+            }
+        }
+        out
+    }
+
+    /// Fold a turn's final text into the segments: streamed tokens already
+    /// built the text segments, so only the unstreamed remainder is added;
+    /// a final text that rewrites the stream replaces the trailing text.
+    fn finish_text_segment(&mut self, full: &str) {
+        let streamed = self.streamed_text();
+        if full == streamed {
+            return;
+        }
+        if !streamed.is_empty() && full.starts_with(&streamed) {
+            let rest = &full[streamed.len()..];
+            if !rest.is_empty() {
+                self.segments.push(Segment::Text(rest.to_string()));
+            }
+            return;
+        }
+        match self.segments.last_mut() {
+            Some(Segment::Text(s)) => *s = full.to_string(),
+            _ => self.segments.push(Segment::Text(full.to_string())),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -285,7 +370,8 @@ struct Saved {
     active: usize,
     counter: u32,
     nav: String,
-    model: usize,
+    #[serde(default, deserialize_with = "de_saved_model")]
+    model: String,
     tokens: u64,
     cost: f64,
     #[serde(default)]
@@ -306,6 +392,26 @@ struct Saved {
     pub cwd: Option<String>,
 }
 
+/// Saved selections were once a numeric index into the baked roster.
+/// Accept a string (current), a number (legacy index, mapped through
+/// LEGACY_MODEL_KEYS), or nothing (unresolved; the catalog default applies
+/// when the live list loads).
+fn de_saved_model<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Value::deserialize(d)?;
+    Ok(match &v {
+        Value::String(s) => normalize_model_key(s),
+        Value::Number(n) => n
+            .as_u64()
+            .and_then(|i| LEGACY_MODEL_KEYS.get(i as usize))
+            .map(|k| k.to_string())
+            .unwrap_or_default(),
+        _ => String::new(),
+    })
+}
+
 pub struct Model {
     pub sessions: Vec<Session>,
     pub active: usize,
@@ -314,7 +420,13 @@ pub struct Model {
     pub drawer_tab: &'static str,
     /// Set by HYDRA_TAB: incoming diffs must not switch the drawer away.
     pub tab_pinned: bool,
-    pub model: usize,
+    /// The selected alias (or live provider id / local model name).
+    /// Empty until state or the live catalog resolves it.
+    pub model: String,
+    /// The live catalog from the backend; None until it answers.
+    pub catalog: Option<Catalog>,
+    /// Computer-use tool calls currently in flight (machine being driven).
+    pub cu_in_flight: u32,
     pub tokens: u64,
     pub cost: f64,
     pub prompt_tokens: u64,
@@ -397,7 +509,7 @@ pub const UNSAVED: &str = "Not saved: the agent stopped mid-turn, so this partia
 pub const HELD_ELSEWHERE: &str = "This thread is running in another Hydra agent; wait for it to finish.";
 
 fn greeting() -> Msg {
-    Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: "Ask anything, pick a model, and send.".into(), actions: vec![] }
+    Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text: "Ask anything, pick a model, and send.".into(), actions: vec![], segments: vec![] }
 }
 
 fn nav_key(s: &str) -> &'static str {
@@ -436,7 +548,9 @@ impl Model {
             nav: "chat",
             drawer_tab: "screen",
             tab_pinned: false,
-            model: 0,
+            model: String::new(),
+            catalog: None,
+            cu_in_flight: 0,
             tokens: 0,
             cost: 0.0,
             prompt_tokens: 0,
@@ -494,7 +608,7 @@ impl Model {
                     m.sessions = saved.sessions;
                     m.counter = saved.counter;
                     m.nav = nav_key(&saved.nav);
-                    m.model = saved.model.min(MODELS.len() - 1);
+                    m.model = saved.model;
                     m.tokens = saved.tokens;
                     m.cost = saved.cost;
                     m.prompt_tokens = saved.prompt_tokens;
@@ -591,7 +705,7 @@ impl Model {
             active: self.active,
             counter: self.counter,
             nav: self.nav.into(),
-            model: self.model,
+            model: self.model.clone(),
             tokens: self.tokens,
             cost: self.cost,
             prompt_tokens: self.prompt_tokens,
@@ -651,7 +765,7 @@ impl Model {
             id: self.counter,
             thread: format!("desk-{stamp}-{}", self.counter),
             name: format!("Session {}", self.counter),
-            messages: vec![Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text, actions: vec![] }],
+            messages: vec![Msg { user: false, header: "HYDRA ORCHESTRATOR".into(), text, actions: vec![], segments: vec![] }],
             project: self.active_project,
             unread: false,
             archived: false,
@@ -871,7 +985,7 @@ impl Model {
         crate::git::restore(root, &cp.sha)?;
         let s = &mut self.sessions[self.active];
         s.pre_rewind = Some(pre);
-        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: format!("Rewound files to before: {}", cp.label), actions: vec!["Undo rewind is available".into()] });
+        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: format!("Rewound files to before: {}", cp.label), actions: vec!["Undo rewind is available".into()], segments: vec![] });
         self.save();
         Ok(cp.label)
     }
@@ -893,7 +1007,7 @@ impl Model {
         self.sessions[self.active].pre_rewind = None;
         let cwd = self.work_path();
         crate::git::restore(std::path::Path::new(&cwd), &pre)?;
-        self.sessions[self.active].messages.push(Msg { user: false, header: "HYDRA".into(), text: "Rewind undone: files are back as they were.".into(), actions: vec![] });
+        self.sessions[self.active].messages.push(Msg { user: false, header: "HYDRA".into(), text: "Rewind undone: files are back as they were.".into(), actions: vec![], segments: vec![] });
         self.save();
         Ok(())
     }
@@ -968,6 +1082,11 @@ impl Model {
         self.act(Pending::Query, id);
     }
 
+    pub fn pending_models(&mut self, be: &mut Backend) {
+        let id = be.models();
+        self.act(Pending::Query, id);
+    }
+
     pub fn pending_mcp(&mut self, be: &mut Backend, cwd: &str, refresh: bool) {
         let id = be.mcp(cwd, refresh);
         self.act(Pending::Query, id);
@@ -1002,12 +1121,12 @@ impl Model {
             let role = t.get("role").and_then(|x| x.as_str()).unwrap_or("");
             let text = text_of(t.get("content").unwrap_or(&Value::Null));
             match role {
-                "user" => msgs.push(Msg { user: true, header: "YOU".into(), text, actions: vec![] }),
-                "assistant" if !text.is_empty() => msgs.push(Msg { user: false, header: header.clone(), text, actions: vec![] }),
+                "user" => msgs.push(Msg { user: true, header: "YOU".into(), text, actions: vec![], segments: vec![] }),
+                "assistant" if !text.is_empty() => msgs.push(Msg { user: false, header: header.clone(), text, actions: vec![], segments: vec![] }),
                 _ => {}
             }
         }
-        msgs.push(Msg { user: false, header: "HYDRA".into(), text: "Reloaded from the agent after it restarted. The reply cut off by the crash was not saved.".into(), actions: vec![] });
+        msgs.push(Msg { user: false, header: "HYDRA".into(), text: "Reloaded from the agent after it restarted. The reply cut off by the crash was not saved.".into(), actions: vec![], segments: vec![] });
         let n = msgs.len();
         s.messages = msgs;
         s.checkpoints.retain(|c| c.at < n);
@@ -1101,8 +1220,13 @@ impl Model {
             (s.id, s.thread.clone())
         };
         let cwd = self.work_path();
-        let model = MODELS[self.model].0;
-        let header = MODELS[self.model].1.to_uppercase();
+        let model_owned = if self.model.is_empty() {
+            self.catalog.as_ref().map(|c| c.default.clone()).unwrap_or_default()
+        } else {
+            self.model.clone()
+        };
+        let model = model_owned.as_str();
+        let header = model_owned.to_uppercase();
         let chat_like = !matches!(self.nav, "terminal" | "swarm");
         let (prompt, attached) = if chat_like { crate::fsx::expand_mentions(text, std::path::Path::new(&cwd)) } else { (text.to_string(), vec![]) };
         let agent_cp = chat_like && self.agent_checkpoints;
@@ -1112,8 +1236,8 @@ impl Model {
         let user_at = self.sessions[self.active].messages.len();
         {
             let s = &mut self.sessions[self.active];
-            s.messages.push(Msg { user: true, header: "YOU".into(), text: text.into(), actions: attached.iter().map(|a| format!("attached {a}")).collect() });
-            s.messages.push(Msg { user: false, header, text: String::new(), actions: vec!["Thinking…".into()] });
+            s.messages.push(Msg { user: true, header: "YOU".into(), text: text.into(), actions: attached.iter().map(|a| format!("attached {a}")).collect(), segments: vec![] });
+            s.messages.push(Msg { user: false, header, text: String::new(), actions: vec!["Thinking…".into()], segments: vec![] });
         }
         self.turn_counter += 1;
         let turn = format!("t{}", self.turn_counter);
@@ -1304,7 +1428,7 @@ impl Model {
     }
 
     fn fail_bubble(&mut self, sid: u32, msg: &str) {
-        let label = MODELS.get(self.model).map(|m| m.1).unwrap_or("the model");
+        let label = if self.model.is_empty() { "the model" } else { self.model.as_str() };
         let explained = explain_error(label, msg);
         let msg = explained.as_str();
         if let Some(m) = self.last_assistant(sid) {
@@ -1356,7 +1480,7 @@ impl Model {
                             s.rewound_tail.clear();
                             "files only (this checkpoint kept no conversation)".to_string()
                         };
-                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: format!("Rewound {what} to before: {label}\n{} restored, {} removed.", restored.len(), removed.len()), actions: vec!["Undo rewind is available".into()] });
+                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: format!("Rewound {what} to before: {label}\n{} restored, {} removed.", restored.len(), removed.len()), actions: vec!["Undo rewind is available".into()], segments: vec![] });
                     }
                     self.save();
                 }
@@ -1369,7 +1493,7 @@ impl Model {
                             let tail = std::mem::take(&mut s.rewound_tail);
                             s.messages.extend(tail);
                         }
-                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: if conversation { "Rewind undone: files and conversation are back.".into() } else { "Rewind undone: files are back as they were.".into() }, actions: vec![] });
+                        s.messages.push(Msg { user: false, header: "HYDRA".into(), text: if conversation { "Rewind undone: files and conversation are back.".into() } else { "Rewind undone: files are back as they were.".into() }, actions: vec![], segments: vec![] });
                     }
                     self.save();
                 }
@@ -1426,6 +1550,16 @@ impl Model {
                 self.picked_skills.retain(|p| skills.iter().any(|s| s.get("id").and_then(|x| x.as_str()) == Some(p)));
                 self.skills = skills;
             }
+            Ev::ModelList { id, default, aliases, providers, local, unavailable } => {
+                self.pending.remove(&id);
+                let catalog = Catalog { default, aliases, providers, local, unavailable };
+                // A stored selection the live catalog no longer offers (or
+                // none stored yet) resolves to the catalog default.
+                if self.model.is_empty() || !catalog.contains(&self.model) {
+                    self.model = catalog.default.clone();
+                }
+                self.catalog = Some(catalog);
+            }
             Ev::TaskList { id, tasks } => {
                 self.pending.remove(&id);
                 self.tasks = tasks.into_iter().filter_map(|t| Some((t.get("task")?.as_str()?.to_string(), t))).collect();
@@ -1456,16 +1590,26 @@ impl Model {
                     if let Some(m) = self.last_assistant(sid) {
                         m.actions.retain(|a| a != "Thinking…");
                         m.text.push_str(&text);
+                        m.push_text_segment(&text);
                     }
                     self.journal(sid, &text);
                     self.touch(sid, false);
                 }
             }
             Ev::ToolStart { turn, tool, args, .. } => {
+                if tool.starts_with("computer_") {
+                    self.cu_in_flight += 1;
+                }
                 if let Some(sid) = self.run_session(&turn) {
                     if let Some(m) = self.last_assistant(sid) {
                         m.actions.retain(|a| a != "Thinking…");
-                        m.actions.push(format!("▸ {tool}  {}", short(&args)));
+                        m.segments.push(Segment::Tool {
+                            tool: tool.clone(),
+                            args: short(&args),
+                            output: None,
+                            is_error: false,
+                            open: false,
+                        });
                     }
                 }
                 if tool == "invoke_subagent" {
@@ -1486,10 +1630,20 @@ impl Model {
                 self.log(&format!("\n$ {tool} {}", short(&args)));
             }
             Ev::ToolResult { turn, tool, is_error, output } => {
+                if tool.starts_with("computer_") {
+                    self.cu_in_flight = self.cu_in_flight.saturating_sub(1);
+                }
                 if let Some(sid) = self.run_session(&turn) {
-                    let first = output.lines().next().unwrap_or("").chars().take(100).collect::<String>();
                     if let Some(m) = self.last_assistant(sid) {
-                        m.actions.push(format!("{} {tool}: {first}", if is_error { "×" } else { "✓" }));
+                        for seg in m.segments.iter_mut().rev() {
+                            if let Segment::Tool { tool: name, output: slot, is_error: err, .. } = seg {
+                                if *name == tool && slot.is_none() {
+                                    *slot = Some(output.clone());
+                                    *err = is_error;
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
                 if tool == "invoke_subagent" {
@@ -1538,9 +1692,11 @@ impl Model {
                         if cancelled {
                             m.actions.push("■ turn cancelled".into());
                         } else if !text.is_empty() {
+                            m.finish_text_segment(&text);
                             m.text = text.clone();
                         } else if !ok && m.text.is_empty() {
                             m.text = "Turn failed.".into();
+                            m.finish_text_segment("Turn failed.");
                         }
                     }
                     self.finish_sid(sid);
@@ -1635,6 +1791,7 @@ impl Model {
                             header: format!("{} · {}", h["title"].as_str().unwrap_or("HEAD"), h["model"].as_str().unwrap_or("")).to_uppercase(),
                             text: body,
                             actions: vec![format!("{}s", h["duration_sec"].as_f64().unwrap_or(0.0))],
+                            segments: vec![],
                         });
                     }
                     let mut synth = placeholder.unwrap_or_default();
@@ -2020,16 +2177,16 @@ mod tests {
         let path = dir.join("state.json");
         let mut a = Model::new(Some(path.clone()), ".".into());
         a.new_session();
-        a.sessions[0].messages.push(Msg { user: true, header: "YOU".into(), text: "hello".into(), actions: vec![] });
+        a.sessions[0].messages.push(Msg { user: true, header: "YOU".into(), text: "hello".into(), actions: vec![], segments: vec![] });
         a.tokens = 1234;
         a.cost = 0.5;
-        a.model = 3;
+        a.model = "bonsai 2 27b".into();
         a.set_nav("swarm");
         a.save();
         let b = Model::new(Some(path), ".".into());
         assert_eq!(b.sessions.len(), 2);
         assert_eq!(b.sessions[0].messages.last().unwrap().text, "hello");
-        assert_eq!((b.tokens, b.model, b.nav), (1234, 3, "swarm"));
+        assert_eq!((b.tokens, b.model.as_str(), b.nav), (1234, "bonsai 2 27b", "swarm"));
         assert_eq!(b.sessions[0].thread, a.sessions[0].thread);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2039,7 +2196,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hydra-bak-{}", std::process::id()));
         let path = dir.join("state.json");
         let mut a = Model::new(Some(path.clone()), ".".into());
-        a.sessions[0].messages.push(Msg { user: true, header: "YOU".into(), text: "keep me".into(), actions: vec![] });
+        a.sessions[0].messages.push(Msg { user: true, header: "YOU".into(), text: "keep me".into(), actions: vec![], segments: vec![] });
         a.save();
         a.save(); // second save leaves the first as .bak
         std::fs::write(&path, b"{\"sessions\": [ {tru").unwrap(); // simulated torn write
@@ -2052,7 +2209,7 @@ mod tests {
     fn events_fold_into_the_bubble_and_the_tally() {
         let mut m = Model::new(None, ".".into());
         m.runs.insert("t1".into(), m.sessions[0].id);
-        m.sessions[0].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["Thinking…".into()] });
+        m.sessions[0].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["Thinking…".into()], segments: vec![] });
         m.apply(Ev::Token { turn: "t1".into(), text: "ab".into() });
         m.apply(Ev::Token { turn: "t1".into(), text: "cd".into() });
         assert_eq!(m.sessions[0].messages.last().unwrap().text, "abcd");
@@ -2125,7 +2282,7 @@ mod tests {
 
     fn running_thread(m: &mut Model, idx: usize, turn: &str) {
         let sid = m.sessions[idx].id;
-        m.sessions[idx].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["Thinking…".into()] });
+        m.sessions[idx].messages.push(Msg { user: false, header: "X".into(), text: String::new(), actions: vec!["Thinking…".into()], segments: vec![] });
         m.runs.insert(turn.into(), sid);
     }
 
