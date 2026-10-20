@@ -39,6 +39,26 @@ class ProviderError(Exception):
     """Base exception for provider invocation failures."""
 
 
+# Provenance of the most recent completion: which model was requested and
+# which model actually produced the text. The fallback cascades used to
+# answer under the requested model's identity with nothing recording the
+# swap; callers that present an answer as a model's (CLI JSON, the agent
+# fallback chain, the summon tool) read this to label substitutions.
+LAST_COMPLETION_PROVENANCE: Dict[str, Any] = {}
+
+
+def _record_provenance(requested: str, answered_by: str, provider: str, fallback: bool) -> None:
+    LAST_COMPLETION_PROVENANCE.clear()
+    LAST_COMPLETION_PROVENANCE.update(
+        {
+            "requested_model": requested,
+            "answered_by": answered_by,
+            "provider": provider,
+            "fallback": bool(fallback),
+        }
+    )
+
+
 class CredentialsMissingError(ProviderError):
     """Raised when required credentials are missing."""
 
@@ -4204,37 +4224,56 @@ def complete(
 
     cascade_active = fallback_cascade_enabled and os.environ.get("HYDRA_NO_FALLBACK", "").strip() != "1"
 
+    tier_seen: Dict[str, str] = {}
+
+    def _note_tier(tier: str, tier_model: str) -> None:
+        tier_seen["provider"] = tier
+        tier_seen["model"] = tier_model
+
+    def _cascaded_text(frontier_error: Optional[Exception]) -> str:
+        allowed = model_providers(route["model"])
+        if allowed and set(allowed) <= {"local"}:
+            raise ProviderError(
+                redact(
+                    f"Model '{route['model']}' is restricted to local serving and is "
+                    f"unavailable; refusing a cloud substitute. Frontier error: {frontier_error}"
+                )
+            )
+        text = fallback_cascade(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            frontier_error=frontier_error,
+            on_tier_transition=_note_tier,
+        )
+        _record_provenance(
+            route["model"],
+            tier_seen.get("model", "unknown-fallback"),
+            tier_seen.get("provider", "fallback-cascade"),
+            True,
+        )
+        return text
+
     providers = []
     try:
         providers = providers_for_model(route["model"])
     except CredentialsMissingError as cme:
         if not cascade_active:
             raise
-        return fallback_cascade(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            frontier_error=cme,
-        )
+        return _cascaded_text(cme)
 
     if not providers:
         if not cascade_active:
             raise CredentialsMissingError(
                 "No frontier credentials found. Export OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or CHEAPERINFERENCE_API_KEY."
             )
-        return fallback_cascade(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            frontier_error=ProviderError("No frontier credentials configured"),
-        )
+        return _cascaded_text(ProviderError("No frontier credentials configured"))
 
     last_error: Optional[Exception] = None
     for provider in providers:
         try:
-            return fetch_chat_completion(
+            text = fetch_chat_completion(
                 url=provider["url"],
                 headers=provider["headers"],
                 model=route["model"],
@@ -4243,6 +4282,8 @@ def complete(
                 max_tokens=max_tokens,
                 reasoning=reasoning,
             )
+            _record_provenance(route["model"], route["model"], provider.get("name", provider.get("id", "?")), False)
+            return text
         except UsageError:
             raise
         except Exception as exc:
@@ -4250,13 +4291,7 @@ def complete(
             continue
 
     if cascade_active:
-        return fallback_cascade(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            frontier_error=last_error,
-        )
+        return _cascaded_text(last_error)
 
     raise ProviderError(redact(f"All configured providers failed for '{route['model']}'. Last error: {last_error}"))
 

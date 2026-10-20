@@ -450,6 +450,18 @@
     "fallback": "glm 5.3 flash"
   },
   "model_providers": {
+    "prism-ml/Ternary-Bonsai-2-2B-gguf": [
+      "local"
+    ],
+    "prism-ml/Ternary-Bonsai-2-4B-gguf": [
+      "local"
+    ],
+    "prism-ml/Ternary-Bonsai-2-9B-gguf": [
+      "local"
+    ],
+    "prism-ml/Ternary-Bonsai-2-27B-gguf": [
+      "local"
+    ],
     "anthropic/claude-opus-5.5-fast": [
       "vercel"
     ],

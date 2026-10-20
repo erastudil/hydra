@@ -543,13 +543,28 @@ def resolve_and_complete_with_fallback(
             pt = len(prompt.split())
             ct = len(ans.split())
             token_rec = get_token_accounting().record_usage(m, pt, ct)
+            # The completer's own provider cascade may have substituted a
+            # different model inside the call; its provenance record is the
+            # truth and overrides the chain-level bookkeeping.
+            prov: Dict[str, Any] = {}
+            try:
+                from hydra_cli.providers import LAST_COMPLETION_PROVENANCE
+
+                if LAST_COMPLETION_PROVENANCE.get("requested_model") == resolved_id:
+                    prov = dict(LAST_COMPLETION_PROVENANCE)
+            except Exception:
+                prov = {}
+            substituted = bool(prov.get("fallback"))
             return {
                 "isError": False,
                 "content": ans,
                 "model_requested": model,
                 "model_used": m,
                 "resolved_model_id": resolved_id,
-                "fallback_triggered": (m != model),
+                "answered_by": prov.get("answered_by", resolved_id),
+                "answered_by_provider": prov.get("provider"),
+                "substituted_inside_complete": substituted,
+                "fallback_triggered": (m != model) or substituted,
                 "attempts": attempts,
                 "usage": {
                     "prompt_tokens": pt,

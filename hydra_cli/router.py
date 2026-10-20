@@ -23,6 +23,7 @@ from hydra_cli.config import (
     build_cached_system_prompt,
     consume_alias,
     load_dotenv,
+    model_providers,
     resolve_route,
 )
 from hydra_cli.display import TokenStreamWriter
@@ -701,6 +702,9 @@ def execute_summon(
                 import json
                 print(json.dumps({
                     "model": model_id,
+                    "requested_model": model_id,
+                    "answered_by": model_id,
+                    "fallback": False,
                     "provider": provider["name"],
                     "effort": route_effort,
                     "reasoning_mode": route_mode,
@@ -719,6 +723,11 @@ def execute_summon(
             last_error = exc
             continue
 
+    # A model the catalog restricts to local serving must never be answered
+    # by a cloud substitute, labeled or not: skip the cloud cascade tiers.
+    _allowed = model_providers(model_id)
+    local_only = bool(_allowed) and set(_allowed) <= {"local"}
+
     if cascade_enabled:
         # Automatic fallback routing cascade: Frontier -> Cloudflare -> OpenRouter -> Local/Ollama (WO-05)
         cascade_errors = []
@@ -729,12 +738,19 @@ def execute_summon(
 
         # Tier 2: Cloudflare Workers AI
         cf = _cloudflare_provider()
-        if cf:
+        if cf and not local_only:
             sys.stderr.write(
                 f"[HYDRA CASCADE] Frontier unavailable ({redact(last_error or 'no credentials')}). "
                 f"Falling back to Cloudflare Workers AI ({DEFAULT_CLOUDFLARE_MODEL})...\n"
             )
             sys.stderr.flush()
+            if not json_mode:
+                print(
+                    f"[hydra] FALLBACK: requested {model_id} unavailable; "
+                    f"the answer below is by {DEFAULT_CLOUDFLARE_MODEL} (Cloudflare Workers AI), "
+                    "not the requested model.",
+                    flush=True,
+                )
             emitted = False
             try:
                 if stream and not json_mode:
@@ -761,7 +777,7 @@ def execute_summon(
                 )
                 if json_mode:
                     import json
-                    print(json.dumps({"model": DEFAULT_CLOUDFLARE_MODEL, "provider": cf["name"], "content": resp}, indent=2))
+                    print(json.dumps({"model": DEFAULT_CLOUDFLARE_MODEL, "requested_model": model_id, "answered_by": DEFAULT_CLOUDFLARE_MODEL, "fallback": True, "provider": cf["name"], "content": resp}, indent=2))
                 else:
                     print(resp)
                 return 0
@@ -774,13 +790,20 @@ def execute_summon(
 
         # Tier 3: OpenRouter Free Forge
         or_free = _openrouter_free_provider()
-        if or_free:
+        if or_free and not local_only:
             free_models = [DEFAULT_FREE_MODEL] + [m for m in FREE_MODELS if m != DEFAULT_FREE_MODEL]
             for fm in free_models:
                 sys.stderr.write(
                     f"[HYDRA CASCADE] Falling back to OpenRouter Free Forge ({fm})...\n"
                 )
                 sys.stderr.flush()
+                if not json_mode:
+                    print(
+                        f"[hydra] FALLBACK: requested {model_id} unavailable; "
+                        f"the answer below is by {fm} (OpenRouter Free Forge), "
+                        "not the requested model.",
+                        flush=True,
+                    )
                 emitted = False
                 try:
                     if stream and not json_mode:
@@ -808,7 +831,7 @@ def execute_summon(
                     )
                     if json_mode:
                         import json
-                        print(json.dumps({"model": fm, "provider": or_free["name"], "content": resp}, indent=2))
+                        print(json.dumps({"model": fm, "requested_model": model_id, "answered_by": fm, "fallback": True, "provider": or_free["name"], "content": resp}, indent=2))
                     else:
                         print(resp)
                     return 0
@@ -826,6 +849,13 @@ def execute_summon(
                 f"[HYDRA CASCADE] Cloud tiers unavailable. Falling back to local offline inference ({local_name})...\n"
             )
             sys.stderr.flush()
+            if not json_mode:
+                print(
+                    f"[hydra] FALLBACK: requested {model_id} unavailable; "
+                    f"the answer below is by {DEFAULT_LOCAL_MODEL} (local, {local_name}), "
+                    "not the requested model.",
+                    flush=True,
+                )
             emitted = False
             try:
                 if stream and not json_mode:
@@ -852,7 +882,7 @@ def execute_summon(
                 )
                 if json_mode:
                     import json
-                    print(json.dumps({"model": DEFAULT_LOCAL_MODEL, "provider": local_name, "content": resp}, indent=2))
+                    print(json.dumps({"model": DEFAULT_LOCAL_MODEL, "requested_model": model_id, "answered_by": DEFAULT_LOCAL_MODEL, "fallback": True, "provider": local_name, "content": resp}, indent=2))
                 else:
                     print(resp)
                 return 0
