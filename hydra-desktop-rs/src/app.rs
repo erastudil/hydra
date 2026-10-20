@@ -841,11 +841,11 @@ impl HydraApp {
             }
             // narrow windows give the badge's width to the cost chip
             if !narrow {
-                let (r, resp) = ui.allocate_exact_size(vec2(66.0, 22.0), Sense::click());
+                let (r, resp) = ui.allocate_exact_size(vec2(122.0, 22.0), Sense::click());
                 widgets::glow(ui, r, 11, ACCENT_DIM, 8);
                 ui.painter().rect_filled(r, cr(11), ACCENT_DIM);
                 ui.painter().rect_stroke(r, cr(11), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
-                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, concat!("v", env!("CARGO_PKG_VERSION")), egui::FontId::new(TYPE_BADGE, egui::FontFamily::Name(BOLD.into())), ACCENT);
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, format!("v{} · {}", env!("CARGO_PKG_VERSION"), BUILD_COMMIT), egui::FontId::new(TYPE_BADGE, egui::FontFamily::Name(BOLD.into())), ACCENT);
                 let clicked = resp.on_hover_text(format!("{}\nClick to check GitHub & sync local install", hydra_stdio::update::status_line())).clicked();
                 if clicked {
                     self.run(Cmd::Update);

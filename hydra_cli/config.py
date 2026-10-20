@@ -1,6 +1,7 @@
 """
 Configuration and model resolution for Hydra CLI.
-Aliases live in catalog.json so the Python and Node runtimes share one map.
+Aliases, the default model keys, and the REPL shorthand map all live in
+catalog.json, so every runtime shares one map and one default.
 """
 
 import json

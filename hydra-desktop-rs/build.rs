@@ -69,6 +69,17 @@ fn main() {
     }
     let mw = r["min_window"].as_array().unwrap();
     out += &format!("pub const RESP_MIN_WINDOW: [f32; 2] = [{:?}, {:?}];\n", mw[0].as_f64().unwrap(), mw[1].as_f64().unwrap());
+    // Build stamp: the short git HEAD this binary is compiled from, so a
+    // running window can be matched to the exact tree that produced it.
+    let commit = std::process::Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() { Some(String::from_utf8_lossy(&o.stdout).trim().to_string()) } else { None })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    out += &format!("pub const BUILD_COMMIT: &str = {commit:?};\n");
+    println!("cargo:rerun-if-changed=../.git/HEAD");
     let dest = Path::new(&env::var("OUT_DIR").unwrap()).join("tokens.rs");
     fs::write(dest, out).unwrap();
 }
