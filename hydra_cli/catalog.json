@@ -398,10 +398,10 @@
       "model": "mimo-2.6-pro"
     },
     "mimo": {
-      "model": "mimo-2.6-pro"
+      "model": "mimo-2.6-flash"
     },
     "mimo 2.6": {
-      "model": "mimo-2.6-pro"
+      "model": "mimo-2.6-flash"
     },
     "mimo pro": {
       "model": "mimo-2.6-pro"
@@ -424,6 +424,30 @@
     "fallback": {
       "model": "glm-5.3-flash"
     }
+  },
+  "alias_shorthands": {
+    "bonsai": "bonsai 2 9b",
+    "bonsai 9b": "bonsai 2 9b",
+    "bonsai 2b": "bonsai 2 2b",
+    "bonsai 4b": "bonsai 2 4b",
+    "bonsai 27b": "bonsai 2 27b",
+    "sonnet": "sonnet 5.5",
+    "opus": "opus 5.5",
+    "sol": "gpt 6.1 sol",
+    "sol pro": "sol 5.6 pro",
+    "flash": "flash 2.5",
+    "haiku": "haiku 4.5",
+    "qwen": "qwen 3.8",
+    "deepseek": "deepseek 4.1 flash",
+    "glm": "glm 5.3 flash",
+    "mimo": "mimo 2.6 flash",
+    "mimo pro": "mimo 2.6 pro",
+    "mimo.2.6 pro": "mimo 2.6 pro",
+    "mimo flash": "mimo 2.6 flash",
+    "mimo.2.6 flash": "mimo 2.6 flash",
+    "driver": "mimo 2.6 flash",
+    "daily driver": "mimo 2.6 flash",
+    "fallback": "glm 5.3 flash"
   },
   "model_providers": {
     "anthropic/claude-opus-5.5-fast": [
@@ -616,8 +640,8 @@
     "bonsai 2 2b": 262144,
     "bonsai 2 27b": 262144
   },
-  "default_orchestrator_model": "bonsai 2 9b",
-  "default_agent_model": "bonsai 2 9b",
+  "default_orchestrator_model": "mimo 2.6 flash",
+  "default_agent_model": "mimo 2.6 flash",
   "swarm_combos": {
     "open swarm": {
       "title": "Open Swarm",
@@ -651,7 +675,7 @@
       ]
     }
   },
-  "default_model": "bonsai 2 9b",
+  "default_model": "mimo 2.6 flash",
   "default_fanout_aliases": [
     "glm 5.3 flash",
     "deepseek 4.1 flash",

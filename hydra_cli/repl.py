@@ -16,7 +16,13 @@ import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from hydra_cli import __version__
-from hydra_cli.config import DEFAULT_SYSTEM_PROMPT, MODEL_MAP, resolve_route
+from hydra_cli.config import (
+    ALIAS_SHORTHANDS,
+    DEFAULT_AGENT_MODEL,
+    DEFAULT_SYSTEM_PROMPT,
+    MODEL_MAP,
+    resolve_route,
+)
 from hydra_cli.ui import GREEN_BRIGHT, GREEN_DIM, RESET, print_banner, supports_color
 
 
@@ -758,30 +764,9 @@ def create_continuation_manager(
 
 
 
-DEFAULT_MODEL_ALIASES: Dict[str, str] = {
-    "bonsai": "bonsai 2 9b",
-    "bonsai 9b": "bonsai 2 9b",
-    "bonsai 2b": "bonsai 2 2b",
-    "bonsai 4b": "bonsai 2 4b",
-    "bonsai 27b": "bonsai 2 27b",
-    "sonnet": "sonnet 5.5",
-    "opus": "opus 5.5",
-    "sol": "gpt 6.1 sol",
-    "sol pro": "sol 5.6 pro",
-    "flash": "flash 2.5",
-    "haiku": "haiku 4.5",
-    "qwen": "qwen 3.8",
-    "deepseek": "deepseek 4.1 flash",
-    "glm": "glm 5.3 flash",
-    "mimo": "mimo 2.6 pro",
-    "mimo pro": "mimo 2.6 pro",
-    "mimo.2.6 pro": "mimo 2.6 pro",
-    "mimo flash": "mimo 2.6 flash",
-    "mimo.2.6 flash": "mimo 2.6 flash",
-    "driver": "mimo 2.6 flash",
-    "daily driver": "mimo 2.6 flash",
-    "fallback": "glm 5.3 flash",
-}
+# Shorthand map lives in catalog.json ("alias_shorthands") — the single home
+# for alias data. This name is kept for compatibility; it is the catalog's map.
+DEFAULT_MODEL_ALIASES: Dict[str, str] = dict(ALIAS_SHORTHANDS)
 
 
 class ReplAliasExpander:
@@ -1290,7 +1275,7 @@ class ReplSession:
         self.history: ReplHistoryDedup = get_default_history_dedup()
         self.menu_pager: ReplMenuPager = get_default_menu_pager()
         self.exit_confirm: ReplExitConfirm = get_default_exit_confirm()
-        self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "mimo 2.6 flash").strip() or "mimo 2.6 flash"
+        self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "").strip() or DEFAULT_AGENT_MODEL
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.effort: Optional[str] = None
         self.reasoning_mode: Optional[str] = None

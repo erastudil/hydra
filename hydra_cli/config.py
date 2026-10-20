@@ -80,8 +80,13 @@ DEFAULT_HF_BASE = os.environ.get("HF_INFERENCE_BASE", "https://router.huggingfac
 DEFAULT_HF_MODEL = os.environ.get("HYDRA_HF_MODEL", CATALOG.get("default_hf_model", "meta-llama/Llama-3.1-8B-Instruct"))
 DEFAULT_MODEL = os.environ.get(
     "HYDRA_DEFAULT_MODEL",
-    CATALOG.get("default_model", "bonsai 2 9b"),
+    CATALOG.get("default_model", "mimo 2.6 flash"),
 )
+
+# Shorthand -> canonical alias. Single home: catalog.json "alias_shorthands".
+ALIAS_SHORTHANDS: Dict[str, str] = {
+    str(k).lower(): str(v) for k, v in (CATALOG.get("alias_shorthands") or {}).items()
+}
 DEFAULT_ORCHESTRATOR_MODEL = os.environ.get(
     "HYDRA_ORCHESTRATOR_MODEL",
     DEFAULT_MODEL,
