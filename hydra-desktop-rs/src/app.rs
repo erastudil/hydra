@@ -3821,8 +3821,10 @@ impl HydraApp {
         self.shortcuts(ctx);
         self.work.set_root(PathBuf::from(self.m.work_path()));
         self.work.poll();
-        if matches!(self.m.drawer_tab, "files" | "git") {
-            self.work.refresh(false);
+        match self.m.drawer_tab {
+            "files" => self.work.refresh(false),
+            "git" => self.work.refresh_status(false),
+            _ => {}
         }
         let busy_now = self.m.any_busy();
         if self.was_busy && !busy_now {

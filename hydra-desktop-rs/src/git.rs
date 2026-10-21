@@ -13,7 +13,7 @@ pub struct Change {
     pub y: char, // worktree state
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Status {
     pub branch: String,
     pub upstream: Option<String>,

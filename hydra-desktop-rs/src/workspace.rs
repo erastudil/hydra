@@ -24,7 +24,8 @@ impl OpenFile {
 struct Snapshot {
     root: PathBuf,
     status: Option<Status>,
-    index: Vec<String>,
+    /// None for a status-only refresh: the index stays as it was
+    index: Option<Vec<String>>,
 }
 
 pub struct Work {
@@ -91,6 +92,16 @@ impl Work {
 
     /// Ask for a fresh git status and file index on a worker thread. Throttled unless `force`.
     pub fn refresh(&mut self, force: bool) {
+        self.refresh_with(force, true);
+    }
+
+    /// Git status only, for the Changes panel's idle poll: re-walking the folder for the file index (up to
+    /// 20,000 entries) on every wake cost idle CPU and only Files and @-mentions read it.
+    pub fn refresh_status(&mut self, force: bool) {
+        self.refresh_with(force, false);
+    }
+
+    fn refresh_with(&mut self, force: bool, with_index: bool) {
         if self.inflight {
             return;
         }
@@ -99,12 +110,16 @@ impl Work {
         }
         self.inflight = true;
         self.last = Some(Instant::now());
-        let (root, tx, wake) = (self.root.clone(), self.tx.clone(), self.wake.clone());
+        let (root, tx, wake, before) = (self.root.clone(), self.tx.clone(), self.wake.clone(), self.status.clone());
         std::thread::spawn(move || {
             let status = if git::is_repo(&root) { git::status(&root).ok() } else { None };
-            let index = fsx::index(&root, 20_000);
+            let index = with_index.then(|| fsx::index(&root, 20_000));
+            // an unchanged status-only poll waits for the next frame instead of drawing one for nothing
+            let news = index.is_some() || status != before;
             let _ = tx.send(Snapshot { root, status, index });
-            wake();
+            if news {
+                wake();
+            }
         });
     }
 
@@ -118,7 +133,9 @@ impl Work {
             }
             self.is_repo = s.status.is_some();
             self.status = s.status;
-            self.index = s.index;
+            if let Some(index) = s.index {
+                self.index = index;
+            }
             self.tree.clear();
             changed = true;
             if let Some(sel) = self.selected.clone() {
@@ -268,6 +285,29 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("refresh never finished");
+    }
+
+    #[test]
+    fn an_unchanged_status_poll_does_not_wake_the_window() {
+        // the Changes panel's idle poll woke the window every time, so an idle desk drew an extra frame each wake
+        // for nothing (idle CPU 0.1% -> 0.4%); only a changed status, or a refresh with an index, wakes it
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let d = repo("wake");
+        let wakes = std::sync::Arc::new(AtomicUsize::new(0));
+        let n = wakes.clone();
+        let mut w = Work::new(d.clone(), move || {
+            n.fetch_add(1, Ordering::SeqCst);
+        });
+        settle(&mut w);
+        let after_start = wakes.load(Ordering::SeqCst);
+        w.refresh_status(true);
+        settle(&mut w);
+        assert_eq!(wakes.load(Ordering::SeqCst), after_start, "same status, no wake");
+        std::fs::write(d.join("new.txt"), "x").unwrap();
+        w.refresh_status(true);
+        settle(&mut w);
+        assert_eq!(wakes.load(Ordering::SeqCst), after_start + 1, "a new change wakes the window");
+        assert!(w.status.as_ref().unwrap().changes.iter().any(|c| c.path == "new.txt"));
     }
 
     #[test]

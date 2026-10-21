@@ -794,3 +794,23 @@ fn d03_drawer_reviews_the_thread_and_shows_a_mode_tool_only_in_its_mode() {
         assert!(TOOL_TAB_LABELS.iter().all(|l| h.query_all_by_label(l).next().is_none()), "{w}: the tool tab goes away with its mode");
     }
 }
+
+#[test]
+fn an_idle_changes_tab_polls_git_status_without_reindexing_the_folder() {
+    // D03 made Changes the default panel; its idle poll re-walked up to 20,000 files every wake only to refresh
+    // git status (idle CPU 0.1% -> 0.4% on a big folder). The file index is for Files and @-mentions, so the
+    // Changes poll leaves it alone and the Files tab still picks up new files.
+    let mut h = harness("changes-idle-index");
+    settle(&mut h);
+    let root = app(&mut h).work_mut().root.clone();
+    assert_eq!(app(&mut h).model().drawer_tab, "git");
+    std::fs::write(root.join("made-while-idle.txt"), "x").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(3200)); // past the 3 s poll throttle
+    h.run_steps(2);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    h.run_steps(2);
+    assert!(!app(&mut h).work_mut().index.iter().any(|f| f == "made-while-idle.txt"), "the Changes poll must not rebuild the file index");
+    app(&mut h).model_mut().drawer_tab = "files";
+    std::thread::sleep(std::time::Duration::from_millis(3200));
+    assert!(wait(&mut h, 5, |a| a.work_mut().index.iter().any(|f| f == "made-while-idle.txt")), "the Files tab still sees the new file");
+}
