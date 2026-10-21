@@ -49,6 +49,18 @@ pub const NAV: &[(&str, &str)] = &[
     ("computer", "Computer Use"),
     ("terminal", "Terminal Sandbox"),
 ];
+/// Drawer tabs that belong to one mode's tool rather than to the thread.
+pub const TOOL_TABS: &[&str] = &["screen", "term", "agent"];
+
+/// The drawer tool a mode brings with it, if any.
+pub fn mode_tool_tab(nav: &str) -> Option<&'static str> {
+    match nav {
+        "agent" => Some("agent"),
+        "computer" => Some("screen"),
+        "terminal" => Some("term"),
+        _ => None,
+    }
+}
 pub const PROFILES: &[&str] = &["full_automation", "browser_only", "workspace_only", "minimal"];
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
@@ -466,7 +478,7 @@ impl Model {
             active: 0,
             counter: 0,
             nav: "chat",
-            drawer_tab: "screen",
+            drawer_tab: "git",
             tab_pinned: false,
             model: 0,
             zoom: default_zoom(),
@@ -1104,13 +1116,13 @@ impl Model {
         self.tasks.values().filter(|t| t.get("state").and_then(|x| x.as_str()) == Some("running")).count()
     }
 
+    /// D03: a mode's tool opens with it; leaving a tool mode returns the drawer to the thread's changes.
     pub fn set_nav(&mut self, key: &str) {
         self.nav = nav_key(key);
-        match self.nav {
-            "agent" => self.drawer_tab = "agent",
-            "computer" => self.drawer_tab = "screen",
-            "terminal" => self.drawer_tab = "term",
-            _ => {}
+        if let Some(tab) = mode_tool_tab(self.nav) {
+            self.drawer_tab = tab;
+        } else if TOOL_TABS.contains(&self.drawer_tab) {
+            self.drawer_tab = "git";
         }
     }
 
@@ -1543,7 +1555,7 @@ impl Model {
                         s.diffs.push(DiffItem { path, diff });
                     }
                     // only from the passive tabs: a tab the user opened to work in (Rules, Files, ...) is never yanked away
-                    if self.sessions[self.active].id == sid && !self.tab_pinned && matches!(self.drawer_tab, "screen" | "term" | "agent" | "diff") {
+                    if self.sessions[self.active].id == sid && !self.tab_pinned && matches!(self.drawer_tab, "git" | "screen" | "term" | "agent" | "diff") {
                         self.drawer_tab = "diff";
                     }
                 }

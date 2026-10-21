@@ -757,3 +757,40 @@ fn fit_hint_keeps_whole_segments_in_priority_order() {
     assert_eq!(fit_hint(&segs, |t| t.chars().count() <= 40), "Thinking · Esc interrupts · Enter queues");
     assert_eq!(fit_hint(&segs, |t| t.chars().count() <= 10), "Thinking", "the first segment always stays; the label truncates it if it must");
 }
+
+/// Full and short names of the mode tool tabs (Computer Use, Terminal Sandbox, Agent ReAct Loop).
+const TOOL_TAB_LABELS: &[&str] = &["Live Screen", "Screen", "Terminal Logs", "Logs", "Agent Runner", "Agent"];
+
+fn painted(h: &Harness<'static, HydraApp>, text: &str) -> bool {
+    h.output().shapes.iter().any(|c| matches!(&c.shape, egui::Shape::Text(t) if t.galley.text() == text))
+}
+
+#[test]
+fn d03_drawer_reviews_the_thread_and_shows_a_mode_tool_only_in_its_mode() {
+    // D03: the right drawer was the old web desk "INSPECTION & AUTOMATION" panel with a dead "X: - | Y: -" readout
+    // and four always-on tool tabs (Live Screen, Terminal Logs, Diffs & Code, Agent Runner). Now it opens on the
+    // thread's Changes, names the open panel, and a mode tool appears only while its mode is picked.
+    for (w, hgt) in [(1280.0, 800.0), (900.0, 700.0)] {
+        let mut h = harness_sized(&format!("d03drawer{w}"), w, hgt);
+        settle(&mut h);
+        assert_eq!(app(&mut h).model().drawer_tab, "git", "{w}: a chat thread opens on its changes");
+        assert!(!painted(&h, "INSPECTION & AUTOMATION") && !painted(&h, "X: - | Y: -"), "{w}: old web-desk header is gone");
+        assert!(painted(&h, "CHANGES"), "{w}: the header names the open panel");
+        for tool in TOOL_TAB_LABELS.iter().chain(&["Diffs & Code"]) {
+            assert!(h.query_all_by_label(tool).next().is_none(), "{w}: chat mode shows no {tool} tab");
+        }
+        h.get_by_label_contains("Diffs");
+        for (nav, tab, header) in [("computer", "screen", "LIVE SCREEN"), ("terminal", "term", "TERMINAL LOGS"), ("agent", "agent", "AGENT RUNNER")] {
+            app(&mut h).model_mut().set_nav(nav);
+            h.run_steps(3);
+            assert_eq!(app(&mut h).model().drawer_tab, tab, "{w}: {nav} opens its tool");
+            assert!(painted(&h, header), "{w}: header reads {header}");
+            let tools: Vec<&str> = TOOL_TAB_LABELS.iter().copied().filter(|l| h.query_all_by_label(l).next().is_some()).collect();
+            assert_eq!(tools.len(), 1, "{w}: only {nav}'s tool tab is shown: {tools:?}");
+        }
+        app(&mut h).model_mut().set_nav("chat");
+        h.run_steps(3);
+        assert_eq!(app(&mut h).model().drawer_tab, "git", "{w}: leaving a tool mode returns to the thread's changes");
+        assert!(TOOL_TAB_LABELS.iter().all(|l| h.query_all_by_label(l).next().is_none()), "{w}: the tool tab goes away with its mode");
+    }
+}

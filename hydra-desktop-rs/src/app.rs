@@ -61,7 +61,24 @@ pub fn fmt_tokens(n: u64) -> String {
     }
 }
 
-const DRAWER_TABS: &[(&str, &str)] = &[("screen", "Live Screen"), ("term", "Terminal Logs"), ("diff", "Diffs & Code"), ("agent", "Agent Runner")];
+/// Every drawer panel: key, full name, short name for a cell narrower than DRAWER_TAB_SHORT_BELOW (D16).
+const DRAWER_PANELS: &[(&str, &str, &str)] = &[
+    ("git", "Changes", "Git"),
+    ("diff", "Diffs", "Diffs"),
+    ("approvals", "Approvals", "Asks"),
+    ("files", "Files", "Files"),
+    ("rules", "Rules", "Rules"),
+    ("skills", "Skills", "Skills"),
+    ("mcp", "MCP", "MCP"),
+    ("tasks", "Tasks", "Tasks"),
+    ("screen", "Live Screen", "Screen"),
+    ("term", "Terminal Logs", "Logs"),
+    ("agent", "Agent Runner", "Agent"),
+];
+
+fn drawer_panel(key: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
+    DRAWER_PANELS.iter().find(|p| p.0 == key)
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum Cmd {
@@ -290,7 +307,8 @@ fn palette_entries() -> Vec<(&'static str, &'static str, Cmd)> {
         ("Switch to Terminal Sandbox", "", Cmd::Nav("terminal")),
         ("Open Live Screen", "", Cmd::Tab("screen")),
         ("Open Terminal Logs", "", Cmd::Tab("term")),
-        ("Open Diffs & Code", "", Cmd::Tab("diff")),
+        ("Open Changes", "", Cmd::Tab("git")),
+        ("Open Diffs", "", Cmd::Tab("diff")),
         ("Open Agent Runner", "", Cmd::Tab("agent")),
         ("Start Agent Task", "", Cmd::AgentStart),
         ("Pause Agent Task", "", Cmd::AgentCtl("pause")),
@@ -464,7 +482,7 @@ impl HydraApp {
             m.set_nav(&n);
         }
         if let Ok(t) = std::env::var("HYDRA_TAB") {
-            if let Some(k) = DRAWER_TABS.iter().chain([("files", ""), ("git", ""), ("approvals", ""), ("rules", ""), ("skills", ""), ("mcp", ""), ("tasks", "")].iter()).find(|d| d.0 == t) {
+            if let Some(k) = drawer_panel(&t) {
                 m.drawer_tab = k.0;
                 m.tab_pinned = true;
             }
@@ -2052,54 +2070,34 @@ impl HydraApp {
     // ---------------------------------------------------------------- drawer
     fn drawer(&mut self, ui: &mut egui::Ui, width: f32) {
         ui.spacing_mut().item_spacing.y = 0.0;
+        // D03: the drawer reviews the thread (Changes, Diffs, Approvals, Files); a mode's tool tab joins the first
+        // row only while that mode is picked, or while it is the open panel. The header names the open panel.
+        let tool = mode_tool_tab(self.m.nav).or(TOOL_TABS.contains(&self.m.drawer_tab).then_some(self.m.drawer_tab));
+        let mut first: Vec<&str> = vec!["git", "diff", "approvals", "files"];
+        first.extend(tool);
+        let rows: [Vec<&str>; 2] = [first, vec!["rules", "skills", "mcp", "tasks"]];
         egui::Frame::new().inner_margin(Margin::symmetric(20, 14)).show(ui, |ui| {
             ui.set_width(width - 41.0);
             let (rect, _) = ui.allocate_exact_size(vec2(width - 41.0, 14.0), Sense::hover());
             let bold = egui::FontId::new(TYPE_DRAWER_HEADER, egui::FontFamily::Name(BOLD.into()));
-            ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, "INSPECTION & AUTOMATION", bold, TEXT2);
-            ui.painter().text(rect.right_center(), egui::Align2::RIGHT_CENTER, "X: - | Y: -", egui::FontId::new(TYPE_COORD_READOUT, egui::FontFamily::Proportional), MUTED);
+            let title = drawer_panel(self.m.drawer_tab).map(|p| p.1).unwrap_or("Changes").to_uppercase();
+            ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, title, bold, TEXT2);
         });
         let y = ui.cursor().top();
         ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, BORDER));
         egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
             ui.set_width(width - 17.0);
-            ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
-            let cell = (width - 17.0 - 12.0) / 4.0;
-            ui.horizontal(|ui| {
-                for (key, label) in DRAWER_TABS {
-                    let active = self.m.drawer_tab == *key;
-                    let w = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), egui::FontId::new(12.0, egui::FontFamily::Proportional), TEXT).size().x);
-                    let wrapped = w + 12.0 > cell;
-                    let text = if wrapped { label.replacen(' ', "\n", 1) } else { label.to_string() };
-                    let h: f32 = if wrapped { 17.0 * 2.0 + 16.0 } else { 30.0 };
-                    let (rect, resp) = ui.allocate_exact_size(vec2(cell, h), Sense::click());
-                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, *label));
-                    let t = motion::toggle(ui.ctx(), resp.id.with("hv"), resp.hovered() && !active);
-                    if active {
-                        widgets::shadow(ui, rect, 10, SHADOW_DRAWER_TAB_GLOW);
-                        ui.painter().rect_filled(rect, cr(10), ACCENT_DIM);
-                    } else if t > 0.0 {
-                        ui.painter().rect_filled(rect, cr(10), BG3.gamma_multiply(t));
-                    }
-                    let fam = if active { egui::FontFamily::Name(BOLD.into()) } else { egui::FontFamily::Proportional };
-                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::new(TYPE_DRAWER_TAB, fam), if active { ACCENT } else { motion::mix(MUTED, TEXT, t) });
-                    if resp.clicked() {
-                        self.m.drawer_tab = key;
-                    }
-                }
-            });
-        });
-        egui::Frame::new().fill(BG).inner_margin(Margin::symmetric(8, 2)).show(ui, |ui| {
-            ui.set_width(width - 17.0);
-            ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
-            for row in [&[("files", "Files"), ("git", "Changes"), ("approvals", "Approvals"), ("rules", "Rules")][..], &[("skills", "Skills"), ("mcp", "MCP"), ("tasks", "Tasks")][..]] {
+            ui.spacing_mut().item_spacing = vec2(4.0, 2.0);
+            for row in &rows {
             let n = row.len() as f32;
             ui.horizontal(|ui| {
                 // D16: on a narrow drawer the long names ran together; use short ones when a cell is too small
-                let tight = (width - 17.0 - 12.0) / n - 4.0 < DRAWER_TAB_SHORT_BELOW;
-                for &(key, label) in row {
+                let cell = (width - 17.0 - 12.0) / n - 4.0;
+                let tight = cell < DRAWER_TAB_SHORT_BELOW;
+                for &key in row {
+                    let Some(&(key, full, short)) = drawer_panel(key) else { continue };
                     let active = self.m.drawer_tab == key;
-                    let label = if tight { match key { "git" => "Git", "approvals" => "Asks", _ => label } } else { label };
+                    let label = if tight { short } else { full };
                     let mut text = label.to_string();
                     if key == "approvals" && !self.m.approvals.is_empty() {
                         text = format!("{label} ({})", self.m.approvals.len());
@@ -2117,16 +2115,18 @@ impl HydraApp {
                             }
                         }
                     }
-                    let (rect, resp) = ui.allocate_exact_size(vec2((width - 17.0 - 12.0) / n - 4.0, 26.0), Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(vec2(cell, 28.0), Sense::click());
                     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, text.clone()));
+                    let t = motion::toggle(ui.ctx(), resp.id.with("hv"), resp.hovered() && !active);
                     if active {
+                        widgets::shadow(ui, rect, 10, SHADOW_DRAWER_TAB_GLOW);
                         ui.painter().rect_filled(rect, cr(10), ACCENT_DIM);
-                    } else if resp.hovered() {
-                        ui.painter().rect_filled(rect, cr(10), BG3);
+                    } else if t > 0.0 {
+                        ui.painter().rect_filled(rect, cr(10), BG3.gamma_multiply(t));
                     }
                     let fam = if active { egui::FontFamily::Name(BOLD.into()) } else { egui::FontFamily::Proportional };
                     // clip so a count like "Git (12)" cannot paint into the next cell (D16)
-                    ui.painter().with_clip_rect(rect).text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::new(TYPE_DRAWER_TAB, fam), if active { ACCENT } else if resp.hovered() { TEXT } else { MUTED });
+                    ui.painter().with_clip_rect(rect).text(rect.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::new(TYPE_DRAWER_TAB, fam), if active { ACCENT } else { motion::mix(MUTED, TEXT, t) });
                     if resp.clicked() {
                         self.m.drawer_tab = key;
                     }
