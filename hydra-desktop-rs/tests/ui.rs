@@ -708,3 +708,52 @@ fn default_model_is_mimo_flash_and_computer_use_renders_screen_gradient_mesh() {
     assert!(has_gradient_mesh, "Computer Use active state must paint the 64-segment inward screen-border gradient mesh");
 }
 
+
+/// The composer status hint: its painted text, rect and whether egui cut it with "…".
+fn status_hint(h: &Harness<'static, HydraApp>, prefix: &str) -> Vec<(String, egui::Rect, bool)> {
+    h.output().shapes.iter().filter_map(|c| match &c.shape {
+        egui::Shape::Text(t) if t.galley.text().starts_with(prefix) => Some((t.galley.text().to_string(), t.visual_bounding_rect(), t.galley.elided)),
+        _ => None,
+    }).collect()
+}
+
+#[test]
+fn composer_status_hint_drops_whole_keys_instead_of_clipping_before_the_mode_pill() {
+    // the long Thinking and approval hints were cut mid-word ("Ctrl+Enter steers · Esc in…") left of the Mode pill;
+    // now whole low-priority keys drop out and the ones kept (Esc interrupts, Enter allows) read in full
+    for (w, hgt) in [(1280.0, 800.0), (900.0, 700.0), (820.0, 560.0)] {
+        let mut h = harness_sized(&format!("hint{w}"), w, hgt);
+        settle(&mut h);
+        assert!(wait(&mut h, 10, |a| a.model().agent_ready), "the agent starts");
+        say(&mut h, "SLOW keep thinking");
+        assert!(app(&mut h).model().active_busy(), "{w}: a turn is running");
+        h.run_steps(3);
+        let pill = h.get_by_label_contains("Mode: Chat").rect();
+        let hint = status_hint(&h, "Thinking");
+        assert_eq!(hint.len(), 1, "{w}: one Thinking hint painted: {hint:?}");
+        let (text, r, elided) = &hint[0];
+        assert!(!elided, "{w}x{hgt}: Thinking hint clipped: {text:?}");
+        assert!(text.contains("Esc interrupts"), "{w}x{hgt}: the interrupt key must stay: {text:?}");
+        assert!(r.max.x <= pill.min.x, "{w}x{hgt}: hint {r:?} runs under the Mode pill {pill:?}");
+
+        let a = app(&mut h);
+        let sid = a.model().sessions[a.model().active].id;
+        a.model_mut().approvals.push(Approval { sid, turn: "t1".into(), id: "ap-hint".into(), tool: "write_file".into(), args: serde_json::json!({"path": "a.txt", "content": "x"}) });
+        h.run_steps(3);
+        let hint = status_hint(&h, "hydra is waiting");
+        assert_eq!(hint.len(), 1, "{w}: one approval hint painted: {hint:?}");
+        let (text, r, elided) = &hint[0];
+        assert!(!elided, "{w}x{hgt}: approval hint clipped: {text:?}");
+        assert!(text.contains("Enter allows"), "{w}x{hgt}: the allow key must stay: {text:?}");
+        assert!(r.max.x <= pill.min.x, "{w}x{hgt}: hint {r:?} runs under the Mode pill {pill:?}");
+    }
+}
+
+#[test]
+fn fit_hint_keeps_whole_segments_in_priority_order() {
+    use hydra_desktop::app::fit_hint;
+    let segs = ["Thinking", "Esc interrupts", "Enter queues", "Ctrl+Enter steers"];
+    assert_eq!(fit_hint(&segs, |_| true), "Thinking · Esc interrupts · Enter queues · Ctrl+Enter steers");
+    assert_eq!(fit_hint(&segs, |t| t.chars().count() <= 40), "Thinking · Esc interrupts · Enter queues");
+    assert_eq!(fit_hint(&segs, |t| t.chars().count() <= 10), "Thinking", "the first segment always stays; the label truncates it if it must");
+}

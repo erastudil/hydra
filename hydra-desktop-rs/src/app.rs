@@ -1422,16 +1422,22 @@ impl HydraApp {
                         }
                     });
                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        let (mark, hint, color) = if recording {
-                            (rtb("● REC", 11.5, motion::mix(REC_MID, REC_HI, rec_pulse)), "listening… · Esc cancels", TEXT2)
+                        // segments in priority order: whole keys drop from the end instead of being cut mid-word
+                        // in front of the Mode pill; the label still truncates the first one on a very narrow row
+                        let (mark, segs, color): (_, &[&str], _) = if recording {
+                            (rtb("● REC", 11.5, motion::mix(REC_MID, REC_HI, rec_pulse)), &["listening…", "Esc cancels"], TEXT2)
                         } else if waiting_approval {
-                            (rtb("◆", 11.5, AMBER_HI), "hydra is waiting on your answer · Enter allows · Esc skips", AMBER_HI)
+                            (rtb("◆", 11.5, AMBER_HI), &["hydra is waiting on your answer", "Enter allows", "Esc skips"], AMBER_HI)
                         } else if thinking {
-                            (rtb(spin, 12.0, ACCENT), "Thinking · working... · Enter queues · Ctrl+Enter steers · Esc interrupts", TEXT2)
+                            (rtb(spin, 12.0, ACCENT), &["Thinking · working...", "Esc interrupts", "Enter queues", "Ctrl+Enter steers"], TEXT2)
                         } else {
-                            (rtb("❯", 12.0, MUTED), "Ready · Enter sends · Shift+Enter new line · / commands", MUTED)
+                            (rtb("❯", 12.0, MUTED), &["Ready", "Enter sends", "Shift+Enter new line", "/ commands"], MUTED)
                         };
                         ui.label(mark);
+                        let room = ui.available_width();
+                        let hint = fit_hint(segs, |t| {
+                            egui::WidgetText::from(rt(t, 11.5, color)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x <= room
+                        });
                         ui.add(egui::Label::new(rt(hint, 11.5, color)).truncate());
                     });
                 });
@@ -4294,6 +4300,11 @@ unsafe fn run_win32_screen_glow_overlay(state: std::sync::Arc<(std::sync::atomic
 }
 
 /// The cwd chip text: the whole path if it fits, else "…" plus as much of its tail as fits, else nothing.
+/// Join hint segments with " · ", keeping as many as fit in priority order; the first segment always stays.
+pub fn fit_hint(segs: &[&str], fits: impl Fn(&str) -> bool) -> String {
+    (1..=segs.len()).rev().map(|n| segs[..n].join(" · ")).find(|t| fits(t)).unwrap_or_else(|| segs.first().copied().unwrap_or("").to_string())
+}
+
 pub fn fit_cwd(cwd: &str, fits: impl Fn(&str) -> bool) -> Option<String> {
     let full = format!("cwd: {cwd}");
     if fits(&full) {
