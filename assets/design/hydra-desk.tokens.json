@@ -263,11 +263,6 @@
     "weight": 400,
     "weight_header": 600
    },
-   "nav_item": {
-    "size": 13,
-    "weight": 500,
-    "weight_active": 600
-   },
    "input": {
     "size": 13,
     "weight": 400
@@ -379,17 +374,6 @@
     "blur": 8,
     "spread": 0,
     "inset": false
-   }
-  ],
-  "nav_active_inset": [
-   {
-    "color": "#00ff66",
-    "alpha": 0.08,
-    "x": 0,
-    "y": 0,
-    "blur": 12,
-    "spread": 0,
-    "inset": true
    }
   ],
   "card": [
@@ -611,9 +595,6 @@
    },
    "add_session": {
     "translate_y": -1
-   },
-   "nav_item": {
-    "translate_x": 3
    },
    "button_active": {
     "translate_y": 0
@@ -917,36 +898,6 @@
     "border": "1px solid $colors.accent",
     "translate_y": -1
    }
-  },
-  "nav_item": {
-   "gap": 10,
-   "padding": [
-    10,
-    14
-   ],
-   "radius": 12,
-   "color": "$colors.text_muted",
-   "size": 13,
-   "weight": 500,
-   "hover": {
-    "bg": "$colors.bg_tertiary",
-    "color": "$colors.text_primary",
-    "translate_x": 3
-   },
-   "active": {
-    "bg": "$colors.accent_dim",
-    "color": "$colors.accent",
-    "border_left": "3px solid $colors.accent",
-    "shadow": "nav_active_inset",
-    "weight": 600
-   },
-   "labels": [
-    "Chat Mode",
-    "Agent ReAct Loop",
-    "3-Headed Swarm",
-    "Computer Use",
-    "Terminal Sandbox"
-   ]
   },
   "msg_header": {
    "size": 11,

@@ -50,3 +50,31 @@ fn every_color_in_the_app_comes_from_the_design_tokens() {
     }
     assert!(found.is_empty(), "add these to assets/design/hydra-desk.tokens.json and use the generated constant:\n{}", found.join("\n"));
 }
+
+/// Type sizes in the design file that no widget reads yet.
+// wuwei: input and button sizes are not wired; widget labels still pass literal sizes until a type-size sweep moves them
+const TYPE_NOT_WIRED: &[&str] = &["input", "button"];
+
+#[test]
+fn every_type_size_in_the_design_file_is_used_by_the_app() {
+    // 5S: a size left behind by a removed widget (TYPE_NAV_ITEM after D03 dropped the sidebar mode list) is pruned,
+    // not kept as a dead constant
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tokens: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(root.join("../assets/design/hydra-desk.tokens.json")).unwrap()).unwrap();
+    let mut src = String::new();
+    for entry in std::fs::read_dir(root.join("src")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "rs") {
+            src += &std::fs::read_to_string(&path).unwrap();
+        }
+    }
+    let unused: Vec<String> = tokens["typography"]["scale"].as_object().unwrap().keys()
+        .filter(|k| !TYPE_NOT_WIRED.contains(&k.as_str()))
+        .map(|k| format!("TYPE_{}", k.to_uppercase()))
+        .filter(|c| !src.contains(c.as_str()))
+        .collect();
+    assert!(unused.is_empty(), "use these in src/ or prune them from typography.scale: {unused:?}");
+    for k in TYPE_NOT_WIRED {
+        assert!(tokens["typography"]["scale"].get(*k).is_some(), "{k} is gone from the design file; drop it from TYPE_NOT_WIRED");
+    }
+}
