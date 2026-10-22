@@ -1671,7 +1671,7 @@ impl HydraApp {
                 let k = self.m.last_prompt as f64 / 1000.0;
                 ui.label(rt(format!("ctx {k:.1}k"), 11.0, if self.m.last_prompt > 100_000 { WARN } else { MUTED })).on_hover_text("Tokens the model read on the last request of this app (prompt plus carried context)");
             }
-            // D26: Undo rewind comes before the hint text, which truncates, so the button is never cut off
+            // D26: Undo rewind comes before the hint text; every hint below truncates, so the row ends inside the column
             if self.m.sessions[self.m.active].pre_rewind.is_some() && !self.m.active_busy() && widgets::button(ui, "Undo rewind", Kind::Secondary, 11.0, (10.0, 3.0), None).clicked() {
                 undo = true;
             }
@@ -1679,7 +1679,7 @@ impl HydraApp {
             if q > 0 {
                 ui.add(egui::Label::new(rt(format!("{q} queued, sends when this turn ends"), 11.0, ACCENT)).truncate());
             } else if self.m.active_busy() {
-                ui.label(rt("Enter queues a follow-up", 11.0, MUTED));
+                ui.add(egui::Label::new(rt("Enter queues a follow-up", 11.0, MUTED)).truncate());
             } else {
                 ui.add(egui::Label::new(rt("@ attaches a file   Ctrl+P finds files   Ctrl+O opens a folder", 11.0, MUTED)).truncate());
             }

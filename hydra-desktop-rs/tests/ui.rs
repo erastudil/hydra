@@ -750,6 +750,26 @@ fn composer_status_hint_drops_whole_keys_instead_of_clipping_before_the_mode_pil
 }
 
 #[test]
+fn the_busy_meta_row_hint_ends_inside_the_composer_column() {
+    // retest-1c8b865 D16/D26 family: during a turn "Enter queues a follow-up" was a plain label in the meta row,
+    // so it ran under the drawer and was cut mid-word ("Enter que") at 900/820 and 1280 with a ctx count
+    for (w, hgt) in [(1280.0, 800.0), (900.0, 700.0), (820.0, 560.0)] {
+        let mut h = harness_sized(&format!("busymeta{w}"), w, hgt);
+        settle(&mut h);
+        assert!(wait(&mut h, 10, |a| a.model().agent_ready), "the agent starts");
+        say(&mut h, "SLOW keep going");
+        assert!(app(&mut h).model().active_busy(), "{w}: a turn is running");
+        app(&mut h).model_mut().last_prompt = 123_456; // a ctx count takes room in the row, as in a real thread
+        h.run_steps(3);
+        let column_right = w - hydra_desktop::layout::frame(w).drawer_width;
+        let hint = status_hint(&h, "Enter queues a");
+        assert_eq!(hint.len(), 1, "{w}: one meta row hint painted: {hint:?}");
+        let (text, r, _) = &hint[0];
+        assert!(r.max.x <= column_right, "{w}x{hgt}: {text:?} at {r:?} runs past the composer column (right edge {column_right})");
+    }
+}
+
+#[test]
 fn fit_hint_keeps_whole_segments_in_priority_order() {
     use hydra_desktop::app::fit_hint;
     let segs = ["Thinking", "Esc interrupts", "Enter queues", "Ctrl+Enter steers"];
