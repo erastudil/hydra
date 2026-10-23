@@ -56,6 +56,7 @@ hydra_cli/getting_started.md
 hydra_cli/hands.py
 hydra_cli/invariants.json
 hydra_cli/invariants.py
+hydra_cli/local_server.py
 hydra_cli/mcp.py
 hydra_cli/mcp_registry.py
 hydra_cli/mcp_servers.default.json
