@@ -100,10 +100,10 @@
       "fingerprint": null,
       "elements": {
         "combat.end_turn": {
-          "x": null,
-          "y": null,
+          "x": 895,
+          "y": 824,
           "verify": false,
-          "note": "END TURN button, right side of the combat screen. To be grounded from the first live combat screenshot of the run and filled in mid-run. Cards and enemies are never in the atlas: the model grounds them every step."
+          "note": "END TURN button, bottom-right of the combat screen. Grounded mid-run from the run's live combat screenshot (Overgrowth, first combat) 2026-10-27."
         }
       }
     }
