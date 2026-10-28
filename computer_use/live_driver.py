@@ -16,6 +16,16 @@ C:\\Users\\jpm05\\hydra\\live-driver, override with HYDRA_LIVE_DRIVER_HOME):
   shots\\<name>.png screenshots captured by the screenshot action
   heartbeat.json   rewritten every loop: pid, session id, screen size
   driver.log       append-only action log
+  glow_state.json  screen-glow state the driver maintains (executing,
+                   last_activity, driver_pid); glow_ready.json /
+                   glow_error.txt are the glow's startup handshake
+
+Screen glow: starting the driver launches computer_use/screen_glow.py,
+a click-through border glow shown only while commands execute (plus a
+short idle grace, owned by the glow). The driver refuses to run if the
+glow cannot start: an unglowed run would be a silent spec violation
+(2026-10-20 audit: the glow is gated on computer-use activity, never a
+static always-on border). Stopping the driver stops the glow.
 
 Actions: screenshot, click, move, key, chord, paste, type, focus,
 windows, active, launch, wait, quit. Every action is executed through
@@ -35,6 +45,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -52,6 +63,12 @@ DONE_DIR = os.path.join(WORKDIR, "done")
 SHOTS_DIR = os.path.join(WORKDIR, "shots")
 LOG_PATH = os.path.join(WORKDIR, "driver.log")
 HEARTBEAT_PATH = os.path.join(WORKDIR, "heartbeat.json")
+GLOW_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "screen_glow.py"
+)
+GLOW_STATE_PATH = os.path.join(WORKDIR, "glow_state.json")
+GLOW_READY_PATH = os.path.join(WORKDIR, "glow_ready.json")
+GLOW_ERROR_PATH = os.path.join(WORKDIR, "glow_error.txt")
 
 for _d in (CMD_DIR, DONE_DIR, SHOTS_DIR):
     os.makedirs(_d, exist_ok=True)
@@ -156,10 +173,89 @@ class Driver:
 
         self.engine = get_computer_use_engine()
         self.running = True
+        self.glow_proc: subprocess.Popen | None = None
+        self._last_activity = 0.0
+        # The glow is part of the driver's contract with the owner: if
+        # it cannot start, the driver refuses to run (see _start_glow).
+        self._start_glow()
         log(
             f"driver start pid={os.getpid()} session={session_id()} "
             f"screen={self.engine.os.get_screen_size()}"
         )
+
+    # -- screen glow ---------------------------------------------------
+
+    def _write_glow_state(self, executing: bool) -> None:
+        data = {
+            "executing": executing,
+            "last_activity": self._last_activity,
+            "driver_pid": os.getpid(),
+            "updated": time.time(),
+        }
+        tmp = GLOW_STATE_PATH + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, GLOW_STATE_PATH)
+        except Exception:
+            log("glow state write failed:\n" + traceback.format_exc(limit=3))
+
+    def _start_glow(self) -> None:
+        for path in (GLOW_READY_PATH, GLOW_ERROR_PATH):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        self._write_glow_state(False)
+        self.glow_proc = subprocess.Popen(
+            [
+                sys.executable,
+                GLOW_SCRIPT,
+                "--state", GLOW_STATE_PATH,
+                "--ready", GLOW_READY_PATH,
+                "--error", GLOW_ERROR_PATH,
+                "--driver-pid", str(os.getpid()),
+            ],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.time() + 8.0
+        while time.time() < deadline:
+            if os.path.exists(GLOW_READY_PATH):
+                log(f"glow ready pid={self.glow_proc.pid}")
+                return
+            if os.path.exists(GLOW_ERROR_PATH):
+                try:
+                    with open(GLOW_ERROR_PATH, "r", encoding="utf-8") as f:
+                        detail = f.read().strip()
+                except Exception:
+                    detail = "(unreadable error file)"
+                raise RuntimeError(f"screen glow failed to start: {detail}")
+            if self.glow_proc.poll() is not None:
+                raise RuntimeError(
+                    "screen glow exited during startup "
+                    f"rc={self.glow_proc.returncode}"
+                )
+            time.sleep(0.1)
+        raise RuntimeError("screen glow did not signal ready within 8s")
+
+    def _stop_glow(self) -> None:
+        proc, self.glow_proc = self.glow_proc, None
+        self._write_glow_state(False)
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=3)
+        except Exception:
+            log("glow stop failed:\n" + traceback.format_exc(limit=3))
+        log("glow stopped")
 
     def heartbeat(self) -> None:
         data = {
@@ -253,6 +349,7 @@ class Driver:
                 continue
             log(f"cmd {cmd_id}: {cmd.get('action')} {cmd.get('params')}")
             started = time.time()
+            self._write_glow_state(True)
             try:
                 res = self.execute(cmd)
                 ok = not (isinstance(res, dict) and res.get("isError"))
@@ -263,6 +360,9 @@ class Driver:
                     "ok": False,
                     "error": traceback.format_exc(limit=5),
                 }
+            finally:
+                self._last_activity = time.time()
+                self._write_glow_state(False)
             result["elapsed_s"] = round(time.time() - started, 3)
             self._write_done(done_path, result)
             log(f"done {cmd_id}: ok={result['ok']}")
@@ -277,14 +377,24 @@ class Driver:
         os.replace(tmp, done_path)
 
     def loop(self) -> None:
-        while self.running:
-            try:
-                self.run_once()
-            except Exception:
-                log("loop error:\n" + traceback.format_exc(limit=5))
-            time.sleep(0.25)
+        try:
+            while self.running:
+                try:
+                    self.run_once()
+                except Exception:
+                    log("loop error:\n" + traceback.format_exc(limit=5))
+                time.sleep(0.25)
+        finally:
+            self._stop_glow()
         log("driver exit")
 
 
 if __name__ == "__main__":
-    Driver().loop()
+    try:
+        Driver().loop()
+    except Exception:
+        # Startup failures (including a glow that cannot start) are
+        # reported in driver.log and exit non-zero; the driver never
+        # runs silently without its glow.
+        log("FATAL: driver failed to start\n" + traceback.format_exc(limit=5))
+        sys.exit(1)

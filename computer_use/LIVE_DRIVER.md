@@ -34,6 +34,35 @@ Workdir `C:\Users\jpm05\hydra\live-driver` (override `HYDRA_LIVE_DRIVER_HOME`):
 through the engine. `type` uses VkKeyScanW so punctuation follows the real
 keyboard layout.
 
+## screen glow
+
+`screen_glow.py` is the active-use border glow from the 2026-10-20
+audit spec: full-screen, gradient, green, pulsing, shown ONLY while
+computer use is executing. The driver launches it at startup and
+refuses to run if it cannot start (the failure lands in `driver.log`
+as a FATAL startup error -- an unglowed run would be a silent spec
+violation). Stopping the driver stops the glow; the glow also watches
+the driver pid and exits on its own if the driver dies.
+
+- Rendering: a pure Win32 layered window with per-pixel alpha
+  (UpdateLayeredWindow over a 32bpp DIB), click-through
+  (WS_EX_TRANSPARENT), always-on-top, never focus-taking
+  (WS_EX_NOACTIVATE). Per-pixel alpha is load-bearing: the falloff
+  lives in the alpha channel, cos^2 over a 36 px frame, reaching zero
+  with zero slope -- the glow fades to nothing with no internal edge.
+  (Opaque color-keyed bands cannot do this; their last band is always
+  a visible line. First build, replaced.)
+- Peak opacity 0.8 at the screen edge; color gradient (64,255,120) ->
+  (0,64,22); pulse 1.6 s period, intensity 0.62..1.0 (unchanged since
+  the owner called it spot on).
+- State: the driver maintains `glow_state.json` in the workdir --
+  `executing` true around each command, `last_activity` stamped at
+  each command end. The glow is visible while executing or within a
+  2 s idle grace after the last activity, then hides.
+- Handshake: `glow_ready.json` (glow pid) once the window exists and
+  a first frame has presented; `glow_error.txt` carries the traceback
+  on setup failure.
+
 ## safety
 
 - Engine return values are never proof (2026-10-20 audit: failure paths
