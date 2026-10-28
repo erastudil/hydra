@@ -54,8 +54,11 @@ SYSTEM = (
     "enter, escape), \"chord\" (e.g. alt+tab), \"text\" (for type), \"seconds\" (for wait). "
     "Coordinates are normalized full-screen: x=0 left edge, x=1000 right edge, y=0 top, y=1000 bottom. "
     "Extra images after the first are native-resolution CROPS of regions of the same screen; their "
-    "labels give their full-screen bounds. Use crops to READ details (card names, costs, node icons); "
-    "always answer in full-screen coordinates. "
+    "labels give their names and full-screen bounds. Use crops to READ details (card names, costs, "
+    "node icons). To CLICK something inside a crop region, answer the click with \"frame\" set to "
+    "that crop's name (hand, map, enemy) and x,y in the CROP's own 0-1000 space (0,0 = the crop's "
+    "top-left, 1000,1000 = its bottom-right); the driver converts to full-screen. Clicks without a "
+    "frame use full-screen coordinates. "
     "HARD RULE: never confirm an abandon, give up, quit, save-and-quit, or delete dialog in any app. "
     "If such a dialog is on screen, answer key escape to back out. "
     "Output \"done\" only when the goal is fully achieved. Output \"stuck\" when you cannot make "
@@ -66,8 +69,9 @@ DANGER_READ = ["are you sure", "abandon", "give up", "result in a loss", "save a
 DANGER_TARGET = ["abandon", "give up", "give_up", "quit", "delete"]
 
 CROPS = {
-    "hand": {"box": (380, 790, 1560, 1080), "label": "HAND CROP (native resolution): the bottom strip of the screen holding your cards. Full-screen bounds: x 198-812, y 731-1000 (0-1000 scale). Slot numbers are printed above the cards."},
-    "map": {"box": (330, 90, 1620, 1010), "label": "MAP CROP (native resolution): the map area of the screen. Full-screen bounds: x 172-844, y 83-935 (0-1000 scale). Node icons: small face = Enemy, horned = Elite, ? = Unknown, chest = Treasure, flame = Rest, shop bag = Shop, big icon at top = Boss."},
+    "hand": {"box": (380, 790, 1560, 1080), "label": "HAND CROP (name: hand; native resolution): the bottom strip of the screen holding your cards. Full-screen bounds: x 198-812, y 731-1000 (0-1000 scale). Slot numbers are printed above the cards."},
+    "map": {"box": (330, 90, 1620, 1010), "label": "MAP CROP (name: map; native resolution): the map area of the screen. Full-screen bounds: x 172-844, y 83-935 (0-1000 scale). Node icons: small face = Enemy, horned = Elite, ? = Unknown, chest = Treasure, flame = Rest, shop bag = Shop, big icon at top = Boss."},
+    "enemy": {"box": (1240, 430, 1700, 830), "label": "ENEMY CROP (name: enemy; native resolution): the enemy area of the combat screen. Full-screen bounds: x 646-885, y 398-769 (0-1000 scale). To target the enemy, click with frame \"enemy\" at the CENTER of its body in this crop."},
 }
 
 # ---------- IPC ----------
@@ -190,6 +194,9 @@ def extract_action(raw):
     if act == "click" and obj.get("target"):
         if obj.get("x") is not None: obj["x"] = max(0, min(1000, int(obj["x"])))
         if obj.get("y") is not None: obj["y"] = max(0, min(1000, int(obj["y"])))
+    if act == "click" and obj.get("frame"):
+        if obj["frame"] not in CROPS: raise ValueError(f"bad frame {obj['frame']!r}")
+        obj["x"] = max(0, min(1000, int(obj["x"]))); obj["y"] = max(0, min(1000, int(obj["y"])))
     if act == "play_card":
         obj["slot"] = int(obj["slot"])
         if not (1 <= obj["slot"] <= 10): raise ValueError("slot out of range")
@@ -228,6 +235,8 @@ def main():
     ap.add_argument("--primer-file", default="")
     ap.add_argument("--crops", default="")
     ap.add_argument("--nochange-limit", type=int, default=3)
+    ap.add_argument("--focus-target", default="",
+                    help="window title substring to focus before keyboard actions (keyboard input goes to the focused window; a stray console window in front silently eats keypresses)")
     args = ap.parse_args()
     goal = Path(args.goal_file).read_text(encoding="utf-8").strip()
     primer = Path(args.primer_file).read_text(encoding="utf-8").strip() if args.primer_file else ""
@@ -238,14 +247,23 @@ def main():
     logf = (run_dir / "run.log").open("a", encoding="utf-8")
     def log(*a):
         s = " ".join(str(x) for x in a)
-        print(s, flush=True); logf.write(s + "\n"); logf.flush()
+        try: print(s, flush=True)
+        except Exception: pass
+        logf.write(s + "\n"); logf.flush()
     hb = threading.Thread(target=heartbeat, daemon=True); hb.start()
+    def focus_game():
+        if not args.focus_target: return
+        fr = ipc("focus", {"target": args.focus_target})
+        if (fr.get("result") or {}).get("isError"):
+            log(f"focus '{args.focus_target}' FAILED: {fr.get('result')}")
+        time.sleep(0.3)
     log(f"RUN {run_dir} label={args.label} max_steps={args.max_steps} atlas={args.atlas} crops={crop_names} pid={_pid}")
     log(f"GOAL: {goal}")
     if atlas.data:
         log(f"ATLAS loaded: {len(atlas.elements())} elements across {len(atlas.data.get('states', []))} states; keybinds={'yes' if atlas.data.get('keybinds') else 'no'}")
     history = []
     prev_bytes = None; nochange = 0
+    focus_game()
     blocked = {}          # signature -> reason
     last_sig = None; sig_noeffect = 0
     guard_note = ""
@@ -326,6 +344,13 @@ def main():
             if a == "click":
                 x, y = act.get("x"), act.get("y")
                 resolution = "model"; verified = "-"
+                frame = act.get("frame")
+                if frame:
+                    bx0, by0, bx1, by1 = CROPS[frame]["box"]
+                    fx = int((bx0 + (x / 1000.0) * (bx1 - bx0)) / 1920 * 1000)
+                    fy = int((by0 + (y / 1000.0) * (by1 - by0)) / 1080 * 1000)
+                    log(f"step {step}: frame={frame} crop_xy=({x},{y}) -> full_xy=({fx},{fy})")
+                    x, y = fx, fy
                 tgt = act.get("target")
                 if tgt:
                     res = atlas.resolve(tgt, shot_hash)
@@ -342,15 +367,19 @@ def main():
                 r = ipc("click", {"x": px, "y": py})
                 log(f"step {step}: executed click px=({px},{py}) resolution={resolution} verified={verified} input={'atlas' if resolution == 'atlas' else 'click'} ok={r.get('ok')}")
             elif a == "play_card":
+                focus_game()
                 digit = str(act["slot"] % 10)
                 r = ipc("key", {"key": digit})
                 log(f"step {step}: executed play_card slot={act['slot']} key={digit} input=keyboard ok={r.get('ok')}")
             elif a == "end_turn":
+                focus_game()
                 r = ipc("key", {"key": "e"})
                 log(f"step {step}: executed end_turn key=e input=keyboard ok={r.get('ok')}")
             elif a == "key":
+                focus_game()
                 r = ipc("key", {"key": act["key"]}); log(f"step {step}: executed key {act['key']} input=keyboard ok={r.get('ok')}")
             elif a == "chord":
+                focus_game()
                 r = ipc("chord", {"chord": act["chord"]}); log(f"step {step}: executed chord {act['chord']} input=keyboard ok={r.get('ok')}")
             elif a == "type":
                 r = ipc("type", {"text": act["text"]}); log(f"step {step}: executed type input=keyboard ok={r.get('ok')}")
