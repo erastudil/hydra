@@ -59,6 +59,20 @@ the driver pid and exits on its own if the driver dies.
   `executing` true around each command, `last_activity` stamped at
   each command end. The glow is visible while executing or within a
   2 s idle grace after the last activity, then hides.
+- Session-level glow (owner ruling, 2026-10-27): per-command gating
+  flickers when a driver task loop's think time (local model
+  inference between commands) exceeds the 2 s grace. A task loop
+  therefore asserts `session_state.json` in the workdir --
+  `{"active": true, "loop_pid": ..., "updated": <ISO timestamp>}` --
+  heartbeated at least once per second for as long as the loop is
+  alive, including during inference, with a final `{"active": false}`
+  write on exit. The driver passes the path to the glow via
+  `--session` and deletes any stale session file at startup. While
+  the session file is fresh (updated within 30 s) and active, the
+  glow stays lit continuously (pulse unchanged); if heartbeats stop
+  for ~30 s the glow clears, so a hung loop cannot leave it lit
+  forever. Session-active governs visibility; the per-command
+  executing/grace signal remains as a secondary input.
 - Handshake: `glow_ready.json` (glow pid) once the window exists and
   a first frame has presented; `glow_error.txt` carries the traceback
   on setup failure.

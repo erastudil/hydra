@@ -19,6 +19,13 @@ C:\\Users\\jpm05\\hydra\\live-driver, override with HYDRA_LIVE_DRIVER_HOME):
   glow_state.json  screen-glow state the driver maintains (executing,
                    last_activity, driver_pid); glow_ready.json /
                    glow_error.txt are the glow's startup handshake
+  session_state.json  task-loop session state (active, loop_pid,
+                   updated), written by a driver task loop (e.g. the
+                   local model driver); while fresh (<= 30 s) and
+                   active it holds the glow lit for the whole session,
+                   including model think time between commands. The
+                   driver deletes any stale session file at startup and
+                   passes its path to the glow via --session.
 
 Screen glow: starting the driver launches computer_use/screen_glow.py,
 a click-through border glow shown only while commands execute (plus a
@@ -67,6 +74,7 @@ GLOW_SCRIPT = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "screen_glow.py"
 )
 GLOW_STATE_PATH = os.path.join(WORKDIR, "glow_state.json")
+SESSION_STATE_PATH = os.path.join(WORKDIR, "session_state.json")
 GLOW_READY_PATH = os.path.join(WORKDIR, "glow_ready.json")
 GLOW_ERROR_PATH = os.path.join(WORKDIR, "glow_error.txt")
 
@@ -206,12 +214,19 @@ class Driver:
                 os.remove(path)
             except OSError:
                 pass
+        # A session file left by a dead loop must not light the new
+        # driver's glow; loops write a fresh one when they start.
+        try:
+            os.remove(SESSION_STATE_PATH)
+        except OSError:
+            pass
         self._write_glow_state(False)
         self.glow_proc = subprocess.Popen(
             [
                 sys.executable,
                 GLOW_SCRIPT,
                 "--state", GLOW_STATE_PATH,
+                "--session", SESSION_STATE_PATH,
                 "--ready", GLOW_READY_PATH,
                 "--error", GLOW_ERROR_PATH,
                 "--driver-pid", str(os.getpid()),

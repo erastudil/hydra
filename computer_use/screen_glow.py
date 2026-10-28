@@ -27,6 +27,22 @@ to run if the glow cannot start. The glow:
 
   visible  <=>  executing is true
                 OR now - last_activity <= GRACE_S
+                OR a driver task loop's session is active (below)
+
+Session-level glow (owner ruling, 2026-10-27): per-command execution
+flickers when a driver loop's think time (e.g. local model inference)
+exceeds GRACE_S. A task loop therefore asserts a session file:
+
+  session file (written by the task loop, path passed with --session):
+    {"active": bool, "loop_pid": int, "updated": ISO-8601 timestamp}
+
+  session visible  <=>  active is true AND the file's updated timestamp
+                        is at most SESSION_FRESH_S (30 s) old. The loop
+                        heartbeats it at least once per second for as
+                        long as it lives, including during inference;
+                        it clears on loop exit, or when heartbeats stop
+                        for ~30 s, so a hung loop cannot leave the glow
+                        lit forever. The pulse is unchanged.
 
   - watches the driver pid and exits when the driver dies, so the glow
     can never outlive the thing it describes;
@@ -52,6 +68,7 @@ import traceback
 from ctypes import wintypes
 
 GRACE_S = 2.0
+SESSION_FRESH_S = 30.0
 TICK_MS = 60
 FRAME_PX = 36
 PULSE_PERIOD_S = 1.6
@@ -385,6 +402,24 @@ class Glow:
         except Exception:
             return None
 
+    def session_active(self) -> bool:
+        """True while a task loop's session file is fresh and active."""
+        path = getattr(self.args, "session", None)
+        if not path:
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not data.get("active"):
+                return False
+            from datetime import datetime
+
+            updated = datetime.fromisoformat(str(data.get("updated")))
+            age = time.time() - updated.timestamp()
+            return age <= SESSION_FRESH_S
+        except Exception:
+            return False
+
     def should_exit(self, state: dict | None) -> bool:
         if state is not None:
             self.seen_state = True
@@ -415,6 +450,8 @@ class Glow:
             else:
                 last = float(state.get("last_activity") or 0.0)
                 active = (time.time() - last) <= GRACE_S
+        if not active and self.session_active():
+            active = True
         if active and not self.shown:
             user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
             self.shown = True
@@ -455,6 +492,9 @@ class Glow:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Hydra computer-use screen glow")
     parser.add_argument("--state", required=True)
+    parser.add_argument("--session", default=None,
+                        help="optional task-loop session state file; while it "
+                             "is fresh and active the glow stays lit")
     parser.add_argument("--ready", required=True)
     parser.add_argument("--error", required=True)
     parser.add_argument("--driver-pid", type=int, required=True)
