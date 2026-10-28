@@ -51,8 +51,12 @@ SYSTEM = (
     "\"action\" (one of: click, key, chord, type, wait, play_card, end_turn, done, stuck), and as "
     "needed: \"target\" (name of a known UI element from the ATLAS list, when you want to click it), "
     "\"x\" and \"y\" (integers 0-1000, your own estimate of the click point; ALWAYS include them on a "
-    "click), \"slot\" (for play_card: the hand slot number printed above the card), \"key\" (e.g. "
-    "enter, escape), \"chord\" (e.g. alt+tab), \"text\" (for type), \"seconds\" (for wait). "
+    "click), \"slot\" (for play_card: the hand slot number printed above the card), \"card_type\" "
+    "(for play_card: \"attack\", \"skill\", or \"power\", read from the card's type line — play_card "
+    "is a PRIMITIVE: it selects the card AND completes the play for you, target click included, so "
+    "never follow it with your own target click), \"state\" (a short string with the state YOU read: "
+    "energy, enemy HP and intent, hand contents — include it every step), \"key\" (e.g. enter, "
+    "escape), \"chord\" (e.g. alt+tab), \"text\" (for type), \"seconds\" (for wait). "
     "Coordinates are normalized full-screen: x=0 left edge, x=1000 right edge, y=0 top, y=1000 bottom. "
     "Extra images after the first are native-resolution CROPS of regions of the same screen; their "
     "labels give their names and full-screen bounds. Use crops to READ details (card names, costs, "
@@ -119,6 +123,42 @@ def crop_b64(img_bytes, box):
     buf = io.BytesIO(); im.save(buf, "PNG")
     return base64.b64encode(buf.getvalue()).decode()
 
+def enemy_centroid(img_bytes):
+    """Locate the enemy sprite in the enemy-crop region by teal segmentation.
+
+    Returns (px, py, blob_size) in full-screen pixels, or None. The current
+    first-floor enemy (Nibbit) is a saturated teal on dark olive ruins; the
+    mask is H 115-150 / S>=70 / V>=80 in PIL HSV over the enemy crop box,
+    sampled every 2nd pixel, largest connected blob wins."""
+    box = CROPS["enemy"]["box"]
+    im = Image.open(io.BytesIO(img_bytes)).convert("HSV").crop(box)
+    w, h = im.size
+    px = im.load()
+    step = 2
+    gw, gh = w // step, h // step
+    mask = [[False] * gw for _ in range(gh)]
+    for gy in range(gh):
+        for gx in range(gw):
+            hh, ss, vv = px[gx * step, gy * step]
+            if 115 <= hh <= 150 and ss >= 70 and vv >= 80:
+                mask[gy][gx] = True
+    seen = [[False] * gw for _ in range(gh)]
+    best = []
+    for gy in range(gh):
+        for gx in range(gw):
+            if mask[gy][gx] and not seen[gy][gx]:
+                stack = [(gx, gy)]; seen[gy][gx] = True; blob = []
+                while stack:
+                    cx, cy = stack.pop(); blob.append((cx, cy))
+                    for nx, ny in ((cx+1, cy), (cx-1, cy), (cx, cy+1), (cx, cy-1)):
+                        if 0 <= nx < gw and 0 <= ny < gh and mask[ny][nx] and not seen[ny][nx]:
+                            seen[ny][nx] = True; stack.append((nx, ny))
+                if len(blob) > len(best): best = blob
+    if len(best) < 120: return None
+    mx = sum(p[0] for p in best) / len(best) * step
+    my = sum(p[1] for p in best) / len(best) * step
+    return (int(box[0] + mx), int(box[1] + my), len(best))
+
 # ---------- atlas ----------
 class Atlas:
     def __init__(self, path):
@@ -176,7 +216,7 @@ def ask_model(goal, primer, atlas_block, notes, images):
         content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
     payload = {"messages": [{"role": "system", "content": SYSTEM},
                             {"role": "user", "content": content}],
-               "temperature": 0.15, "max_tokens": 1024}
+               "temperature": 0.15, "max_tokens": 1600}
     req = urllib.request.Request(MODEL_URL, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=300) as r:
@@ -201,6 +241,8 @@ def extract_action(raw):
     if act == "play_card":
         obj["slot"] = int(obj["slot"])
         if not (1 <= obj["slot"] <= 10): raise ValueError("slot out of range")
+        if obj.get("card_type") is not None and obj["card_type"] not in ("attack", "skill", "power", "curse"):
+            raise ValueError(f"bad card_type {obj['card_type']!r}")
     return obj
 
 def signature(act):
@@ -259,6 +301,16 @@ def main():
         if (fr.get("result") or {}).get("isError"):
             log(f"focus '{focus_name}' FAILED: {fr.get('result')}")
         time.sleep(0.3)
+    def snap(tag):
+        nm = f"step{step:02d}-{tag}.png"
+        rr = ipc("screenshot", {"name": nm})
+        if not rr.get("ok"): return None
+        try:
+            b = (SHOTS / nm).read_bytes()
+            (run_dir / nm).write_bytes(b)
+            return b
+        except Exception:
+            return None
     log(f"RUN {run_dir} label={args.label} max_steps={args.max_steps} atlas={args.atlas} crops={crop_names} pid={_pid}")
     log(f"GOAL: {goal}")
     if atlas.data:
@@ -269,6 +321,7 @@ def main():
     blocked = {}          # signature -> reason
     last_sig = None; sig_noeffect = 0
     guard_note = ""
+    last_state = ""
     outcome = "step-cap"
     try:
         for step in range(1, args.max_steps + 1):
@@ -299,6 +352,8 @@ def main():
             for cn in crop_names:
                 images.append((CROPS[cn]["label"], crop_b64(img, CROPS[cn]["box"])))
             notes = f"Recent steps: {'; '.join(history[-4:]) or 'none'}"
+            if last_state:
+                notes += f"\nYOUR LAST REPORTED STATE: {last_state}"
             if blocked:
                 notes += "\nBLOCKED ACTIONS (do not repeat these; pick a different card or end the turn): " + \
                          "; ".join(f"{k} ({v})" for k, v in blocked.items())
@@ -316,9 +371,11 @@ def main():
                     log(f"step {step}: MALFORMED again ({e2}); raw={raw[:300]!r}; STOP")
                     outcome = "malformed"; break
             read = str(act.get("read", ""))
+            if act.get("state"):
+                last_state = str(act["state"])[:300]
             a = act["action"]
             sig = signature(act)
-            log(f"step {step}: read={read!r} action={a} target={act.get('target')} slot={act.get('slot')} xy=({act.get('x')},{act.get('y')}) key={act.get('key')} sig={sig} hash={shot_hash}")
+            log(f"step {step}: read={read!r} state={act.get('state')!r} action={a} target={act.get('target')} slot={act.get('slot')} card_type={act.get('card_type')} xy=({act.get('x')},{act.get('y')}) key={act.get('key')} sig={sig} hash={shot_hash}")
             history.append(f"step{step}:{a}({act.get('target') or act.get('slot') or act.get('key') or ''})")
             if a in ("done", "stuck"):
                 outcome = a; break
@@ -369,10 +426,49 @@ def main():
                 r = ipc("click", {"x": px, "y": py})
                 log(f"step {step}: executed click px=({px},{py}) resolution={resolution} verified={verified} input={'atlas' if resolution == 'atlas' else 'click'} ok={r.get('ok')}")
             elif a == "play_card":
-                focus_game()
+                # ---- WORKFLOW PRIMITIVE (v3.2): select + complete the play ----
+                ctype = act.get("card_type")
                 digit = str(act["slot"] % 10)
-                r = ipc("key", {"key": digit})
-                log(f"step {step}: executed play_card slot={act['slot']} key={digit} input=keyboard ok={r.get('ok')}")
+                if ctype == "curse":
+                    log(f"step {step}: GUARD-REFUSED play_card slot={act['slot']} card_type=curse (unplayable) input=guard")
+                    guard_note = "Curses are unplayable and can never be selected. Pick a different card."
+                    last_sig = sig; time.sleep(0.5); continue
+                focus_game()
+                p0 = snap("p0")
+                ipc("key", {"key": digit})
+                time.sleep(0.8)
+                p1 = snap("p1")
+                sel_diff = thumb_diff(p0, p1) if (p0 and p1) else -1
+                if sel_diff >= 0 and sel_diff < 1.0:
+                    ipc("key", {"key": digit})
+                    time.sleep(0.8)
+                    p1 = snap("p1b")
+                    sel_diff = thumb_diff(p0, p1) if (p0 and p1) else -1
+                    log(f"step {step}: PRIMITIVE selection retry for slot={act['slot']}")
+                log(f"step {step}: PRIMITIVE play_card slot={act['slot']} type={ctype} key={digit} selection_diff={sel_diff:.2f} input=keyboard")
+                if ctype == "attack":
+                    cen = enemy_centroid(p1) if p1 else None
+                    if cen:
+                        cx, cy, blob = cen
+                        ipc("click", {"x": cx, "y": cy})
+                        log(f"step {step}: PRIMITIVE target click px=({cx},{cy}) centroid blob={blob} input=primitive")
+                        time.sleep(1.0)
+                        p2 = snap("p2")
+                        pd = thumb_diff(p1, p2) if (p1 and p2) else -1
+                        log(f"step {step}: PRIMITIVE-PLAY attack slot={act['slot']} play_diff={pd:.2f} verified_change={pd >= 1.5}")
+                        if pd < 1.5:
+                            guard_note = "Your attack play did not visibly resolve. Re-read the state before acting."
+                    else:
+                        log(f"step {step}: PRIMITIVE no enemy centroid found; selection left active for the model's own target click")
+                        guard_note = "A card is selected and targeting. Click the enemy's body center yourself now (frame \"enemy\")."
+                elif ctype in ("skill", "power"):
+                    ipc("key", {"key": "e"})
+                    time.sleep(0.8)
+                    p2 = snap("p2")
+                    pd = thumb_diff(p1, p2) if (p1 and p2) else -1
+                    log(f"step {step}: PRIMITIVE-PLAY {ctype} slot={act['slot']} confirm=e play_diff={pd:.2f} input=keyboard")
+                else:
+                    log(f"step {step}: PRIMITIVE play_card slot={act['slot']} without card_type: selection only, play not completed")
             elif a == "end_turn":
                 focus_game()
                 r = ipc("key", {"key": "e"})
