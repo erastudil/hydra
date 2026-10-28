@@ -243,6 +243,10 @@ class Driver:
             try:
                 with open(cmd_path, "r", encoding="utf-8") as f:
                     cmd = json.load(f)
+            except PermissionError:
+                # The file is still being copied in (scp holds it open);
+                # skip this pass and read it once it is fully written.
+                continue
             except Exception as exc:
                 result = {"id": cmd_id, "ok": False, "error": f"bad command file: {exc}"}
                 self._write_done(done_path, result)
