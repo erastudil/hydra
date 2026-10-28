@@ -251,11 +251,12 @@ def main():
         except Exception: pass
         logf.write(s + "\n"); logf.flush()
     hb = threading.Thread(target=heartbeat, daemon=True); hb.start()
+    focus_name = args.focus_target or (atlas.data or {}).get("app_display_name", "")
     def focus_game():
-        if not args.focus_target: return
-        fr = ipc("focus", {"target": args.focus_target})
+        if not focus_name: return
+        fr = ipc("focus", {"target": focus_name})
         if (fr.get("result") or {}).get("isError"):
-            log(f"focus '{args.focus_target}' FAILED: {fr.get('result')}")
+            log(f"focus '{focus_name}' FAILED: {fr.get('result')}")
         time.sleep(0.3)
     log(f"RUN {run_dir} label={args.label} max_steps={args.max_steps} atlas={args.atlas} crops={crop_names} pid={_pid}")
     log(f"GOAL: {goal}")
