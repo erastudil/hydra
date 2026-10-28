@@ -447,7 +447,10 @@ def main():
                     log(f"step {step}: PRIMITIVE selection retry for slot={act['slot']}")
                 log(f"step {step}: PRIMITIVE play_card slot={act['slot']} type={ctype} key={digit} selection_diff={sel_diff:.2f} input=keyboard")
                 if ctype == "attack":
-                    cen = enemy_centroid(p1) if p1 else None
+                    # Centroid from the PRE-selection frame: once a card is
+                    # selected it enlarges over the enemy region and its own
+                    # art contaminates the segmentation (sts2j step 6-7).
+                    cen = enemy_centroid(p0) if p0 else None
                     if cen:
                         cx, cy, blob = cen
                         ipc("click", {"x": cx, "y": cy})
