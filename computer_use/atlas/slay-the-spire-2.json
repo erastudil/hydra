@@ -86,6 +86,12 @@
           "y": 917,
           "verify": false,
           "note": "PROCEED button bottom-left of the map screen. Map layout varies per run so no fingerprint gate; node positions are per-run and must be grounded by the model each run."
+        },
+        "map.node.first_enemy": {
+          "x": 341,
+          "y": 509,
+          "verify": false,
+          "note": "First-row ENEMY node (left) on this run's Act 1 map (seed HCP3XV8GWJ), taught mid-run from the run's own map screenshot 2026-10-27 after the model stalled grounding it. A second first-row node sits at about (576,509), partly behind the act title; the model may ground that one itself."
         }
       }
     },
