@@ -107,5 +107,44 @@
         }
       }
     }
+  ],
+  "keybinds": {
+    "source": "Read from the game's own Settings > Input screen (v0.111.0) by the operator on 2026-10-27 (screenshots op-keys3..op-keys8 in the live-driver shots folder). Active profile: Mouse + Keyboard (Keyboard-Only Mode OFF). The game is the authority for these bindings.",
+    "profile": "mouse+keyboard",
+    "bindings": {
+      "select": null,
+      "cancel_exit": "Escape",
+      "view_map": "M",
+      "top_panel": null,
+      "view_deck_pile_page_left": "D",
+      "view_draw_pile": "A",
+      "view_discard_pile": "S",
+      "view_exhaust_pile_page_right": "X",
+      "confirm": "E",
+      "end_turn": "E",
+      "peek": "Space",
+      "up": "Up",
+      "down": "Down",
+      "left": "Left",
+      "right": "Right",
+      "select_card_1": "1",
+      "select_card_2": "2",
+      "select_card_3": "3",
+      "select_card_4": "4",
+      "select_card_5": "5",
+      "select_card_6": "6",
+      "select_card_7": "7",
+      "select_card_8": "8",
+      "select_card_9": "9",
+      "select_card_10": "0"
+    },
+    "combat_workflow": "Hand slots are numbered left to right and the game prints the slot number above each card. Pressing a slot's number key selects that card. An attack then needs a target: click the enemy's body. Skills and powers self-resolve (select, then E confirms if it stays selected). E is both Confirm and End Turn: with a card selected it confirms, with nothing selected it ends the turn. Escape cancels a selection and backs out of menus and dialogs. There is no keyboard target selection in the mouse+keyboard profile."
+  },
+  "forbidden_targets": [
+    "give up",
+    "abandon",
+    "quit",
+    "save and quit",
+    "delete"
   ]
 }
