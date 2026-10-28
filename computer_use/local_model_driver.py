@@ -33,8 +33,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from PIL import Image
 
-sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+for _s in (sys.stdout, sys.stderr):
+    try: _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception: pass  # pythonw.exe: stdout/stderr are None; log() guards its print
 
 HOME = Path(r"C:\Users\jpm05\hydra\local-driver")
 LIVE = Path(r"C:\Users\jpm05\hydra\live-driver")
