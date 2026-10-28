@@ -221,7 +221,13 @@ class Driver:
         return {"isError": True, "error": f"unknown driver action: {action}"}
 
     def run_once(self) -> None:
-        self.heartbeat()
+        try:
+            self.heartbeat()
+        except Exception:
+            # A reader (scp) can hold heartbeat.json open on Windows and
+            # make os.replace fail; the heartbeat is advisory, never let
+            # it starve command processing.
+            pass
         try:
             names = sorted(os.listdir(CMD_DIR))
         except Exception:
