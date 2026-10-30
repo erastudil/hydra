@@ -17,6 +17,7 @@ pub enum Ev {
     Retry { turn: String, attempt: u64, of: u64, wait: f64, reason: String },
     TaskUpdate { task: Value },
     SkillList { id: String, skills: Vec<Value> },
+    ModelList { id: String, default: String, aliases: Vec<(String, String)>, providers: Vec<(String, Vec<String>)>, local: Vec<(String, String)>, unavailable: Vec<String> },
     SessionList { id: String, sessions: Vec<Value> },
     HistoryResult { id: String, thread: String, turns: Vec<Value> },
     TaskList { id: String, tasks: Vec<Value> },
@@ -67,6 +68,14 @@ pub fn parse_line(line: &str) -> Option<Ev> {
         "history_result" => Ev::HistoryResult { id: s("id"), thread: s("thread"), turns: arr(&v, "turns") },
         "session_list" => Ev::SessionList { id: s("id"), sessions: arr(&v, "sessions") },
         "skill_list" => Ev::SkillList { id: s("id"), skills: arr(&v, "skills") },
+        "model_list" => {
+            let mut aliases: Vec<(String, String)> = v.get("aliases").and_then(|x| x.as_object()).map(|o| o.iter().map(|(k, val)| (k.clone(), val.as_str().unwrap_or("").to_string())).collect()).unwrap_or_default();
+            aliases.sort();
+            let mut providers: Vec<(String, Vec<String>)> = v.get("providers").and_then(|x| x.as_object()).map(|o| o.iter().map(|(k, val)| (k.clone(), val.as_array().map(|a| a.iter().filter_map(|i| i.as_str().map(String::from)).collect()).unwrap_or_default())).collect()).unwrap_or_default();
+            providers.sort();
+            let local: Vec<(String, String)> = v.get("local").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|e| Some((e.get("id")?.as_str()?.to_string(), e.get("engine")?.as_str()?.to_string()))).collect()).unwrap_or_default();
+            Ev::ModelList { id: s("id"), default: s("default"), aliases, providers, local, unavailable: strs(&v, "unavailable") }
+        }
         "task_list" => Ev::TaskList { id: s("id"), tasks: arr(&v, "tasks") },
         "mcp_status" => Ev::McpStatus { id: s("id"), config: v.get("config").and_then(|x| x.as_str()).map(String::from), servers: arr(&v, "servers") },
         "tool_start" => Ev::ToolStart { turn: s("turn"), call: n("call"), tool: s("tool"), args: v.get("arguments").cloned().unwrap_or(Value::Null) },
@@ -290,6 +299,13 @@ impl Backend {
     pub fn sessions(&mut self) -> String {
         let id = self.req();
         self.send(json!({"type": "sessions", "id": id}));
+        id
+    }
+
+    /// The live model catalog. Reply: Ev::ModelList.
+    pub fn models(&mut self) -> String {
+        let id = self.req();
+        self.send(json!({"type": "models", "id": id}));
         id
     }
 

@@ -166,6 +166,7 @@ class Adapter:
             "approval": self._on_approval, "shutdown": lambda m: False, "sessions": self._on_sessions,
             "history": self._on_history, "action": self._on_action, "rules": self._on_rules, "skills": self._on_skills, "mcp": self._on_mcp, "mcp_toggle": self._on_mcp_toggle, "tasks": self._on_tasks, "task_stop": self._on_task_stop,
             "checkpoints": self._on_checkpoints, "rewind": self._on_rewind,
+            "models": self._on_models,
         }.get(kind)
         if handler is None:
             self.error(f"unknown message type {kind!r}", "unknown_type", req=_text(msg.get("id")))
@@ -552,6 +553,23 @@ class Adapter:
             return self.error(f"no task {task!r}", "bad_request", req=req)
         self._tasks.stop(task)
         self._on_tasks(msg)
+
+    def _on_models(self, msg: Dict[str, Any]) -> None:
+        from hydra_cli.config import DEFAULT_AGENT_MODEL
+        from hydra_cli.providers import list_live_models
+
+        live = list_live_models()
+        self.emit(
+            {
+                "type": "model_list",
+                "id": _text(msg.get("id")),
+                "default": DEFAULT_AGENT_MODEL,
+                "aliases": live["aliases"],
+                "providers": live["providers"],
+                "local": live["local"],
+                "unavailable": live["unavailable"],
+            }
+        )
 
     def _on_skills(self, msg: Dict[str, Any]) -> None:
         listed = [{"id": sk["id"], "keys": sk["keys"], "title": (sk["body"].splitlines() or [""])[0]} for sk in _skills()]

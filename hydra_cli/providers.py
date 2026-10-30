@@ -46,6 +46,26 @@ class ProviderError(Exception):
     """Base exception for provider invocation failures."""
 
 
+# Provenance of the most recent completion: which model was requested and
+# which model actually produced the text. The fallback cascades used to
+# answer under the requested model's identity with nothing recording the
+# swap; callers that present an answer as a model's (CLI JSON, the agent
+# fallback chain, the summon tool) read this to label substitutions.
+LAST_COMPLETION_PROVENANCE: Dict[str, Any] = {}
+
+
+def _record_provenance(requested: str, answered_by: str, provider: str, fallback: bool) -> None:
+    LAST_COMPLETION_PROVENANCE.clear()
+    LAST_COMPLETION_PROVENANCE.update(
+        {
+            "requested_model": requested,
+            "answered_by": answered_by,
+            "provider": provider,
+            "fallback": bool(fallback),
+        }
+    )
+
+
 class CredentialsMissingError(ProviderError):
     """Raised when required credentials are missing."""
 
@@ -711,6 +731,117 @@ def get_local_provider():
         'name': name,
         'url': url,
         'headers': {'Content-Type': 'application/json'},
+    }
+
+
+def _fetch_json(url: str, headers: Optional[Dict[str, str]] = None, timeout: float = 6.0) -> Optional[Any]:
+    """GET a JSON document. None on any failure; listings are never faked."""
+    try:
+        req = urllib.request.Request(url, headers=headers or {}, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return None
+
+
+def list_provider_models(provider: Dict[str, Any]) -> List[str]:
+    """One configured provider's own live model listing.
+
+    OpenAI-compatible providers answer at <base>/models. Cloudflare's chat
+    URL embeds the model in a /run/ path, so its catalog comes from the
+    account-scoped models search API instead. A provider with no readable
+    listing returns [] and callers report it as unavailable, never invent it.
+    """
+    pid = str(provider.get("id") or "")
+    url = str(provider.get("url") or "")
+    headers = provider.get("headers") or {}
+    if pid == "cloudflare" or "/ai/run/" in url:
+        match = re.search(r"/accounts/([^/]+)/", url)
+        if not match:
+            return []
+        data = _fetch_json(
+            f"https://api.cloudflare.com/client/v4/accounts/{match.group(1)}/ai/models/search?per_page=1000",
+            headers=headers,
+        )
+        if isinstance(data, dict) and isinstance(data.get("result"), list):
+            return sorted({str(m.get("name")) for m in data["result"] if isinstance(m, dict) and m.get("name")})
+        return []
+    base = url[: -len("/chat/completions")] if url.endswith("/chat/completions") else url.rstrip("/")
+    if not base:
+        return []
+    data = _fetch_json(f"{base}/models", headers=headers)
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        return sorted({str(m.get("id")) for m in data["data"] if isinstance(m, dict) and m.get("id")})
+    if isinstance(data, dict) and isinstance(data.get("models"), list):
+        return sorted({str(m) for m in data["models"] if m})
+    return []
+
+
+def list_local_models() -> List[Dict[str, Any]]:
+    """Real enumeration of locally served models.
+
+    Ollama answers /api/tags; llama.cpp answers /v1/models. An empty list
+    means no local server answered — callers must say so, not fall back to
+    a baked roster.
+    """
+    found: List[Dict[str, Any]] = []
+    ollama_base = os.environ.get("OLLAMA_HOST", "").strip() or "http://127.0.0.1:11434"
+    if not ollama_base.startswith("http"):
+        ollama_base = f"http://{ollama_base}"
+    data = _fetch_json(f"{ollama_base.rstrip('/')}/api/tags", timeout=2.0)
+    if isinstance(data, dict) and isinstance(data.get("models"), list):
+        for entry in data["models"]:
+            if isinstance(entry, dict) and entry.get("name"):
+                found.append(
+                    {
+                        "id": str(entry["name"]),
+                        "engine": "ollama",
+                        "size": entry.get("size"),
+                        "modified_at": entry.get("modified_at"),
+                    }
+                )
+    llama_base = os.environ.get("LLAMACPP_HOST", "").strip() or "http://127.0.0.1:8080"
+    if not llama_base.startswith("http"):
+        llama_base = f"http://{llama_base}"
+    data = _fetch_json(f"{llama_base.rstrip('/')}/v1/models", timeout=2.0)
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        for entry in data["data"]:
+            if isinstance(entry, dict) and entry.get("id"):
+                found.append({"id": str(entry["id"]), "engine": "llama.cpp", "size": None, "modified_at": None})
+    return found
+
+
+def list_live_models() -> Dict[str, Any]:
+    """The live catalog: each configured provider's own listing, merged
+    with the alias catalog, plus the local enumeration.
+
+    This is the single source every picker reads. Providers whose listing
+    cannot be read land in 'unavailable' with no invented entries.
+    """
+    by_provider: Dict[str, List[str]] = {}
+    unavailable: List[str] = []
+    candidates: List[Dict[str, Any]] = list(get_frontier_providers())
+    cf = _cloudflare_provider()
+    if cf:
+        candidates.append(cf)
+    seen: set = set()
+    for provider in candidates:
+        pid = str(provider.get("id") or provider.get("name") or "?")
+        if pid in seen:
+            continue
+        seen.add(pid)
+        ids = list_provider_models(provider)
+        if ids:
+            by_provider[pid] = ids
+        else:
+            unavailable.append(pid)
+    from hydra_cli.config import MODEL_MAP
+
+    return {
+        "providers": by_provider,
+        "aliases": dict(MODEL_MAP),
+        "local": list_local_models(),
+        "unavailable": unavailable,
     }
 
 
@@ -4382,37 +4513,56 @@ def complete(
 
     cascade_active = fallback_cascade_enabled and os.environ.get("HYDRA_NO_FALLBACK", "").strip() != "1"
 
+    tier_seen: Dict[str, str] = {}
+
+    def _note_tier(tier: str, tier_model: str) -> None:
+        tier_seen["provider"] = tier
+        tier_seen["model"] = tier_model
+
+    def _cascaded_text(frontier_error: Optional[Exception]) -> str:
+        allowed = model_providers(route["model"])
+        if allowed and set(allowed) <= {"local"}:
+            raise ProviderError(
+                redact(
+                    f"Model '{route['model']}' is restricted to local serving and is "
+                    f"unavailable; refusing a cloud substitute. Frontier error: {frontier_error}"
+                )
+            )
+        text = fallback_cascade(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            frontier_error=frontier_error,
+            on_tier_transition=_note_tier,
+        )
+        _record_provenance(
+            route["model"],
+            tier_seen.get("model", "unknown-fallback"),
+            tier_seen.get("provider", "fallback-cascade"),
+            True,
+        )
+        return text
+
     providers = []
     try:
         providers = providers_for_model(route["model"])
     except CredentialsMissingError as cme:
         if not cascade_active:
             raise
-        return fallback_cascade(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            frontier_error=cme,
-        )
+        return _cascaded_text(cme)
 
     if not providers:
         if not cascade_active:
             raise CredentialsMissingError(
                 "No frontier credentials found. Export OPENROUTER_API_KEY, AI_GATEWAY_API_KEY, or CHEAPERINFERENCE_API_KEY."
             )
-        return fallback_cascade(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            frontier_error=ProviderError("No frontier credentials configured"),
-        )
+        return _cascaded_text(ProviderError("No frontier credentials configured"))
 
     last_error: Optional[Exception] = None
     for provider in providers:
         try:
-            return fetch_chat_completion(
+            text = fetch_chat_completion(
                 url=provider["url"],
                 headers=provider["headers"],
                 model=route["model"],
@@ -4421,6 +4571,8 @@ def complete(
                 max_tokens=max_tokens,
                 reasoning=reasoning,
             )
+            _record_provenance(route["model"], route["model"], provider.get("name", provider.get("id", "?")), False)
+            return text
         except UsageError:
             raise
         except Exception as exc:
@@ -4428,13 +4580,7 @@ def complete(
             continue
 
     if cascade_active:
-        return fallback_cascade(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            frontier_error=last_error,
-        )
+        return _cascaded_text(last_error)
 
     raise ProviderError(redact(f"All configured providers failed for '{route['model']}'. Last error: {last_error}"))
 

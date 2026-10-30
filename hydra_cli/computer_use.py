@@ -18,6 +18,7 @@ import urllib.parse
 import json
 import os
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -683,13 +684,27 @@ class OSController:
             try:
                 ctypes.windll.user32.ShowWindow(target_hwnd, 9)
                 ctypes.windll.user32.SetForegroundWindow(target_hwnd)
+                actual = ctypes.windll.user32.GetForegroundWindow()
+                if int(actual or 0) != int(target_hwnd):
+                    return {
+                        "isError": True,
+                        "error": f"focus_window: foreground readback is {actual}, not the target {target_hwnd}; focus was not taken",
+                        "hwnd": target_hwnd,
+                        "focused": False,
+                    }
                 return {"isError": False, "hwnd": target_hwnd, "focused": True}
             except Exception as exc:
                 return {"isError": True, "error": str(exc)}
 
-        with self._lock:
-            self._sim_active_window["title"] = str(title_or_hwnd)
-            return {"isError": False, "target": title_or_hwnd, "focused": True, "simulated": True}
+        # No real window matched (or this platform has no real window
+        # control): report the failure instead of a simulated success.
+        return {
+            "isError": True,
+            "error": f"focus_window: no window matching '{title_or_hwnd}' could be focused on this desktop",
+            "target": title_or_hwnd,
+            "focused": False,
+            "simulated": True,
+        }
 
 
     def find_window_by_title_pattern(self, pattern: str, visible_only: bool = True) -> Dict[str, Any]:
@@ -706,7 +721,9 @@ class OSController:
         """Relocate and resize window on desktop."""
         if self.is_windows:
             try:
-                ctypes.windll.user32.MoveWindow(hwnd, x, y, width, height, True)
+                ok = ctypes.windll.user32.MoveWindow(hwnd, x, y, width, height, True)
+                if not ok:
+                    return {"isError": True, "error": f"set_window_bounds: MoveWindow failed for hwnd {hwnd}", "hwnd": hwnd}
                 return {
                     "isError": False,
                     "hwnd": hwnd,
@@ -714,17 +731,14 @@ class OSController:
                 }
             except Exception as exc:
                 return {"isError": True, "error": str(exc)}
-        with self._lock:
-            for w in self._sim_windows:
-                if w.get("hwnd") == hwnd:
-                    w["rect"] = {"left": x, "top": y, "right": x + width, "bottom": y + height}
-                    return {"isError": False, "hwnd": hwnd, "rect": w["rect"], "simulated": True}
-            return {
-                "isError": False,
-                "hwnd": hwnd,
-                "rect": {"left": x, "top": y, "right": x + width, "bottom": y + height},
-                "simulated": True,
-            }
+        # No real window control behind this call: fail honestly rather
+        # than reporting a simulated move as done.
+        return {
+            "isError": True,
+            "error": f"set_window_bounds: window {hwnd} was not moved (no real window control on this path)",
+            "hwnd": hwnd,
+            "simulated": True,
+        }
 
     def safe_key_sequence(self, keys: List[str], interval_ms: float = 50.0) -> Dict[str, Any]:
         """Execute sequence of key strokes with safety pauses."""
@@ -746,7 +760,9 @@ class OSController:
 class ScreenCaptureEngine:
     """
     Desktop screen capture engine.
-    Captures full desktop or region with base64 serialization and synthetic fallback.
+    Captures full desktop or region with base64 serialization. Capture
+    failure is an error: no synthetic image is ever substituted for the
+    real screen.
     """
 
     def __init__(self, bounds: Optional[CoordinateBounds] = None) -> None:
@@ -761,37 +777,22 @@ class ScreenCaptureEngine:
     ) -> Dict[str, Any]:
         """Capture screen image returning metadata, bytes, and optional base64."""
         img = None
+        grab_error: Optional[str] = None
         if PIL_AVAILABLE:
             try:
                 img = ImageGrab.grab(bbox=bbox)
-            except Exception:
+            except Exception as exc:
+                grab_error = str(exc)
                 img = None
 
         if img is None:
-            w = self.bounds.width if not bbox else max(10, bbox[2] - bbox[0])
-            h = self.bounds.height if not bbox else max(10, bbox[3] - bbox[1])
-            if PIL_AVAILABLE:
-                img = Image.new("RGB", (w, h), color=(15, 23, 42))
-                draw = ImageDraw.Draw(img)
-                for x in range(0, w, 80):
-                    draw.line([(x, 0), (x, h)], fill=(30, 41, 59), width=1)
-                for y in range(0, h, 80):
-                    draw.line([(0, y), (w, y)], fill=(30, 41, 59), width=1)
-                draw.rectangle([(20, 20), (w - 20, 80)], fill=(16, 185, 129))
-                draw.text((40, 40), f"Hydra Sovereign Desktop Canvas - {datetime.datetime.now().isoformat()}", fill=(0, 0, 0))
-            else:
-                raw_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\rIDATx\x9cc`\x00\x00\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82"
-                b64 = base64.b64encode(raw_bytes).decode("ascii") if as_base64 else ""
-                return {
-                    "isError": False,
-                    "width": 1,
-                    "height": 1,
-                    "format": "PNG",
-                    "size_bytes": len(raw_bytes),
-                    "base64": b64,
-                    "sha256": hashlib.sha256(raw_bytes).hexdigest(),
-                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                }
+            reason = grab_error or ("Pillow is not available" if not PIL_AVAILABLE else "ImageGrab returned no image")
+            return {
+                "isError": True,
+                "error": f"screen capture failed: {reason}. No image was captured; nothing is substituted.",
+                "simulated": False,
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
 
         buf = io.BytesIO()
         img.save(buf, format="PNG")
@@ -1185,6 +1186,16 @@ class ComputerUseEngine:
                 path = kwargs.get("path")
                 as_b64 = kwargs.get("as_base64", True)
                 return self.screen.capture(bbox=bbox, save_path=path, as_base64=as_b64)
+
+            elif act in ("launch_app", "open_app", "launch"):
+                target = str(kwargs.get("target") or kwargs.get("app") or "").strip()
+                if not target:
+                    return {"isError": True, "error": "launch_app requires a target path or name"}
+                try:
+                    proc = subprocess.Popen([target, *[str(a) for a in (kwargs.get("args") or [])]])
+                    return {"isError": False, "launched": target, "pid": proc.pid}
+                except Exception as exc:
+                    return {"isError": True, "error": f"launch_app failed for '{target}': {exc}"}
 
             elif act in ("mouse_move", "move"):
                 x = int(kwargs.get("x", 0))

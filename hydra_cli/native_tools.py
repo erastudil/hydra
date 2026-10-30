@@ -3388,7 +3388,17 @@ class NativeToolRegistry:
             )
         except Exception as exc:
             return {"isError": True, "error": f"Summon failed: {exc}", "alias": cleaned, "model": route.get("model")}
-        return {"alias": cleaned, "model": route.get("model"), "content": text}
+        result: Dict[str, Any] = {"alias": cleaned, "model": route.get("model"), "content": text}
+        try:
+            from hydra_cli.providers import LAST_COMPLETION_PROVENANCE
+
+            if LAST_COMPLETION_PROVENANCE.get("requested_model") == route.get("model"):
+                result["answered_by"] = LAST_COMPLETION_PROVENANCE.get("answered_by")
+                result["answered_by_provider"] = LAST_COMPLETION_PROVENANCE.get("provider")
+                result["fallback"] = bool(LAST_COMPLETION_PROVENANCE.get("fallback"))
+        except Exception:
+            pass
+        return result
 
     def swarm_fanout(
         self,

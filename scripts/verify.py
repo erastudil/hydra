@@ -2489,11 +2489,19 @@ def context_management_bounding_and_compaction():
                 )
 
             report = ledger.compact_session(max_history_turns=3)
+            # Compaction contract (owner ruling 2026-10-20): compaction never
+            # deletes. Older turns fold into a coverage-marked summary turn;
+            # the verbatim originals stay in the archive and recall by keyword.
             assert report["turns_on_disk"] == 9
-            assert report["turns_pruned"] == 5
-            assert report["turns_retained"] == 4
-            assert len(ledger.turns) == 4
+            assert report["turns_pruned"] == 0
+            assert report["pruned_messages"] == []
+            assert report["turns_covered"] == 6
+            assert report["turns_retained"] == 9
+            assert len(ledger.turns) == 10
             assert ledger.turns[0]["role"] == "system"
+            assert "Turn message 3" in ledger.turns[4]["content"]
+            assert len(ledger.live_window()) == 4
+            assert ledger.live_window()[0]["role"] == "summary"
 
             messages = [
                 {"role": "system", "content": "You are Hydra systems engineer."},
@@ -9825,7 +9833,13 @@ def computer_use_os_controller_and_screen_capture():
 
     screen = ScreenCaptureEngine(bounds)
     cap = screen.capture(as_base64=True)
-    assert cap["isError"] is False
+    # Honest-capture contract (owner ruling 2026-10-20): a failed capture
+    # reports isError with NO image attached — a synthetic substitute is
+    # the banned pattern. On a live desktop the capture succeeds for real.
+    if cap["isError"]:
+        assert "error" in cap
+        assert not cap.get("base64")
+        return
     assert cap["format"] == "PNG"
     assert cap["width"] > 0 and cap["height"] > 0
     raw = base64.b64decode(cap["base64"])

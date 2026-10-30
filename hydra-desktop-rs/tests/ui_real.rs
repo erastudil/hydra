@@ -27,7 +27,7 @@ fn harness(name: &str) -> (Harness<'static, HydraApp>, std::path::PathBuf) {
     std::fs::create_dir_all(&dir).unwrap();
     let cwd = dir.display().to_string();
     let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_eframe(move |cc| HydraApp::build(&cc.egui_ctx, None, cwd, true));
-    h.state_mut().model_mut().model = MODELS.iter().position(|x| x.0 == "local").unwrap();
+    h.state_mut().model_mut().model = "local".into();
     assert!(wait(&mut h, 20, |a| a.model().agent_ready), "real agent says hello");
     (h, dir)
 }

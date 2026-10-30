@@ -214,9 +214,10 @@ DEFAULT_AGENT_SYSTEM_PROMPT = os.environ.get(
         "SUMMON:\n"
         "You are the orchestrator. Do the work locally with the file and shell tools when you can. "
         "Summon another head only when the task needs a different model.\n"
-        "- summon: one completion. Pass a catalog alias and a prompt. "
-        "Aliases: opus 5.5, sonnet 5.5, haiku 4.5, sol 6.1, gemini 3.8, grok 4.7, "
-        "glm 5.3 flash, deepseek 4.1 flash, mimo 2.6 pro, mimo 2.6 flash, qwen 3.8.\n"
+        "- summon: one completion. Pass a catalog alias (for example 'opus 5.5') and a prompt. "
+        "Aliases are defined only by the model catalog (catalog.json) and the live "
+        "model list it feeds; resolve every model name through the catalog. "
+        "This prompt names no roster: a list written here would rot.\n"
         "- invoke_subagent: a tool-using child for one bounded coding subtask. Pass the same kind of alias.\n"
         "- swarm_fanout: parallel architect, coder, and auditor heads.\n"
         "Pass the alias exactly. An alias that is not in the catalog is refused. "
@@ -376,20 +377,30 @@ def model_status_label(alias: str) -> str:
     return f"{alias} -> {model_id}"
 
 
-MODEL_PICKER: List[str] = [
-    "alice",
-    "glm 5.3 flash",
-    "glm 5.3",
-    "opus 5.5",
-    "sonnet 5.5",
-    "sol 6.1",
-    "gemini 3.8",
-    "grok 4.7",
-    "qwen 3.8",
-    "deepseek",
-    "llama 4",
-    "qwen2.5-coder:7b",
-]
+def _build_model_picker() -> List[str]:
+    """The picker is the catalog itself: the default first, a stable
+    preferred order for common aliases, then every remaining catalog alias.
+    No hand-typed roster and no raw provider ids."""
+    preferred = [
+        "alice",
+        "glm 5.3 flash",
+        "mimo 2.6 flash",
+        "glm 5.3",
+        "opus 5.5",
+        "sonnet 5.5",
+        "sol 6.1",
+        "gemini 3.8",
+        "grok 4.7",
+        "qwen 3.8",
+        "deepseek",
+        "llama 4",
+    ]
+    head = [name for name in preferred if name in MODEL_MAP]
+    tail = sorted(name for name in MODEL_MAP if name not in head)
+    return head + tail
+
+
+MODEL_PICKER: List[str] = _build_model_picker()
 
 ALIAS_TYPOS = {
     "alise": "alice",
@@ -3401,6 +3412,9 @@ def _run_agent_loop(
     reserve_tokens = 16384 if (route_effort or "").lower() == "high" else OUTPUT_RESERVE_TOKENS
     if max_context_chars is None:
         window_tokens = get_context_window(requested_model)
+        env_window = os.environ.get("HYDRA_CONTEXT_WINDOW_TOKENS", "").strip()
+        if env_window.isdigit():
+            window_tokens = max(256, int(env_window))
     else:
         window_tokens = max(1024, max_context_chars // 4)
     context_chars = input_char_budget(window_tokens, tools, reserve_tokens)
@@ -4924,7 +4938,7 @@ def run_interactive_agent(
                 active_strategy = "recall"
                 get_default_progen_reanchor_controller().record_compaction(
                     active_session_id,
-                    unloaded_rounds=summary.get("turns_pruned", 0),
+                    unloaded_rounds=summary.get("turns_covered", 0),
                 )
                 sys.stdout.write(f"{c_mid}[{summary['summary']}]{c_reset}\n")
                 sys.stdout.write(f"{c_mid}[Live window set to recall. Ledger turns stay verbatim.]{c_reset}\n")
