@@ -1410,26 +1410,26 @@ impl HydraApp {
         let recording = self.voice_recording;
         let q_count = self.queue.get(&self.m.sessions[self.m.active].id).map(|q| q.len()).unwrap_or(0);
 
-        if recording || waiting_approval || thinking {
-            const BRAILLE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let spin = BRAILLE[((time * 12.0) as usize) % BRAILLE.len()];
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if recording {
-                    let c = motion::mix(Color32::from_rgb(180, 48, 48), Color32::from_rgb(255, 84, 84), rec_pulse);
-                    ui.label(rtb("● REC", 11.5, c));
-                    ui.label(rt("listening… · Esc cancels", 11.5, TEXT2));
-                } else if waiting_approval {
-                    let c = Color32::from_rgb(255, 184, 48);
-                    ui.label(rtb("◆", 11.5, c));
-                    ui.label(rt("hydra is waiting on your answer · Enter allows · Esc skips", 11.5, c));
-                } else {
-                    ui.label(rtb(spin, 12.0, ACCENT));
-                    ui.label(rt("Thinking · working... · Enter queues · Ctrl+Enter steers · Esc interrupts", 11.5, TEXT2));
-                }
-            });
-            ui.add_space(4.0);
-        }
+        const BRAILLE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let spin = BRAILLE[((time * 12.0) as usize) % BRAILLE.len()];
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if recording {
+                let c = motion::mix(Color32::from_rgb(180, 48, 48), Color32::from_rgb(255, 84, 84), rec_pulse);
+                ui.label(rtb("● REC", 11.5, c));
+                ui.label(rt("listening… · Esc cancels", 11.5, TEXT2));
+            } else if waiting_approval {
+                let c = Color32::from_rgb(255, 184, 48);
+                ui.label(rtb("◆", 11.5, c));
+                ui.label(rt("hydra is waiting on your answer · Enter allows · Esc skips", 11.5, c));
+            } else if thinking {
+                ui.label(rtb(spin, 12.0, ACCENT));
+                ui.label(rt("Thinking · working... · Enter queues · Ctrl+Enter steers · Esc interrupts", 11.5, TEXT2));
+            } else {
+                ui.label(rt("hydra · idle", 11.5, MUTED));
+            }
+        });
+        ui.add_space(4.0);
 
         let mut do_send = false;
         let mut do_stop = false;
