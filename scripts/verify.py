@@ -14092,7 +14092,6 @@ def terminal_launcher_follows_catalog_default():
     assert "Exiting Hydra agent session" in (proc.stdout or "")
 
 
-def main() -> int:
 def main(argv=None) -> int:
     args = sys.argv[1:] if argv is None else list(argv)
     selected = (
