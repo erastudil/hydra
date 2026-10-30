@@ -97,5 +97,7 @@ value here is key custody plus test mode, not a free claim.
 - **Together AI free tier is gone** — $5 minimum credit purchase.
 - **GitHub Models closed to new customers 2026-06-16** (existing accounts
   keep access).
-- DeepInfra: no confirmed free tier. Baseten: none (gated startup program
-  only). Perplexity API: no free tier. Kluster.ai sunset 2026-06-09.
+- DeepInfra: no confirmed free tier.
+- Baseten: none; access is a gated startup program only.
+- Perplexity API: no free tier.
+- Kluster.ai sunset 2026-06-09.
