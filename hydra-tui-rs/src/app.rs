@@ -96,11 +96,11 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into());
-        let rules_detected = std::path::Path::new(&cwd).join("AGENTS.md").exists()
-            || std::path::Path::new(&cwd).join(".cursorrules").exists()
-            || std::path::Path::new(&cwd).join("CLAUDE.md").exists();
         let dialect = std::env::var("HYDRA_DIALECT")
-            .unwrap_or_else(|_| if rules_detected { "progen".into() } else { "slack".into() });
+            .ok()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "slack".into());
         let raw_model = std::env::var("HYDRA_DEFAULT_MODEL")
             .or_else(|_| std::env::var("HYDRA_MODEL"))
             .unwrap_or_else(|_| DEFAULT_AGENT_MODEL.into());
@@ -832,6 +832,26 @@ impl App {
                     self.transcript.push(format!(
                         "permission : {} (options: plan, manual, accept_edits, bypass)",
                         self.permission
+                    ));
+                }
+            }
+            "progen" => {
+                self.dialect = "progen".into();
+                self.transcript.push("dialect : progen".into());
+            }
+            "slack" | "english" => {
+                self.dialect = "slack".into();
+                self.transcript.push("dialect : slack".into());
+            }
+            "dialect" | "register" => {
+                let arg = parts.next().unwrap_or("");
+                if matches!(arg, "progen" | "syntax" | "instruct" | "slack") {
+                    self.dialect = arg.into();
+                    self.transcript.push(format!("dialect : {}", self.dialect));
+                } else {
+                    self.transcript.push(format!(
+                        "dialect : {} (options: slack, progen, syntax, instruct)",
+                        self.dialect
                     ));
                 }
             }
@@ -1585,10 +1605,24 @@ mod tests {
     fn default_model_is_mimo_flash_and_speed_dial_commands_work() {
         std::env::remove_var("HYDRA_DEFAULT_MODEL");
         std::env::remove_var("HYDRA_MODEL");
+        std::env::remove_var("HYDRA_DIALECT");
         let mut app = App::new();
         assert_eq!(app.model, "bonsai 2 9b");
         assert_eq!(app.fallback_model, "glm 5.3 flash");
         assert_eq!(app.speed_dial_model, "mimo 2.6 pro");
+        assert_eq!(app.dialect, "slack");
+
+        for ch in "/progen".chars() {
+            app.on_char(ch);
+        }
+        app.submit();
+        assert_eq!(app.dialect, "progen");
+
+        for ch in "/slack".chars() {
+            app.on_char(ch);
+        }
+        app.submit();
+        assert_eq!(app.dialect, "slack");
 
         for ch in "/fallback".chars() {
             app.on_char(ch);
