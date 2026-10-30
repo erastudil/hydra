@@ -124,8 +124,14 @@ def is_port_open(host: str, port: int, timeout: float = 0.4) -> bool:
 
 
 def chat_completions_url(base: str) -> str:
-    """Normalize a server origin to an OpenAI-compatible chat completions URL."""
+    """Normalize a server origin to an OpenAI-compatible chat completions URL.
+
+    Ollama documents OLLAMA_HOST as host:port (127.0.0.1:11434) with no scheme.
+    A missing scheme is http, matching Ollama's own client.
+    """
     root = base.strip().rstrip("/")
+    if root and "://" not in root:
+        root = f"http://{root}"
     if root.endswith("/chat/completions"):
         return root
     if not root.endswith("/v1"):
