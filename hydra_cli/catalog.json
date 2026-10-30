@@ -206,6 +206,15 @@
     "gpt-4o": {
       "model": "openai/gpt-4o"
     },
+    "gpt-oss 120b": {
+      "model": "openai/gpt-oss-120b"
+    },
+    "gpt-oss": {
+      "model": "openai/gpt-oss-120b"
+    },
+    "groq": {
+      "model": "openai/gpt-oss-120b"
+    },
     "o3": {
       "model": "openai/o3"
     },
@@ -531,6 +540,30 @@
       "cheaperinference",
       "vercel",
       "openrouter"
+    ],
+    "openai/gpt-oss-120b": [
+      "groq"
+    ],
+    "qwen/qwen3.8-27b": [
+      "groq",
+      "cheaperinference",
+      "vercel",
+      "openrouter"
+    ],
+    "Meta-Llama-3_3-70B-Instruct": [
+      "ovhcloud"
+    ],
+    "meta/llama-3.3-70b-instruct": [
+      "nvidia"
+    ],
+    "mistral-small-latest": [
+      "mistral"
+    ],
+    "llama-3.3-70b-instruct": [
+      "scaleway"
+    ],
+    "command-a-03-2025": [
+      "cohere"
     ]
   },
   "swarm": {
@@ -617,6 +650,12 @@
     }
   },
   "default_hf_model": "meta-llama/Llama-3.1-8B-Instruct",
+  "default_groq_model": "openai/gpt-oss-120b",
+  "default_ovhcloud_model": "Meta-Llama-3_3-70B-Instruct",
+  "default_nvidia_model": "meta/llama-3.3-70b-instruct",
+  "default_mistral_model": "mistral-small-latest",
+  "default_scaleway_model": "llama-3.3-70b-instruct",
+  "default_cohere_model": "command-a-03-2025",
   "context_profiles": {
     "default": 1048576,
     "128k": 131072,
@@ -643,7 +682,13 @@
     "qwen/qwen-2.5-coder-32b-instruct": 131072,
     "gemma-e4b": 131072,
     "google/gemma-4-26b-a4b-it": 131072,
-    "prism-ml/Ternary-Bonsai-2-9B-gguf": 262144,
+"openai/gpt-oss-120b": 131072,
+    "Meta-Llama-3_3-70B-Instruct": 131072,
+    "meta/llama-3.3-70b-instruct": 131072,
+    "mistral-small-latest": 131072,
+    "llama-3.3-70b-instruct": 131072,
+    "command-a-03-2025": 262144,
+"prism-ml/Ternary-Bonsai-2-9B-gguf": 262144,
     "prism-ml/Ternary-Bonsai-2-4B-gguf": 262144,
     "prism-ml/Ternary-Bonsai-2-2B-gguf": 262144,
     "prism-ml/Ternary-Bonsai-2-27B-gguf": 262144,
@@ -652,8 +697,8 @@
     "bonsai 2 2b": 262144,
     "bonsai 2 27b": 262144
   },
-  "default_orchestrator_model": "mimo 2.6 flash",
-  "default_agent_model": "mimo 2.6 flash",
+  "default_orchestrator_model": "bonsai 2 9b",
+  "default_agent_model": "bonsai 2 9b",
   "swarm_combos": {
     "open swarm": {
       "title": "Open Swarm",
@@ -687,7 +732,7 @@
       ]
     }
   },
-  "default_model": "mimo 2.6 flash",
+  "default_model": "bonsai 2 9b",
   "default_fanout_aliases": [
     "glm 5.3 flash",
     "deepseek 4.1 flash",

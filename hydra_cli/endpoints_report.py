@@ -163,6 +163,11 @@ def probe_credit_balances() -> List[Dict[str, Any]]:
         ("openai", "OPENAI_API_KEY"),
         ("gemini", "GEMINI_API_KEY"),
         ("xai", "XAI_API_KEY"),
+        ("groq", "GROQ_API_KEY"),
+        ("nvidia", "NVIDIA_API_KEY"),
+        ("mistral", "MISTRAL_API_KEY"),
+        ("scaleway", "SCW_SECRET_KEY"),
+        ("cohere", "COHERE_API_KEY"),
     ]:
         val = os.environ.get(env_k, "").strip()
         results.append({
@@ -170,6 +175,14 @@ def probe_credit_balances() -> List[Dict[str, Any]]:
             "detail": f"{env_k} present" if val else f"{env_k} unconfigured",
             "is_configured": bool(val),
         })
+
+    # 5. OVHcloud (key optional; anonymous access works without one)
+    ovh_key = os.environ.get("OVHCLOUD_API_KEY", "").strip()
+    results.append({
+        "provider": "ovhcloud",
+        "detail": "OVHCLOUD_API_KEY present (authenticated tier)" if ovh_key else "anonymous access active (no key required)",
+        "is_configured": True,
+    })
 
     return results
 
@@ -230,6 +243,33 @@ def probe_free_endpoint_usage() -> List[Dict[str, Any]]:
             "quota_remaining": "available upon setting OPENROUTER_API_KEY",
             "models": "catalog free models",
         })
+
+    # 4. Groq free tier
+    from hydra_cli.config import DEFAULT_GROQ_MODEL, DEFAULT_OVHCLOUD_MODEL
+
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if groq_key:
+        free_items.append({
+            "service": "groq free tier",
+            "status": "ready",
+            "quota_remaining": "30 RPM / 1K RPD / 200K TPD per model (recurring free tier)",
+            "models": DEFAULT_GROQ_MODEL,
+        })
+    else:
+        free_items.append({
+            "service": "groq free tier",
+            "status": "unconfigured",
+            "quota_remaining": "available upon setting GROQ_API_KEY",
+            "models": DEFAULT_GROQ_MODEL,
+        })
+
+    # 5. OVHcloud AI Endpoints anonymous tier (no key, no signup)
+    free_items.append({
+        "service": "ovhcloud ai endpoints (anonymous)",
+        "status": "ready",
+        "quota_remaining": "2 RPM per IP per model; no key or signup required",
+        "models": DEFAULT_OVHCLOUD_MODEL,
+    })
 
     return free_items
 

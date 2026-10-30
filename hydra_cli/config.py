@@ -76,6 +76,30 @@ DEFAULT_EASYLM_ENDPOINT = os.environ.get("LOCAL_AI_BASE", "http://127.0.0.1:8000
 DEFAULT_LOCAL_MODEL = os.environ.get("HYDRA_LOCAL_MODEL", CATALOG["default_local_model"])
 
 DEFAULT_CHEAPERINFERENCE_BASE = "https://api.cheaperinference.com/v1"
+DEFAULT_GROQ_BASE = "https://api.groq.com/openai/v1"
+DEFAULT_GROQ_MODEL = os.environ.get(
+    "HYDRA_GROQ_MODEL", CATALOG.get("default_groq_model", "openai/gpt-oss-120b")
+)
+DEFAULT_OVHCLOUD_BASE = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"
+DEFAULT_OVHCLOUD_MODEL = os.environ.get(
+    "HYDRA_OVHCLOUD_MODEL", CATALOG.get("default_ovhcloud_model", "Meta-Llama-3_3-70B-Instruct")
+)
+DEFAULT_NVIDIA_BASE = "https://integrate.api.nvidia.com/v1"
+DEFAULT_NVIDIA_MODEL = os.environ.get(
+    "HYDRA_NVIDIA_MODEL", CATALOG.get("default_nvidia_model", "meta/llama-3.3-70b-instruct")
+)
+DEFAULT_MISTRAL_BASE = "https://api.mistral.ai/v1"
+DEFAULT_MISTRAL_MODEL = os.environ.get(
+    "HYDRA_MISTRAL_MODEL", CATALOG.get("default_mistral_model", "mistral-small-latest")
+)
+DEFAULT_SCALEWAY_BASE = "https://api.scaleway.ai/v1"
+DEFAULT_SCALEWAY_MODEL = os.environ.get(
+    "HYDRA_SCALEWAY_MODEL", CATALOG.get("default_scaleway_model", "llama-3.3-70b-instruct")
+)
+DEFAULT_COHERE_BASE = "https://api.cohere.com/compatibility/v1"
+DEFAULT_COHERE_MODEL = os.environ.get(
+    "HYDRA_COHERE_MODEL", CATALOG.get("default_cohere_model", "command-a-03-2025")
+)
 DEFAULT_RUNPOD_BASE_TEMPLATE = "https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
 DEFAULT_HF_BASE = os.environ.get("HF_INFERENCE_BASE", "https://router.huggingface.co/v1").rstrip("/")
 DEFAULT_HF_MODEL = os.environ.get("HYDRA_HF_MODEL", CATALOG.get("default_hf_model", "meta-llama/Llama-3.1-8B-Instruct"))
@@ -116,6 +140,12 @@ PROVIDER_KEY_NAMES: Dict[str, str] = {
     "runpod": "RUNPOD_API_KEY",
     "modal": "MODAL_ENDPOINT_URL",
     "huggingface": "HF_TOKEN",
+    "groq": "GROQ_API_KEY",
+    "ovhcloud": "OVHCLOUD_API_KEY (optional; anonymous access works without one)",
+    "nvidia": "NVIDIA_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "scaleway": "SCW_SECRET_KEY",
+    "cohere": "COHERE_API_KEY",
     "local": "LOCAL_AI_BASE or local runner",
 }
 

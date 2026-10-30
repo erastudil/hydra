@@ -19,6 +19,7 @@ from hydra_cli import __version__
 from hydra_cli.config import (
     ALIAS_SHORTHANDS,
     DEFAULT_AGENT_MODEL,
+    DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     MODEL_MAP,
     resolve_route,
@@ -1275,7 +1276,7 @@ class ReplSession:
         self.history: ReplHistoryDedup = get_default_history_dedup()
         self.menu_pager: ReplMenuPager = get_default_menu_pager()
         self.exit_confirm: ReplExitConfirm = get_default_exit_confirm()
-        self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "").strip() or DEFAULT_AGENT_MODEL
+        self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "").strip() or DEFAULT_MODEL
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.effort: Optional[str] = None
         self.reasoning_mode: Optional[str] = None
