@@ -10964,6 +10964,23 @@ def desktop_launcher_targets_rust_exe():
 
 
 @check
+def rust_stdio_and_tui_contracts():
+    """hydra-stdio and hydra-tui-rs unit tests verify bundled python, exit polling, /reconnect, and layout log gating."""
+    if shutil.which("cargo") is None:
+        raise Skip("cargo not on PATH")
+    for crate in ("hydra-stdio", "hydra-tui-rs"):
+        manifest = os.path.join(REPO, crate, "Cargo.toml")
+        res = subprocess.run(
+            ["cargo", "test", "--manifest-path", manifest, "--quiet"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert res.returncode == 0, f"{crate} failed:\n{res.stdout}\n{res.stderr}"
+
+
+@check
 def gui_no_browser_app_remains():
     assert not os.path.exists(os.path.join(REPO, "hydra_cli", "desktop.py"))
     assert not os.path.exists(os.path.join(REPO, "scripts", "package_desktop.py"))
@@ -13865,9 +13882,18 @@ def tankbench_runners():
             assert "TANKBENCH_SRC" in missing.stderr
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    args = sys.argv[1:] if argv is None else list(argv)
+    selected = (
+        [fn for fn in CHECKS if any(q in fn.__name__ for q in args)]
+        if args
+        else list(CHECKS)
+    )
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")
+    real_home = os.path.expanduser("~")
+    os.environ.setdefault("RUSTUP_HOME", os.path.join(real_home, ".rustup"))
+    os.environ.setdefault("CARGO_HOME", os.path.join(real_home, ".cargo"))
     home = tempfile.mkdtemp(prefix="hydra-gate-")
     os.environ["HOME"] = home
     os.environ["USERPROFILE"] = home
@@ -13879,7 +13905,7 @@ def main() -> int:
 
     failed = []
     skipped = []
-    for fn in CHECKS:
+    for fn in selected:
         name = fn.__name__
         try:
             with _silent():
@@ -13894,7 +13920,7 @@ def main() -> int:
             print(f"{name} : exit 0.")
 
     elapsed_ms = (time.perf_counter() - started) * 1000.0
-    print(f"\nchecks : {len(CHECKS) - len(failed) - len(skipped)} pass, {len(skipped)} skip, {len(failed)} fail.")
+    print(f"\nchecks : {len(selected) - len(failed) - len(skipped)} pass, {len(skipped)} skip, {len(failed)} fail.")
     print(f"execution duration : {elapsed_ms:.1f}ms.")
     if failed:
         print("hydra gate status : fail.")
@@ -13907,3 +13933,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

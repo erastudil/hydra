@@ -500,6 +500,8 @@ impl App {
             ("/mode", "switch context strategy: compact, sliding, recall"),
             ("/window", "set context window size in tokens"),
             ("/agents", "list active runner tasks"),
+            ("/reconnect", "respawn the stdio backend agent process"),
+            ("/retry", "alias for /reconnect"),
             ("/update", "check version and pull latest from github"),
             ("/allow", "approve pending tool call"),
             ("/skip", "skip pending tool call"),
@@ -621,7 +623,33 @@ impl App {
         self.dispatch_turn(&text);
     }
 
+    pub fn reconnect(&mut self) {
+        if let Some(mut old) = self.be.take() {
+            old.shutdown();
+        }
+        self.busy_turn = None;
+        self.busy_start = None;
+        self.assistant_at = None;
+        self.approval = None;
+        self.approval_args = Value::Null;
+        self.status_label = "idle".into();
+        if cfg!(test) || std::env::var("HYDRA_NO_BACKEND").ok().as_deref() == Some("1") {
+            self.transcript.push("agent : reconnected".into());
+            return;
+        }
+        match Backend::spawn(|| {}) {
+            Ok(be) => {
+                self.be = Some(be);
+                self.transcript.push("agent : reconnected".into());
+            }
+            Err(e) => self.transcript.push(format!("agent : {e}")),
+        }
+    }
+
     fn dispatch_turn(&mut self, text: &str) {
+        if self.be.is_none() && !cfg!(test) && std::env::var("HYDRA_NO_BACKEND").ok().as_deref() != Some("1") {
+            self.reconnect();
+        }
         if self.be.is_none() && !cfg!(test) {
             self.transcript.push("agent : not connected".into());
             return;
@@ -753,6 +781,7 @@ impl App {
                     ("/mode [compact|sliding|recall]", "switch context strategy"),
                     ("/window [tokens]", "set context window size in tokens"),
                     ("/agents", "list active runner tasks"),
+                    ("/reconnect", "respawn the stdio backend agent process"),
                     ("/update", "check version and pull latest from github"),
                     ("/allow | /skip | /abort", "respond to pending tool approval"),
                     ("/clear", "reset session transcript"),
@@ -1095,6 +1124,7 @@ impl App {
                 self.update_rx = Some(rx);
                 self.transcript.push("update : checking github origin/main...".into());
             }
+            "reconnect" | "retry" => self.reconnect(),
             "cancel" => self.cancel(),
             "allow" => self.decide("allow"),
             "skip" => self.decide("skip"),
@@ -1104,15 +1134,29 @@ impl App {
     }
 
     fn drain(&mut self) {
-        let evs: Vec<Ev> = if let Some(be) = &self.be {
-            let mut v = Vec::new();
+        let mut evs = Vec::new();
+        let mut status = None;
+        if let Some(be) = &mut self.be {
             while let Ok(ev) = be.rx.try_recv() {
-                v.push(ev);
+                evs.push(ev);
             }
-            v
-        } else {
-            Vec::new()
-        };
+            let eof = evs.iter().any(|e| matches!(e, Ev::Exited(_)));
+            for _ in 0..if eof { 20 } else { 1 } {
+                if let Some(why) = be.exited() {
+                    status = Some(why);
+                    break;
+                }
+                if eof {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+        if let Some(why) = status {
+            match evs.iter_mut().find(|e| matches!(e, Ev::Exited(_))) {
+                Some(e) => *e = Ev::Exited(why),
+                None => evs.push(Ev::Exited(why)),
+            }
+        }
         for ev in evs {
             self.apply(ev);
         }
@@ -1377,8 +1421,14 @@ impl App {
             }
             Ev::Exited(reason) => {
                 self.transcript.push(format!("agent exited : {reason}"));
-                self.busy_turn = None;
+                if let Some(turn) = self.busy_turn.take() {
+                    self.mark_agent(&turn, "failed");
+                }
                 self.busy_start = None;
+                self.assistant_at = None;
+                self.approval = None;
+                self.approval_args = Value::Null;
+                self.steer_after_cancel = false;
                 self.status_label = "idle".into();
                 self.be = None;
             }
@@ -1570,8 +1620,12 @@ pub fn read_clipboard_text() -> Option<String> {
 }
 
 pub fn log_layout(width: u16, fit_spin: usize, fit_label: usize, overflow: bool, thinking_in_status: bool, same_row: bool) {
-    // #region agent log
-    let path = r"C:\Users\jpm05\documents\debug-ada62c.log";
+    let Ok(path) = std::env::var("HYDRA_LAYOUT_LOG") else {
+        return;
+    };
+    if path.trim().is_empty() {
+        return;
+    }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     let rows = [
         ("A", "status row width", serde_json::json!({"width": width, "spin_cols": fit_spin, "label_cols": fit_label, "overflow": overflow})),
@@ -1594,7 +1648,6 @@ pub fn log_layout(width: u16, fit_spin: usize, fit_label: usize, overflow: bool,
             let _ = writeln!(f, "{line}");
         }
     }
-    // #endregion
 }
 
 #[cfg(test)]
@@ -1775,5 +1828,41 @@ mod tests {
         app.cursor_pos = app.input.len();
         app.submit();
         assert!(app.transcript.iter().any(|l| l == "  +new"));
+    }
+
+    #[test]
+    fn exited_resets_busy_turn_reconnect_command_and_layout_log_gate() {
+        let mut app = App::new();
+        app.input = "run task".into();
+        app.cursor_pos = app.input.len();
+        app.submit();
+        assert_eq!(app.busy_turn.as_deref(), Some("t1"));
+        assert_eq!(app.agents[0].state, "running");
+
+        app.apply(Ev::Exited("exited with code 3".into()));
+        assert!(app.busy_turn.is_none());
+        assert_eq!(app.status_label, "idle");
+        assert_eq!(app.agents[0].state, "failed");
+        assert!(app.transcript.iter().any(|l| l == "agent exited : exited with code 3"));
+
+        app.input = "/recon".into();
+        app.cursor_pos = app.input.len();
+        assert!(app.candidates().iter().any(|(c, _)| c == "/reconnect"));
+        app.input = "/reconnect".into();
+        app.cursor_pos = app.input.len();
+        app.submit();
+        assert!(app.transcript.iter().any(|l| l == "agent : reconnected"));
+
+        let tmp = std::env::temp_dir().join(format!("hydra-layout-log-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        std::env::remove_var("HYDRA_LAYOUT_LOG");
+        log_layout(80, 2, 10, false, false, false);
+        assert!(!tmp.exists());
+
+        std::env::set_var("HYDRA_LAYOUT_LOG", &tmp);
+        log_layout(80, 2, 10, false, false, false);
+        std::env::remove_var("HYDRA_LAYOUT_LOG");
+        assert!(tmp.exists());
+        let _ = std::fs::remove_file(&tmp);
     }
 }
