@@ -77,7 +77,7 @@ USAGE:
     hydra sandbox run "<cmd>"            # Isolated zero-trust command execution
     hydra banner                         # Display 3-head TUI Hydra + title wordmark
     hydra / hydra chat / hydra tui       # Interactive REPL with slash commands
-    hydra setup                          # Interactive setup & app/agent integration guide
+    hydra setup                          # Plain-language setup: accounts, credits, and keys
     hydra auth                           # Interactive credential onboarding wizard & provider status
     hydra auth status                    # Inspect configured model providers without leaking secrets
     cat file.txt | hydra <alias>         # The pipe is the prompt
@@ -210,128 +210,34 @@ def launch_desktop() -> int:
     return 0
 
 
+def launch_rust_tui(argv: Optional[List[str]] = None) -> int:
+    """Launch the native Rust TUI binary (hydra-tui.exe / hydra-tui) in the current terminal."""
+    import subprocess
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    names = ("hydra-tui.exe", "hydra-tui")
+    candidates = [os.environ.get("HYDRA_TUI_EXE", "")]
+    for sub in (("dist", "Hydra"), ("dist",), ("hydra-tui-rs", "target", "release")):
+        candidates += [os.path.join(root, *sub, n) for n in names]
+    exe = next((c for c in candidates if c and os.path.isfile(c)), "")
+    if not exe:
+        print("Native Rust TUI binary not built. Run `cargo build --release` inside hydra-tui-rs.", file=sys.stderr)
+        return 1
+    pass_args = [a for a in (argv or []) if a != "--rust"]
+    proc = subprocess.run([exe, *pass_args], cwd=root, env={**os.environ, "HYDRA_REPO": root})
+    return proc.returncode
+
+
 def print_setup_guide():
-    """Print a comprehensive setup and application/agent integration guide."""
-    guide = f"""
-================================================================================
-  HYDRA SETUP & INTEGRATION GUIDE · v{__version__}
-================================================================================
-
-1. QUICK SETUP & CREDENTIALS
---------------------------------------------------------------------------------
-Hydra reads the process environment first, then ~/.hydra/.env.
-A project .env may set ordinary settings such as HYDRA_FREE_MODEL.
-Keys, tokens, and host URLs in a project .env stay unloaded unless HYDRA_TRUST_CWD_ENV=1.
-Supported providers:
-
-  A. Cloudflare Workers AI (Zero cost or your existing paid plan):
-     export CLOUDFLARE_API_TOKEN="your-token"
-     export CLOUDFLARE_ACCOUNT_ID="your-account-id"
-
-  B. OpenRouter (Access to 200+ models with unified billing or free tiers):
-     export OPENROUTER_API_KEY="sk-or-v1-..."
-
-  C. Vercel AI Gateway:
-     export AI_GATEWAY_API_KEY="your-token"
-     # VERCEL_AI_GATEWAY_TOKEN is accepted as an alias of the same key.
-
-  D. CheaperInference (Discounted frontier & open-weight routing, GLM models):
-     export CHEAPERINFERENCE_API_KEY="ci_live_..."
-
-  E. RunPod (Serverless vLLM endpoints and GPU pods):
-     export RUNPOD_API_KEY="rpa_..."
-     export RUNPOD_ENDPOINT_ID="your-endpoint-id" # or export RUNPOD_ENDPOINT_URL="..."
-
-  F. Modal (Serverless vLLM / OpenAI endpoints):
-     export MODAL_ENDPOINT_URL="https://<app>.modal.run/v1"
-     export MODAL_API_KEY="your-key"
-
-  G. Local mode needs no cloud key:
-     • hydra local "<prompt>"  -> Ollama (11434), llama.cpp (8080), or EasyLM (8000)
-     • hydra free "<prompt>"   -> Cloudflare or OpenRouter free-tier models. A key is required.
-
-  H. Groq (Recurring free tier: 30 RPM, 1K RPD, 200K TPD per model; no card):
-     export GROQ_API_KEY="gsk_..."
-
-  I. OVHcloud AI Endpoints (Anonymous free access, 2 RPM per IP per model; no signup):
-     # No key required. An optional project key unlocks the authenticated tier:
-     export OVHCLOUD_API_KEY="your-key"
-
-  J. NVIDIA NIM (Free hosted endpoints via the NVIDIA Developer Program):
-     export NVIDIA_API_KEY="nvapi-..."
-
-  K. Mistral AI (Recurring free plan; the free tier trains on submitted data):
-     export MISTRAL_API_KEY="your-key"
-
-  L. Scaleway Generative APIs (1M tokens free on the serverless tier):
-     export SCW_SECRET_KEY="your-secret-key"
-
-  M. Cohere (Trial keys never expire, 1,000 calls/month; non-commercial use only):
-     export COHERE_API_KEY="your-key"
-
-2. SHELL SCRIPTS & UNIX PIPES
---------------------------------------------------------------------------------
-Pipe outputs directly from your shell into any model:
-
-  # Review recent git diff with Sonnet 5.5
-  git diff | hydra sonnet 5.5 - "Audit for security issues and edge cases"
-
-  # The pipe alone is the prompt
-  cat build.log | hydra free --no-stream
-
-  # Words after -- stay in the prompt, even when they look like an alias
-  hydra opus 5.5 -- high ground rules
-
-3. INTEGRATING INTO PYTHON APPLICATIONS & AGENTS
---------------------------------------------------------------------------------
-A. Direct Import:
-   from hydra_cli import complete
-
-   print(complete("sonnet 5.5", "Analyze memory ordering in lock-free rings"))
-
-B. Subprocess / Agent Tool Pattern (LangChain, AutoGen, CrewAI, Antigravity):
-   import subprocess
-
-   def hydra_tool(model_alias: str, query: str) -> str:
-       proc = subprocess.run(
-           ["hydra", model_alias, query, "--no-stream"],
-           capture_output=True,
-           text=True,
-           check=True
-       )
-       return proc.stdout.strip()
-
-   # Or structured JSON:
-   # proc = subprocess.run(["hydra", "sonnet 5.5", query, "--json", "--no-stream"], ...)
-
-4. INTEGRATING INTO NODE.JS / TYPESCRIPT APPLICATIONS
---------------------------------------------------------------------------------
-Run via global CLI or npx with zero npm install:
-
-  import {{ execFileSync }} from 'node:child_process';
-
-  function callHydra(alias, prompt) {{
-    return execFileSync('hydra', [alias, prompt, '--no-stream'], {{
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }}).trim();
-  }}
-
-  const analysis = callHydra('sonnet 5.5', 'Analyze this payload');
-
-5. MULTI-AGENT SWARMS
---------------------------------------------------------------------------------
-Spawn specialist heads in parallel, then one synthesizer after they finish:
-
-  hydra swarm "Architect a low-latency tick-by-tick orderbook"
-
-Custom heads:
-  hydra swarm "Design consensus loop" --heads architect,auditor
-
-Docs & Source: https://github.com/erastudil/hydra
-================================================================================
-"""
-    print(guide)
+    """Print the plain-language setup guide shipped beside this module."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "getting_started.md")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as exc:
+        sys.stderr.write(f"[ERROR] Setup guide missing at {path} ({exc}).\n")
+        return
+    print(text.rstrip("\n"))
 
 
 def _parse_number(flag: str, raw: str, integer: bool) -> Tuple[Optional[float], Optional[str]]:
@@ -366,7 +272,11 @@ def route_command(argv: List[str]) -> int:
         from hydra_cli.ui import print_banner
         print_banner(detailed=True, version=__version__)
         return 0
+    if argv and argv[0].lower() in ("rust-tui", "tui-rs", "--rust"):
+        return launch_rust_tui(argv[1:])
     if argv and argv[0].lower() in ("chat", "tui", "repl", "interactive"):
+        if "--rust" in argv[1:] or (argv[0].lower() == "tui" and os.environ.get("HYDRA_RUST_TUI", "").strip() == "1"):
+            return launch_rust_tui(argv[1:])
         from hydra_cli.repl import run_repl
         return run_repl(initial_argv=argv[1:])
     if argv and argv[0] in ("setup", "guide", "--setup", "--guide"):

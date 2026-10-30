@@ -10,7 +10,7 @@ import shutil
 import tempfile
 from typing import Any, Dict
 
-import pytest
+import unittest
 
 from hydra_cli.config import (
     DEFAULT_AGENT_MODEL,
@@ -39,11 +39,24 @@ from hydra_cli.session_logger import (
 
 
 def test_mimo_26_model_routing_and_cheaperinference_defaults():
-    """Verify Mimo 2.6 Pro daily driver and CheaperInference provider precedence."""
-    # Default daily driver resolution
-    assert DEFAULT_MODEL == "mimo 2.6 pro"
-    assert DEFAULT_ORCHESTRATOR_MODEL == "mimo 2.6 pro"
-    assert DEFAULT_AGENT_MODEL == "mimo 2.6 pro"
+    """Verify Bonsai 2 9B default agent, Mimo 2.6 Flash daily driver, and CheaperInference provider precedence."""
+    # Default agent resolution
+    assert DEFAULT_MODEL == "bonsai 2 9b"
+    assert DEFAULT_ORCHESTRATOR_MODEL == "bonsai 2 9b"
+    assert DEFAULT_AGENT_MODEL == "bonsai 2 9b"
+
+    # Bonsai 2 alias and adapter resolution
+    route_9b = resolve_route("bonsai 2 9b")
+    assert route_9b["model"] == "prism-ml/Ternary-Bonsai-2-9B-gguf"
+    assert route_9b["adapter"] == "Bluebarrels/easylm-bonsai-2-9b"
+    assert route_9b["hydra_adapter"] == "Bluebarrels/easylm-hydra-bonsai-2-9b"
+    assert route_9b["memory_mb"] == 2000
+    assert route_9b["context_window"] == 262144
+    assert get_context_window("bonsai 2 9b") == 262144
+    assert resolve_model("bonsai") == "prism-ml/Ternary-Bonsai-2-9B-gguf"
+    assert resolve_model("bonsai 2 2b") == "prism-ml/Ternary-Bonsai-2-2B-gguf"
+    assert resolve_model("bonsai 2 4b") == "prism-ml/Ternary-Bonsai-2-4B-gguf"
+    assert resolve_model("bonsai 2 27b") == "prism-ml/Ternary-Bonsai-2-27B-gguf"
 
     # Alias resolution
     assert resolve_model("mimo 2.6 pro") == "mimo-2.6-pro"
@@ -51,9 +64,10 @@ def test_mimo_26_model_routing_and_cheaperinference_defaults():
     assert resolve_model("mimo") == "mimo-2.6-pro"
     assert resolve_model("mimo 2.6") == "mimo-2.6-pro"
     assert resolve_model("mimo pro") == "mimo-2.6-pro"
-    assert resolve_model("daily driver") == "mimo-2.6-pro"
+    assert resolve_model("daily driver") == "mimo-2.6-flash"
 
     assert resolve_model("mimo 2.6 flash") == "mimo-2.6-flash"
+    assert resolve_model("mimo.2.6 flash") == "mimo-2.6-flash"
     assert resolve_model("mimo-2.6-flash") == "mimo-2.6-flash"
     assert resolve_model("mimo flash") == "mimo-2.6-flash"
 
@@ -67,10 +81,11 @@ def test_mimo_26_model_routing_and_cheaperinference_defaults():
     assert "openrouter" in provs_flash
 
     # REPL alias expansions
+    assert DEFAULT_MODEL_ALIASES["bonsai"] == "bonsai 2 9b"
     assert DEFAULT_MODEL_ALIASES["mimo"] == "mimo 2.6 pro"
     assert DEFAULT_MODEL_ALIASES["mimo pro"] == "mimo 2.6 pro"
     assert DEFAULT_MODEL_ALIASES["mimo flash"] == "mimo 2.6 flash"
-    assert DEFAULT_MODEL_ALIASES["daily driver"] == "mimo 2.6 pro"
+    assert DEFAULT_MODEL_ALIASES["daily driver"] == "mimo 2.6 flash"
 
 
 def test_swarm_fanout_aliases_and_adaptation():
@@ -81,15 +96,15 @@ def test_swarm_fanout_aliases_and_adaptation():
     ci_url = "https://api.cheaperinference.com/v1/chat/completions"
     or_url = "https://openrouter.ai/api/v1/chat/completions"
 
-    assert adapt_model_for_url(ci_url, "mimo-2.6-pro") == "mimo-2.6-pro"
-    assert adapt_model_for_url(ci_url, "mimo-2.6-flash") == "mimo-2.6-flash"
-    assert adapt_model_for_url(ci_url, "xiaomi/mimo-2.6-pro") == "mimo-2.6-pro"
-    assert adapt_model_for_url(ci_url, "xiaomi/mimo-2.6-flash") == "mimo-2.6-flash"
+    assert adapt_model_for_url(ci_url, "mimo-2.6-pro") == "mimo-v2.6-pro"
+    assert adapt_model_for_url(ci_url, "mimo-2.6-flash") == "mimo-v2.6-flash"
+    assert adapt_model_for_url(ci_url, "xiaomi/mimo-2.6-pro") == "mimo-v2.6-pro"
+    assert adapt_model_for_url(ci_url, "xiaomi/mimo-2.6-flash") == "mimo-v2.6-flash"
 
-    assert adapt_model_for_url(or_url, "mimo-2.6-pro") == "xiaomi/mimo-2.6-pro"
-    assert adapt_model_for_url(or_url, "mimo-2.6-flash") == "xiaomi/mimo-2.6-flash"
+    assert adapt_model_for_url(or_url, "mimo-2.6-pro") == "xiaomi/mimo-v2.6-pro"
+    assert adapt_model_for_url(or_url, "mimo-2.6-flash") == "xiaomi/mimo-v2.6-flash"
     assert adapt_model_for_url(or_url, "glm-5.3-flash") == "z-ai/glm-5.3-flash"
-    assert adapt_model_for_url(or_url, "deepseek-4.1-flash") == "deepseek/deepseek-4.1-flash"
+    assert adapt_model_for_url(or_url, "deepseek-4.1-flash") == "deepseek/deepseek-v4.1-flash"
 
 
 def test_context_window_sizing_and_ai_ml_invariant():
@@ -283,3 +298,16 @@ def test_docstring_p018_linter_on_new_modules():
         res = linter.analyze_source(src)
         violations = res.get("violations", [])
         assert len(violations) == 0, f"Docstring violations in {rel_path}: {violations}"
+
+
+class SwarmSessionLoggerUnittestSuite(unittest.TestCase):
+    """Standard library unittest harness for SwarmSessionLogger and routing checks."""
+
+    def test_all_swarm_session_logger_checks(self):
+        """Run all swarm session logger, routing, and docstring linter checks."""
+        test_mimo_26_model_routing_and_cheaperinference_defaults()
+        test_swarm_fanout_aliases_and_adaptation()
+        test_context_window_sizing_and_ai_ml_invariant()
+        test_swarm_session_logger_lifecycle_and_writeup()
+        test_native_tool_implementations()
+        test_docstring_p018_linter_on_new_modules()

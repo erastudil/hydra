@@ -52,9 +52,11 @@ hydra_cli/desktop_core.py
 hydra_cli/dictation.py
 hydra_cli/display.py
 hydra_cli/endpoints_report.py
+hydra_cli/getting_started.md
 hydra_cli/hands.py
 hydra_cli/invariants.json
 hydra_cli/invariants.py
+hydra_cli/local_server.py
 hydra_cli/mcp.py
 hydra_cli/mcp_registry.py
 hydra_cli/mcp_servers.default.json

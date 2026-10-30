@@ -1,4 +1,4 @@
-﻿"""
+"""
 Integration test suite for Hydra Desktop Dynamic Theme Engine.
 Complies with AGENTS.md genome invariants: zero fake tests, real interfaces, exit code 0.
 """
@@ -6,7 +6,36 @@ Complies with AGENTS.md genome invariants: zero fake tests, real interfaces, exi
 from __future__ import annotations
 
 import tempfile
-import pytest
+try:
+    import pytest
+except ImportError:
+    import contextlib
+
+    class _PytestFallback:
+        @staticmethod
+        def fixture(*args, **kwargs):
+            def _dec(fn):
+                return fn
+            if args and callable(args[0]):
+                return args[0]
+            return _dec
+
+        @staticmethod
+        @contextlib.contextmanager
+        def raises(exc_type):
+            class _Info:
+                value = None
+            info = _Info()
+            try:
+                yield info
+            except exc_type as exc:
+                info.value = exc
+                return
+            raise AssertionError(f"Expected {exc_type} to be raised")
+
+    pytest = _PytestFallback()
+
+import unittest
 
 from desktop.theme_manager import (
     ThemeManager,
@@ -162,3 +191,25 @@ def test_global_singleton_theme_manager():
     t3 = reset_theme_manager()
     assert t3 is not t1
     assert get_theme_manager() is t3
+
+
+class ThemeManagerUnittestSuite(unittest.TestCase):
+    """Unittest runner wrapper for ThemeManager verification."""
+
+    def test_all_theme_manager_invariants(self):
+        """Execute all theme manager checks under standard library unittest."""
+        test_wcag_contrast_math_and_compliance()
+        test_builtin_palettes_catalog_and_contrast_compliance()
+        m = ThemeManager()
+        try:
+            test_custom_palette_registration(m)
+        finally:
+            m.set_active_theme("dark_slate")
+        test_css_variables_and_stylesheet_generation()
+        m = ThemeManager()
+        try:
+            test_active_theme_switching_and_subscriber_events(m)
+        finally:
+            m.set_active_theme("dark_slate")
+        test_theme_settings_persistence()
+        test_global_singleton_theme_manager()

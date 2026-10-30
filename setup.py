@@ -10,7 +10,7 @@ setup(
     author="erastudil",
     url="https://github.com/erastudil/hydra",
     packages=find_packages(include=["hydra_cli", "hydra_cli.*"]),
-    package_data={"hydra_cli": ["catalog.json", "invariants.json", "mcp_servers.default.json"]},
+    package_data={"hydra_cli": ["catalog.json", "invariants.json", "mcp_servers.default.json", "getting_started.md"]},
     include_package_data=True,
     python_requires=">=3.8",
     install_requires=[],

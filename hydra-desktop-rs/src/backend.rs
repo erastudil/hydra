@@ -114,10 +114,12 @@ pub fn bundled_python(dir: &std::path::Path) -> Option<std::path::PathBuf> {
     names.iter().map(|n| rt.join(n)).find(|p| p.is_file())
 }
 
-/// The checkout that holds `hydra_cli`: HYDRA_REPO, the release folder's `app/`, else a parent of the exe or cwd.
+/// The checkout that holds `hydra_cli`: HYDRA_REPO, the release folder's `app/`, else `hydra_stdio::repo_dir()`.
 pub fn repo_dir() -> Option<String> {
     if let Ok(r) = std::env::var("HYDRA_REPO") {
-        return Some(r);
+        if !r.trim().is_empty() {
+            return Some(r);
+        }
     }
     if let Some(b) = bundle_dir() {
         let app = b.join("app");
@@ -125,21 +127,7 @@ pub fn repo_dir() -> Option<String> {
             return Some(app.display().to_string());
         }
     }
-    let mut starts = vec![];
-    if let Ok(exe) = std::env::current_exe() {
-        starts.push(exe);
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        starts.push(cwd);
-    }
-    for start in starts {
-        for dir in start.ancestors().skip(1).take(8) {
-            if dir.join("hydra_cli").join("__init__.py").is_file() {
-                return Some(dir.display().to_string());
-            }
-        }
-    }
-    None
+    hydra_stdio::repo_dir()
 }
 
 /// Interpreters to try, in order, as (program, leading args). The bundled runtime wins; system python is a dev fallback.

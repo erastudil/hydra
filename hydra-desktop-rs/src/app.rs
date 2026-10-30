@@ -81,6 +81,7 @@ enum Cmd {
     Help,
     Search,
     EditInstructions,
+    Update,
 }
 
 /// True when the current agent child has not said hello 20 s after it was spawned. Counts from the latest spawn,
@@ -113,6 +114,7 @@ pub const SLASH: &[(&str, &str)] = &[
     ("/agents", "Edit this project's AGENTS.md"),
     ("/search", "Search every chat"),
     ("/settings", "Provider keys"),
+    ("/update", "Check version and sync with GitHub"),
     ("/help", "Keyboard shortcuts"),
 ];
 
@@ -141,6 +143,7 @@ fn slash_cmd(name: &str) -> Option<Cmd> {
         "/agents" => Cmd::EditInstructions,
         "/search" => Cmd::Search,
         "/settings" => Cmd::Settings,
+        "/update" => Cmd::Update,
         "/help" => Cmd::Help,
         _ => return None,
     })
@@ -307,6 +310,7 @@ fn palette_entries() -> Vec<(&'static str, &'static str, Cmd)> {
         ("Open Skills", "/skills", Cmd::Tab("skills")),
         ("Open MCP Servers", "/mcp", Cmd::Tab("mcp")),
         ("Open Background Tasks", "/tasks", Cmd::Tab("tasks")),
+        ("Check for Updates (Sync with GitHub)", "/update", Cmd::Update),
     ]
 }
 
@@ -378,6 +382,10 @@ pub struct HydraApp {
     skills_asked: bool,
     mcp_asked: bool,
     tasks_asked: bool,
+    pub voice_recording: bool,
+    pub headless: bool,
+    #[cfg(windows)]
+    screen_overlay: ScreenGlowOverlay,
 }
 
 /// Frame-time probe for the motion check: HYDRA_PROBE=<file> runs a scripted toggle/arrival/palette sequence and writes one CSV row per frame.
@@ -409,7 +417,11 @@ impl HydraApp {
             }
         });
         let state = if std::env::var("HYDRA_NO_STATE").is_ok() { None } else { Some(state_dir().join("state.json")) };
-        Self::build(&cc.egui_ctx, state, cwd, std::env::var("HYDRA_NO_BACKEND").is_err())
+        let mut app = Self::build(&cc.egui_ctx, state, cwd, std::env::var("HYDRA_NO_BACKEND").is_err());
+        app.headless = std::env::var("HYDRA_SHOT").is_ok()
+            || std::env::var("HYDRA_PROBE").is_ok()
+            || std::env::var("HYDRA_NO_SCREEN_OVERLAY").is_ok();
+        app
     }
 
     /// Build the app on any egui context. Tests use this with a temp state file and `spawn_backend` as needed.
@@ -437,7 +449,10 @@ impl HydraApp {
                 m.sessions[m.active].permission = p;
             }
         }
-        if let Some(i) = std::env::var("HYDRA_MODEL").ok().and_then(|k| MODELS.iter().position(|x| x.0 == k)) {
+        if let Some(i) = std::env::var("HYDRA_MODEL").ok().and_then(|k| {
+            let norm = normalize_model_key(&k);
+            MODELS.iter().position(|x| x.0 == norm || x.0 == k.trim())
+        }) {
             m.model = i;
         }
         if let Ok(n) = std::env::var("HYDRA_NAV") {
@@ -493,7 +508,7 @@ impl HydraApp {
             focus_input: std::env::var("HYDRA_SHOT").is_err() || std::env::var("HYDRA_INPUT").is_ok(),
             composer_rect: egui::Rect::NOTHING,
             health_rx: { let (tx, rx) = std::sync::mpsc::channel(); std::thread::spawn(move || { let _ = tx.send(health::run()); }); rx },
-            update_rx: hydra_stdio::update::spawn_launch_check(),
+            update_rx: { let u_ctx = ctx0.clone(); hydra_stdio::update::spawn_launch_check_with(move || u_ctx.request_repaint()) },
             checks: vec![],
             crash_note: crate::crash::take_last_crash().map(|c| c.1),
             panel_dismissed: std::env::var("HYDRA_OPEN").as_deref() == Ok("dismiss"),
@@ -523,6 +538,10 @@ impl HydraApp {
             skills_asked: false,
             mcp_asked: false,
             tasks_asked: false,
+            voice_recording: false,
+            headless: true,
+            #[cfg(windows)]
+            screen_overlay: ScreenGlowOverlay::default(),
             probe: std::env::var("HYDRA_PROBE").ok().map(|path| Probe { path, rows: vec![], last: 0.0, stage: 0, scroll: None }),
             open_folder: if std::env::var("HYDRA_OPEN").as_deref() == Ok("folder") { Some((std::env::var("HYDRA_CWD").unwrap_or_default(), String::new())) } else { None },
             rename: None,
@@ -618,6 +637,14 @@ impl HydraApp {
                 self.memories_entries = read_memory_ledger(&memory_ledger_path());
                 self.memories_open = true;
             }
+            Cmd::Update => {
+                self.toast = Some(("Checking GitHub for updates and syncing local install...".into(), f64::NAN));
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(hydra_stdio::update::check_now());
+                });
+                self.update_rx = rx;
+            }
         }
     }
 
@@ -705,6 +732,21 @@ impl HydraApp {
 
     fn send(&mut self) {
         let text = format_prompt_with_attachments(&self.input, &self.attachments);
+        if let Some(arg) = text.trim().strip_prefix("/model") {
+            if arg.is_empty() || arg.starts_with(char::is_whitespace) {
+                let target = normalize_model_key(arg);
+                if let Some(idx) = MODELS.iter().position(|(k, label)| *k == target || label.to_lowercase().contains(&target)) {
+                    self.m.model = idx;
+                    self.m.save();
+                    self.toast = Some((format!("Model switched to {}", MODELS[idx].1), f64::NAN));
+                } else {
+                    self.toast = Some((format!("Unknown model: {}", arg.trim()), f64::NAN));
+                }
+                self.input.clear();
+                self.attachments.clear();
+                return;
+            }
+        }
         if let Some(cmd) = slash_cmd(text.trim()) {
             self.input.clear();
             self.attachments.clear();
@@ -796,11 +838,15 @@ impl HydraApp {
             }
             // narrow windows give the badge's width to the cost chip
             if !narrow {
-                let (r, _) = ui.allocate_exact_size(vec2(66.0, 22.0), Sense::hover());
+                let (r, resp) = ui.allocate_exact_size(vec2(66.0, 22.0), Sense::click());
                 widgets::glow(ui, r, 11, ACCENT_DIM, 8);
                 ui.painter().rect_filled(r, cr(11), ACCENT_DIM);
                 ui.painter().rect_stroke(r, cr(11), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
-                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "v1.2.2", egui::FontId::new(TYPE_BADGE, egui::FontFamily::Name(BOLD.into())), ACCENT);
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, concat!("v", env!("CARGO_PKG_VERSION")), egui::FontId::new(TYPE_BADGE, egui::FontFamily::Name(BOLD.into())), ACCENT);
+                let clicked = resp.on_hover_text(format!("{}\nClick to check GitHub & sync local install", hydra_stdio::update::status_line())).clicked();
+                if clicked {
+                    self.run(Cmd::Update);
+                }
             }
         });
         let brand_right = brand.response.rect.right();
@@ -1347,6 +1393,44 @@ impl HydraApp {
             ui.add_space(4.0);
         }
         ui.spacing_mut().item_spacing.x = 12.0;
+        let time = ui.ctx().input(|i| i.time);
+        let reduced = motion::reduced_motion();
+        let pulse = if reduced {
+            1.0
+        } else {
+            ((time * std::f64::consts::TAU / 1.6).sin() * 0.5 + 0.5) as f32
+        };
+        let rec_pulse = if reduced {
+            1.0
+        } else {
+            ((time * 3.2).sin() * 0.5 + 0.5) as f32
+        };
+        let thinking = self.m.active_busy() || self.m.any_busy();
+        let waiting_approval = !self.m.approvals.is_empty();
+        let recording = self.voice_recording;
+        let q_count = self.queue.get(&self.m.sessions[self.m.active].id).map(|q| q.len()).unwrap_or(0);
+
+        const BRAILLE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let spin = BRAILLE[((time * 12.0) as usize) % BRAILLE.len()];
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if recording {
+                let c = motion::mix(Color32::from_rgb(180, 48, 48), Color32::from_rgb(255, 84, 84), rec_pulse);
+                ui.label(rtb("● REC", 11.5, c));
+                ui.label(rt("listening… · Esc cancels", 11.5, TEXT2));
+            } else if waiting_approval {
+                let c = Color32::from_rgb(255, 184, 48);
+                ui.label(rtb("◆", 11.5, c));
+                ui.label(rt("hydra is waiting on your answer · Enter allows · Esc skips", 11.5, c));
+            } else if thinking {
+                ui.label(rtb(spin, 12.0, ACCENT));
+                ui.label(rt("Thinking · working... · Enter queues · Ctrl+Enter steers · Esc interrupts", 11.5, TEXT2));
+            } else {
+                ui.label(rt("hydra · idle", 11.5, MUTED));
+            }
+        });
+        ui.add_space(4.0);
+
         let mut do_send = false;
         let mut do_stop = false;
         let mut do_steer = false;
@@ -1362,31 +1446,58 @@ impl HydraApp {
             if focused && !self.slash_menu(ui) && ui.input_mut(|i| !i.modifiers.shift && !i.modifiers.alt && i.consume_key(Modifiers::NONE, Key::Enter)) {
                 do_send = true;
             }
-            let thinking = self.m.active_busy();
-            if self.composer_rect.is_positive() && (focused || thinking) {
-                if thinking && !motion::reduced_motion() {
-                    // TUI prompt-bar pulse: border breathes between dim and
-                    // full phosphor green on a sin(ms / 240) wave while busy.
-                    let wave = ((ui.ctx().input(|i| i.time) * 1000.0 / 240.0).sin() * 0.5 + 0.5) as f32;
-                    let glow_color = Color32::from_rgba_unmultiplied(0, 255, 102, (40.0 + 90.0 * wave) as u8);
-                    widgets::glow(ui, self.composer_rect, 16, glow_color, (10.0 + 10.0 * wave).round() as u8);
+
+            let tui_forest = Color32::from_rgb(31, 122, 69);
+            let amber_lo = Color32::from_rgb(180, 120, 20);
+            let amber_hi = Color32::from_rgb(255, 184, 48);
+            let rec_lo = Color32::from_rgb(150, 32, 32);
+            let rec_hi = Color32::from_rgb(255, 84, 84);
+
+            let (border_col, stroke_w) = if recording {
+                (motion::mix(rec_lo, rec_hi, rec_pulse), 1.6 + 0.8 * rec_pulse)
+            } else if waiting_approval {
+                (motion::mix(amber_lo, amber_hi, pulse), 1.6 + 0.6 * pulse)
+            } else if thinking {
+                (motion::mix(tui_forest, ACCENT, pulse), 1.6 + 0.8 * pulse)
+            } else if focused {
+                (ACCENT, 1.6)
+            } else {
+                (tui_forest, 1.2)
+            };
+
+            if self.composer_rect.is_positive() {
+                if recording {
+                    let glow_c = Color32::from_rgba_unmultiplied(255, 84, 84, (55.0 + 95.0 * rec_pulse) as u8);
+                    widgets::glow(ui, self.composer_rect, 16, glow_c, (12.0 + 10.0 * rec_pulse).round() as u8);
+                } else if waiting_approval {
+                    let glow_c = Color32::from_rgba_unmultiplied(255, 184, 48, (50.0 + 85.0 * pulse) as u8);
+                    widgets::glow(ui, self.composer_rect, 16, glow_c, (10.0 + 10.0 * pulse).round() as u8);
+                } else if thinking {
+                    let glow_c = Color32::from_rgba_unmultiplied(0, 255, 102, (55.0 + 110.0 * pulse) as u8);
+                    widgets::glow(ui, self.composer_rect, 16, glow_c, (12.0 + 12.0 * pulse).round() as u8);
                 } else if focused {
                     widgets::shadow(ui, self.composer_rect, 16, SHADOW_GLOW);
                 }
             }
+
             let resp = egui::Frame::new()
                 .fill(BG3)
                 .corner_radius(cr(16))
-                .inner_margin(Margin::symmetric(16, 12))
-                .stroke(Stroke::new(1.0, if thinking {
-                    let wave = ((ui.ctx().input(|i| i.time) * 1000.0 / 240.0).sin() * 0.5 + 0.5) as f32;
-                    motion::mix(Color32::from_rgb(31, 122, 69), ACCENT, if motion::reduced_motion() { 1.0 } else { wave })
-                } else if focused { ACCENT } else { BORDER }))
+                .inner_margin(Margin { left: 32, right: 16, top: 14, bottom: 12 })
+                .stroke(Stroke::new(stroke_w, border_col))
                 .show(ui, |ui| {
-                    ui.set_width(width - 34.0);
-                    let hint = match self.m.nav {
-                        "terminal" => "Run a command in the sandbox...",
-                        _ => "Summon frontier model, instruct agent, or issue bash command...",
+                    ui.set_width((width - 48.0).max(40.0));
+                    let hint = if recording {
+                        "listening… escape to cancel"
+                    } else if waiting_approval {
+                        "type your answer · Enter to send · Esc to cancel"
+                    } else if thinking {
+                        "type to queue · Ctrl+Enter steers the running turn"
+                    } else {
+                        match self.m.nav {
+                            "terminal" => "Run a command in the sandbox...",
+                            _ => "Ask anything, or / for commands...",
+                        }
                     };
                     let r = ui.add(
                         egui::TextEdit::multiline(&mut self.input)
@@ -1404,7 +1515,84 @@ impl HydraApp {
                 resp.inner.request_focus();
                 self.focus_input = false;
             }
-            self.composer_rect = resp.response.rect;
+            let rect = resp.response.rect;
+            self.composer_rect = rect;
+
+            // Paint multi-ring outer + inner glow AFTER/OVER `rect` so `BG3` fill never obscures the pulsing halo
+            if recording {
+                widgets::composer_halo(ui, rect, 16, rec_hi, rec_pulse);
+            } else if waiting_approval {
+                widgets::composer_halo(ui, rect, 16, amber_hi, pulse);
+            } else if thinking {
+                widgets::composer_halo(ui, rect, 16, ACCENT, pulse);
+            } else if focused {
+                widgets::composer_halo(ui, rect, 16, ACCENT, 0.35);
+            }
+
+            // Paint TUI `❯` prompt chevron inside the left margin of the composer box
+            let chev_col = if recording {
+                rec_hi
+            } else if waiting_approval {
+                amber_hi
+            } else {
+                ACCENT
+            };
+            ui.painter().text(
+                egui::pos2(rect.left() + 14.0, rect.top() + 22.0),
+                egui::Align2::LEFT_CENTER,
+                "❯",
+                egui::FontId::new(13.0, egui::FontFamily::Name(BOLD.into())),
+                chev_col,
+            );
+
+            // Paint TUI top-border embedded title pill (top-left) and model/permission pill (top-right)
+            let pill_bg = Color32::from_rgb(8, 8, 8);
+            let font_bold = egui::FontId::new(11.0, egui::FontFamily::Name(BOLD.into()));
+            let font_reg = egui::FontId::new(11.0, egui::FontFamily::Proportional);
+            let left_runs: Vec<(String, egui::FontId, Color32)> = if recording {
+                vec![(" ● dictating ".into(), font_bold.clone(), rec_hi)]
+            } else if waiting_approval {
+                vec![(" ◆ hydra · waiting on your answer ".into(), font_bold.clone(), amber_hi)]
+            } else if thinking {
+                let mut v = vec![
+                    (" hydra ".into(), font_bold.clone(), ACCENT),
+                    ("· working ".into(), font_reg.clone(), MUTED),
+                ];
+                if q_count > 0 {
+                    v.push((format!("· {q_count} queued "), font_bold.clone(), amber_hi));
+                }
+                v
+            } else {
+                let mut v = vec![(" hydra ".into(), font_bold.clone(), ACCENT)];
+                if q_count > 0 {
+                    v.push((format!("· {q_count} queued "), font_bold.clone(), amber_hi));
+                }
+                v
+            };
+
+            let mut left_w = 0.0f32;
+            for (t, f, c) in &left_runs {
+                left_w += ui.fonts_mut(|fm| fm.layout_no_wrap(t.clone(), f.clone(), *c).size().x);
+            }
+            let left_pill = egui::Rect::from_min_size(egui::pos2(rect.left() + 18.0, rect.top() - 7.0), vec2(left_w + 4.0, 14.0));
+            ui.painter().rect_filled(left_pill, cr(4), pill_bg);
+            let mut lx = left_pill.left() + 2.0;
+            for (t, f, c) in left_runs {
+                let w = ui.fonts_mut(|fm| fm.layout_no_wrap(t.clone(), f.clone(), c).size().x);
+                ui.painter().text(egui::pos2(lx, left_pill.center().y), egui::Align2::LEFT_CENTER, t, f, c);
+                lx += w;
+            }
+
+            let model_short = MODELS.get(self.m.model).map(|m| m.0).unwrap_or("mimo 2.6 flash");
+            let perm_short = self.m.sessions.get(self.m.active).map(|s| s.permission.as_str()).unwrap_or("manual");
+            let right_label = format!(" {model_short} · {perm_short} ");
+            let right_w = ui.fonts_mut(|fm| fm.layout_no_wrap(right_label.clone(), font_reg.clone(), MUTED).size().x);
+            if rect.width() > left_w + right_w + 56.0 {
+                let right_pill = egui::Rect::from_min_size(egui::pos2(rect.right() - 18.0 - right_w - 4.0, rect.top() - 7.0), vec2(right_w + 4.0, 14.0));
+                ui.painter().rect_filled(right_pill, cr(4), pill_bg);
+                ui.painter().text(right_pill.center(), egui::Align2::CENTER_CENTER, right_label, font_reg, MUTED);
+            }
+
             ui.with_layout(Layout::bottom_up(Align::Max), |ui| {
                 if self.m.active_busy() {
                     if widgets::button(ui, "Stop", Kind::Danger, 13.0, (16.0, 8.0), Some(send_w)).clicked() {
@@ -3475,11 +3663,12 @@ impl HydraApp {
             }
         }
         // Idle means idle: backend events, input and the workspace watcher wake us. Only animate while something runs.
-        let animating = self.m.any_busy() || self.checks.is_empty() || time - self.started < 2.0;
+        let active_anim = self.m.any_busy() || !self.m.approvals.is_empty() || self.voice_recording || self.is_computer_use_active();
+        let startup_anim = self.checks.is_empty() || time - self.started < 2.0;
         // D21: a frame caused by input or an agent event is followed by one more, so a swap chain that lags a frame
         // (software GL on Xvfb) still presents the current state without waiting for the next pointer move
         let woke = ctx.input(|i| !i.events.is_empty()) || std::mem::take(&mut self.had_events);
-        ctx.request_repaint_after(std::time::Duration::from_millis(if animating { 50 } else if woke { 120 } else { IDLE_REPAINT_MS }));
+        ctx.request_repaint_after(std::time::Duration::from_millis(if active_anim { 16 } else if startup_anim { 80 } else if woke { 120 } else { IDLE_REPAINT_MS }));
         if self.m.agent_ready && !self.m.any_busy() {
             if let Ok(p) = std::env::var("HYDRA_DEMO_PROMPT") {
                 std::env::remove_var("HYDRA_DEMO_PROMPT");
@@ -3626,14 +3815,12 @@ impl HydraApp {
         self.toast_ui(ctx, time);
         let _ = &self.start_error;
 
-        if self.is_computer_use_active() {
-            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("computer_use_glow")));
-            let s_rect = ctx.content_rect();
-            let pulse = 0.75 + 0.25 * (time * 3.5).sin().abs() as f32;
-            let glow_c1 = Color32::from_rgba_premultiplied(0, 255, 102, (180.0 * pulse) as u8);
-            let glow_c2 = Color32::from_rgba_premultiplied(0, 255, 102, (60.0 * pulse) as u8);
-            painter.rect_stroke(s_rect, CornerRadius::ZERO, Stroke::new(4.0, glow_c1), StrokeKind::Inside);
-            painter.rect_stroke(s_rect.shrink(4.0), CornerRadius::ZERO, Stroke::new(4.0, glow_c2), StrokeKind::Inside);
+        let cu_active = self.is_computer_use_active();
+        #[cfg(windows)]
+        self.screen_overlay.set_active(cu_active && !self.headless);
+
+        if cu_active {
+            paint_computer_use_screen_glow(ctx, time);
         }
 
         if let Some(plan) = &mut self.shot {
@@ -3655,6 +3842,356 @@ impl HydraApp {
             }
         }
     }
+}
+
+/// Build a 2-band GPU vertex-interpolated inward screen-border gradient mesh (0..28px core + 28..84px feather to transparent).
+pub fn build_screen_border_gradient_mesh(rect: egui::Rect, time: f64) -> egui::Mesh {
+    let mut mesh = egui::Mesh::default();
+    if !rect.is_positive() {
+        return mesh;
+    }
+    let segs_per_edge = 16usize;
+    let total_segs = segs_per_edge * 4;
+    let core_depth = 28.0_f32.min(rect.width() * 0.2).min(rect.height() * 0.2);
+    let feather_depth = 84.0_f32.min(rect.width() * 0.45).min(rect.height() * 0.45);
+    let r0 = rect;
+    let r1 = rect.shrink(core_depth);
+    let r2 = rect.shrink(feather_depth);
+
+    let point_on_rect = |r: egui::Rect, idx: usize| -> egui::Pos2 {
+        let edge = idx / segs_per_edge;
+        let step = (idx % segs_per_edge) as f32 / (segs_per_edge as f32);
+        match edge {
+            0 => egui::pos2(r.left() + r.width() * step, r.top()),
+            1 => egui::pos2(r.right(), r.top() + r.height() * step),
+            2 => egui::pos2(r.right() - r.width() * step, r.bottom()),
+            _ => egui::pos2(r.left(), r.bottom() - r.height() * step),
+        }
+    };
+
+    let reduced = motion::reduced_motion();
+    let pulse = if reduced {
+        0.85
+    } else {
+        ((time * std::f64::consts::TAU / 1.6).sin() * 0.5 + 0.5) as f32
+    };
+
+    for i in 0..total_segs {
+        let angle = (i as f64 / total_segs as f64) * std::f64::consts::TAU;
+        let wave = if reduced {
+            1.0
+        } else {
+            (0.72 + 0.28 * ((angle * 2.0 - time * 2.4).sin() * 0.5 + 0.5)) as f32
+        };
+        let intensity = (0.76 + 0.24 * pulse) * wave;
+        let outer_alpha = (180.0 * intensity).round().clamp(1.0, 255.0) as u8;
+        let mid_alpha = (64.0 * intensity).round().clamp(1.0, 255.0) as u8;
+
+        let c_outer = Color32::from_rgba_unmultiplied(0, 255, 102, outer_alpha);
+        let c_mid = Color32::from_rgba_unmultiplied(0, 230, 90, mid_alpha);
+        let c_inner = Color32::TRANSPARENT;
+
+        mesh.colored_vertex(point_on_rect(r0, i), c_outer);
+        mesh.colored_vertex(point_on_rect(r1, i), c_mid);
+        mesh.colored_vertex(point_on_rect(r2, i), c_inner);
+    }
+
+    for i in 0..total_segs {
+        let next = (i + 1) % total_segs;
+        let a = (i * 3) as u32;
+        let b = (next * 3) as u32;
+        // Core band: outer edge (0) to mid ring (1)
+        mesh.add_triangle(a, b, b + 1);
+        mesh.add_triangle(a, b + 1, a + 1);
+        // Atmospheric feather band: mid ring (1) to transparent inner boundary (2)
+        mesh.add_triangle(a + 1, b + 1, b + 2);
+        mesh.add_triangle(a + 1, b + 2, a + 2);
+    }
+
+    mesh
+}
+
+fn paint_computer_use_screen_glow(ctx: &egui::Context, time: f64) {
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("computer_use_glow")));
+    let s_rect = ctx.content_rect();
+    let mesh = build_screen_border_gradient_mesh(s_rect, time);
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// Native Windows click-through full-monitor edge gradient overlay while Computer Use is active.
+#[cfg(windows)]
+#[derive(Default)]
+struct ScreenGlowOverlay {
+    state: Option<std::sync::Arc<(std::sync::atomic::AtomicBool, std::sync::atomic::AtomicBool)>>,
+}
+
+#[cfg(windows)]
+impl ScreenGlowOverlay {
+    fn set_active(&mut self, active: bool) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        if !active && self.state.is_none() {
+            return;
+        }
+        let pair = self.state.get_or_insert_with(|| {
+            let s = Arc::new((AtomicBool::new(false), AtomicBool::new(false)));
+            let s_thread = Arc::clone(&s);
+            std::thread::spawn(move || unsafe {
+                run_win32_screen_glow_overlay(s_thread);
+            });
+            s
+        });
+        pair.0.store(active, Ordering::Relaxed);
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ScreenGlowOverlay {
+    fn drop(&mut self) {
+        if let Some(s) = &self.state {
+            s.0.store(false, std::sync::atomic::Ordering::Relaxed);
+            s.1.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(windows)]
+unsafe fn run_win32_screen_glow_overlay(state: std::sync::Arc<(std::sync::atomic::AtomicBool, std::sync::atomic::AtomicBool)>) {
+    use std::ffi::c_void;
+    use std::sync::atomic::Ordering;
+
+    #[repr(C)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+    #[repr(C)]
+    struct Size {
+        cx: i32,
+        cy: i32,
+    }
+    #[repr(C)]
+    struct BlendFunction {
+        blend_op: u8,
+        blend_flags: u8,
+        source_constant_alpha: u8,
+        alpha_format: u8,
+    }
+    #[repr(C)]
+    struct BitmapInfoHeader {
+        bi_size: u32,
+        bi_width: i32,
+        bi_height: i32,
+        bi_planes: u16,
+        bi_bit_count: u16,
+        bi_compression: u32,
+        bi_size_image: u32,
+        bi_x_pels_per_meter: i32,
+        bi_y_pels_per_meter: i32,
+        bi_clr_used: u32,
+        bi_clr_important: u32,
+    }
+    #[repr(C)]
+    struct MsgWin {
+        hwnd: *mut c_void,
+        message: u32,
+        w_param: usize,
+        l_param: isize,
+        time: u32,
+        pt: Point,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetSystemMetrics(index: i32) -> i32;
+        fn CreateWindowExW(
+            ex_style: u32,
+            class_name: *const u16,
+            window_name: *const u16,
+            style: u32,
+            x: i32,
+            y: i32,
+            width: i32,
+            height: i32,
+            parent: *mut c_void,
+            menu: *mut c_void,
+            instance: *mut c_void,
+            param: *mut c_void,
+        ) -> *mut c_void;
+        fn ShowWindow(hwnd: *mut c_void, cmd_show: i32) -> i32;
+        fn DestroyWindow(hwnd: *mut c_void) -> i32;
+        fn UpdateLayeredWindow(
+            hwnd: *mut c_void,
+            hdc_dst: *mut c_void,
+            ppt_dst: *const Point,
+            psize: *const Size,
+            hdc_src: *mut c_void,
+            ppt_src: *const Point,
+            cr_key: u32,
+            pblend: *const BlendFunction,
+            flags: u32,
+        ) -> i32;
+        fn GetDC(hwnd: *mut c_void) -> *mut c_void;
+        fn ReleaseDC(hwnd: *mut c_void, hdc: *mut c_void) -> i32;
+        fn PeekMessageW(msg: *mut MsgWin, hwnd: *mut c_void, min: u32, max: u32, remove: u32) -> i32;
+        fn TranslateMessage(msg: *const MsgWin) -> i32;
+        fn DispatchMessageW(msg: *const MsgWin) -> isize;
+    }
+
+    #[link(name = "gdi32")]
+    extern "system" {
+        fn CreateCompatibleDC(hdc: *mut c_void) -> *mut c_void;
+        fn DeleteDC(hdc: *mut c_void) -> i32;
+        fn CreateDIBSection(
+            hdc: *mut c_void,
+            pbmi: *const BitmapInfoHeader,
+            usage: u32,
+            ppv_bits: *mut *mut u32,
+            h_section: *mut c_void,
+            offset: u32,
+        ) -> *mut c_void;
+        fn SelectObject(hdc: *mut c_void, h: *mut c_void) -> *mut c_void;
+        fn DeleteObject(h: *mut c_void) -> i32;
+    }
+
+    let w = GetSystemMetrics(0).max(320);
+    let h = GetSystemMetrics(1).max(240);
+    // Built-in STATIC class avoids custom WNDCLASSEX registration
+    let class_name: [u16; 7] = [b'S' as u16, b'T' as u16, b'A' as u16, b'T' as u16, b'I' as u16, b'C' as u16, 0];
+    let title: [u16; 1] = [0];
+    const WS_POPUP: u32 = 0x8000_0000;
+    const WS_EX_LAYERED: u32 = 0x0008_0000;
+    const WS_EX_TRANSPARENT: u32 = 0x0000_0020;
+    const WS_EX_TOPMOST: u32 = 0x0000_0008;
+    const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+    const WS_EX_NOACTIVATE: u32 = 0x0800_0000;
+
+    let hwnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        class_name.as_ptr(),
+        title.as_ptr(),
+        WS_POPUP,
+        0,
+        0,
+        w,
+        h,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+    );
+    if hwnd.is_null() {
+        return;
+    }
+
+    let screen_dc = GetDC(std::ptr::null_mut());
+    let mem_dc = CreateCompatibleDC(screen_dc);
+    let bmi = BitmapInfoHeader {
+        bi_size: std::mem::size_of::<BitmapInfoHeader>() as u32,
+        bi_width: w,
+        bi_height: -h, // top-down DIB
+        bi_planes: 1,
+        bi_bit_count: 32,
+        bi_compression: 0,
+        bi_size_image: 0,
+        bi_x_pels_per_meter: 0,
+        bi_y_pels_per_meter: 0,
+        bi_clr_used: 0,
+        bi_clr_important: 0,
+    };
+    let mut bits: *mut u32 = std::ptr::null_mut();
+    let hbm = CreateDIBSection(mem_dc, &bmi, 0, &mut bits, std::ptr::null_mut(), 0);
+    if hbm.is_null() || bits.is_null() {
+        DeleteDC(mem_dc);
+        ReleaseDC(std::ptr::null_mut(), screen_dc);
+        DestroyWindow(hwnd);
+        return;
+    }
+    let old_bm = SelectObject(mem_dc, hbm);
+    let border = 72i32.min(w / 4).min(h / 4);
+    let start = std::time::Instant::now();
+    let mut visible = false;
+
+    while !state.1.load(Ordering::Relaxed) {
+        let mut msg = MsgWin {
+            hwnd: std::ptr::null_mut(),
+            message: 0,
+            w_param: 0,
+            l_param: 0,
+            time: 0,
+            pt: Point { x: 0, y: 0 },
+        };
+        while PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, 1) != 0 {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        if state.0.load(Ordering::Relaxed) {
+            let t = start.elapsed().as_secs_f32();
+            let pulse = 0.72 + 0.28 * ((t * std::f32::consts::TAU / 1.6).sin() * 0.5 + 0.5);
+            let slice = std::slice::from_raw_parts_mut(bits, (w * h) as usize);
+
+            let paint_row = |slice: &mut [u32], y: i32, x_start: i32, x_end: i32| {
+                let dy = y.min(h - 1 - y);
+                let row_off = (y * w) as usize;
+                for x in x_start..x_end {
+                    let dx = x.min(w - 1 - x);
+                    let d = dx.min(dy);
+                    if d >= border {
+                        slice[row_off + x as usize] = 0;
+                    } else {
+                        let norm = 1.0 - (d as f32 / border as f32);
+                        let falloff = norm * norm;
+                        let a = (170.0 * pulse * falloff) as u32;
+                        let g = a; // premultiplied G = 255 * (a/255) = a
+                        let b = (a * 102) / 255;
+                        slice[row_off + x as usize] = (a << 24) | (g << 8) | b;
+                    }
+                }
+            };
+
+            for y in 0..border {
+                paint_row(slice, y, 0, w);
+            }
+            for y in (h - border)..h {
+                paint_row(slice, y, 0, w);
+            }
+            for y in border..(h - border) {
+                paint_row(slice, y, 0, border);
+                paint_row(slice, y, w - border, w);
+            }
+
+            let pt_zero = Point { x: 0, y: 0 };
+            let sz = Size { cx: w, cy: h };
+            let blend = BlendFunction {
+                blend_op: 0,
+                blend_flags: 0,
+                source_constant_alpha: 255,
+                alpha_format: 1, // AC_SRC_ALPHA
+            };
+            UpdateLayeredWindow(hwnd, screen_dc, &pt_zero, &sz, mem_dc, &pt_zero, 0, &blend, 2);
+            if !visible {
+                ShowWindow(hwnd, 4); // SW_SHOWNOACTIVATE
+                visible = true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(33));
+        } else {
+            if visible {
+                ShowWindow(hwnd, 0); // SW_HIDE
+                visible = false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(80));
+        }
+    }
+
+    if visible {
+        ShowWindow(hwnd, 0);
+    }
+    SelectObject(mem_dc, old_bm);
+    DeleteObject(hbm);
+    DeleteDC(mem_dc);
+    ReleaseDC(std::ptr::null_mut(), screen_dc);
+    DestroyWindow(hwnd);
 }
 
 /// The cwd chip text: the whole path if it fits, else "…" plus as much of its tail as fits, else nothing.
@@ -3697,6 +4234,43 @@ fn pick_folder_dialog(initial: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_default_model_and_screen_border_gradient_mesh() {
+        assert_eq!(MODELS[0].0, "bonsai 2 9b");
+        assert_eq!(MODELS[1].0, "bonsai 2 2b");
+        assert_eq!(MODELS[2].0, "bonsai 2 4b");
+        assert_eq!(MODELS[3].0, "bonsai 2 27b");
+        assert_eq!(MODELS[4].0, "mimo 2.6 flash");
+        assert_eq!(MODELS[5].0, "mimo 2.6 pro");
+        assert_eq!(MODELS[6].0, "glm 5.3 flash");
+        assert_eq!(normalize_model_key("bonsai"), "bonsai 2 9b");
+        assert_eq!(normalize_model_key("bonsai-2-9b"), "bonsai 2 9b");
+        assert_eq!(normalize_model_key("mimo.2.6 flash"), "mimo 2.6 flash");
+        assert_eq!(normalize_model_key("mimo.2.6 pro"), "mimo 2.6 pro");
+
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(1280.0, 800.0));
+        let mesh = build_screen_border_gradient_mesh(rect, 0.4);
+        assert!(!mesh.vertices.is_empty());
+        assert!(!mesh.indices.is_empty());
+        assert_eq!(mesh.vertices.len(), 64 * 3);
+        assert_eq!(mesh.indices.len(), 64 * 4 * 3);
+        for (i, v) in mesh.vertices.iter().enumerate() {
+            match i % 3 {
+                0 => {
+                    assert!(v.color.g() > 0, "outer boundary vertex must carry positive phosphor green");
+                    assert!(v.color.a() > 0, "outer boundary vertex must have positive alpha");
+                }
+                1 => {
+                    assert!(v.color.g() > 0 && v.color.a() > 0, "mid gradient vertex must carry intermediate green alpha");
+                }
+                _ => {
+                    assert_eq!(v.color, Color32::TRANSPARENT, "inner feather vertex must fade to transparent");
+                    assert_eq!(v.color.a(), 0);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_drag_and_drop_attachments_and_prompt_formatting() {
@@ -3749,5 +4323,9 @@ mod tests {
         let entries = palette_entries();
         assert!(entries.iter().any(|e| e.0.contains("Options")));
         assert!(entries.iter().any(|e| e.0.contains("Memory")));
+        assert!(entries.iter().any(|e| e.1 == "/update" && e.2 == Cmd::Update));
+        assert!(SLASH.iter().any(|s| s.0 == "/update"));
+        assert!(slash_cmd("/update") == Some(Cmd::Update));
     }
 }
+

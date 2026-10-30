@@ -1,7 +1,7 @@
 //! Local reachability and provider budget probes. Secret values stay out of the returned rows.
 
 use serde_json::Value;
-use std::net::{SocketAddr, TcpStream};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -19,14 +19,14 @@ pub struct Budget {
 
 pub fn local_endpoints() -> Vec<Endpoint> {
     let specs = [
-        ("ollama", env_host("OLLAMA_HOST", "127.0.0.1:11434")),
-        ("llama.cpp", env_host("LLAMACPP_HOST", "127.0.0.1:8080")),
-        ("local openai", env_host("LOCAL_AI_BASE", "127.0.0.1:8000")),
+        ("ollama", env_host("OLLAMA_HOST", "127.0.0.1:11434"), 11434u16),
+        ("llama.cpp", env_host("LLAMACPP_HOST", "127.0.0.1:8080"), 8080),
+        ("local openai", env_host("LOCAL_AI_BASE", "127.0.0.1:8000"), 8000),
     ];
     specs
         .into_iter()
-        .map(|(name, target)| {
-            let open = tcp_open(&target);
+        .map(|(name, target, default_port)| {
+            let open = tcp_open(&target, default_port);
             Endpoint { name: name.into(), target, open }
         })
         .collect()
@@ -149,18 +149,52 @@ fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(default)
 }
 
-fn tcp_open(target: &str) -> bool {
-    let hostport = target.trim().trim_start_matches("http://").trim_start_matches("https://");
-    let hostport = hostport.split('/').next().unwrap_or(hostport);
-    let (host, port) = match hostport.rsplit_once(':') {
-        Some((h, p)) => (h, p.parse::<u16>().unwrap_or(80)),
-        None => (hostport, 80),
-    };
-    let addr = format!("{host}:{port}");
-    let Ok(sockaddr) = addr.parse::<SocketAddr>() else {
+/// Host and port from a Hydra endpoint string.
+///
+/// Accepts `127.0.0.1:11434`, `http://localhost:11434`, and `http://localhost:8080/v1`.
+/// A missing port uses `default_port` (the service default), not port 80.
+fn host_port(target: &str, default_port: u16) -> Option<(String, u16)> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let rest = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    let rest = rest.split(['/', '?', '#']).next().unwrap_or(rest).trim();
+    if rest.is_empty() {
+        return None;
+    }
+    if let Some(body) = rest.strip_prefix('[') {
+        let (addr, after) = body.split_once(']')?;
+        if addr.is_empty() {
+            return None;
+        }
+        let port = match after.strip_prefix(':') {
+            Some(raw) if !raw.is_empty() => raw.parse().ok()?,
+            _ => default_port,
+        };
+        return Some((format!("[{addr}]"), port));
+    }
+    if let Some((host, raw_port)) = rest.rsplit_once(':') {
+        if !host.is_empty() {
+            let port = raw_port.parse::<u16>().unwrap_or(default_port);
+            return Some((host.to_string(), port));
+        }
+    }
+    Some((rest.to_string(), default_port))
+}
+
+fn tcp_open(target: &str, default_port: u16) -> bool {
+    let Some((host, port)) = host_port(target, default_port) else {
         return false;
     };
-    TcpStream::connect_timeout(&sockaddr, Duration::from_millis(250)).is_ok()
+    let lookup = host.trim_start_matches('[').trim_end_matches(']');
+    let Ok(addrs) = (lookup, port).to_socket_addrs() else {
+        return false;
+    };
+    addrs.take(8).any(|sockaddr| TcpStream::connect_timeout(&sockaddr, Duration::from_millis(250)).is_ok())
 }
 
 fn http_balance(url: &str, key: &str) -> Option<f64> {
@@ -185,4 +219,31 @@ fn http_json(url: &str, key: &str) -> Option<Value> {
         .call()
         .ok()?;
     serde_json::from_reader(resp.into_reader()).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn host_port_reads_url_forms_the_rest_of_hydra_stores() {
+        assert_eq!(host_port("http://localhost:8080/v1", 8000), Some(("localhost".into(), 8080)));
+        assert_eq!(host_port("https://127.0.0.1:11434", 80), Some(("127.0.0.1".into(), 11434)));
+        assert_eq!(host_port("127.0.0.1:8080", 80), Some(("127.0.0.1".into(), 8080)));
+        assert_eq!(host_port("http://127.0.0.1", 11434), Some(("127.0.0.1".into(), 11434)));
+        assert_eq!(host_port("[::1]:11434", 80), Some(("[::1]".into(), 11434)));
+        assert_eq!(host_port("   ", 11434), None);
+    }
+
+    #[test]
+    fn tcp_open_reaches_localhost_urls() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("http://localhost:{port}/v1");
+        assert!(tcp_open(&url, 9), "{url} should be open");
+        assert!(tcp_open(&format!("http://127.0.0.1:{port}"), 9));
+        drop(listener);
+        assert!(!tcp_open(&format!("http://127.0.0.1:{port}"), 9));
+    }
 }

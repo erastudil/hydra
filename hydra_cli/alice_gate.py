@@ -73,7 +73,7 @@ QUESTION_RE = re.compile(r"^(what|where|how|which|who|when|why)\b", re.IGNORECAS
 STACK_ROOTS = (
     ("hydra", r"C:\Users\jpm05\Documents\hydra", "CLI, agent loop, catalog, providers"),
     ("alice", r"C:\Users\jpm05\Documents\snowgate-alice\alice_core.js", "local cognitive core"),
-    ("easylm", r"C:\Users\jpm05\Documents\hnai\easylm", "browser WebGPU inference"),
+    ("easylm", r"C:\Users\jpm05\Documents\easylm", "browser WebGPU inference"),
     ("progen", r"C:\Users\jpm05\Documents\.agents\rules\progen_invariants.md", "syntax invariants"),
     ("progen skill", r"C:\Users\jpm05\Documents\.agents\skills\progen\SKILL.md", "progen skill"),
     ("documents", r"C:\Users\jpm05\Documents\AGENTS.md", "workspace genome"),
