@@ -7,7 +7,6 @@ use hydra_stdio::{Backend, Ev};
 use serde_json::{json, Value};
 
 use crate::endpoints::{budgets, free_usage, local_endpoints};
-use crate::layout::SPIN;
 
 pub const DEFAULT_AGENT_MODEL: &str = "bonsai 2 9b";
 pub const DEFAULT_FLASH_MODEL: &str = "mimo 2.6 flash";
@@ -88,7 +87,6 @@ pub struct App {
     pub thread: String,
     pub cwd: String,
     pub turn_n: u64,
-    pub log_once: bool,
     pub quit: bool,
     assistant_at: Option<usize>,
 }
@@ -96,11 +94,11 @@ pub struct App {
 impl App {
     pub fn new() -> Self {
         let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| ".".into());
-        let rules_detected = std::path::Path::new(&cwd).join("AGENTS.md").exists()
-            || std::path::Path::new(&cwd).join(".cursorrules").exists()
-            || std::path::Path::new(&cwd).join("CLAUDE.md").exists();
         let dialect = std::env::var("HYDRA_DIALECT")
-            .unwrap_or_else(|_| if rules_detected { "progen".into() } else { "slack".into() });
+            .ok()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "slack".into());
         let raw_model = std::env::var("HYDRA_DEFAULT_MODEL")
             .or_else(|_| std::env::var("HYDRA_MODEL"))
             .unwrap_or_else(|_| DEFAULT_AGENT_MODEL.into());
@@ -150,7 +148,6 @@ impl App {
             thread: "tui-main".into(),
             cwd,
             turn_n: 0,
-            log_once: false,
             quit: false,
             assistant_at: None,
         };
@@ -500,6 +497,8 @@ impl App {
             ("/mode", "switch context strategy: compact, sliding, recall"),
             ("/window", "set context window size in tokens"),
             ("/agents", "list active runner tasks"),
+            ("/reconnect", "respawn the stdio backend agent process"),
+            ("/retry", "alias for /reconnect"),
             ("/update", "check version and pull latest from github"),
             ("/allow", "approve pending tool call"),
             ("/skip", "skip pending tool call"),
@@ -621,7 +620,33 @@ impl App {
         self.dispatch_turn(&text);
     }
 
+    pub fn reconnect(&mut self) {
+        if let Some(mut old) = self.be.take() {
+            old.shutdown();
+        }
+        self.busy_turn = None;
+        self.busy_start = None;
+        self.assistant_at = None;
+        self.approval = None;
+        self.approval_args = Value::Null;
+        self.status_label = "idle".into();
+        if cfg!(test) || std::env::var("HYDRA_NO_BACKEND").ok().as_deref() == Some("1") {
+            self.transcript.push("agent : reconnected".into());
+            return;
+        }
+        match Backend::spawn(|| {}) {
+            Ok(be) => {
+                self.be = Some(be);
+                self.transcript.push("agent : reconnected".into());
+            }
+            Err(e) => self.transcript.push(format!("agent : {e}")),
+        }
+    }
+
     fn dispatch_turn(&mut self, text: &str) {
+        if self.be.is_none() && !cfg!(test) && std::env::var("HYDRA_NO_BACKEND").ok().as_deref() != Some("1") {
+            self.reconnect();
+        }
         if self.be.is_none() && !cfg!(test) {
             self.transcript.push("agent : not connected".into());
             return;
@@ -753,6 +778,7 @@ impl App {
                     ("/mode [compact|sliding|recall]", "switch context strategy"),
                     ("/window [tokens]", "set context window size in tokens"),
                     ("/agents", "list active runner tasks"),
+                    ("/reconnect", "respawn the stdio backend agent process"),
                     ("/update", "check version and pull latest from github"),
                     ("/allow | /skip | /abort", "respond to pending tool approval"),
                     ("/clear", "reset session transcript"),
@@ -832,6 +858,26 @@ impl App {
                     self.transcript.push(format!(
                         "permission : {} (options: plan, manual, accept_edits, bypass)",
                         self.permission
+                    ));
+                }
+            }
+            "progen" => {
+                self.dialect = "progen".into();
+                self.transcript.push("dialect : progen".into());
+            }
+            "slack" | "english" => {
+                self.dialect = "slack".into();
+                self.transcript.push("dialect : slack".into());
+            }
+            "dialect" | "register" => {
+                let arg = parts.next().unwrap_or("");
+                if matches!(arg, "progen" | "syntax" | "instruct" | "slack") {
+                    self.dialect = arg.into();
+                    self.transcript.push(format!("dialect : {}", self.dialect));
+                } else {
+                    self.transcript.push(format!(
+                        "dialect : {} (options: slack, progen, syntax, instruct)",
+                        self.dialect
                     ));
                 }
             }
@@ -1075,6 +1121,7 @@ impl App {
                 self.update_rx = Some(rx);
                 self.transcript.push("update : checking github origin/main...".into());
             }
+            "reconnect" | "retry" => self.reconnect(),
             "cancel" => self.cancel(),
             "allow" => self.decide("allow"),
             "skip" => self.decide("skip"),
@@ -1084,15 +1131,29 @@ impl App {
     }
 
     fn drain(&mut self) {
-        let evs: Vec<Ev> = if let Some(be) = &self.be {
-            let mut v = Vec::new();
+        let mut evs = Vec::new();
+        let mut status = None;
+        if let Some(be) = &mut self.be {
             while let Ok(ev) = be.rx.try_recv() {
-                v.push(ev);
+                evs.push(ev);
             }
-            v
-        } else {
-            Vec::new()
-        };
+            let eof = evs.iter().any(|e| matches!(e, Ev::Exited(_)));
+            for _ in 0..if eof { 20 } else { 1 } {
+                if let Some(why) = be.exited() {
+                    status = Some(why);
+                    break;
+                }
+                if eof {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+        if let Some(why) = status {
+            match evs.iter_mut().find(|e| matches!(e, Ev::Exited(_))) {
+                Some(e) => *e = Ev::Exited(why),
+                None => evs.push(Ev::Exited(why)),
+            }
+        }
         for ev in evs {
             self.apply(ev);
         }
@@ -1357,8 +1418,14 @@ impl App {
             }
             Ev::Exited(reason) => {
                 self.transcript.push(format!("agent exited : {reason}"));
-                self.busy_turn = None;
+                if let Some(turn) = self.busy_turn.take() {
+                    self.mark_agent(&turn, "failed");
+                }
                 self.busy_start = None;
+                self.assistant_at = None;
+                self.approval = None;
+                self.approval_args = Value::Null;
+                self.steer_after_cancel = false;
                 self.status_label = "idle".into();
                 self.be = None;
             }
@@ -1373,10 +1440,6 @@ impl App {
 
     pub fn quit_requested(&self) -> bool {
         self.quit
-    }
-
-    pub fn frame(&self) -> char {
-        SPIN[self.spin_i % SPIN.len()]
     }
 
     #[allow(dead_code)]
@@ -1549,34 +1612,6 @@ pub fn read_clipboard_text() -> Option<String> {
     }
 }
 
-pub fn log_layout(width: u16, fit_spin: usize, fit_label: usize, overflow: bool, thinking_in_status: bool, same_row: bool) {
-    // #region agent log
-    let path = r"C:\Users\jpm05\documents\debug-ada62c.log";
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-    let rows = [
-        ("A", "status row width", serde_json::json!({"width": width, "spin_cols": fit_spin, "label_cols": fit_label, "overflow": overflow})),
-        ("B", "thinking stays off the status row", serde_json::json!({"thinking_in_status": thinking_in_status})),
-        ("C", "spinner column width", serde_json::json!({"spin_cols": fit_spin})),
-        ("D", "status and footer are separate rows", serde_json::json!({"same_row": same_row})),
-    ];
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        use std::io::Write;
-        for (id, message, data) in rows {
-            let line = serde_json::json!({
-                "sessionId": "ada62c",
-                "timestamp": now,
-                "location": "hydra-tui-rs/src/app.rs",
-                "message": message,
-                "data": data,
-                "hypothesisId": id,
-                "runId": "tui-layout"
-            });
-            let _ = writeln!(f, "{line}");
-        }
-    }
-    // #endregion
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1585,10 +1620,24 @@ mod tests {
     fn default_model_is_mimo_flash_and_speed_dial_commands_work() {
         std::env::remove_var("HYDRA_DEFAULT_MODEL");
         std::env::remove_var("HYDRA_MODEL");
+        std::env::remove_var("HYDRA_DIALECT");
         let mut app = App::new();
         assert_eq!(app.model, "bonsai 2 9b");
         assert_eq!(app.fallback_model, "glm 5.3 flash");
         assert_eq!(app.speed_dial_model, "mimo 2.6 pro");
+        assert_eq!(app.dialect, "slack");
+
+        for ch in "/progen".chars() {
+            app.on_char(ch);
+        }
+        app.submit();
+        assert_eq!(app.dialect, "progen");
+
+        for ch in "/slack".chars() {
+            app.on_char(ch);
+        }
+        app.submit();
+        assert_eq!(app.dialect, "slack");
         app.input = "/m".into();
         app.cursor_pos = app.input.len();
         assert!(app.candidates().iter().any(|(cmd, desc)| {
@@ -1752,5 +1801,30 @@ mod tests {
         app.cursor_pos = app.input.len();
         app.submit();
         assert!(app.transcript.iter().any(|l| l == "  +new"));
+    }
+
+    #[test]
+    fn exited_resets_busy_turn_reconnect_command_and_layout_log_gate() {
+        let mut app = App::new();
+        app.input = "run task".into();
+        app.cursor_pos = app.input.len();
+        app.submit();
+        assert_eq!(app.busy_turn.as_deref(), Some("t1"));
+        assert_eq!(app.agents[0].state, "running");
+
+        app.apply(Ev::Exited("exited with code 3".into()));
+        assert!(app.busy_turn.is_none());
+        assert_eq!(app.status_label, "idle");
+        assert_eq!(app.agents[0].state, "failed");
+        assert!(app.transcript.iter().any(|l| l == "agent exited : exited with code 3"));
+
+        app.input = "/recon".into();
+        app.cursor_pos = app.input.len();
+        assert!(app.candidates().iter().any(|(c, _)| c == "/reconnect"));
+        app.input = "/reconnect".into();
+        app.cursor_pos = app.input.len();
+        app.submit();
+        assert!(app.transcript.iter().any(|l| l == "agent : reconnected"));
+
     }
 }
