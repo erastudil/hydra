@@ -10,6 +10,8 @@ from typing import List, Optional, Tuple
 
 from hydra_cli import __version__
 from hydra_cli.config import (
+    CATALOG,
+    MODEL_PROVIDERS,
     DEFAULT_MODEL,
     DEFAULT_ORCHESTRATOR_MODEL,
     DEFAULT_AGENT_MODEL,
@@ -45,6 +47,15 @@ from hydra_cli.providers import (
     stream_chat_completion,
 )
 from hydra_cli.swarm import execute_swarm
+
+# Every model id the catalog knows, by route pin or by alias target. A bare
+# summon word outside this set and outside MODEL_MAP is a typo, not a model:
+# route_command refuses it instead of burning the fallback cascade on it.
+KNOWN_MODEL_IDS = set(MODEL_PROVIDERS) | {
+    spec["model"]
+    for spec in CATALOG["aliases"].values()
+    if isinstance(spec, dict) and spec.get("model")
+}
 
 # Help uses the compact wordmark only. The 3-head TUI splash lives on `hydra banner`.
 HELP_BANNER = f"""
@@ -659,6 +670,18 @@ def route_command(argv: List[str]) -> int:
                 agentic=agentic_mode,
             )
         else:
+            if (
+                not model_override
+                and command_or_alias not in MODEL_MAP
+                and "/" not in command_or_alias
+                and command_or_alias not in KNOWN_MODEL_IDS
+            ):
+                sys.stderr.write(
+                    f"[ERROR] Unknown model alias '{command_or_alias}'. "
+                    "Run 'hydra --list-models' for registered aliases, or pass a full "
+                    "provider model id (for example openai/gpt-oss-120b).\n"
+                )
+                return 1
             return execute_summon(
                 alias=command_or_alias,
                 prompt=effective_prompt,

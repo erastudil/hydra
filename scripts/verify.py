@@ -627,6 +627,59 @@ def providers():
 
 
 @check
+def groq_summon_wiring_and_transport_user_agent():
+    """Groq aliases resolve onto the Groq route, and the chat transport sends
+    a real User-Agent (api.groq.com refuses the Python-urllib default)."""
+    import http.server
+    import threading
+
+    from hydra_cli.config import model_providers, resolve_route
+    from hydra_cli.providers import fetch_chat_completion
+
+    assert resolve_route("groq")["model"] == "openai/gpt-oss-120b"
+    assert resolve_route("gpt-oss 120b")["model"] == "openai/gpt-oss-120b"
+    assert resolve_route("gpt-oss")["model"] == "openai/gpt-oss-120b"
+    assert model_providers("openai/gpt-oss-120b") == ["groq"]
+    assert model_providers("qwen/qwen3.8-27b")[0] == "groq"
+    assert resolve_route("qwen")["model"] == "qwen/qwen3.8-27b"
+
+    seen = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            seen["ua"] = self.headers.get("User-Agent") or ""
+            body = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions"
+        out = fetch_chat_completion(
+            url,
+            {"Content-Type": "application/json"},
+            "test-model",
+            [{"role": "user", "content": "hi"}],
+            max_retries=0,
+        )
+        assert out == "ok"
+    finally:
+        server.shutdown()
+    assert seen["ua"], "chat transport sent no User-Agent"
+    assert "Python-urllib" not in seen["ua"], f"chat transport sent the urllib default User-Agent: {seen['ua']}"
+
+
+@check
 def display_and_voice():
     import re
 
