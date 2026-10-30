@@ -43,6 +43,14 @@ COMMAND_HINTS: Dict[str, Dict[str, Any]] = {
         "hint_text": "alias from registered models",
         "description": "Switch active model alias",
         "choices": [
+            "bonsai 2 9b",
+            "bonsai 2 2b",
+            "bonsai 2 4b",
+            "bonsai 2 27b",
+            "mimo 2.6 flash",
+            "mimo.2.6 flash",
+            "mimo 2.6 pro",
+            "glm 5.3 flash",
             "sonnet 5.5",
             "opus 5.5",
             "gpt 6.1 sol",
@@ -751,6 +759,11 @@ def create_continuation_manager(
 
 
 DEFAULT_MODEL_ALIASES: Dict[str, str] = {
+    "bonsai": "bonsai 2 9b",
+    "bonsai 9b": "bonsai 2 9b",
+    "bonsai 2b": "bonsai 2 2b",
+    "bonsai 4b": "bonsai 2 4b",
+    "bonsai 27b": "bonsai 2 27b",
     "sonnet": "sonnet 5.5",
     "opus": "opus 5.5",
     "sol": "gpt 6.1 sol",
@@ -762,9 +775,12 @@ DEFAULT_MODEL_ALIASES: Dict[str, str] = {
     "glm": "glm 5.3 flash",
     "mimo": "mimo 2.6 pro",
     "mimo pro": "mimo 2.6 pro",
+    "mimo.2.6 pro": "mimo 2.6 pro",
     "mimo flash": "mimo 2.6 flash",
-    "driver": "mimo 2.6 pro",
-    "daily driver": "mimo 2.6 pro",
+    "mimo.2.6 flash": "mimo 2.6 flash",
+    "driver": "mimo 2.6 flash",
+    "daily driver": "mimo 2.6 flash",
+    "fallback": "glm 5.3 flash",
 }
 
 
@@ -1274,7 +1290,7 @@ class ReplSession:
         self.history: ReplHistoryDedup = get_default_history_dedup()
         self.menu_pager: ReplMenuPager = get_default_menu_pager()
         self.exit_confirm: ReplExitConfirm = get_default_exit_confirm()
-        self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "mimo 2.6 pro").strip() or "mimo 2.6 pro"
+        self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "mimo 2.6 flash").strip() or "mimo 2.6 flash"
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.effort: Optional[str] = None
         self.reasoning_mode: Optional[str] = None

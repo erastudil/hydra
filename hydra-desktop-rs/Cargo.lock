@@ -1323,6 +1323,7 @@ dependencies = [
  "egui_kittest",
  "hydra-stdio",
  "image",
+ "libloading",
  "serde",
  "serde_json",
 ]

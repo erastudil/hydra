@@ -3,6 +3,11 @@ use hydra_desktop::{app, theme};
 
 fn main() -> eframe::Result<()> {
     hydra_desktop::crash::install();
+    #[cfg(target_os = "linux")]
+    if let Some(msg) = hydra_desktop::syslibs::preflight() {
+        eprint!("{msg}");
+        std::process::exit(1);
+    }
     let size = std::env::var("HYDRA_SIZE").ok().and_then(|s| {
         let (w, h) = s.split_once('x')?;
         Some([w.parse::<f32>().ok()?, h.parse::<f32>().ok()?])

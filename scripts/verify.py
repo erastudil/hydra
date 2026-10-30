@@ -261,6 +261,30 @@ def manifests():
 
 
 @check
+def project_metadata_egg_info():
+    """egg_info accepts the license table on the system setuptools and records prompt_toolkit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        result = subprocess.run(
+            [sys.executable, "setup.py", "egg_info", "--egg-base", tmp],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr or result.stdout
+        info = os.path.join(tmp, "hydra_ai_cli.egg-info")
+        pkg = open(os.path.join(info, "PKG-INFO"), encoding="utf-8").read()
+        requires = open(os.path.join(info, "requires.txt"), encoding="utf-8").read()
+        sources = open(os.path.join(info, "SOURCES.txt"), encoding="utf-8").read()
+        assert "\nLicense: Apache-2.0\n" in pkg
+        assert "\nLicense-File: LICENSE\n" in pkg
+        assert "prompt_toolkit>=" in requires
+        assert "hydra_cli/skills/hydra.md" in sources.splitlines()
+        assert "hydra_cli/data/stacks_cards.jsonl" in sources.splitlines()
+        assert "hydra_cli/getting_started.md" in sources.splitlines()
+
+
+@check
 def release_archive_urls():
     """Install docs may only name release assets that GitHub actually serves."""
     import re
@@ -293,8 +317,8 @@ def cli_processes():
         (["--version"], 0, __version__, ""),
         (["-v"], 0, "hydra ", ""),
         (["banner"], 0, "Sovereign Multi-Headed AI Shell", ""),
-        (["setup"], 0, "HYDRA SETUP & INTEGRATION GUIDE", ""),
-        (["guide"], 0, "HYDRA SETUP & INTEGRATION GUIDE", ""),
+        (["setup"], 0, "Getting started with Hydra", ""),
+        (["guide"], 0, "Getting started with Hydra", ""),
         (["--list-models"], 0, "Hydra Registered Models & Aliases", ""),
         (["--list-models", "--verbose"], 0, "anthropic/claude-sonnet-5.5", ""),
         (["mcp", "list"], 0, "MCP", ""),
@@ -343,6 +367,52 @@ def cli_processes():
     assert "hydra :" in out
     assert "New session:" in out
     assert "Exiting Hydra agent session" in out
+
+
+@check
+def setup_guide_for_new_users():
+    """hydra setup prints the packaged beginner guide from Python and from Node."""
+    guide_path = os.path.join(REPO, "hydra_cli", "getting_started.md")
+    guide = open(guide_path, encoding="utf-8").read()
+    for phrase in (
+        "Getting started with Hydra",
+        "Open a terminal",
+        "Add python.exe to PATH",
+        "hydra auth",
+        "OPENROUTER_API_KEY",
+        "Cloudflare",
+        "10,000 Neurons",
+        "Credits, in plain words",
+        "Cheaper Inference",
+        "Hugging Face",
+        "RunPod",
+        "Modal",
+        "Ollama",
+        "Windows",
+        "Mac",
+        "Linux",
+        "/credits",
+        "HYDRA_TRUST_CWD_ENV",
+    ):
+        assert phrase in guide, phrase
+    proc = run_cli(["setup"])
+    assert proc.returncode == 0, proc.stderr
+    expected = guide if guide.endswith("\n") else guide + "\n"
+    assert proc.stdout == expected
+    node = shutil.which("node")
+    if not node:
+        return
+    node_proc = subprocess.run(
+        [node, os.path.join(REPO, "bin", "hydra.js"), "setup"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+    )
+    assert node_proc.returncode == 0, node_proc.stderr
+    assert node_proc.stdout == proc.stdout
 
 
 @check
@@ -2314,7 +2384,7 @@ def open_swarm_and_catalog():
     assert model_providers("deepseek 4.1 flash") == ["cheaperinference", "vercel", "openrouter"]
     assert model_providers("mimo 2.6 flash") == ["cheaperinference", "vercel", "openrouter"]
     assert model_providers("mimo 2.6 pro") == ["cheaperinference", "vercel", "openrouter"]
-    assert resolve_route("orchestrator")["model"] == "mimo-2.6-pro"
+    assert resolve_route("orchestrator")["model"] == "mimo-2.6-flash"
 
     ci_url = "https://api.cheaperinference.com/v1/chat/completions"
     or_url = "https://openrouter.ai/api/v1/chat/completions"
@@ -10904,13 +10974,14 @@ def wave22_session_logger_and_mimo_routing():
     )
     from hydra_cli.native_tools import NativeToolRegistry
 
-    assert DEFAULT_MODEL == "mimo 2.6 pro"
-    assert DEFAULT_ORCHESTRATOR_MODEL == "mimo 2.6 pro"
-    assert DEFAULT_AGENT_MODEL == "mimo 2.6 pro"
+    assert DEFAULT_MODEL == "bonsai 2 9b"
+    assert DEFAULT_ORCHESTRATOR_MODEL == "bonsai 2 9b"
+    assert DEFAULT_AGENT_MODEL == "bonsai 2 9b"
     assert resolve_model("mimo 2.6 pro") == "mimo-2.6-pro"
     assert resolve_model("mimo") == "mimo-2.6-pro"
-    assert resolve_model("daily driver") == "mimo-2.6-pro"
+    assert resolve_model("daily driver") == "mimo-2.6-flash"
     assert resolve_model("mimo 2.6 flash") == "mimo-2.6-flash"
+    assert resolve_model("mimo.2.6 flash") == "mimo-2.6-flash"
 
     assert set(DEFAULT_FANOUT_SWARM_ALIASES) == {"glm 5.3 flash", "deepseek 4.1 flash", "mimo 2.6 flash"}
     assert model_providers("mimo 2.6 pro")[0] == "cheaperinference"
@@ -10997,6 +11068,23 @@ def desktop_launcher_targets_rust_exe():
     assert os.path.isfile(os.path.join(REPO, "scripts", "check_rust.sh"))
     assert os.path.isfile(os.path.join(REPO, "hydra-desktop-rs", "Cargo.toml"))
     assert callable(router.launch_desktop)
+
+
+@check
+def rust_stdio_and_tui_contracts():
+    """hydra-stdio and hydra-tui-rs unit tests verify bundled python, exit polling, /reconnect, and layout log gating."""
+    if shutil.which("cargo") is None:
+        raise Skip("cargo not on PATH")
+    for crate in ("hydra-stdio", "hydra-tui-rs"):
+        manifest = os.path.join(REPO, crate, "Cargo.toml")
+        res = subprocess.run(
+            ["cargo", "test", "--manifest-path", manifest, "--quiet"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert res.returncode == 0, f"{crate} failed:\n{res.stdout}\n{res.stderr}"
 
 
 @check
@@ -11626,6 +11714,54 @@ def knowledge_runtime_deps():
     with open(os.path.join(REPO, "package.json"), encoding="utf-8") as handle:
         package = json.load(handle)
     assert "dependencies" not in package, "Node package gained a dependency; update the README"
+
+
+@check
+def mcp_registry_sanitize():
+    """Stale MCP configs from older Hydra versions load repaired."""
+    from hydra_cli.mcp_registry import McpRegistry, sanitize_server_configs
+
+    stale = {
+        "mcpServers": {
+            "fetch": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-fetch"]},
+            "sqlite": {"command": "uvx", "args": ["mcp-server-sqlite", "--db-path", "x.db"]},
+            "brave-search": {
+                "command": "npx",
+                "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+                "env": {"BRAVE_API_KEY": "${BRAVE_API_KEY}"},
+            },
+            "memory": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-memory"]},
+        }
+    }
+    out = sanitize_server_configs(stale["mcpServers"])
+    assert "brave-search" not in out
+    assert out["searxng"]["args"] == ["-y", "mcp-searxng"]
+    assert "BRAVE" not in json.dumps(out)
+    assert out["fetch"] == {"command": "uvx", "args": ["mcp-server-fetch"]}
+    assert out["sqlite"]["args"][:3] == ["--with", "mcp==1.*", "mcp-server-sqlite"]
+    assert out["memory"]["args"] == ["-y", "@modelcontextprotocol/server-memory"]
+
+    current = {
+        "fetch": {"command": "uvx", "args": ["mcp-server-fetch"]},
+        "sqlite": {"command": "uvx", "args": ["--with", "mcp==1.*", "mcp-server-sqlite"]},
+        "searxng": {"command": "npx", "args": ["-y", "mcp-searxng"]},
+    }
+    assert sanitize_server_configs(current) == current
+
+    unsafe_pin = {"sqlite": {"command": "uvx", "args": ["--with", "mcp<2", "mcp-server-sqlite"]}}
+    out_pin = sanitize_server_configs(unsafe_pin)
+    assert out_pin["sqlite"]["args"] == ["--with", "mcp==1.*", "mcp-server-sqlite"]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg = os.path.join(tmp, "mcp_servers.json")
+        with open(cfg, "w", encoding="utf-8") as handle:
+            json.dump(stale, handle)
+        registry = McpRegistry(config_path=cfg, auto_load=False)
+        names = set(registry._server_configs)
+        assert "brave-search" not in names
+        assert "searxng" in names
+        assert registry._server_configs["fetch"]["command"] == "uvx"
+        assert registry._server_configs["sqlite"]["args"][1] == "mcp==1.*"
 
 
 @check
@@ -13853,9 +13989,18 @@ def tankbench_runners():
             assert "TANKBENCH_SRC" in missing.stderr
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    args = sys.argv[1:] if argv is None else list(argv)
+    selected = (
+        [fn for fn in CHECKS if any(q in fn.__name__ for q in args)]
+        if args
+        else list(CHECKS)
+    )
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")
+    real_home = os.path.expanduser("~")
+    os.environ.setdefault("RUSTUP_HOME", os.path.join(real_home, ".rustup"))
+    os.environ.setdefault("CARGO_HOME", os.path.join(real_home, ".cargo"))
     home = tempfile.mkdtemp(prefix="hydra-gate-")
     os.environ["HOME"] = home
     os.environ["USERPROFILE"] = home
@@ -13867,7 +14012,7 @@ def main() -> int:
 
     failed = []
     skipped = []
-    for fn in CHECKS:
+    for fn in selected:
         name = fn.__name__
         try:
             with _silent():
@@ -13882,7 +14027,7 @@ def main() -> int:
             print(f"{name} : exit 0.")
 
     elapsed_ms = (time.perf_counter() - started) * 1000.0
-    print(f"\nchecks : {len(CHECKS) - len(failed) - len(skipped)} pass, {len(skipped)} skip, {len(failed)} fail.")
+    print(f"\nchecks : {len(selected) - len(failed) - len(skipped)} pass, {len(skipped)} skip, {len(failed)} fail.")
     print(f"execution duration : {elapsed_ms:.1f}ms.")
     if failed:
         print("hydra gate status : fail.")
@@ -13895,3 +14040,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+

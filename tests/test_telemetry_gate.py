@@ -1,11 +1,40 @@
-﻿"""
+"""
 Integration test suite for Hydra Desktop Sovereign Telemetry Gate.
 Complies with AGENTS.md genome invariants: zero fake tests, real interfaces, exit code 0.
 """
 
 from __future__ import annotations
 
-import pytest
+try:
+    import pytest
+except ImportError:
+    import contextlib
+
+    class _PytestFallback:
+        @staticmethod
+        def fixture(*args, **kwargs):
+            def _dec(fn):
+                return fn
+            if args and callable(args[0]):
+                return args[0]
+            return _dec
+
+        @staticmethod
+        @contextlib.contextmanager
+        def raises(exc_type):
+            class _Info:
+                value = None
+            info = _Info()
+            try:
+                yield info
+            except exc_type as exc:
+                info.value = exc
+                return
+            raise AssertionError(f"Expected {exc_type} to be raised")
+
+    pytest = _PytestFallback()
+
+import unittest
 
 from desktop.telemetry_gate import (
     SovereignTelemetryGate,
@@ -101,3 +130,23 @@ def test_global_singleton_telemetry_gate():
     g3 = reset_telemetry_gate()
     assert g3 is not g1
     assert get_telemetry_gate() is g3
+
+
+class TelemetryGateUnittestSuite(unittest.TestCase):
+    """Unittest runner wrapper for SovereignTelemetryGate verification."""
+
+    def test_all_telemetry_gate_invariants(self):
+        """Execute all telemetry gate checks under standard library unittest."""
+        test_telemetry_endpoint_detection()
+        g = SovereignTelemetryGate(strict_mode=True)
+        try:
+            test_strict_mode_outbound_interception_raises_violation(g)
+        finally:
+            g.clear()
+        test_non_strict_mode_inspection_returns_structured_rejection()
+        g2 = SovereignTelemetryGate(strict_mode=True)
+        try:
+            test_local_only_telemetry_recording_and_summary(g2)
+        finally:
+            g2.clear()
+        test_global_singleton_telemetry_gate()
