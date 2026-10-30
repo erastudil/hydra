@@ -14059,6 +14059,39 @@ def tankbench_runners():
             assert "TANKBENCH_SRC" in missing.stderr
 
 
+@check
+def terminal_launcher_follows_catalog_default():
+    """The Windows terminal launcher must not pin a model the catalog no longer uses."""
+    from hydra_cli.config import CATALOG, DEFAULT_AGENT_MODEL
+
+    bat_path = os.path.join(REPO, "launch", "bin", "hydra-terminal.bat")
+    bat = open(bat_path, encoding="utf-8").read().replace("\r\n", "\n")
+    for pin in (
+        "HYDRA_DEFAULT_MODEL=",
+        "HYDRA_DEFAULT_ALIAS=",
+        "HYDRA_AGENT_MODEL=",
+        "HYDRA_ORCHESTRATOR_MODEL=",
+        '--model "mimo 2.6 flash"',
+    ):
+        assert pin not in bat, pin
+    assert 'doskey flash=python -m hydra_cli "mimo 2.6 flash" $*' in bat
+    assert "\npython -m hydra_cli agent\n" in bat
+
+    expected = CATALOG["default_agent_model"]
+    assert DEFAULT_AGENT_MODEL == expected
+    pinned = {
+        "HYDRA_DEFAULT_MODEL": None,
+        "HYDRA_DEFAULT_ALIAS": None,
+        "HYDRA_AGENT_MODEL": None,
+        "HYDRA_ORCHESTRATOR_MODEL": None,
+    }
+    with isolated(env=pinned):
+        proc = run_cli(["agent", "-i"], stdin="/exit\n", timeout=20)
+    assert proc.returncode == 0, proc.stderr
+    assert f"Model: {expected}" in (proc.stdout or "")
+    assert "Exiting Hydra agent session" in (proc.stdout or "")
+
+
 def main(argv=None) -> int:
     args = sys.argv[1:] if argv is None else list(argv)
     selected = (
