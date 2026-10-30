@@ -39,6 +39,7 @@ from hydra_cli.config import (
     resolve_route,
     sensitive_env_key,
 )
+from hydra_cli._version import __version__
 
 
 class ProviderError(Exception):
@@ -4115,6 +4116,19 @@ def _raise_provider_failure(url: str, where: str, exc: BaseException, label: str
     raise ProviderError(redact(f"{label} {where}: {exc}")) from exc
 
 
+# Cloudflare-fronted endpoints (api.groq.com among them) refuse the default
+# Python-urllib user agent with HTTP 403 (error 1010), so chat completion
+# requests identify themselves. A caller-supplied User-Agent always wins.
+DEFAULT_USER_AGENT = f"Hydra/{__version__} (+https://github.com/erastudil/hydra)"
+
+
+def _with_user_agent(headers: Dict[str, str]) -> Dict[str, str]:
+    merged = dict(headers)
+    if not any(key.lower() == "user-agent" for key in merged):
+        merged["User-Agent"] = DEFAULT_USER_AGENT
+    return merged
+
+
 def stream_chat_completion(
     url: str,
     headers: Dict[str, str],
@@ -4132,7 +4146,7 @@ def stream_chat_completion(
     effective_model = adapt_model_for_url(url, model)
     payload = _build_payload(effective_model, messages, True, temperature, max_tokens, reasoning)
     data_bytes = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, headers=headers, data=data_bytes, method="POST")
+    req = urllib.request.Request(url, headers=_with_user_agent(headers), data=data_bytes, method="POST")
     wait = completion_timeout(reasoning, timeout)
     where = describe_endpoint(url)
 
@@ -4202,7 +4216,7 @@ def fetch_chat_completion(
     effective_model = adapt_model_for_url(url, model)
     payload = _build_payload(effective_model, messages, False, temperature, max_tokens, reasoning)
     data_bytes = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, headers=headers, data=data_bytes, method="POST")
+    req = urllib.request.Request(url, headers=_with_user_agent(headers), data=data_bytes, method="POST")
     wait = completion_timeout(reasoning, timeout)
     where = describe_endpoint(url)
 

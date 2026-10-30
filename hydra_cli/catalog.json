@@ -206,6 +206,15 @@
     "gpt-4o": {
       "model": "openai/gpt-4o"
     },
+    "gpt-oss 120b": {
+      "model": "openai/gpt-oss-120b"
+    },
+    "gpt-oss": {
+      "model": "openai/gpt-oss-120b"
+    },
+    "groq": {
+      "model": "openai/gpt-oss-120b"
+    },
     "o3": {
       "model": "openai/o3"
     },
@@ -498,6 +507,12 @@
     ],
     "openai/gpt-oss-120b": [
       "groq"
+    ],
+    "qwen/qwen3.8-27b": [
+      "groq",
+      "cheaperinference",
+      "vercel",
+      "openrouter"
     ],
     "Meta-Llama-3_3-70B-Instruct": [
       "ovhcloud"
