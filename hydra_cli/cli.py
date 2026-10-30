@@ -8,6 +8,12 @@ from hydra_cli.router import route_command
 
 
 def main():
+    try:
+        from hydra_cli.local_server import autostart_local_async
+
+        autostart_local_async()
+    except Exception:
+        pass
     from hydra_cli.memory import GateError, launch_sweep
     if sys.argv[1:2] == ["stdio"]:
         sys.exit(route_command(sys.argv[1:]))  # the app owns the project dir, no sweep on spawn

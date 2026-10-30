@@ -1410,26 +1410,26 @@ impl HydraApp {
         let recording = self.voice_recording;
         let q_count = self.queue.get(&self.m.sessions[self.m.active].id).map(|q| q.len()).unwrap_or(0);
 
-        if recording || waiting_approval || thinking {
-            const BRAILLE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let spin = BRAILLE[((time * 12.0) as usize) % BRAILLE.len()];
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                if recording {
-                    let c = motion::mix(Color32::from_rgb(180, 48, 48), Color32::from_rgb(255, 84, 84), rec_pulse);
-                    ui.label(rtb("● REC", 11.5, c));
-                    ui.label(rt("listening… · Esc cancels", 11.5, TEXT2));
-                } else if waiting_approval {
-                    let c = Color32::from_rgb(255, 184, 48);
-                    ui.label(rtb("◆", 11.5, c));
-                    ui.label(rt("hydra is waiting on your answer · Enter allows · Esc skips", 11.5, c));
-                } else {
-                    ui.label(rtb(spin, 12.0, ACCENT));
-                    ui.label(rt("Thinking · working... · Enter queues · Ctrl+Enter steers · Esc interrupts", 11.5, TEXT2));
-                }
-            });
-            ui.add_space(4.0);
-        }
+        const BRAILLE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let spin = BRAILLE[((time * 12.0) as usize) % BRAILLE.len()];
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if recording {
+                let c = motion::mix(Color32::from_rgb(180, 48, 48), Color32::from_rgb(255, 84, 84), rec_pulse);
+                ui.label(rtb("● REC", 11.5, c));
+                ui.label(rt("listening… · Esc cancels", 11.5, TEXT2));
+            } else if waiting_approval {
+                let c = Color32::from_rgb(255, 184, 48);
+                ui.label(rtb("◆", 11.5, c));
+                ui.label(rt("hydra is waiting on your answer · Enter allows · Esc skips", 11.5, c));
+            } else if thinking {
+                ui.label(rtb(spin, 12.0, ACCENT));
+                ui.label(rt("Thinking · working... · Enter queues · Ctrl+Enter steers · Esc interrupts", 11.5, TEXT2));
+            } else {
+                ui.label(rt("hydra · idle", 11.5, MUTED));
+            }
+        });
+        ui.add_space(4.0);
 
         let mut do_send = false;
         let mut do_stop = false;
@@ -4237,9 +4237,15 @@ mod tests {
 
     #[test]
     fn test_default_model_and_screen_border_gradient_mesh() {
-        assert_eq!(MODELS[0].0, "mimo 2.6 flash");
-        assert_eq!(MODELS[1].0, "mimo 2.6 pro");
-        assert_eq!(MODELS[2].0, "glm 5.3 flash");
+        assert_eq!(MODELS[0].0, "bonsai 2 9b");
+        assert_eq!(MODELS[1].0, "bonsai 2 2b");
+        assert_eq!(MODELS[2].0, "bonsai 2 4b");
+        assert_eq!(MODELS[3].0, "bonsai 2 27b");
+        assert_eq!(MODELS[4].0, "mimo 2.6 flash");
+        assert_eq!(MODELS[5].0, "mimo 2.6 pro");
+        assert_eq!(MODELS[6].0, "glm 5.3 flash");
+        assert_eq!(normalize_model_key("bonsai"), "bonsai 2 9b");
+        assert_eq!(normalize_model_key("bonsai-2-9b"), "bonsai 2 9b");
         assert_eq!(normalize_model_key("mimo.2.6 flash"), "mimo 2.6 flash");
         assert_eq!(normalize_model_key("mimo.2.6 pro"), "mimo 2.6 pro");
 

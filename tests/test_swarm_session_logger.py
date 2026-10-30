@@ -39,11 +39,24 @@ from hydra_cli.session_logger import (
 
 
 def test_mimo_26_model_routing_and_cheaperinference_defaults():
-    """Verify Mimo 2.6 Flash daily driver and CheaperInference provider precedence."""
-    # Default daily driver resolution
-    assert DEFAULT_MODEL == "mimo 2.6 flash"
-    assert DEFAULT_ORCHESTRATOR_MODEL == "mimo 2.6 flash"
-    assert DEFAULT_AGENT_MODEL == "mimo 2.6 flash"
+    """Verify Bonsai 2 9B default agent, Mimo 2.6 Flash daily driver, and CheaperInference provider precedence."""
+    # Default agent resolution
+    assert DEFAULT_MODEL == "bonsai 2 9b"
+    assert DEFAULT_ORCHESTRATOR_MODEL == "bonsai 2 9b"
+    assert DEFAULT_AGENT_MODEL == "bonsai 2 9b"
+
+    # Bonsai 2 alias and adapter resolution
+    route_9b = resolve_route("bonsai 2 9b")
+    assert route_9b["model"] == "prism-ml/Ternary-Bonsai-2-9B-gguf"
+    assert route_9b["adapter"] == "Bluebarrels/easylm-bonsai-2-9b"
+    assert route_9b["hydra_adapter"] == "Bluebarrels/easylm-hydra-bonsai-2-9b"
+    assert route_9b["memory_mb"] == 2000
+    assert route_9b["context_window"] == 262144
+    assert get_context_window("bonsai 2 9b") == 262144
+    assert resolve_model("bonsai") == "prism-ml/Ternary-Bonsai-2-9B-gguf"
+    assert resolve_model("bonsai 2 2b") == "prism-ml/Ternary-Bonsai-2-2B-gguf"
+    assert resolve_model("bonsai 2 4b") == "prism-ml/Ternary-Bonsai-2-4B-gguf"
+    assert resolve_model("bonsai 2 27b") == "prism-ml/Ternary-Bonsai-2-27B-gguf"
 
     # Alias resolution
     assert resolve_model("mimo 2.6 pro") == "mimo-2.6-pro"
@@ -68,6 +81,7 @@ def test_mimo_26_model_routing_and_cheaperinference_defaults():
     assert "openrouter" in provs_flash
 
     # REPL alias expansions
+    assert DEFAULT_MODEL_ALIASES["bonsai"] == "bonsai 2 9b"
     assert DEFAULT_MODEL_ALIASES["mimo"] == "mimo 2.6 pro"
     assert DEFAULT_MODEL_ALIASES["mimo pro"] == "mimo 2.6 pro"
     assert DEFAULT_MODEL_ALIASES["mimo flash"] == "mimo 2.6 flash"

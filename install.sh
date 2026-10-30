@@ -56,6 +56,7 @@ hydra_cli/getting_started.md
 hydra_cli/hands.py
 hydra_cli/invariants.json
 hydra_cli/invariants.py
+hydra_cli/local_server.py
 hydra_cli/mcp.py
 hydra_cli/mcp_registry.py
 hydra_cli/mcp_servers.default.json
@@ -69,6 +70,7 @@ hydra_cli/serve.py
 hydra_cli/session_logger.py
 hydra_cli/skills/alice.md
 hydra_cli/skills/backend.md
+hydra_cli/skills/charter.md
 hydra_cli/skills/code.md
 hydra_cli/skills/containers.md
 hydra_cli/skills/devops.md

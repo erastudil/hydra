@@ -75,12 +75,36 @@ DEFAULT_EASYLM_ENDPOINT = os.environ.get("LOCAL_AI_BASE", "http://127.0.0.1:8000
 DEFAULT_LOCAL_MODEL = os.environ.get("HYDRA_LOCAL_MODEL", CATALOG["default_local_model"])
 
 DEFAULT_CHEAPERINFERENCE_BASE = "https://api.cheaperinference.com/v1"
+DEFAULT_GROQ_BASE = "https://api.groq.com/openai/v1"
+DEFAULT_GROQ_MODEL = os.environ.get(
+    "HYDRA_GROQ_MODEL", CATALOG.get("default_groq_model", "openai/gpt-oss-120b")
+)
+DEFAULT_OVHCLOUD_BASE = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"
+DEFAULT_OVHCLOUD_MODEL = os.environ.get(
+    "HYDRA_OVHCLOUD_MODEL", CATALOG.get("default_ovhcloud_model", "Meta-Llama-3_3-70B-Instruct")
+)
+DEFAULT_NVIDIA_BASE = "https://integrate.api.nvidia.com/v1"
+DEFAULT_NVIDIA_MODEL = os.environ.get(
+    "HYDRA_NVIDIA_MODEL", CATALOG.get("default_nvidia_model", "meta/llama-3.3-70b-instruct")
+)
+DEFAULT_MISTRAL_BASE = "https://api.mistral.ai/v1"
+DEFAULT_MISTRAL_MODEL = os.environ.get(
+    "HYDRA_MISTRAL_MODEL", CATALOG.get("default_mistral_model", "mistral-small-latest")
+)
+DEFAULT_SCALEWAY_BASE = "https://api.scaleway.ai/v1"
+DEFAULT_SCALEWAY_MODEL = os.environ.get(
+    "HYDRA_SCALEWAY_MODEL", CATALOG.get("default_scaleway_model", "llama-3.3-70b-instruct")
+)
+DEFAULT_COHERE_BASE = "https://api.cohere.com/compatibility/v1"
+DEFAULT_COHERE_MODEL = os.environ.get(
+    "HYDRA_COHERE_MODEL", CATALOG.get("default_cohere_model", "command-a-03-2025")
+)
 DEFAULT_RUNPOD_BASE_TEMPLATE = "https://api.runpod.ai/v2/{endpoint_id}/openai/v1"
 DEFAULT_HF_BASE = os.environ.get("HF_INFERENCE_BASE", "https://router.huggingface.co/v1").rstrip("/")
 DEFAULT_HF_MODEL = os.environ.get("HYDRA_HF_MODEL", CATALOG.get("default_hf_model", "meta-llama/Llama-3.1-8B-Instruct"))
 DEFAULT_MODEL = os.environ.get(
     "HYDRA_DEFAULT_MODEL",
-    CATALOG.get("default_model", "mimo 2.6 flash"),
+    CATALOG.get("default_model", "bonsai 2 9b"),
 )
 DEFAULT_ORCHESTRATOR_MODEL = os.environ.get(
     "HYDRA_ORCHESTRATOR_MODEL",
@@ -110,6 +134,12 @@ PROVIDER_KEY_NAMES: Dict[str, str] = {
     "runpod": "RUNPOD_API_KEY",
     "modal": "MODAL_ENDPOINT_URL",
     "huggingface": "HF_TOKEN",
+    "groq": "GROQ_API_KEY",
+    "ovhcloud": "OVHCLOUD_API_KEY (optional; anonymous access works without one)",
+    "nvidia": "NVIDIA_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "scaleway": "SCW_SECRET_KEY",
+    "cohere": "COHERE_API_KEY",
     "local": "LOCAL_AI_BASE or local runner",
 }
 
@@ -117,6 +147,7 @@ DEFAULT_CONTEXT_WINDOW = 1048576
 # recall: dynamic context threading. compact: normal mode, summarize at 80 percent. sliding: last turns.
 DEFAULT_CONTEXT_MODE = os.environ.get("HYDRA_CONTEXT_MODE", "recall")
 CONTEXT_PROFILES: Dict[str, int] = dict(CATALOG.get("context_profiles") or {"default": 1048576, "128k": 131072, "1m": 1048576})
+
 
 # JSON and source tokenize denser than prose. Three characters per token keeps the
 # live window inside the provider window after tool schemas are attached.
@@ -130,8 +161,11 @@ def get_context_window(model: Optional[str] = None) -> int:
         return DEFAULT_CONTEXT_WINDOW
     key = model.strip()
     spec = (CATALOG.get("aliases") or {}).get(key.lower())
-    if isinstance(spec, dict) and spec.get("model"):
-        key = spec["model"]
+    if isinstance(spec, dict):
+        if spec.get("context_window"):
+            return int(spec["context_window"])
+        if spec.get("model"):
+            key = spec["model"]
     return CONTEXT_PROFILES.get(key, CONTEXT_PROFILES.get("default", DEFAULT_CONTEXT_WINDOW))
 
 
@@ -252,13 +286,28 @@ def resolve_route(alias: str) -> Dict[str, Any]:
     cleaned = alias.strip().lower()
     spec = CATALOG["aliases"].get(cleaned)
     if not spec:
-        return {"model": alias, "effort": None, "reasoning_mode": None, "runner": None, "swarm": None, "providers": model_providers(alias)}
+        return {
+            "model": alias,
+            "effort": None,
+            "reasoning_mode": None,
+            "runner": None,
+            "swarm": None,
+            "adapter": None,
+            "hydra_adapter": None,
+            "memory_mb": None,
+            "context_window": None,
+            "providers": model_providers(alias),
+        }
     return {
         "model": spec["model"],
         "effort": spec.get("effort"),
         "reasoning_mode": spec.get("reasoning_mode"),
         "runner": spec.get("runner"),
         "swarm": spec.get("swarm"),
+        "adapter": spec.get("adapter"),
+        "hydra_adapter": spec.get("hydra_adapter"),
+        "memory_mb": spec.get("memory_mb"),
+        "context_window": spec.get("context_window"),
         "providers": model_providers(spec["model"]),
     }
 
