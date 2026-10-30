@@ -63,6 +63,7 @@ $Files = @(
     'hydra_cli/session_logger.py',
     'hydra_cli/skills/alice.md',
     'hydra_cli/skills/backend.md',
+    'hydra_cli/skills/charter.md',
     'hydra_cli/skills/code.md',
     'hydra_cli/skills/containers.md',
     'hydra_cli/skills/devops.md',

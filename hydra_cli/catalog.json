@@ -495,6 +495,24 @@
       "cheaperinference",
       "vercel",
       "openrouter"
+    ],
+    "openai/gpt-oss-120b": [
+      "groq"
+    ],
+    "Meta-Llama-3_3-70B-Instruct": [
+      "ovhcloud"
+    ],
+    "meta/llama-3.3-70b-instruct": [
+      "nvidia"
+    ],
+    "mistral-small-latest": [
+      "mistral"
+    ],
+    "llama-3.3-70b-instruct": [
+      "scaleway"
+    ],
+    "command-a-03-2025": [
+      "cohere"
     ]
   },
   "swarm": {
@@ -581,6 +599,12 @@
     }
   },
   "default_hf_model": "meta-llama/Llama-3.1-8B-Instruct",
+  "default_groq_model": "openai/gpt-oss-120b",
+  "default_ovhcloud_model": "Meta-Llama-3_3-70B-Instruct",
+  "default_nvidia_model": "meta/llama-3.3-70b-instruct",
+  "default_mistral_model": "mistral-small-latest",
+  "default_scaleway_model": "llama-3.3-70b-instruct",
+  "default_cohere_model": "command-a-03-2025",
   "context_profiles": {
     "default": 1048576,
     "128k": 131072,
@@ -607,7 +631,13 @@
     "qwen/qwen-2.5-coder-32b-instruct": 131072,
     "gemma-e4b": 131072,
     "google/gemma-4-26b-a4b-it": 131072,
-    "prism-ml/Ternary-Bonsai-2-9B-gguf": 262144,
+"openai/gpt-oss-120b": 131072,
+    "Meta-Llama-3_3-70B-Instruct": 131072,
+    "meta/llama-3.3-70b-instruct": 131072,
+    "mistral-small-latest": 131072,
+    "llama-3.3-70b-instruct": 131072,
+    "command-a-03-2025": 262144,
+"prism-ml/Ternary-Bonsai-2-9B-gguf": 262144,
     "prism-ml/Ternary-Bonsai-2-4B-gguf": 262144,
     "prism-ml/Ternary-Bonsai-2-2B-gguf": 262144,
     "prism-ml/Ternary-Bonsai-2-27B-gguf": 262144,

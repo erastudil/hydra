@@ -69,6 +69,49 @@ PROVIDER_DIRECTORY: Dict[str, Dict[str, Any]] = {
         "registration_url": "https://huggingface.co/settings/tokens",
         "probe_url": "https://huggingface.co/api/whoami-v2",
     },
+    "groq": {
+        "name": "Groq",
+        "description": "Recurring free tier on fast hosted open models (30 RPM, 1K RPD, 200K TPD per model); OpenAI-compatible",
+        "keys": ["GROQ_API_KEY"],
+        "registration_url": "https://console.groq.com/keys",
+        "probe_url": "https://api.groq.com/openai/v1/models",
+    },
+    "ovhcloud": {
+        "name": "OVHcloud AI Endpoints",
+        "description": "Anonymous access with NO key (2 RPM per IP per model); an optional key unlocks the authenticated project tier",
+        "keys": [],
+        "optional_keys": ["OVHCLOUD_API_KEY"],
+        "registration_url": "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/",
+        "probe_url": None,
+    },
+    "nvidia": {
+        "name": "NVIDIA NIM",
+        "description": "Free hosted NIM endpoints via the NVIDIA Developer Program; quota unpublished",
+        "keys": ["NVIDIA_API_KEY"],
+        "registration_url": "https://build.nvidia.com/",
+        "probe_url": "https://integrate.api.nvidia.com/v1/models",
+    },
+    "mistral": {
+        "name": "Mistral AI",
+        "description": "La Plateforme recurring free plan; the free tier trains on submitted data, so route only non-sensitive work through it",
+        "keys": ["MISTRAL_API_KEY"],
+        "registration_url": "https://console.mistral.ai/api-keys",
+        "probe_url": "https://api.mistral.ai/v1/models",
+    },
+    "scaleway": {
+        "name": "Scaleway",
+        "description": "Generative APIs serverless tier; 1M tokens free per provider FAQ; EU (Paris) hosting",
+        "keys": ["SCW_SECRET_KEY"],
+        "registration_url": "https://console.scaleway.com/generative-api",
+        "probe_url": None,
+    },
+    "cohere": {
+        "name": "Cohere",
+        "description": "Trial keys never expire (1,000 calls/month, Chat 20 RPM); NON-COMMERCIAL / non-production use only",
+        "keys": ["COHERE_API_KEY"],
+        "registration_url": "https://dashboard.cohere.com/api-keys",
+        "probe_url": "https://api.cohere.com/v1/models",
+    },
 }
 
 
@@ -113,10 +156,13 @@ def probe_credential(
     Never leaks secret value into output message.
     """
     val = (value or "").strip()
+    pid = provider_id.lower().strip()
     if not val:
+        info = PROVIDER_DIRECTORY.get(pid)
+        if info is not None and not info.get("keys"):
+            return True, f"{info['name']} needs no credential (anonymous access)."
         return False, "Empty credential provided."
 
-    pid = provider_id.lower().strip()
     if pid not in PROVIDER_DIRECTORY:
         return len(val) >= 4, "Format verified."
 
@@ -187,7 +233,27 @@ def probe_credential(
             return False, "Modal endpoint must be a valid HTTP or HTTPS URL."
         return True, "Format valid."
 
-    elif pid in ("vercel", "cheaperinference", "runpod"):
+    elif pid in ("groq", "nvidia", "mistral", "cohere"):
+        if len(val) < 8:
+            return False, f"{PROVIDER_DIRECTORY[pid]['name']} token format invalid (too short)."
+        probe_url = PROVIDER_DIRECTORY[pid].get("probe_url")
+        try:
+            req = urllib.request.Request(
+                probe_url,
+                headers={"Authorization": f"Bearer {val}", "User-Agent": "Hydra-Auth"},
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return True, f"{PROVIDER_DIRECTORY[pid]['name']} token verified (HTTP 200 OK)."
+        except urllib.error.HTTPError as he:
+            if he.code in (401, 403):
+                return False, f"{PROVIDER_DIRECTORY[pid]['name']} rejected token (HTTP {he.code} Unauthorized)."
+            return True, f"Format valid (HTTP {he.code})."
+        except Exception:
+            return True, "Format valid (network offline or probe timed out)."
+        return True, "Format valid."
+
+    elif pid in ("vercel", "cheaperinference", "runpod", "scaleway"):
         if len(val) < 8:
             return False, f"{PROVIDER_DIRECTORY[pid]['name']} token format invalid (too short)."
         return True, "Format valid."
@@ -482,9 +548,16 @@ def execute_auth_command(args: List[str]) -> int:
         if not info:
             sys.stderr.write(f"Unknown provider '{target_pid}'. Available: {', '.join(PROVIDER_DIRECTORY.keys())}\n")
             return 1
-        primary_key = info["keys"][0]
+        key_pool = info.get("keys") or info.get("optional_keys") or []
+        if not key_pool:
+            sys.stderr.write(f"No credential variables defined for {info['name']}.\n")
+            return 1
+        primary_key = key_pool[0]
         val = os.environ.get(primary_key, "")
         if not val:
+            if not info.get("keys"):
+                sys.stdout.write(f"[OK] {info['name']} probe: anonymous access active; no credential required.\n")
+                return 0
             sys.stderr.write(f"No credential found for {info['name']} ({primary_key} not set).\n")
             return 1
         extra = {k: os.environ.get(k, "") for k in info.get("keys", [])}

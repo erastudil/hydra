@@ -20,10 +20,16 @@ from urllib.parse import urlparse
 
 from hydra_cli.config import (
     DEFAULT_CLOUDFLARE_MODEL,
+    DEFAULT_COHERE_BASE,
     DEFAULT_FREE_MODEL,
+    DEFAULT_GROQ_BASE,
     DEFAULT_HF_BASE,
     DEFAULT_HF_MODEL,
     DEFAULT_LOCAL_MODEL,
+    DEFAULT_MISTRAL_BASE,
+    DEFAULT_NVIDIA_BASE,
+    DEFAULT_OVHCLOUD_BASE,
+    DEFAULT_SCALEWAY_BASE,
     DEFAULT_SYSTEM_PROMPT,
     FREE_MODELS,
     PROVIDER_KEY_NAMES,
@@ -393,6 +399,130 @@ def check_cheaperinference_balance_guard(
     return True, balance, f"CheaperInference balance ${balance:.2f} above ${threshold:.2f} floor." 
 
 
+def get_groq_provider() -> Optional[Dict[str, Any]]:
+    """Return Groq provider dict when credentials are present.
+
+    Groq runs a recurring free tier (30 RPM, 1K RPD, 200K TPD per model).
+    """
+    key = clean_secret(os.environ.get("GROQ_API_KEY"))
+    if not key:
+        return None
+    base = os.environ.get("GROQ_API_BASE", DEFAULT_GROQ_BASE).strip()
+    return {
+        "id": "groq",
+        "name": "Groq",
+        "url": chat_completions_url(base),
+        "headers": {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+    }
+
+
+def get_ovhcloud_provider() -> Dict[str, Any]:
+    """Return OVHcloud AI Endpoints provider dict. No credentials required.
+
+    Anonymous access serves 2 RPM per IP per model with no signup at all.
+    OVHCLOUD_API_KEY stays optional: present, it rides as a bearer token for
+    the authenticated project tier; absent, requests go out keyless.
+    """
+    base = os.environ.get("OVHCLOUD_API_BASE", DEFAULT_OVHCLOUD_BASE).strip()
+    key = clean_secret(os.environ.get("OVHCLOUD_API_KEY"))
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    return {
+        "id": "ovhcloud",
+        "name": "OVHcloud AI Endpoints",
+        "url": chat_completions_url(base),
+        "headers": headers,
+    }
+
+
+def get_nvidia_provider() -> Optional[Dict[str, Any]]:
+    """Return NVIDIA NIM provider dict when credentials are present.
+
+    Hosted NIM endpoints stay free under the NVIDIA Developer Program;
+    the program publishes no quota, so none is asserted here.
+    """
+    key = clean_secret(os.environ.get("NVIDIA_API_KEY"))
+    if not key:
+        return None
+    base = os.environ.get("NVIDIA_API_BASE", DEFAULT_NVIDIA_BASE).strip()
+    return {
+        "id": "nvidia",
+        "name": "NVIDIA NIM",
+        "url": chat_completions_url(base),
+        "headers": {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+    }
+
+
+def get_mistral_provider() -> Optional[Dict[str, Any]]:
+    """Return Mistral AI provider dict when credentials are present.
+
+    The recurring free plan trains on submitted data (Mistral docs);
+    route only non-sensitive work through the free tier.
+    """
+    key = clean_secret(os.environ.get("MISTRAL_API_KEY"))
+    if not key:
+        return None
+    base = os.environ.get("MISTRAL_API_BASE", DEFAULT_MISTRAL_BASE).strip()
+    return {
+        "id": "mistral",
+        "name": "Mistral AI",
+        "url": chat_completions_url(base),
+        "headers": {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+    }
+
+
+def get_scaleway_provider() -> Optional[Dict[str, Any]]:
+    """Return Scaleway Generative APIs provider dict when credentials are present.
+
+    The serverless tier carries 1M free tokens per the provider FAQ.
+    The secret key rides under Scaleway's SCW_SECRET_KEY convention.
+    """
+    key = clean_secret(os.environ.get("SCW_SECRET_KEY"))
+    if not key:
+        return None
+    base = os.environ.get("SCALEWAY_API_BASE", DEFAULT_SCALEWAY_BASE).strip()
+    return {
+        "id": "scaleway",
+        "name": "Scaleway",
+        "url": chat_completions_url(base),
+        "headers": {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+    }
+
+
+def get_cohere_provider() -> Optional[Dict[str, Any]]:
+    """Return Cohere provider dict when credentials are present.
+
+    Trial keys never expire (1,000 calls/month) and carry a hard caveat:
+    non-commercial, non-production use only.
+    """
+    key = clean_secret(os.environ.get("COHERE_API_KEY"))
+    if not key:
+        return None
+    base = os.environ.get("COHERE_API_BASE", DEFAULT_COHERE_BASE).strip()
+    return {
+        "id": "cohere",
+        "name": "Cohere",
+        "url": chat_completions_url(base),
+        "headers": {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+    }
+
+
 def get_runpod_provider() -> Optional[Dict[str, Any]]:
     """Return RunPod provider dict when credentials/endpoints are present."""
     key = clean_secret(os.environ.get("RUNPOD_API_KEY"))
@@ -488,8 +618,14 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
     2. CheaperInference (ultra low-cost endpoints)
     3. Vercel AI Gateway (fast / free endpoints)
     4. OpenRouter (aggregator fallback)
-    5. Modal (serverless container compute)
-    6. RunPod (serverless GPU compute)
+    5. Groq (recurring free tier, fast hosted open models)
+    6. OVHcloud AI Endpoints (anonymous free access, no key required)
+    7. NVIDIA NIM (free hosted endpoints, developer program)
+    8. Mistral AI (recurring free plan; free tier trains on data)
+    9. Scaleway (1M free serverless tokens)
+    10. Cohere (trial keys, non-commercial only)
+    11. Modal (serverless container compute)
+    12. RunPod (serverless GPU compute)
     """
     providers = []
 
@@ -527,6 +663,28 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
                 "X-Title": "Hydra Multi-Headed AI Summoning CLI",
             },
         })
+
+    groq = get_groq_provider()
+    if groq:
+        providers.append(groq)
+
+    providers.append(get_ovhcloud_provider())
+
+    nvidia = get_nvidia_provider()
+    if nvidia:
+        providers.append(nvidia)
+
+    mistral = get_mistral_provider()
+    if mistral:
+        providers.append(mistral)
+
+    scaleway = get_scaleway_provider()
+    if scaleway:
+        providers.append(scaleway)
+
+    cohere = get_cohere_provider()
+    if cohere:
+        providers.append(cohere)
 
     modal = get_modal_provider()
     if modal:
