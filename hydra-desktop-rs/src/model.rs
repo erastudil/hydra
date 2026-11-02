@@ -42,6 +42,10 @@ pub struct Catalog {
     pub providers: Vec<(String, Vec<String>)>,
     pub local: Vec<(String, String)>,
     pub unavailable: Vec<String>,
+    /// The active Hydra routing mode and the full mode list, as reported
+    /// by the backend (hydra_cli/modes.py owns the data).
+    pub mode: String,
+    pub modes: Vec<String>,
 }
 
 impl Catalog {
@@ -392,6 +396,14 @@ struct Saved {
     local_ai_base: String,
     #[serde(default)]
     pub cwd: Option<String>,
+    #[serde(default)]
+    mode: String,
+    #[serde(default = "default_simple")]
+    simple: bool,
+}
+
+fn default_simple() -> bool {
+    true
 }
 
 /// Saved selections were once a numeric index into the baked roster.
@@ -425,6 +437,12 @@ pub struct Model {
     /// The selected alias (or live provider id / local model name).
     /// Empty until state or the live catalog resolves it.
     pub model: String,
+    /// The active Hydra routing mode (local/free/light/heavy/max).
+    /// Empty until the backend's model_list reports it.
+    pub mode: String,
+    /// Simple layout: one conversation surface, no nav rail, no
+    /// inspection drawer. The full layout stays one toggle away.
+    pub simple: bool,
     /// The live catalog from the backend; None until it answers.
     pub catalog: Option<Catalog>,
     /// Computer-use tool calls currently in flight (machine being driven).
@@ -551,6 +569,8 @@ impl Model {
             drawer_tab: "screen",
             tab_pinned: false,
             model: String::new(),
+            mode: String::new(),
+            simple: true,
             catalog: None,
             cu_in_flight: 0,
             tokens: 0,
@@ -611,6 +631,8 @@ impl Model {
                     m.counter = saved.counter;
                     m.nav = nav_key(&saved.nav);
                     m.model = saved.model;
+                    m.mode = saved.mode;
+                    m.simple = saved.simple;
                     m.tokens = saved.tokens;
                     m.cost = saved.cost;
                     m.prompt_tokens = saved.prompt_tokens;
@@ -708,6 +730,8 @@ impl Model {
             counter: self.counter,
             nav: self.nav.into(),
             model: self.model.clone(),
+            mode: self.mode.clone(),
+            simple: self.simple,
             tokens: self.tokens,
             cost: self.cost,
             prompt_tokens: self.prompt_tokens,
@@ -1552,13 +1576,16 @@ impl Model {
                 self.picked_skills.retain(|p| skills.iter().any(|s| s.get("id").and_then(|x| x.as_str()) == Some(p)));
                 self.skills = skills;
             }
-            Ev::ModelList { id, default, aliases, providers, local, unavailable } => {
+            Ev::ModelList { id, default, aliases, providers, local, unavailable, mode, modes } => {
                 self.pending.remove(&id);
-                let catalog = Catalog { default, aliases, providers, local, unavailable };
+                let catalog = Catalog { default, aliases, providers, local, unavailable, mode, modes };
                 // A stored selection the live catalog no longer offers (or
                 // none stored yet) resolves to the catalog default.
                 if self.model.is_empty() || !catalog.contains(&self.model) {
                     self.model = catalog.default.clone();
+                }
+                if self.mode.is_empty() {
+                    self.mode = catalog.mode.clone();
                 }
                 self.catalog = Some(catalog);
             }

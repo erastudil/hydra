@@ -864,6 +864,11 @@ impl HydraApp {
             if widgets::button(ui, "Clear", Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
                 self.m.clear_active();
             }
+            if widgets::button(ui, if self.m.simple { "Advanced" } else { "Simple" }, Kind::Secondary, 13.0, (16.0, 8.0), None).clicked() {
+                self.m.simple = !self.m.simple;
+                self.m.save();
+            }
+            self.mode_select(ui, if narrow { 84.0 } else { 104.0 });
             self.model_select(ui, if narrow { 120.0 } else { 309.0 });
             let (dot_live, label) = match (self.m.agent_ready, narrow) {
                 (true, false) => (true, "Agent : ready"),
@@ -962,6 +967,37 @@ impl HydraApp {
             });
             if before != self.m.model {
                 self.m.save();
+            }
+        });
+    }
+
+    /// Quiet routing-mode picker beside the model picker. The mode list
+    /// and the active mode come from the backend's model_list (modes.py
+    /// owns the data); a change is sent as the mode:set desk action and
+    /// persisted by the backend in ~/.hydra/settings.json.
+    fn mode_select(&mut self, ui: &mut egui::Ui, width: f32) {
+        let fallback: Vec<String> = ["local", "free", "light", "heavy", "max"].iter().map(|s| s.to_string()).collect();
+        let modes: Vec<String> = match &self.m.catalog {
+            Some(cat) if !cat.modes.is_empty() => cat.modes.clone(),
+            _ => fallback,
+        };
+        let current = if self.m.mode.is_empty() { "light".to_string() } else { self.m.mode.clone() };
+        ui.scope(|ui| {
+            ui.spacing_mut().button_padding = vec2(14.0, 8.0);
+            style_combo(ui);
+            let before = current.clone();
+            let mut picked = current.clone();
+            egui::ComboBox::from_id_salt("mode-select").width(width).selected_text(rt(&current, 13.0, TEXT)).show_ui(ui, |ui| {
+                for name in &modes {
+                    ui.selectable_value(&mut picked, name.clone(), rt(name, 13.0, TEXT));
+                }
+            });
+            if picked != before {
+                self.m.mode = picked.clone();
+                self.m.save();
+                if let Some(be) = &mut self.be {
+                    be.action("mode:set", serde_json::json!({ "mode": picked }));
+                }
             }
         });
     }
@@ -3878,7 +3914,7 @@ impl HydraApp {
                 self.session_bar(ui);
                 ui.painter().hline(ui.max_rect().x_range().expand(20.0), ui.max_rect().bottom() - 0.5, border);
             });
-        if !fr.overlay_nav && nav_t > 0.001 {
+        if !self.m.simple && !fr.overlay_nav && nav_t > 0.001 {
             egui::Panel::left("nav")
                 .exact_size(LAYOUT_SIDEBAR_WIDTH * nav_t)
                 .resizable(false)
@@ -3895,6 +3931,10 @@ impl HydraApp {
                     ui.painter().vline(r.right() + 10.0 - 0.5, r.y_range(), border);
                 });
         }
+        // Simple layout: no inspection drawer — the chat surface takes the
+        // whole width. The drawer (and the nav rail above) return with the
+        // header's Advanced toggle.
+        if !self.m.simple {
         let dw = fr.drawer_width;
         // Pat's layout width by default; dragging the left edge sets a user width, kept within sane bounds as the window changes
         let lo = dw.min(300.0);
@@ -3921,6 +3961,7 @@ impl HydraApp {
                 let live_w = ui.max_rect().width();
                 self.drawer(ui, live_w);
             });
+        }
         egui::Panel::bottom("composer")
             .show_separator_line(false)
             .frame(egui::Frame::new().fill(Color32::from_rgb(8, 8, 8)).inner_margin(Margin::symmetric(24, 16)))
@@ -3931,7 +3972,9 @@ impl HydraApp {
         egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(root, |ui| {
             self.chat(ui);
         });
-        self.nav_overlay(ctx, fr, nav_t);
+        if !self.m.simple {
+            self.nav_overlay(ctx, fr, nav_t);
+        }
         self.modals(ctx);
         self.toast_ui(ctx, time);
         let _ = &self.start_error;
