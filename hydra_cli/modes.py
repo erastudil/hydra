@@ -119,7 +119,24 @@ def classify_model(model_id: str) -> str:
         return "free"
     if mid.endswith(":free") or mid.startswith("@cf/"):
         return "free"
+    if mid in _zero_billed_models():
+        return "free"
     return "paid"
+
+
+def _zero_billed_models() -> set:
+    """Models the free mode's routing table marks zero_billed.
+
+    These are paid-platform listings that currently bill $0 (the free
+    escalation seat). They classify as free for mode purposes only; they
+    are NOT added to the catalog's free_models, which the router iterates
+    as OpenRouter forge candidates under different ids.
+    """
+    try:
+        spec = mode_spec("free")
+    except Exception:
+        return set()
+    return {str(r.get("model")) for r in spec.get("routes") or [] if r.get("zero_billed")}
 
 
 def _light_entry(model_id: str) -> Optional[Dict[str, Any]]:
@@ -149,7 +166,7 @@ def light_eligible(model_id: str) -> Tuple[bool, str]:
         if inp < cap and outp < cap:
             return True, f"light table: ${inp}/M in, ${outp}/M out, under the ${cap}/M cap"
         return False, f"light table prices reach the cap: ${inp}/M in, ${outp}/M out (cap ${cap}/M both ways)"
-    return True, "light table (PROVISIONAL: named in the plan, prices unverified until CENSUS-2026-11-01.md lands)"
+    return True, "light table (PROVISIONAL entry: named in the plan, not in the 2026-11-02 bench set, prices unverified)"
 
 
 def check_request(model_id: str, mode: Optional[str] = None) -> Tuple[bool, str]:
@@ -208,6 +225,11 @@ def describe(name: Optional[str] = None) -> str:
         lines.append(f"  route: {route.get('model')} via {provs} (context {ctx})")
         if route.get("note"):
             lines.append(f"         {route['note']}")
+    esc = spec.get("escalation")
+    if esc:
+        fb = esc.get("paid_fallback") or {}
+        lines.append(f"  escalation seat: {esc.get('seat')} (alias {esc.get('seat_alias')})")
+        lines.append(f"    paid fallback: {fb.get('model')} under {fb.get('mode')} mode, when {esc.get('paid_fallback_when')}")
     if name == "light":
         lines.append(f"  eligible paid models (cap ${light_cap()}/M in AND out):")
         for entry in spec.get("eligible") or []:

@@ -13885,7 +13885,7 @@ def modes_media_and_desk():
     allow/refuse matrix, the E4B front-desk default, media routes, and
     the GPU arbiter's state roundtrip. No network, no GPU."""
     from hydra_cli import gpu_arbiter, media, modes
-    from hydra_cli.config import DEFAULT_LOCAL_MODEL, resolve_route
+    from hydra_cli.config import DEFAULT_LOCAL_MODEL, resolve_model, resolve_route
 
     # The front desk is Gemma E4B, with the adapter slot present in the
     # catalog route (null until W2's artifact lands) and the shim named.
@@ -13896,6 +13896,11 @@ def modes_media_and_desk():
 
     assert modes.mode_names() == ["local", "free", "light", "heavy", "max"]
     assert modes.default_alias("local") == "gemma-e4b"
+    # Owner seat rulings 2026-11-02 (capability bench): muse-spark
+    # contributor is the light default; Ling is the free escalation seat.
+    assert modes.default_alias("light") == "muse spark contributor"
+    assert resolve_model("muse spark contributor") == "muse-spark-1.3-contributor"
+    assert resolve_model("ling") == "ling-3.1-flash-1019"
     assert modes.routes("free"), "free mode must carry an inspectable routing table"
     for entry in modes.mode_spec("light")["eligible"]:
         inp, outp = entry.get("input_per_million"), entry.get("output_per_million")
@@ -13909,6 +13914,10 @@ def modes_media_and_desk():
         ("mimo-2.6-flash", "local", False),
         ("google/gemma-4-26b-a4b-it:free", "free", True),
         ("mimo-2.6-flash", "free", False),
+        ("muse-spark-1.3-contributor", "light", True),
+        ("muse-spark-1.3-contributor", "free", False),
+        ("ling-3.1-flash-1019", "free", True),
+        ("ling-3.1-flash-1019", "light", True),
         ("mimo-2.6-flash", "light", True),
         ("anthropic/claude-opus-5.5", "light", False),
         ("anthropic/claude-fable-5.1", "heavy", False),
