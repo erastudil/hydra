@@ -379,7 +379,7 @@
       "provider": "local",
       "hydra_adapter": null,
       "format_shim": "stdio",
-      "adapter_note": "Hydra adapter (W2) not trained yet: base weights + stdio/tool format shim. When the adapter GGUF lands in hydra-models/gemma-4-e4b/ (or HYDRA_GEMMA_E4B_LORA is set), local_server loads it with --lora and this field names it."
+      "adapter_note": "Hydra adapter trained by W2 on 2026-11-01 (adapter-dataset/trained/easylm-hydra-gemma-4-e4b, HF safetensors LoRA r16, held-out loss 0.548) but not yet converted to GGUF: llama.cpp conversion needs the HF base on disk and the laptop was at 1.7 GB free. Until the converted GGUF lands in hydra-models/gemma-4-e4b/ (or HYDRA_GEMMA_E4B_LORA is set), the desk runs base weights + the stdio/tool format shim, local_server loads it with --lora and this field names it."
     },
     "local-gemma": {
       "title": "Local Gemma E4B",
@@ -387,7 +387,7 @@
       "provider": "local",
       "hydra_adapter": null,
       "format_shim": "stdio",
-      "adapter_note": "Hydra adapter (W2) not trained yet: base weights + stdio/tool format shim. When the adapter GGUF lands in hydra-models/gemma-4-e4b/ (or HYDRA_GEMMA_E4B_LORA is set), local_server loads it with --lora and this field names it."
+      "adapter_note": "Hydra adapter trained by W2 on 2026-11-01 (adapter-dataset/trained/easylm-hydra-gemma-4-e4b, HF safetensors LoRA r16, held-out loss 0.548) but not yet converted to GGUF: llama.cpp conversion needs the HF base on disk and the laptop was at 1.7 GB free. Until the converted GGUF lands in hydra-models/gemma-4-e4b/ (or HYDRA_GEMMA_E4B_LORA is set), the desk runs base weights + the stdio/tool format shim, local_server loads it with --lora and this field names it."
     },
     "gemma 4 e4b": {
       "title": "Gemma 4 E4B",
@@ -395,7 +395,7 @@
       "provider": "local",
       "hydra_adapter": null,
       "format_shim": "stdio",
-      "adapter_note": "Hydra adapter (W2) not trained yet: base weights + stdio/tool format shim. When the adapter GGUF lands in hydra-models/gemma-4-e4b/ (or HYDRA_GEMMA_E4B_LORA is set), local_server loads it with --lora and this field names it."
+      "adapter_note": "Hydra adapter trained by W2 on 2026-11-01 (adapter-dataset/trained/easylm-hydra-gemma-4-e4b, HF safetensors LoRA r16, held-out loss 0.548) but not yet converted to GGUF: llama.cpp conversion needs the HF base on disk and the laptop was at 1.7 GB free. Until the converted GGUF lands in hydra-models/gemma-4-e4b/ (or HYDRA_GEMMA_E4B_LORA is set), the desk runs base weights + the stdio/tool format shim, local_server loads it with --lora and this field names it."
     },
     "mimo 2.6 pro": {
       "model": "mimo-2.6-pro"
