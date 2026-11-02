@@ -124,19 +124,26 @@ def build_workflow(prompt: str, width: int, height: int) -> Optional[Dict[str, A
     kind = cfg["kind"]
     seed = int(time.time()) % 2_147_483_647
     if kind == "flux2-klein":
+        # Node class names verified against the Imagine Toy's ComfyUI
+        # 0.34.0 /object_info on 2026-11-01.
         return {
             "1": {"class_type": "UNETLoader", "inputs": {"unet_name": cfg["unet"], "weight_dtype": "default"}},
             "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": cfg["clip"], "type": "flux2"}},
             "3": {"class_type": "VAELoader", "inputs": {"vae_name": cfg["vae"]}},
             "4": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": prompt}},
-            "5": {"class_type": "EmptyFlux2Latent", "inputs": {"width": width, "height": height, "batch_size": 1}},
-            "6": {"class_type": "KSampler", "inputs": {
-                "model": ["1", 0], "positive": ["4", 0], "negative": ["4", 0], "latent_image": ["5", 0],
+            "5": {"class_type": "CLIPTextEncode", "inputs": {"clip": ["2", 0], "text": ""}},
+            "6": {"class_type": "EmptyFlux2LatentImage", "inputs": {"width": width, "height": height, "batch_size": 1}},
+            "7": {"class_type": "ModelSamplingFlux", "inputs": {
+                "model": ["1", 0], "max_shift": cfg.get("max_shift", 1.15), "base_shift": cfg.get("base_shift", 0.5),
+                "width": width, "height": height,
+            }},
+            "8": {"class_type": "KSampler", "inputs": {
+                "model": ["7", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["6", 0],
                 "seed": seed, "steps": cfg.get("steps", 4), "cfg": cfg.get("cfg", 1.0),
                 "sampler_name": cfg.get("sampler", "euler"), "scheduler": cfg.get("scheduler", "simple"), "denoise": 1.0,
             }},
-            "7": {"class_type": "VAEDecode", "inputs": {"samples": ["6", 0], "vae": ["3", 0]}},
-            "8": {"class_type": "SaveImage", "inputs": {"images": ["7", 0], "filename_prefix": "hydra-imagine"}},
+            "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["3", 0]}},
+            "10": {"class_type": "SaveImage", "inputs": {"images": ["9", 0], "filename_prefix": "hydra-imagine"}},
         }
     if kind == "z-image-turbo":
         return {
