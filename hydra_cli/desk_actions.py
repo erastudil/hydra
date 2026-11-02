@@ -115,10 +115,72 @@ def _models(p: Dict[str, Any]) -> Dict[str, Any]:
     return {"isError": False, "models": sorted(MODEL_MAP)}
 
 
+def _mode_get(p: Dict[str, Any]) -> Dict[str, Any]:
+    from hydra_cli import modes
+
+    name = modes.current_mode()
+    return {
+        "isError": False,
+        "mode": name,
+        "modes": modes.mode_names(),
+        "default_alias": modes.default_alias(name),
+        "routes": modes.routes(name),
+        "summary": modes.mode_spec(name).get("summary", ""),
+    }
+
+
+def _mode_set(p: Dict[str, Any]) -> Dict[str, Any]:
+    from hydra_cli import modes
+
+    name = str(p.get("mode") or "").strip().lower()
+    try:
+        modes.set_mode(name, source="desktop")
+    except ValueError as exc:
+        return {"isError": True, "error": str(exc)}
+    return _mode_get(p)
+
+
+def _desk_status(p: Dict[str, Any]) -> Dict[str, Any]:
+    from hydra_cli import gpu_arbiter
+
+    return {"isError": False, **gpu_arbiter.desk_status()}
+
+
+def _desk_aside(p: Dict[str, Any]) -> Dict[str, Any]:
+    from hydra_cli import gpu_arbiter
+
+    return {"isError": False, **gpu_arbiter.step_aside(str(p.get("reason") or "manual (desktop)"))}
+
+
+def _desk_return(p: Dict[str, Any]) -> Dict[str, Any]:
+    from hydra_cli import gpu_arbiter
+
+    return {"isError": False, **gpu_arbiter.return_desk()}
+
+
+def _desk_hold(p: Dict[str, Any]) -> Dict[str, Any]:
+    from hydra_cli import gpu_arbiter
+
+    return {"isError": False, **gpu_arbiter.set_override("hold" if p.get("hold", True) else "auto")}
+
+
+def _media_imagine(p: Dict[str, Any]) -> Dict[str, Any]:
+    from hydra_cli import media
+
+    prompt = str(p.get("prompt") or "").strip()
+    if not prompt:
+        return {"isError": True, "error": "prompt is required"}
+    result = media.generate_image(prompt)
+    return {"isError": not result.get("ok"), **result}
+
+
 DESK_ACTIONS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "terminal:run": _terminal_run, "swarm:run": _swarm_run, "computer:screen": _screen, "computer:click": _click,
     "computer:type": _type, "computer:window": _window, "agent:run": _agent_run, "agent:status": _agent_status,
     "jobs:create": _job_create, "jobs:run": _job_run, "jobs:cancel": _job_cancel, "models:list": _models,
+    "mode:get": _mode_get, "mode:set": _mode_set,
+    "desk:status": _desk_status, "desk:aside": _desk_aside, "desk:return": _desk_return, "desk:hold": _desk_hold,
+    "media:imagine": _media_imagine,
 }
 
 

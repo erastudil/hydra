@@ -111,7 +111,9 @@ sessions : list threads on disk. fields id, optional. reply `session_list`.
 
 history : read stored turns of a thread. fields id, thread, limit optional with default 200. reply `history_result`.
 
-action : run a desktop service by command palette name, for the old panels. fields id, action, params object optional. the names are the keys of COMMAND_PALETTE_ACTIONS in hydra_cli/desktop_core.py. reply `action_result`. actions run off the reader thread, so several may be in flight and replies can arrive out of order, match them by id.
+models : list the live catalog. field id. reply `model_list`.
+
+action : run a desktop service by command palette name, for the old panels. fields id, action, params object optional. the names are the keys of COMMAND_PALETTE_ACTIONS in hydra_cli/desktop_core.py, plus the desk actions in hydra_cli/desk_actions.py. reply `action_result`. actions run off the reader thread, so several may be in flight and replies can arrive out of order, match them by id. desk actions include `mode:get` and `mode:set` for the routing mode, with params naming the mode; `desk:status`, `desk:aside`, `desk:return` and `desk:hold` for the front-desk GPU step-aside; and `media:imagine`, with params carrying the prompt.
 
 
 ## messages from the agent to the app
@@ -159,6 +161,8 @@ rules_result : fields id, thread, rules. each rule has id, tool, prefix or null,
 session_list : fields id, sessions. each session has thread, updated in epoch seconds, and cwd, mode, model, permission and title as last saved, null when unknown.
 
 history_result : fields id, thread, turns, meta. each turn has role and content, oldest first. meta is the saved thread settings, empty for a thread without any.
+
+model_list : fields id, default, aliases, providers, local, unavailable, mode, modes. aliases maps alias to model id, providers maps provider id to its live model ids, local lists the local server's models with their engine, unavailable lists providers whose listing failed. mode is the active Hydra routing mode and modes the full list: local, free, light, heavy, max. hydra_cli/modes.json owns the routing tables.
 
 unanswered prompt : a prompt whose turn ended without a final reply gets an assistant turn with a marker, so user and assistant turns alternate in history and in the next request. a cancelled turn stores `[Turn cancelled by user]`. a turn that ended any other way, such as an agent killed mid-stream, stores `[Turn interrupted before a reply]`. the agent writes that marker when the next turn on the thread starts, or on a `history` request when no agent runs a turn on the thread. partial text streamed before the end is not stored.
 
