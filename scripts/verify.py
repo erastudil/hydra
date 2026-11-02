@@ -13879,6 +13879,72 @@ def tankbench_runners():
             assert "TANKBENCH_SRC" in missing.stderr
 
 
+@check
+def modes_media_and_desk():
+    """The 2026-11-01 Hydra pass: five modes as data, the mode gate's
+    allow/refuse matrix, the E4B front-desk default, media routes, and
+    the GPU arbiter's state roundtrip. No network, no GPU."""
+    from hydra_cli import gpu_arbiter, media, modes
+    from hydra_cli.config import DEFAULT_LOCAL_MODEL, resolve_route
+
+    # The front desk is Gemma E4B, with the adapter slot present in the
+    # catalog route (null until W2's artifact lands) and the shim named.
+    assert DEFAULT_LOCAL_MODEL == "gemma-e4b", DEFAULT_LOCAL_MODEL
+    route = resolve_route("gemma-e4b")
+    assert route["model"] == "gemma-e4b"
+    assert "hydra_adapter" in route and "format_shim" in route
+
+    assert modes.mode_names() == ["local", "free", "light", "heavy", "max"]
+    assert modes.default_alias("local") == "gemma-e4b"
+    assert modes.routes("free"), "free mode must carry an inspectable routing table"
+    for entry in modes.mode_spec("light")["eligible"]:
+        inp, outp = entry.get("input_per_million"), entry.get("output_per_million")
+        if isinstance(inp, (int, float)) and isinstance(outp, (int, float)):
+            assert inp < modes.light_cap() and outp < modes.light_cap(), entry
+        else:
+            assert entry.get("price_status"), f"unpriced light entry must say so: {entry}"
+
+    matrix = [
+        ("gemma-e4b", "local", True),
+        ("mimo-2.6-flash", "local", False),
+        ("google/gemma-4-26b-a4b-it:free", "free", True),
+        ("mimo-2.6-flash", "free", False),
+        ("mimo-2.6-flash", "light", True),
+        ("anthropic/claude-opus-5.5", "light", False),
+        ("anthropic/claude-fable-5.1", "heavy", False),
+        ("anthropic/claude-opus-5.5", "heavy", True),
+        ("anthropic/claude-fable-5.1", "max", True),
+        ("openai/gpt-6-astra", "max", True),
+    ]
+    for model_id, mode, expected in matrix:
+        ok, reason = modes.check_request(model_id, mode)
+        assert ok == expected, f"{model_id} under {mode}: {ok} != {expected} ({reason})"
+    assert modes.cascade_tiers("local")["cloudflare"] is False
+    assert modes.cascade_tiers("light")["cloudflare"] is True
+
+    # Mode switching persists to the (gate-temp) home settings file.
+    modes.set_mode("local", source="verify")
+    assert modes.current_mode() == "local"
+    modes.set_mode("light", source="verify")
+    assert modes.current_mode() == "light"
+
+    # Media routes are data; the local image workflow stays unconfigured
+    # (None) until the fit test records a winner — never a guessed graph.
+    table = media.routes()
+    assert table["audio_transcription"]["groq"]["model"].startswith("whisper-")
+    assert table["video"]["routes"], "video routes must be named even though unwired"
+
+    # Arbiter state: override roundtrip, and status answers without a GPU.
+    assert gpu_arbiter.step_aside_enabled()
+    gpu_arbiter.set_override("hold")
+    assert not gpu_arbiter.step_aside_enabled()
+    gpu_arbiter.set_override("auto")
+    assert gpu_arbiter.step_aside_enabled()
+    status = gpu_arbiter.desk_status()
+    assert status["front_desk_model"] == "gemma-e4b"
+    assert status["override"] == "auto"
+
+
 def main() -> int:
     started = time.perf_counter()
     print("hydra verification : starting consolidated gate.")
