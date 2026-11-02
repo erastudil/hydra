@@ -6,7 +6,7 @@
   ],
   "default_free_model": "google/gemma-4-26b-a4b-it:free",
   "default_cloudflare_model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-  "default_local_model": "prism-ml/Ternary-Bonsai-2-9B-gguf",
+  "default_local_model": "gemma-e4b",
   "free_models": [
     "google/gemma-4-26b-a4b-it:free",
     "google/gemma-4-31b-it:free",
@@ -376,17 +376,26 @@
     "gemma-e4b": {
       "title": "Gemma E4B Local Fine-Tune",
       "model": "gemma-e4b",
-      "provider": "local"
+      "provider": "local",
+      "hydra_adapter": null,
+      "format_shim": "stdio",
+      "adapter_note": "Hydra adapter (W2) not trained yet: base weights + stdio/tool format shim. When the adapter GGUF lands in hydra-models/gemma-4-e4b/ (or HYDRA_GEMMA_E4B_LORA is set), local_server loads it with --lora and this field names it."
     },
     "local-gemma": {
       "title": "Local Gemma E4B",
       "model": "gemma-e4b",
-      "provider": "local"
+      "provider": "local",
+      "hydra_adapter": null,
+      "format_shim": "stdio",
+      "adapter_note": "Hydra adapter (W2) not trained yet: base weights + stdio/tool format shim. When the adapter GGUF lands in hydra-models/gemma-4-e4b/ (or HYDRA_GEMMA_E4B_LORA is set), local_server loads it with --lora and this field names it."
     },
     "gemma 4 e4b": {
       "title": "Gemma 4 E4B",
       "model": "gemma-e4b",
-      "provider": "local"
+      "provider": "local",
+      "hydra_adapter": null,
+      "format_shim": "stdio",
+      "adapter_note": "Hydra adapter (W2) not trained yet: base weights + stdio/tool format shim. When the adapter GGUF lands in hydra-models/gemma-4-e4b/ (or HYDRA_GEMMA_E4B_LORA is set), local_server loads it with --lora and this field names it."
     },
     "mimo 2.6 pro": {
       "model": "mimo-2.6-pro"
