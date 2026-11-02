@@ -193,6 +193,21 @@ def return_desk() -> Dict[str, Any]:
             result["reason"] = f"{type(exc).__name__}: {exc}"
     else:
         result.update(local_server.ensure_local_server(model))
+    # Wait until the restored server actually answers. Without this, the
+    # port sits silent-but-coming-back and any concurrent Hydra launch's
+    # autostart races in and starts the default model on top of the
+    # restore (observed live 2026-11-01: a `hydra desk status` autostart
+    # out-bound a relaunched Bonsai and the Bonsai died on the bind).
+    wait_started = time.time()
+    while time.time() - wait_started < 120:
+        served_now = local_server.served_model_ids()
+        if served_now and model in served_now:
+            result["answered_after_s"] = round(time.time() - wait_started, 1)
+            break
+        time.sleep(1.0)
+    else:
+        result["wait"] = "restored server did not answer within 120s"
+        log_event("return_unanswered", model=model)
     parked = state.get("parked_kv")
     if parked and isinstance(parked, dict) and parked.get("file"):
         if local_server.served_model_ids() and model == (parked.get("model") or model):
