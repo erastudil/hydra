@@ -33,6 +33,8 @@ Slash commands (Claude Code / Codex style):
   /banner               Reprint the TUI splash once
   /models [--verbose]   List aliases (ids with --verbose)
   /model <alias>        Switch the active model alias
+  /mode [name]          Show or set the routing mode (local|free|light|heavy|max)
+  /desk [sub]           Front-desk GPU: status|aside|return|hold|auto|park|restore
   /system <text>        Set the system prompt for this session
   /effort <level>       Set reasoning effort (low|medium|high|xhigh|max)
   /status               Show session model, effort, system prompt
@@ -1271,12 +1273,27 @@ def create_exit_confirm(
     return ReplExitConfirm(policy=policy, window_seconds=window_seconds)
 
 
+def _mode_default_alias() -> Optional[str]:
+    """The session's starting alias under the current Hydra mode
+    (local -> gemma-e4b; free -> None, the incumbent default stands)."""
+    try:
+        from hydra_cli import modes
+
+        return modes.default_alias()
+    except Exception:
+        return None
+
+
 class ReplSession:
     def __init__(self) -> None:
         self.history: ReplHistoryDedup = get_default_history_dedup()
         self.menu_pager: ReplMenuPager = get_default_menu_pager()
         self.exit_confirm: ReplExitConfirm = get_default_exit_confirm()
-        self.alias = os.environ.get("HYDRA_DEFAULT_ALIAS", "").strip() or DEFAULT_MODEL
+        self.alias = (
+            os.environ.get("HYDRA_DEFAULT_ALIAS", "").strip()
+            or _mode_default_alias()
+            or DEFAULT_MODEL
+        )
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.effort: Optional[str] = None
         self.reasoning_mode: Optional[str] = None
@@ -1292,7 +1309,9 @@ class ReplSession:
             self.reasoning_mode = route["reasoning_mode"]
 
     def status_line(self) -> str:
-        bits = [f"model={self.alias}"]
+        from hydra_cli import modes
+
+        bits = [f"model={self.alias}", f"routing={modes.current_mode()}"]
         if self.effort:
             bits.append(f"effort={self.effort}")
         if self.reasoning_mode:
@@ -1361,6 +1380,65 @@ def _handle_slash(session: ReplSession, line: str) -> Tuple[Optional[int], bool]
         session.system_prompt = " ".join(args)
         print("System prompt updated.")
         return None, True
+    if cmd == "/mode":
+        from hydra_cli import modes
+
+        if not args:
+            print(modes.describe())
+            print(f"  all modes: {', '.join(modes.mode_names())} — switch with /mode <name>")
+            return None, True
+        name = args[0].strip().lower()
+        if name in ("list", "routes", "show"):
+            print(modes.describe(args[1].strip().lower() if len(args) > 1 else None))
+            return None, True
+        try:
+            modes.set_mode(name, source="repl")
+        except ValueError as exc:
+            print(str(exc))
+            return None, True
+        alias = modes.default_alias(name)
+        if alias:
+            session.alias = alias
+            route = resolve_route(session.alias)
+            session.effort = route.get("effort")
+            session.reasoning_mode = route.get("reasoning_mode")
+        print(modes.describe(name))
+        if alias:
+            print(f"Session model: {session.alias}")
+        return None, True
+    if cmd == "/desk":
+        from hydra_cli import gpu_arbiter
+
+        sub = args[0].strip().lower() if args else "status"
+        if sub == "status":
+            st = gpu_arbiter.desk_status()
+            print(f"front desk: {st['front_desk_model']}")
+            print(f"serving:    {', '.join(st['served']) if st['served'] else '(nothing)'}"
+                  f" (pid {st['server_pid']}, {'hydra-managed' if st['managed_by_hydra'] else 'foreign'})")
+            print(f"aside:      {st['aside']}" + (f" ({st['aside_reason']})" if st['aside_reason'] else ""))
+            print(f"override:   {st['override']} (step-aside {'enabled' if st['step_aside_enabled'] else 'DISABLED'})")
+            if st["parked_thread"]:
+                print(f"parked:     {st['parked_thread']} (auto-parked on step-aside)")
+        elif sub == "aside":
+            print(gpu_arbiter.step_aside("manual (/desk aside)"))
+        elif sub == "return":
+            print(gpu_arbiter.return_desk())
+        elif sub == "hold":
+            gpu_arbiter.set_override("hold")
+            print("Front desk pinned: step-aside disabled until /desk auto.")
+        elif sub == "auto":
+            gpu_arbiter.set_override("auto")
+            print("Step-aside re-enabled.")
+        elif sub == "park" and len(args) > 1:
+            print(gpu_arbiter.park_thread(args[1]))
+        elif sub == "restore" and len(args) > 1:
+            print(gpu_arbiter.restore_thread(args[1]))
+        elif sub == "bind" and len(args) > 1:
+            gpu_arbiter.bind_parked_thread(None if args[1] == "none" else args[1])
+            print(f"Parked-thread binding: {args[1]}")
+        else:
+            print("Usage: /desk [status|aside|return|hold|auto|park <name>|restore <file>|bind <name|none>]")
+        return None, True
     if cmd == "/effort":
         if not args:
             print(f"Effort: {session.effort or '(default)'}")
@@ -1380,6 +1458,9 @@ def _handle_slash(session: ReplSession, line: str) -> Tuple[Optional[int], bool]
             print(f"model:    {route['model']}")
         print(f"effort:   {session.effort or '(default)'}")
         print(f"mode:     {session.reasoning_mode or '(default)'}")
+        from hydra_cli import modes
+
+        print(f"routing:  {modes.current_mode()} mode (see /mode)")
         preview = session.system_prompt.replace("\n", " ")
         if len(preview) > 80:
             preview = preview[:77] + "..."

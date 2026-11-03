@@ -17,7 +17,7 @@ pub enum Ev {
     Retry { turn: String, attempt: u64, of: u64, wait: f64, reason: String },
     TaskUpdate { task: Value },
     SkillList { id: String, skills: Vec<Value> },
-    ModelList { id: String, default: String, aliases: Vec<(String, String)>, providers: Vec<(String, Vec<String>)>, local: Vec<(String, String)>, unavailable: Vec<String> },
+    ModelList { id: String, default: String, aliases: Vec<(String, String)>, providers: Vec<(String, Vec<String>)>, local: Vec<(String, String)>, unavailable: Vec<String>, mode: String, modes: Vec<String> },
     SessionList { id: String, sessions: Vec<Value> },
     HistoryResult { id: String, thread: String, turns: Vec<Value> },
     TaskList { id: String, tasks: Vec<Value> },
@@ -74,7 +74,7 @@ pub fn parse_line(line: &str) -> Option<Ev> {
             let mut providers: Vec<(String, Vec<String>)> = v.get("providers").and_then(|x| x.as_object()).map(|o| o.iter().map(|(k, val)| (k.clone(), val.as_array().map(|a| a.iter().filter_map(|i| i.as_str().map(String::from)).collect()).unwrap_or_default())).collect()).unwrap_or_default();
             providers.sort();
             let local: Vec<(String, String)> = v.get("local").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|e| Some((e.get("id")?.as_str()?.to_string(), e.get("engine")?.as_str()?.to_string()))).collect()).unwrap_or_default();
-            Ev::ModelList { id: s("id"), default: s("default"), aliases, providers, local, unavailable: strs(&v, "unavailable") }
+            Ev::ModelList { id: s("id"), default: s("default"), aliases, providers, local, unavailable: strs(&v, "unavailable"), mode: s("mode"), modes: strs(&v, "modes") }
         }
         "task_list" => Ev::TaskList { id: s("id"), tasks: arr(&v, "tasks") },
         "mcp_status" => Ev::McpStatus { id: s("id"), config: v.get("config").and_then(|x| x.as_str()).map(String::from), servers: arr(&v, "servers") },

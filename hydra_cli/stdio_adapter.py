@@ -559,17 +559,23 @@ class Adapter:
         from hydra_cli.providers import list_live_models
 
         live = list_live_models()
-        self.emit(
-            {
-                "type": "model_list",
-                "id": _text(msg.get("id")),
-                "default": DEFAULT_AGENT_MODEL,
-                "aliases": live["aliases"],
-                "providers": live["providers"],
-                "local": live["local"],
-                "unavailable": live["unavailable"],
-            }
-        )
+        payload = {
+            "type": "model_list",
+            "id": _text(msg.get("id")),
+            "default": DEFAULT_AGENT_MODEL,
+            "aliases": live["aliases"],
+            "providers": live["providers"],
+            "local": live["local"],
+            "unavailable": live["unavailable"],
+        }
+        try:
+            from hydra_cli import modes
+
+            payload["mode"] = modes.current_mode()
+            payload["modes"] = modes.mode_names()
+        except Exception:
+            pass
+        self.emit(payload)
 
     def _on_skills(self, msg: Dict[str, Any]) -> None:
         listed = [{"id": sk["id"], "keys": sk["keys"], "title": (sk["body"].splitlines() or [""])[0]} for sk in _skills()]

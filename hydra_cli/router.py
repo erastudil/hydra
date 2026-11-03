@@ -312,6 +312,37 @@ def route_command(argv: List[str]) -> int:
         verbose = any(flag in argv[1:] for flag in ("--verbose", "-V", "--show-ids"))
         print_registered_models(verbose=verbose)
         return 0
+    if argv and argv[0] in ("mode", "--mode"):
+        return execute_mode_command(argv[1:])
+    if argv and argv[0] in ("desk", "--desk"):
+        return execute_desk_command(argv[1:])
+    if argv and argv[0] in ("imagine", "--imagine"):
+        from hydra_cli import media
+
+        prompt = " ".join(argv[1:]).strip()
+        if not prompt:
+            sys.stderr.write("usage: hydra imagine \"<prompt>\"\n")
+            return 1
+        result = media.generate_image(prompt)
+        print(json.dumps(result, indent=2))
+        return 0 if result.get("ok") else 1
+    if argv and argv[0] in ("transcribe", "--transcribe"):
+        from hydra_cli import media
+
+        if len(argv) < 2:
+            sys.stderr.write("usage: hydra transcribe <audio-file>\n")
+            return 1
+        result = media.transcribe_audio(argv[1])
+        if result.get("ok"):
+            print(result.get("text", ""))
+            return 0
+        sys.stderr.write(f"transcribe failed: {result.get('error')}\n")
+        return 1
+    if argv and argv[0] in ("media", "--media"):
+        from hydra_cli import media
+
+        print(media.describe_routes())
+        return 0
     if argv and argv[0] in ("auth", "--auth"):
         from hydra_cli.auth import execute_auth_command
         return execute_auth_command(argv[1:])
@@ -357,7 +388,9 @@ def route_command(argv: List[str]) -> int:
     if not argv:
         piped_input = read_stdin_if_piped()
         if piped_input:
-            return execute_summon(DEFAULT_ORCHESTRATOR_MODEL, piped_input, system_prompt=DEFAULT_SYSTEM_PROMPT)
+            from hydra_cli import modes as _modes
+
+            return execute_summon(_modes.default_alias() or DEFAULT_ORCHESTRATOR_MODEL, piped_input, system_prompt=DEFAULT_SYSTEM_PROMPT)
         # Bare `hydra` on a TTY enters the slash-command REPL (Claude Code / Codex style).
         if sys.stdin.isatty() and sys.stdout.isatty():
             from hydra_cli.repl import run_repl
@@ -637,6 +670,58 @@ def route_command(argv: List[str]) -> int:
         return 1
 
 
+def execute_mode_command(argv: List[str]) -> int:
+    """`hydra mode` shows the current mode and its routing table;
+    `hydra mode <name>` switches (persisted in ~/.hydra/settings.json)."""
+    from hydra_cli import modes
+
+    if not argv:
+        print(modes.describe())
+        print(f"  all modes: {', '.join(modes.mode_names())} — switch with: hydra mode <name>")
+        return 0
+    name = argv[0].strip().lower()
+    if name in ("list", "routes", "show"):
+        print(modes.describe(argv[1].strip().lower() if len(argv) > 1 else None))
+        return 0
+    try:
+        modes.set_mode(name, source="cli")
+    except ValueError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    print(modes.describe(name))
+    return 0
+
+
+def execute_desk_command(argv: List[str]) -> int:
+    """`hydra desk` — front-desk (local GPU) status and step-aside control."""
+    from hydra_cli import gpu_arbiter
+
+    sub = argv[0].strip().lower() if argv else "status"
+    if sub == "status":
+        print(json.dumps(gpu_arbiter.desk_status(), indent=2))
+        return 0
+    if sub == "aside":
+        print(json.dumps(gpu_arbiter.step_aside("manual (hydra desk aside)"), indent=2))
+        return 0
+    if sub == "return":
+        print(json.dumps(gpu_arbiter.return_desk(), indent=2))
+        return 0
+    if sub == "hold":
+        print(json.dumps(gpu_arbiter.set_override("hold"), indent=2))
+        return 0
+    if sub == "auto":
+        print(json.dumps(gpu_arbiter.set_override("auto"), indent=2))
+        return 0
+    if sub == "park" and len(argv) > 1:
+        print(json.dumps(gpu_arbiter.park_thread(argv[1]), indent=2))
+        return 0
+    if sub == "restore" and len(argv) > 1:
+        print(json.dumps(gpu_arbiter.restore_thread(argv[1]), indent=2))
+        return 0
+    sys.stderr.write("usage: hydra desk [status|aside|return|hold|auto|park <name>|restore <file>]\n")
+    return 1
+
+
 def execute_summon(
     alias: str,
     prompt: str,
@@ -683,6 +768,17 @@ def execute_summon(
         route_mode = reasoning_mode if reasoning_mode is not None else route.get("reasoning_mode")
     reasoning = reasoning_fields(route_effort, route_mode)
     ensure_temperature(model_id, temperature)
+
+    # Mode gate (hydra_cli/modes.py): the current mode decides which
+    # models may be served at all. It runs after request validation, so
+    # a malformed request fails as malformed regardless of mode.
+    # Refusals name the way out.
+    from hydra_cli import modes as _modes
+
+    _mode_ok, _mode_reason = _modes.check_request(model_id)
+    if not _mode_ok:
+        raise UsageError(f"[{_modes.current_mode()} mode] {_mode_reason}")
+    _modes.log_decision("summon_allowed", {"mode": _modes.current_mode(), "model": model_id})
 
     cascade_enabled = fallback_cascade and os.environ.get("HYDRA_NO_FALLBACK", "").strip() != "1"
 
@@ -764,6 +860,9 @@ def execute_summon(
     # by a cloud substitute, labeled or not: skip the cloud cascade tiers.
     _allowed = model_providers(model_id)
     local_only = bool(_allowed) and set(_allowed) <= {"local"}
+    # Local mode: the cascade may never leave the machine (modes.cascade_tiers).
+    if not _modes.cascade_tiers()["cloudflare"]:
+        local_only = True
 
     if cascade_enabled:
         # Automatic fallback routing cascade: Frontier -> Cloudflare -> OpenRouter -> Local/Ollama (WO-05)
@@ -1068,9 +1167,28 @@ def execute_local(
     stream: bool = True,
     json_mode: bool = False,
 ) -> int:
-    """Execute inference against local engine (Ollama, llama.cpp, EasyLM)."""
-    url, provider_name = detect_local_endpoint()
+    """Execute inference against local engine (Ollama, llama.cpp, EasyLM).
+
+    The GPU arbiter serves the requested model first: when another local
+    model holds the endpoint (the front desk), it steps aside and returns
+    when the summon ends."""
     model_id = model_override or DEFAULT_LOCAL_MODEL
+    from hydra_cli import gpu_arbiter
+
+    with gpu_arbiter.local_model_session(model_id, kind="local summon"):
+        return _execute_local_serving(prompt, system_prompt, model_id, temperature, max_tokens, stream, json_mode)
+
+
+def _execute_local_serving(
+    prompt: str,
+    system_prompt: str,
+    model_id: str,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+    stream: bool = True,
+    json_mode: bool = False,
+) -> int:
+    url, provider_name = detect_local_endpoint()
     available_local = list_local_models()
     if available_local and model_id not in {entry["id"] for entry in available_local}:
         names = ", ".join(sorted({entry["id"] for entry in available_local}))
