@@ -8,13 +8,14 @@ use serde_json::{json, Value};
 
 use crate::endpoints::{budgets, free_usage, local_endpoints};
 
-pub const DEFAULT_AGENT_MODEL: &str = "bonsai 2 9b";
+pub const DEFAULT_AGENT_MODEL: &str = "muse spark contributor";
 pub const DEFAULT_FLASH_MODEL: &str = "mimo 2.6 flash";
 pub const SPEED_DIAL_PRO_MODEL: &str = "mimo 2.6 pro";
 pub const FALLBACK_GLM_MODEL: &str = "glm 5.3 flash";
 
 pub const MODEL_COMPLETIONS: &[(&str, &str)] = &[
-    ("bonsai 2 9b", "Ternary Bonsai 2 9B · 2GB RAM · default agent (Hydra + Progen adapters)"),
+    ("muse spark contributor", "Muse Spark 1.3 Contributor · text/vision/video · default agent"),
+    ("bonsai 2 9b", "Ternary Bonsai 2 9B · 2GB RAM · local agent (Hydra + Progen adapters)"),
     ("bonsai 2 2b", "Ternary Bonsai 2 2B · 500MB RAM · ultra-light local agent"),
     ("bonsai 2 4b", "Ternary Bonsai 2 4B · 1GB RAM · compact local agent"),
     ("bonsai 2 27b", "Ternary Bonsai 2 27B · 6GB RAM · flagship ternary reasoning"),
@@ -32,7 +33,7 @@ pub const MODEL_COMPLETIONS: &[(&str, &str)] = &[
 pub fn normalize_model_alias(raw: &str) -> String {
     let trimmed = raw.trim();
     match trimmed.to_lowercase().as_str() {
-        "bonsai" | "bonsai 9b" | "bonsai-2-9b" | "bonsai 2 9b" | "bonsai.2.9b" => DEFAULT_AGENT_MODEL.into(),
+        "bonsai" | "bonsai 9b" | "bonsai-2-9b" | "bonsai 2 9b" | "bonsai.2.9b" => "bonsai 2 9b".into(),
         "bonsai 2b" | "bonsai-2-2b" | "bonsai 2 2b" | "bonsai.2.2b" => "bonsai 2 2b".into(),
         "bonsai 4b" | "bonsai-2-4b" | "bonsai 2 4b" | "bonsai.2.4b" => "bonsai 2 4b".into(),
         "bonsai 27b" | "bonsai-2-27b" | "bonsai 2 27b" | "bonsai.2.27b" => "bonsai 2 27b".into(),
@@ -465,7 +466,7 @@ impl App {
         }
 
         let cmds: &[(&str, &str)] = &[
-            ("/model", "switch active model alias (default: bonsai 2 9b)"),
+            ("/model", "switch active model alias (default: muse spark contributor)"),
             ("/pro", "speed dial heavy frontier model (mimo 2.6 pro)"),
             ("/flash", "switch back to default fast coding model (mimo 2.6 flash)"),
             ("/fallback", "switch to fallback model (glm 5.3 flash)"),
@@ -759,7 +760,7 @@ impl App {
             "help" => {
                 self.transcript.push("--- hydra slash commands ---".into());
                 for (cmd, desc) in [
-                    ("/model [alias]", "switch active model (default: bonsai 2 9b)"),
+                    ("/model [alias]", "switch active model (default: muse spark contributor)"),
                     ("/pro", "speed dial heavy frontier model (mimo 2.6 pro)"),
                     ("/flash", "switch to fast daily driver (mimo 2.6 flash)"),
                     ("/fallback", "switch to fallback model (glm 5.3 flash)"),
@@ -1622,7 +1623,7 @@ mod tests {
         std::env::remove_var("HYDRA_MODEL");
         std::env::remove_var("HYDRA_DIALECT");
         let mut app = App::new();
-        assert_eq!(app.model, "bonsai 2 9b");
+        assert_eq!(app.model, "muse spark contributor");
         assert_eq!(app.fallback_model, "glm 5.3 flash");
         assert_eq!(app.speed_dial_model, "mimo 2.6 pro");
         assert_eq!(app.dialect, "slack");
@@ -1641,13 +1642,13 @@ mod tests {
         app.input = "/m".into();
         app.cursor_pos = app.input.len();
         assert!(app.candidates().iter().any(|(cmd, desc)| {
-            cmd == "/model" && desc.contains("default: bonsai 2 9b")
+            cmd == "/model" && desc.contains("default: muse spark contributor")
         }));
         app.input.clear();
         app.cursor_pos = 0;
         app.command("help");
         assert!(app.transcript.iter().any(|line| {
-            line.contains("/model [alias]") && line.contains("default: bonsai 2 9b")
+            line.contains("/model [alias]") && line.contains("default: muse spark contributor")
         }));
 
         for ch in "/fallback".chars() {

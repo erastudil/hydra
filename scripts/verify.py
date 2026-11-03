@@ -11031,8 +11031,8 @@ def wave22_session_logger_and_mimo_routing():
             os.environ["HYDRA_DEFAULT_ALIAS"] = saved_alias
     with open(os.path.join(REPO, "hydra-tui-rs", "src", "app.rs"), encoding="utf-8") as tui_fh:
         tui_src = tui_fh.read()
-    assert '("/model", "switch active model alias (default: bonsai 2 9b)")' in tui_src
-    assert '("/model [alias]", "switch active model (default: bonsai 2 9b)")' in tui_src
+    assert '("/model", "switch active model alias (default: muse spark contributor)")' in tui_src
+    assert '("/model [alias]", "switch active model (default: muse spark contributor)")' in tui_src
     assert "default: mimo 2.6 flash" not in tui_src
     assert resolve_model("mimo 2.6 pro") == "mimo-2.6-pro"
     assert resolve_model("mimo") == "mimo-2.6-pro"
