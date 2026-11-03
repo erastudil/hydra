@@ -41,9 +41,9 @@ from hydra_cli.session_logger import (
 def test_mimo_26_model_routing_and_cheaperinference_defaults():
     """Verify Bonsai 2 9B default agent, Mimo 2.6 Flash daily driver, and CheaperInference provider precedence."""
     # Default agent resolution
-    assert DEFAULT_MODEL == "bonsai 2 9b"
-    assert DEFAULT_ORCHESTRATOR_MODEL == "bonsai 2 9b"
-    assert DEFAULT_AGENT_MODEL == "bonsai 2 9b"
+    assert DEFAULT_MODEL == "muse spark contributor"
+    assert DEFAULT_ORCHESTRATOR_MODEL == "muse spark contributor"
+    assert DEFAULT_AGENT_MODEL == "muse spark contributor"
 
     # Bonsai 2 alias and adapter resolution
     route_9b = resolve_route("bonsai 2 9b")
