@@ -1279,6 +1279,8 @@ def _mode_default_alias() -> Optional[str]:
     try:
         from hydra_cli import modes
 
+        if modes.current_mode() != "local":
+            return None
         return modes.default_alias()
     except Exception:
         return None
