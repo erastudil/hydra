@@ -6,7 +6,7 @@
   ],
   "default_free_model": "google/gemma-4-26b-a4b-it:free",
   "default_cloudflare_model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-  "default_local_model": "gemma-e4b",
+  "default_local_model": "gemma-e2b",
   "free_models": [
     "google/gemma-4-26b-a4b-it:free",
     "google/gemma-4-31b-it:free",
@@ -396,6 +396,14 @@
       "format_shim": "stdio",
       "adapter_note": "Hydra adapter trained by W2 on 2026-11-01 (adapter-dataset/trained/easylm-hydra-gemma-4-e4b, HF safetensors LoRA r16, held-out loss 0.548) but not yet converted to GGUF: llama.cpp conversion needs the HF base on disk and the laptop was at 1.7 GB free. Until the converted GGUF lands in hydra-models/gemma-4-e4b/ (or HYDRA_GEMMA_E4B_LORA is set), the desk runs base weights + the stdio/tool format shim, local_server loads it with --lora and this field names it."
     },
+    "gemma-e2b": {
+      "title": "Gemma E2B Local",
+      "model": "gemma-e2b",
+      "provider": "local",
+      "hydra_adapter": null,
+      "format_shim": "stdio",
+      "adapter_note": "No Hydra adapter trained for E2B; the desk runs base weights + the stdio/tool format shim. Front desk per the 2026-11-02 ladder bench: E2B ties or beats E4B on the desk tiers at 4,531 MiB and about twice the speed. E4B stays in the catalog as the local heavy escalation rung."
+    },
     "local-gemma": {
       "title": "Local Gemma E4B",
       "model": "gemma-e4b",
@@ -552,6 +560,9 @@
     "gemma-e4b": [
       "local"
     ],
+    "gemma-e2b": [
+      "local"
+    ],
     "mimo-2.6-pro": [
       "cheaperinference",
       "vercel",
@@ -702,6 +713,7 @@
     "qwen2.5-coder:latest": 131072,
     "qwen/qwen-2.5-coder-32b-instruct": 131072,
     "gemma-e4b": 131072,
+    "gemma-e2b": 131072,
     "google/gemma-4-26b-a4b-it": 131072,
 "openai/gpt-oss-120b": 131072,
     "Meta-Llama-3_3-70B-Instruct": 131072,

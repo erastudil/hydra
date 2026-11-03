@@ -246,8 +246,13 @@ def _servable(model_id: str, models_dir: str) -> Optional[Dict[str, Any]]:
         if not gguf or not binary:
             return None
         return {"binary": binary, "gguf": gguf, "extra_args": [], "kind": "bonsai-prism"}
-    if model_id == "gemma-e4b":
-        gguf = os.path.join(models_dir, "gemma-4-e4b", "gemma-4-E4B-it-Q4_K_M.gguf")
+    gemma = {
+        "gemma-e4b": ("gemma-4-e4b", "gemma-4-E4B-it-Q4_K_M.gguf", "mmproj-F16.gguf"),
+        "gemma-e2b": ("gemma-4-e2b", "gemma-4-E2B-it-Q4_0.gguf", "mmproj-gemma-4-E2B-it-Q8_0.gguf"),
+    }.get(model_id)
+    if gemma:
+        folder, gguf_name, mmproj_name = gemma
+        gguf = os.path.join(models_dir, folder, gguf_name)
         binary = _stock_server_binary()
         if not binary or not os.path.isfile(gguf):
             return None
@@ -258,10 +263,10 @@ def _servable(model_id: str, models_dir: str) -> Optional[Dict[str, Any]]:
             "--image-max-tokens", "1024",
             "--slot-save-path", kv_cache_dir(),
         ]
-        mmproj = os.path.join(models_dir, "gemma-4-e4b", "mmproj-F16.gguf")
+        mmproj = os.path.join(models_dir, folder, mmproj_name)
         if os.path.isfile(mmproj):
             extra += ["--mmproj", mmproj]
-        adapter = _gemma_adapter(models_dir)
+        adapter = _gemma_adapter(models_dir) if model_id == "gemma-e4b" else None
         if adapter:
             extra += ["--lora", adapter]
         return {"binary": binary, "gguf": gguf, "extra_args": extra, "kind": "gemma-stock", "adapter": adapter}

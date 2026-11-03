@@ -1275,7 +1275,7 @@ def create_exit_confirm(
 
 def _mode_default_alias() -> Optional[str]:
     """The session's starting alias under the current Hydra mode
-    (local -> gemma-e4b; free -> None, the incumbent default stands)."""
+    (local -> gemma-e2b; free -> None, the incumbent default stands)."""
     try:
         from hydra_cli import modes
 
