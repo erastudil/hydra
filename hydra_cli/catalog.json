@@ -4,7 +4,7 @@
     "anthropic/claude-opus-5.5",
     "anthropic/claude-opus-5.5-fast"
   ],
-  "default_free_model": "google/gemma-4-26b-a4b-it:free",
+  "default_free_model": "nvidia/nemotron-3.5-lightning:free",
   "default_cloudflare_model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   "default_local_model": "gemma-e2b",
   "free_models": [
@@ -730,8 +730,8 @@
     "bonsai 2 2b": 262144,
     "bonsai 2 27b": 262144
   },
-  "default_orchestrator_model": "bonsai 2 9b",
-  "default_agent_model": "bonsai 2 9b",
+  "default_orchestrator_model": "muse spark contributor",
+  "default_agent_model": "muse spark contributor",
   "swarm_combos": {
     "open swarm": {
       "title": "Open Swarm",
@@ -765,7 +765,7 @@
       ]
     }
   },
-  "default_model": "bonsai 2 9b",
+  "default_model": "muse spark contributor",
   "default_fanout_aliases": [
     "glm 5.3 flash",
     "deepseek 4.1 flash",

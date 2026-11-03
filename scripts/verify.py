@@ -11003,12 +11003,12 @@ def wave22_session_logger_and_mimo_routing():
     )
     from hydra_cli.native_tools import NativeToolRegistry
 
-    assert CATALOG["default_model"] == "bonsai 2 9b"
-    assert CATALOG["default_agent_model"] == "bonsai 2 9b"
-    assert CATALOG["default_orchestrator_model"] == "bonsai 2 9b"
-    assert DEFAULT_MODEL == "bonsai 2 9b"
-    assert DEFAULT_ORCHESTRATOR_MODEL == "bonsai 2 9b"
-    assert DEFAULT_AGENT_MODEL == "bonsai 2 9b"
+    assert CATALOG["default_model"] == "muse spark contributor"
+    assert CATALOG["default_agent_model"] == "muse spark contributor"
+    assert CATALOG["default_orchestrator_model"] == "muse spark contributor"
+    assert DEFAULT_MODEL == "muse spark contributor"
+    assert DEFAULT_ORCHESTRATOR_MODEL == "muse spark contributor"
+    assert DEFAULT_AGENT_MODEL == "muse spark contributor"
     route_9b = resolve_route("bonsai 2 9b")
     assert route_9b["model"] == "prism-ml/Ternary-Bonsai-2-9B-gguf"
     assert route_9b["adapter"] == "Bluebarrels/easylm-bonsai-2-9b"
