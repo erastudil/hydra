@@ -19,6 +19,7 @@ from hydra_cli import __version__
 from hydra_cli.config import (
     ALIAS_SHORTHANDS,
     DEFAULT_AGENT_MODEL,
+    DEFAULT_MODEL,
     DEFAULT_SYSTEM_PROMPT,
     MODEL_MAP,
     resolve_route,
@@ -1291,7 +1292,7 @@ class ReplSession:
         self.alias = (
             os.environ.get("HYDRA_DEFAULT_ALIAS", "").strip()
             or _mode_default_alias()
-            or DEFAULT_AGENT_MODEL
+            or DEFAULT_MODEL
         )
         self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.effort: Optional[str] = None

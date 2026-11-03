@@ -18,7 +18,9 @@ def verify():
 
     assert r'set "PYTHONPATH=C:\Users\jpm05\Documents\hydra;%PYTHONPATH%"' in bat_content
     assert r'cd /d "C:\Users\jpm05\Documents"' in bat_content
-    assert 'python -m hydra_cli agent --model "mimo 2.6 flash"' in bat_content
+    assert 'python -m hydra_cli agent --model "mimo 2.6 flash"' not in bat_content
+    assert "\npython -m hydra_cli agent\n" in bat_content.replace("\r\n", "\n")
+    assert "HYDRA_DEFAULT_MODEL=" not in bat_content
     assert 'cmd /k' in bat_content
     print("launcher invariant verification : exit 0.")
 

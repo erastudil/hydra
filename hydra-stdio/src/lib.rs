@@ -178,11 +178,34 @@ fn candidate_repo_dirs() -> Vec<std::path::PathBuf> {
     dirs
 }
 
-/// The checkout that holds `hydra_cli`: HYDRA_REPO, else a git checkout with `hydra_cli`, else a parent/bundle folder with `hydra_cli`.
+/// Folder that holds Hydra.exe (or HYDRA_BUNDLE_DIR for tests). A release folder carries `runtime/` and `app/` beside it.
+pub fn bundle_dir() -> Option<std::path::PathBuf> {
+    if let Ok(d) = std::env::var("HYDRA_BUNDLE_DIR") {
+        if !d.trim().is_empty() {
+            return Some(d.into());
+        }
+    }
+    std::env::current_exe().ok().and_then(|e| e.parent().map(|p| p.to_path_buf()))
+}
+
+/// Embedded interpreter path inside a release folder, if present.
+pub fn bundled_python(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let names: &[&str] = if cfg!(windows) { &["python.exe"] } else { &["python3", "python"] };
+    let rt = dir.join("runtime");
+    names.iter().map(|n| rt.join(n)).find(|p| p.is_file())
+}
+
+/// The checkout that holds `hydra_cli`: HYDRA_REPO, the release folder's `app/`, else a git checkout with `hydra_cli`, else a parent/bundle folder with `hydra_cli`.
 pub fn repo_dir() -> Option<String> {
     if let Ok(r) = std::env::var("HYDRA_REPO") {
         if !r.trim().is_empty() {
             return Some(r);
+        }
+    }
+    if let Some(b) = bundle_dir() {
+        let app = b.join("app");
+        if app.join("hydra_cli").join("__init__.py").is_file() {
+            return Some(app.display().to_string());
         }
     }
     let cands = candidate_repo_dirs();
@@ -200,10 +223,15 @@ pub fn repo_dir() -> Option<String> {
 }
 
 
-/// Interpreters to try, in order, as (program, leading args).
+/// Interpreters to try, in order, as (program, leading args). The bundled runtime wins; system python is a dev fallback.
 pub fn python_candidates() -> Vec<(String, Vec<String>)> {
     if let Ok(p) = std::env::var("HYDRA_PYTHON") {
-        return vec![(p, vec![])];
+        if !p.trim().is_empty() {
+            return vec![(p, vec![])];
+        }
+    }
+    if let Some(p) = bundle_dir().and_then(|d| bundled_python(&d)) {
+        return vec![(p.display().to_string(), vec![])];
     }
     if cfg!(windows) {
         vec![("python".into(), vec![]), ("py".into(), vec!["-3".into()])]
@@ -220,10 +248,15 @@ impl Backend {
 
     /// Same as `spawn` with extra environment for the child.
     pub fn spawn_with(envs: &[(String, String)], repaint: impl Fn() + Send + 'static) -> Result<Backend, String> {
+        Self::spawn_using(python_candidates(), envs, repaint)
+    }
+
+    /// Spawn with an explicit interpreter list, as (program, leading args), tried in order.
+    pub fn spawn_using(candidates: Vec<(String, Vec<String>)>, envs: &[(String, String)], repaint: impl Fn() + Send + 'static) -> Result<Backend, String> {
         let repo = repo_dir();
         let mut spawned: Option<Child> = None;
         let mut last_err = String::from("no python interpreter found");
-        for (py, lead) in python_candidates() {
+        for (py, lead) in candidates {
             let mut cmd = Command::new(&py);
             cmd.args(&lead).args(["-m", "hydra_cli", "stdio"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
             if let Some(r) = &repo {
@@ -431,6 +464,20 @@ impl Backend {
         id
     }
 
+    /// Why the agent child ended, or None while it runs. Polls without blocking.
+    pub fn exited(&mut self) -> Option<String> {
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(exit_reason(status)),
+            Ok(None) => None,
+            Err(e) => Some(format!("the agent process could not be checked: {e}")),
+        }
+    }
+
+    /// Process id of the agent child.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     pub fn shutdown(&mut self) {
         self.send(json!({"type": "shutdown"}));
         for _ in 0..50 {
@@ -440,6 +487,22 @@ impl Backend {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         let _ = self.child.kill();
+    }
+}
+
+/// Plain words for how the agent process ended.
+pub fn exit_reason(status: std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return format!("killed by signal {sig}");
+        }
+    }
+    match status.code() {
+        Some(0) => "exited".into(),
+        Some(c) => format!("exited with code {c}"),
+        None => "agent process ended".into(),
     }
 }
 
@@ -472,4 +535,35 @@ mod proto_tests {
         let retry = parse_line(r#"{"type":"retry","turn":"t1","attempt":1,"of":3,"wait":1.5,"reason":"429"}"#).unwrap();
         assert!(matches!(retry, Ev::Retry { attempt: 1, of: 3, .. }));
     }
+
+    #[test]
+    fn bundled_python_is_preferred_when_present() {
+        let dir = std::env::temp_dir().join(format!("hydra-stdio-bundle-{}", std::process::id()));
+        let rt = dir.join("runtime");
+        std::fs::create_dir_all(&rt).unwrap();
+        assert!(bundled_python(&dir).is_none());
+        let name = if cfg!(windows) { "python.exe" } else { "python3" };
+        std::fs::write(rt.join(name), b"").unwrap();
+        assert_eq!(bundled_python(&dir).unwrap(), rt.join(name));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn exited_reports_exit_code_across_platforms() {
+        let cands = if cfg!(windows) {
+            vec![("cmd".to_string(), vec!["/C".to_string(), "exit /b 3".to_string()])]
+        } else {
+            vec![("sh".to_string(), vec!["-c".to_string(), "exit 3".to_string()])]
+        };
+        let mut be = Backend::spawn_using(cands, &[], || {}).expect("spawn short-lived command");
+        assert!(be.pid() > 0);
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut why = None;
+        while why.is_none() && std::time::Instant::now() < end {
+            why = be.exited();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(why.as_deref(), Some("exited with code 3"));
+    }
 }
+

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Alice cognitive engine native agent runner for Hydra CLI.
 Integrates Alice (snowgate-alice) as native orchestrator and baseline worker.
 Evaluates prompts through Alice's cognitive grammar, logic map, and deterministic tool pipeline
@@ -177,11 +177,17 @@ def run_alice(
             from hydra_cli.providers import complete
             kantian = alice_eval.get("kantian", {})
             tractatus = alice_eval.get("tractatus", {})
+            dialect = os.environ.get("HYDRA_DIALECT", "").strip().lower()
+            register_line = (
+                "Invariants: Enforce Progen syntax (topic : comment). Zero copula (no leading is/are)."
+                if dialect in ("progen", "syntax", "instruct") or "progen" in prompt.lower()
+                else "Register: Default to clear, direct conversational English unless the session explicitly names progen."
+            )
             system_prompt = (
                 "You are Alice, sovereign cognitive reasoning agent.\n"
                 f"Tractatus Picture: {tractatus.get('picture', 'atomic fact')}\n"
                 f"Kantian Judgment: {kantian.get('judgmentType', 'Synthetic a posteriori')}\n"
-                "Invariants: Enforce Progen syntax (topic : comment). Zero copula (no leading is/are)."
+                f"{register_line}"
             )
             response = complete(
                 prompt=prompt,
