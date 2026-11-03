@@ -14090,6 +14090,17 @@ def modes_media_and_desk():
 
     assert modes.mode_names() == ["local", "free", "light", "heavy", "max"]
     assert modes.default_alias("local") == "gemma-e2b"
+    # Owner two-model framework 2026-11-02: E4B is the local heavy
+    # escalation route; every Bonsai route is on-demand only and carries
+    # no default or designated-coder status.
+    local_routes = {r.get("alias"): r for r in modes.routes("local")}
+    assert "Local heavy escalation route" in local_routes["gemma-e4b"]["note"]
+    assert "Gemma E4B is the heavy escalation route" in modes.mode_spec("local")["summary"]
+    for bonsai_alias in ("bonsai 2 9b", "bonsai 2 4b", "bonsai 2 2b"):
+        bonsai_note = local_routes[bonsai_alias]["note"]
+        assert bonsai_note.startswith("On-demand local model"), (bonsai_alias, bonsai_note)
+        assert "coder" not in bonsai_note.lower(), (bonsai_alias, bonsai_note)
+        assert "Default" not in bonsai_note, (bonsai_alias, bonsai_note)
     # Owner seat rulings 2026-11-02 (capability bench): muse-spark
     # contributor is the light default; Ling is the free escalation seat.
     assert modes.default_alias("light") == "muse spark contributor"
