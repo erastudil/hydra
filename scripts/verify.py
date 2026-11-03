@@ -14076,20 +14076,20 @@ def tankbench_runners():
 @check
 def modes_media_and_desk():
     """The 2026-11-01 Hydra pass: five modes as data, the mode gate's
-    allow/refuse matrix, the E4B front-desk default, media routes, and
+    allow/refuse matrix, the E2B front-desk default, media routes, and
     the GPU arbiter's state roundtrip. No network, no GPU."""
     from hydra_cli import gpu_arbiter, media, modes
     from hydra_cli.config import DEFAULT_LOCAL_MODEL, resolve_model, resolve_route
 
-    # The front desk is Gemma E4B, with the adapter slot present in the
-    # catalog route (null until W2's artifact lands) and the shim named.
-    assert DEFAULT_LOCAL_MODEL == "gemma-e4b", DEFAULT_LOCAL_MODEL
-    route = resolve_route("gemma-e4b")
-    assert route["model"] == "gemma-e4b"
+    # The front desk is Gemma E2B, with the adapter slot present in the
+    # catalog route (null: no E2B adapter trained) and the shim named.
+    assert DEFAULT_LOCAL_MODEL == "gemma-e2b", DEFAULT_LOCAL_MODEL
+    route = resolve_route("gemma-e2b")
+    assert route["model"] == "gemma-e2b"
     assert "hydra_adapter" in route and "format_shim" in route
 
     assert modes.mode_names() == ["local", "free", "light", "heavy", "max"]
-    assert modes.default_alias("local") == "gemma-e4b"
+    assert modes.default_alias("local") == "gemma-e2b"
     # Owner seat rulings 2026-11-02 (capability bench): muse-spark
     # contributor is the light default; Ling is the free escalation seat.
     assert modes.default_alias("light") == "muse spark contributor"
@@ -14105,6 +14105,7 @@ def modes_media_and_desk():
 
     matrix = [
         ("gemma-e4b", "local", True),
+        ("gemma-e2b", "local", True),
         ("mimo-2.6-flash", "local", False),
         ("google/gemma-4-26b-a4b-it:free", "free", True),
         ("mimo-2.6-flash", "free", False),
@@ -14144,7 +14145,7 @@ def modes_media_and_desk():
     gpu_arbiter.set_override("auto")
     assert gpu_arbiter.step_aside_enabled()
     status = gpu_arbiter.desk_status()
-    assert status["front_desk_model"] == "gemma-e4b"
+    assert status["front_desk_model"] == "gemma-e2b"
     assert status["override"] == "auto"
 
 
