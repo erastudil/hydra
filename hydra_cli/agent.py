@@ -57,6 +57,7 @@ from hydra_cli.tool_adapter import (
 from hydra_cli.providers import (
     ProviderError,
     UsageError,
+    _record_provenance,
     adapt_model_for_url,
     attach_tool_capability,
     completion_timeout,
@@ -3621,6 +3622,12 @@ def _run_agent_loop(
                     break
                 if index:
                     order.insert(0, order.pop(index))
+                _record_provenance(
+                    requested_model,
+                    str(payload.get("model") or requested_model),
+                    str(provider.get("name") or provider.get("id") or "Provider"),
+                    index > 0,
+                )
                 return res_json
         checkpointer.transition("ERROR")
         raise ProviderError(redact(f"All configured providers failed for '{requested_model}'. Last error: {last_error}"))
@@ -4333,7 +4340,7 @@ def run_interactive_agent(
     else:
         active_dialect = "slack"
 
-    from hydra_cli import modes as _modes
+    from hydra_cli import modes as _modes, preflight
 
     if alias in ("agent", "auto", "orchestrator"):
         if _modes.current_mode() == "local" and not tier:
@@ -4344,7 +4351,7 @@ def run_interactive_agent(
             active_tier = tier
     else:
         active_alias = alias
-        active_tier = "local" if (_modes.current_mode() == "local" and not tier) else tier
+        active_tier = "local" if (_modes.classify_model(resolve_route(alias)["model"]) == "local" and not tier) else tier
     active_session_id = session_id or f"session_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     active_steer_mode = steer_mode
     active_effort: Optional[str] = None
@@ -4369,6 +4376,10 @@ def run_interactive_agent(
     turns_history: List[Tuple[str, str]] = []
     active_ledger = SessionContextLedger(session_id=active_session_id)
 
+    boot_preflight = preflight.run_preflight(mode=_modes.current_mode())
+    boot_strip = preflight.format_route_strip(boot_preflight)
+    boot_notice = preflight.format_preflight_notice(boot_preflight, mode=_modes.current_mode())
+
     tui = _create_tui()
     if tui is not None:
         from hydra_cli.ui import play_launch_banner
@@ -4377,46 +4388,27 @@ def run_interactive_agent(
             version=__version__,
             info=[
                 ("model", session_model_label(active_alias, active_runner, active_summon)),
+                ("routes", boot_strip),
                 ("cwd", target_cwd),
                 ("rules", rules_label),
                 ("session", active_session_id),
             ],
         )
+        if boot_notice:
+            sys.stdout.write(f"  {c_mid}{boot_notice}{c_reset}\n")
         sys.stdout.write("\n")
         sys.stdout.flush()
     else:
         sys.stdout.write(f"\n{c_head}================================================================================{c_reset}\n")
         sys.stdout.write(f"  {c_bright}HYDRA CODING AGENT{c_reset} // Sovereign Autonomous Shell (v{__version__})\n")
         sys.stdout.write(f"  Model: {c_mid}{session_model_label(active_alias, active_runner, active_summon)}{c_reset} | CWD: {target_cwd}\n")
+        sys.stdout.write(f"  Routes: {c_mid}{boot_strip}{c_reset}\n")
         sys.stdout.write(f"  Project Rules: {rules_label}\n")
         sys.stdout.write(f"  Type {c_bright}/help{c_reset} for slash commands or enter your instruction to begin.\n")
         sys.stdout.write(f"{c_head}================================================================================{c_reset}\n\n")
+        if boot_notice:
+            sys.stdout.write(f"{c_mid}{boot_notice}{c_reset}\n\n")
         sys.stdout.flush()
-
-    if (
-        (active_tier == "local" or _modes.current_mode() == "local" or _modes.classify_model(boot_route["model"]) == "local")
-        and not (os.environ.get("LOCAL_AI_BASE", "").strip() or os.environ.get("OLLAMA_HOST", "").strip())
-    ):
-        from hydra_cli import local_server
-
-        _target_local_model = boot_route["model"]
-        if _modes.current_mode() == "local":
-            _ok, _reason = _modes.check_request(_target_local_model, "local")
-            if not _ok:
-                sys.stderr.write(f"[local] ERROR: [local mode] {_reason}\n")
-                sys.stderr.flush()
-                return 1
-        _ensure_st = local_server.ensure_local_server(
-            _target_local_model,
-            warm=True,
-            show_progress=True,
-            progress_stream=sys.stdout,
-        )
-        if _ensure_st.get("server") not in ("started", "already-running"):
-            _err = _ensure_st.get("reason") or f"server status={_ensure_st.get('server')}"
-            sys.stderr.write(f"[local] ERROR: {_err}\n")
-            sys.stderr.flush()
-            return 1
 
     if tui is not None:
         tui.start()
@@ -4941,6 +4933,55 @@ def run_interactive_agent(
                     sys.stdout.write(f"{c_mid}[Current active tier: {active_tier or 'frontier (paid)'}]{c_reset}\n")
                 sys.stdout.flush()
 
+            elif cmd == "/mode":
+                if not arg:
+                    sys.stdout.write(_modes.describe() + "\n")
+                else:
+                    m_name = arg.strip().lower()
+                    try:
+                        _modes.set_mode(m_name, source="agent")
+                        new_def = _modes.default_alias(m_name)
+                        if new_def:
+                            active_alias = new_def
+                            r_info = resolve_route(new_def)
+                            active_runner = r_info.get("runner")
+                            active_summon = DEFAULT_AGENT_MODEL if active_runner == "alice" else new_def
+                            active_tier = "local" if m_name == "local" else None
+                        sys.stdout.write(_modes.describe(m_name) + "\n")
+                        rep = preflight.run_preflight(mode=m_name, scoped=True)
+                        sys.stdout.write(f"{c_mid}{preflight.format_route_strip(rep)}{c_reset}\n")
+                        notice = preflight.format_preflight_notice(rep, mode=m_name)
+                        if notice:
+                            sys.stdout.write(f"{c_mid}{notice}{c_reset}\n")
+                    except ValueError as exc:
+                        sys.stdout.write(f"{c_mid}[{exc}]{c_reset}\n")
+                sys.stdout.flush()
+
+            elif cmd == "/preflight":
+                rep = preflight.run_preflight(mode=_modes.current_mode(), force=True)
+                sys.stdout.write(f"{c_mid}{preflight.format_route_strip(rep)}{c_reset}\n")
+                notice = preflight.format_preflight_notice(rep, mode=_modes.current_mode())
+                if notice:
+                    sys.stdout.write(f"{c_mid}{notice}{c_reset}\n")
+                sys.stdout.flush()
+
+            elif cmd in ("/start", "/start-local"):
+                from hydra_cli import local_server
+
+                target_local = _modes.default_alias("local") or DEFAULT_LOCAL_MODEL
+                st = local_server.ensure_local_server(
+                    target_local,
+                    warm=True,
+                    show_progress=True,
+                    progress_stream=sys.stdout,
+                )
+                preflight.invalidate_preflight_cache()
+                rep = preflight.run_preflight(mode=_modes.current_mode(), force=True)
+                sys.stdout.write(f"{c_mid}{preflight.format_route_strip(rep)}{c_reset}\n")
+                if st.get("server") not in ("started", "already-running"):
+                    sys.stderr.write(f"[local] ERROR: {st.get('reason') or st.get('server')}\n")
+                sys.stdout.flush()
+
             elif cmd == "/dialect":
                 if not arg:
                     sys.stdout.write(f"{c_mid}[Dialect: {active_dialect}. Valid: {', '.join(DIALECTS)}]{c_reset}\n")
@@ -5120,6 +5161,13 @@ def run_interactive_agent(
         except Exception as exc:
             sys.stderr.write(f"\n[Agent Error]: {redact(exc)}\n\n")
             sys.stderr.flush()
+            if "truncated after output started" not in str(exc):
+                rep = preflight.reprobe_after_pre_token_failure(mode=_modes.current_mode())
+                sys.stdout.write(f"{c_mid}{preflight.format_route_strip(rep)}{c_reset}\n")
+                notice = preflight.format_preflight_notice(rep, mode=_modes.current_mode())
+                if notice:
+                    sys.stdout.write(f"{c_mid}{notice}{c_reset}\n")
+                sys.stdout.flush()
 
     if tui is not None:
         tui.close()

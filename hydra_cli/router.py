@@ -35,6 +35,7 @@ from hydra_cli.providers import (
     UsageError,
     _cloudflare_provider,
     _openrouter_free_provider,
+    _record_provenance,
     detect_local_endpoint,
     ensure_temperature,
     fetch_chat_completion,
@@ -314,6 +315,9 @@ def route_command(argv: List[str]) -> int:
         return 0
     if argv and argv[0] in ("mode", "--mode"):
         return execute_mode_command(argv[1:])
+    if argv and argv[0] in ("preflight", "--preflight"):
+        from hydra_cli.preflight import main as preflight_main
+        return preflight_main(argv[1:])
     if argv and argv[0] in ("desk", "--desk"):
         return execute_desk_command(argv[1:])
     if argv and argv[0] in ("imagine", "--imagine"):
@@ -703,6 +707,13 @@ def execute_mode_command(argv: List[str]) -> int:
         sys.stderr.write(f"{exc}\n")
         return 1
     print(modes.describe(name))
+    from hydra_cli import preflight
+
+    report = preflight.run_preflight(mode=name, scoped=True)
+    print(preflight.format_route_strip(report))
+    notice = preflight.format_preflight_notice(report, mode=name)
+    if notice:
+        print(notice)
     return 0
 
 
@@ -748,6 +759,8 @@ def execute_summon(
     effort: Optional[str] = None,
     reasoning_mode: Optional[str] = None,
     fallback_cascade: bool = True,
+    auto_start_local: bool = True,
+    requested_model_for_provenance: Optional[str] = None,
 ) -> int:
     """Summon a frontier model.
     Tries each configured provider in health-prioritized order.
@@ -774,6 +787,8 @@ def execute_summon(
                 print(output)
             return 0
     model_id = model_override or route["model"]
+    provenance_req = requested_model_for_provenance or model_id
+    is_pre_fallback = bool(requested_model_for_provenance and requested_model_for_provenance != model_id)
     if model_override:
         route_effort = effort
         route_mode = reasoning_mode
@@ -804,9 +819,13 @@ def execute_summon(
         or _modes.classify_model(model_id) == "local"
         or not _modes.cascade_tiers()["cloudflare"]
     )
-    if local_only and not (
-        os.environ.get("LOCAL_AI_BASE", "").strip()
-        or os.environ.get("OLLAMA_HOST", "").strip()
+    if (
+        auto_start_local
+        and local_only
+        and not (
+            os.environ.get("LOCAL_AI_BASE", "").strip()
+            or os.environ.get("OLLAMA_HOST", "").strip()
+        )
     ):
         from hydra_cli import local_server
 
@@ -863,6 +882,7 @@ def execute_summon(
                     )
                 )
                 if emitted:
+                    _record_provenance(provenance_req, model_id, provider["name"], is_pre_fallback)
                     return 0
                 last_error = ProviderError(f"{provider['name']} returned an empty stream")
                 continue
@@ -875,13 +895,14 @@ def execute_summon(
                 max_tokens=max_tokens,
                 reasoning=reasoning,
             )
+            _record_provenance(provenance_req, model_id, provider["name"], is_pre_fallback)
             if json_mode:
                 import json
                 print(json.dumps({
                     "model": model_id,
-                    "requested_model": model_id,
+                    "requested_model": provenance_req,
                     "answered_by": model_id,
-                    "fallback": False,
+                    "fallback": is_pre_fallback,
                     "provider": provider["name"],
                     "effort": route_effort,
                     "reasoning_mode": route_mode,
@@ -945,6 +966,7 @@ def execute_summon(
                         )
                     )
                     if emitted:
+                        _record_provenance(provenance_req, DEFAULT_CLOUDFLARE_MODEL, cf["name"], True)
                         return 0
                     raise ProviderError("Cloudflare returned an empty stream")
                 resp = fetch_chat_completion(
@@ -955,9 +977,10 @@ def execute_summon(
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
+                _record_provenance(provenance_req, DEFAULT_CLOUDFLARE_MODEL, cf["name"], True)
                 if json_mode:
                     import json
-                    print(json.dumps({"model": DEFAULT_CLOUDFLARE_MODEL, "requested_model": model_id, "answered_by": DEFAULT_CLOUDFLARE_MODEL, "fallback": True, "provider": cf["name"], "content": resp}, indent=2))
+                    print(json.dumps({"model": DEFAULT_CLOUDFLARE_MODEL, "requested_model": provenance_req, "answered_by": DEFAULT_CLOUDFLARE_MODEL, "fallback": True, "provider": cf["name"], "content": resp}, indent=2))
                 else:
                     print(resp)
                 return 0
@@ -998,6 +1021,7 @@ def execute_summon(
                             )
                         )
                         if emitted:
+                            _record_provenance(provenance_req, fm, or_free["name"], True)
                             return 0
                         cascade_errors.append(f"OpenRouter ({fm}): empty stream")
                         continue
@@ -1009,9 +1033,10 @@ def execute_summon(
                         temperature=temperature,
                         max_tokens=max_tokens,
                     )
+                    _record_provenance(provenance_req, fm, or_free["name"], True)
                     if json_mode:
                         import json
-                        print(json.dumps({"model": fm, "requested_model": model_id, "answered_by": fm, "fallback": True, "provider": or_free["name"], "content": resp}, indent=2))
+                        print(json.dumps({"model": fm, "requested_model": provenance_req, "answered_by": fm, "fallback": True, "provider": or_free["name"], "content": resp}, indent=2))
                     else:
                         print(resp)
                     return 0
@@ -1050,6 +1075,7 @@ def execute_summon(
                         )
                     )
                     if emitted:
+                        _record_provenance(provenance_req, DEFAULT_LOCAL_MODEL, local_name, True)
                         return 0
                     raise ProviderError(f"{local_name} returned an empty stream")
                 resp = fetch_chat_completion(
@@ -1060,9 +1086,10 @@ def execute_summon(
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
+                _record_provenance(provenance_req, DEFAULT_LOCAL_MODEL, local_name, True)
                 if json_mode:
                     import json
-                    print(json.dumps({"model": DEFAULT_LOCAL_MODEL, "requested_model": model_id, "answered_by": DEFAULT_LOCAL_MODEL, "fallback": True, "provider": local_name, "content": resp}, indent=2))
+                    print(json.dumps({"model": DEFAULT_LOCAL_MODEL, "requested_model": provenance_req, "answered_by": DEFAULT_LOCAL_MODEL, "fallback": True, "provider": local_name, "content": resp}, indent=2))
                 else:
                     print(resp)
                 return 0
@@ -1101,6 +1128,7 @@ def execute_free(
     A later candidate is tried only before any text has been printed.
     """
     candidates = get_free_candidates(model_override)
+    requested_free = model_override or (candidates[0][1] if candidates else DEFAULT_FREE_MODEL)
 
     messages = [
         {"role": "system", "content": build_cached_system_prompt(system_prompt)},
@@ -1128,6 +1156,7 @@ def execute_free(
                         max_tokens=max_tokens,
                     )
                 )
+                _record_provenance(requested_free, model_id, provider_info["name"], index > 0)
                 return 0
             resp = fetch_chat_completion(
                 url=provider_info["url"],
@@ -1137,6 +1166,7 @@ def execute_free(
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+            _record_provenance(requested_free, model_id, provider_info["name"], index > 0)
             if json_mode:
                 import json
                 print(json.dumps({"model": model_id, "provider": provider_info["name"], "content": resp}, indent=2))
@@ -1265,6 +1295,7 @@ def _execute_local_serving(
                     max_tokens=max_tokens,
                 )
             )
+            _record_provenance(model_id, model_id, provider_name, False)
         else:
             resp = fetch_chat_completion(
                 url=url,
@@ -1274,6 +1305,7 @@ def _execute_local_serving(
                 temperature=temperature,
                 max_tokens=max_tokens,
             )
+            _record_provenance(model_id, model_id, provider_name, False)
             if json_mode:
                 import json
                 print(json.dumps({"model": model_id, "provider": provider_name, "endpoint": url, "content": resp}, indent=2))

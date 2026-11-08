@@ -585,6 +585,8 @@ class HydraTUI:
             self._mouse_support = bool(mouse_support)
         self.model = ""
         self.tier = ""
+        self.provider = ""
+        self.route_strip = ""
         self.dialect = ""
         self.effort = ""
         self.heat = ""
@@ -898,7 +900,20 @@ class HydraTUI:
         self._pin_prompt()
         elapsed = time.monotonic() - self._busy_since if self._busy_since else 0.0
         dot = self._g["dot"]
-        header = f"{dot} {self.model} {dot} {elapsed:.1f}s" if self.model else f"{dot} {elapsed:.1f}s"
+        from hydra_cli.providers import LAST_COMPLETION_PROVENANCE
+
+        prov = LAST_COMPLETION_PROVENANCE
+        answered_by = str(prov.get("answered_by") or "").strip() if prov else ""
+        requested = str(prov.get("requested_model") or "").strip() if prov else ""
+        provider_lbl = str(prov.get("provider") or "").strip() if prov else ""
+        fallback = bool(prov.get("fallback")) if prov else False
+        if answered_by:
+            via = f" ({provider_lbl})" if provider_lbl else ""
+            sub = f" [fallback for {requested}]" if (fallback or (requested and answered_by != requested)) else ""
+            model_lbl = f"{answered_by}{via}{sub}"
+        else:
+            model_lbl = self.model
+        header = f"{dot} {model_lbl} {dot} {elapsed:.1f}s" if model_lbl else f"{dot} {elapsed:.1f}s"
         sys.stdout.write("\n" + ui.render_answer(answer, header=header) + "\n\n")
 
     def _begin_busy(self) -> None:
@@ -1275,6 +1290,9 @@ class HydraTUI:
             frame = self._think_frames[int(now * (1000 / 120)) % len(self._think_frames)]
             if self._streaming:
                 label = "Responding · working..."
+            elif elapsed >= 20:
+                prov = (self.provider or self.tier or self.model or "provider").strip()
+                label = f"waiting on {prov}... {elapsed}s · esc to interrupt"
             else:
                 extra = ""
                 if elapsed >= 1 and self._reason_tokens:

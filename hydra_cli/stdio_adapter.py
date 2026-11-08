@@ -166,7 +166,7 @@ class Adapter:
             "approval": self._on_approval, "shutdown": lambda m: False, "sessions": self._on_sessions,
             "history": self._on_history, "action": self._on_action, "rules": self._on_rules, "skills": self._on_skills, "mcp": self._on_mcp, "mcp_toggle": self._on_mcp_toggle, "tasks": self._on_tasks, "task_stop": self._on_task_stop,
             "checkpoints": self._on_checkpoints, "rewind": self._on_rewind,
-            "models": self._on_models,
+            "models": self._on_models, "preflight": self._on_preflight,
         }.get(kind)
         if handler is None:
             self.error(f"unknown message type {kind!r}", "unknown_type", req=_text(msg.get("id")))
@@ -576,6 +576,21 @@ class Adapter:
         except Exception:
             pass
         self.emit(payload)
+
+    def _on_preflight(self, msg: Dict[str, Any]) -> None:
+        from hydra_cli import preflight
+
+        mode = _text(msg.get("mode"))
+        scoped = bool(msg.get("scoped"))
+        force = bool(msg.get("force"))
+        report = preflight.run_preflight(mode=mode, scoped=scoped, force=force)
+        self.emit({
+            "type": "preflight_result",
+            "id": _text(msg.get("id")),
+            "strip": preflight.format_route_strip(report),
+            "notice": preflight.format_preflight_notice(report, mode=mode),
+            "report": report.to_dict(),
+        })
 
     def _on_skills(self, msg: Dict[str, Any]) -> None:
         listed = [{"id": sk["id"], "keys": sk["keys"], "title": (sk["body"].splitlines() or [""])[0]} for sk in _skills()]
