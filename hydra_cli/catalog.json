@@ -218,6 +218,27 @@
     "groq": {
       "model": "openai/gpt-oss-120b"
     },
+    "ollama cloud": {
+      "model": "gpt-oss:120b"
+    },
+    "ollama gpt-oss 120b": {
+      "model": "gpt-oss:120b"
+    },
+    "ollama gpt-oss 20b": {
+      "model": "gpt-oss:20b"
+    },
+    "ollama gemma 31b": {
+      "model": "gemma4:31b"
+    },
+    "ollama nemotron super": {
+      "model": "nemotron-3-super"
+    },
+    "ollama nemotron ultra": {
+      "model": "nemotron-3-ultra"
+    },
+    "ollama nemotron nano": {
+      "model": "nemotron-3-nano:30b"
+    },
     "o3": {
       "model": "openai/o3"
     },
@@ -576,6 +597,24 @@
     "openai/gpt-oss-120b": [
       "groq"
     ],
+    "gpt-oss:120b": [
+      "ollama-cloud"
+    ],
+    "gpt-oss:20b": [
+      "ollama-cloud"
+    ],
+    "gemma4:31b": [
+      "ollama-cloud"
+    ],
+    "nemotron-3-super": [
+      "ollama-cloud"
+    ],
+    "nemotron-3-ultra": [
+      "ollama-cloud"
+    ],
+    "nemotron-3-nano:30b": [
+      "ollama-cloud"
+    ],
     "qwen/qwen3.8-27b": [
       "groq",
       "cheaperinference",
@@ -683,6 +722,7 @@
   },
   "default_hf_model": "meta-llama/Llama-3.1-8B-Instruct",
   "default_groq_model": "openai/gpt-oss-120b",
+  "default_ollama_cloud_model": "gpt-oss:120b",
   "default_ovhcloud_model": "Meta-Llama-3_3-70B-Instruct",
   "default_nvidia_model": "meta/llama-3.3-70b-instruct",
   "default_mistral_model": "mistral-small-latest",

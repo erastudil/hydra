@@ -28,6 +28,7 @@ from hydra_cli.config import (
     DEFAULT_LOCAL_MODEL,
     DEFAULT_MISTRAL_BASE,
     DEFAULT_NVIDIA_BASE,
+    DEFAULT_OLLAMA_CLOUD_BASE,
     DEFAULT_OVHCLOUD_BASE,
     DEFAULT_SCALEWAY_BASE,
     DEFAULT_SYSTEM_PROMPT,
@@ -446,6 +447,27 @@ def get_groq_provider() -> Optional[Dict[str, Any]]:
     }
 
 
+def get_ollama_cloud_provider() -> Optional[Dict[str, Any]]:
+    """Return Ollama Cloud provider dict when credentials are present.
+
+    Ollama Cloud hosts open models behind an OpenAI-compatible API;
+    its free tier is keyed by OLLAMA_API_KEY.
+    """
+    key = clean_secret(os.environ.get("OLLAMA_API_KEY"))
+    if not key:
+        return None
+    base = os.environ.get("OLLAMA_CLOUD_API_BASE", DEFAULT_OLLAMA_CLOUD_BASE).strip()
+    return {
+        "id": "ollama-cloud",
+        "name": "Ollama Cloud",
+        "url": chat_completions_url(base),
+        "headers": {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+        },
+    }
+
+
 def get_ovhcloud_provider() -> Dict[str, Any]:
     """Return OVHcloud AI Endpoints provider dict. No credentials required.
 
@@ -646,13 +668,14 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
     3. Vercel AI Gateway (fast / free endpoints)
     4. OpenRouter (aggregator fallback)
     5. Groq (recurring free tier, fast hosted open models)
-    6. OVHcloud AI Endpoints (anonymous free access, no key required)
-    7. NVIDIA NIM (free hosted endpoints, developer program)
-    8. Mistral AI (recurring free plan; free tier trains on data)
-    9. Scaleway (1M free serverless tokens)
-    10. Cohere (trial keys, non-commercial only)
-    11. Modal (serverless container compute)
-    12. RunPod (serverless GPU compute)
+    6. Ollama Cloud (hosted open models, free tier)
+    7. OVHcloud AI Endpoints (anonymous free access, no key required)
+    8. NVIDIA NIM (free hosted endpoints, developer program)
+    9. Mistral AI (recurring free plan; free tier trains on data)
+    10. Scaleway (1M free serverless tokens)
+    11. Cohere (trial keys, non-commercial only)
+    12. Modal (serverless container compute)
+    13. RunPod (serverless GPU compute)
     """
     providers = []
 
@@ -694,6 +717,10 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
     groq = get_groq_provider()
     if groq:
         providers.append(groq)
+
+    ollama_cloud = get_ollama_cloud_provider()
+    if ollama_cloud:
+        providers.append(ollama_cloud)
 
     providers.append(get_ovhcloud_provider())
 
