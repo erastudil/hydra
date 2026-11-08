@@ -1407,6 +1407,10 @@ def _handle_slash(session: ReplSession, line: str) -> Tuple[Optional[int], bool]
         print(modes.describe(name))
         if alias:
             print(f"Session model: {session.alias}")
+        if name == "local":
+            ok, reason = _ensure_session_local_ready(session, stream=sys.stdout)
+            if not ok:
+                print(f"[local] ERROR: {reason}")
         return None, True
     if cmd == "/desk":
         from hydra_cli import gpu_arbiter
@@ -1570,16 +1574,55 @@ def _handle_slash(session: ReplSession, line: str) -> Tuple[Optional[int], bool]
     return None, True
 
 
+def _ensure_session_local_ready(session: ReplSession, stream: Any = None) -> Tuple[bool, str]:
+    """Ensure the managed local server is running, verified via /props, and warm
+    when the REPL is operating in local mode or targeting a local model."""
+    from hydra_cli import local_server, modes
+
+    route = resolve_route(session.alias)
+    model_id = route["model"]
+    cur_mode = modes.current_mode()
+    is_local_model = modes.classify_model(model_id) == "local"
+    if cur_mode != "local" and not is_local_model:
+        return True, "non-local"
+
+    if cur_mode == "local":
+        ok, reason = modes.check_request(model_id, "local")
+        if not ok:
+            return False, f"[local mode] {reason}"
+
+    if os.environ.get("LOCAL_AI_BASE", "").strip() or os.environ.get("OLLAMA_HOST", "").strip():
+        return True, "custom local host configured"
+
+    status = local_server.ensure_local_server(
+        model_id,
+        warm=True,
+        show_progress=True,
+        progress_stream=stream if stream is not None else sys.stdout,
+    )
+    srv = status.get("server")
+    if srv in ("started", "already-running"):
+        return True, str(srv)
+    reason = status.get("reason") or f"local server status={srv}"
+    return False, str(reason)
+
+
 def run_repl(initial_argv: Optional[List[str]] = None) -> int:
     """Run the interactive Hydra session. Returns a process exit code."""
-    from hydra_cli.router import execute_summon
+    from hydra_cli.router import execute_summon, read_stdin_if_piped
 
-    if not sys.stdin.isatty() or not sys.stdout.isatty():
-        sys.stderr.write(
-            "[ERROR] Interactive mode needs a TTY. "
-            "Pipe a prompt instead: echo hi | hydra sonnet 5.5\n"
-        )
-        return 1
+    scripted_lines: Optional[List[str]] = None
+    is_tty = bool(sys.stdin.isatty() and sys.stdout.isatty())
+    if not is_tty:
+        if os.environ.get("HYDRA_FORCE_TTY", "").strip() != "1":
+            piped = read_stdin_if_piped()
+            if not piped:
+                sys.stderr.write(
+                    "[ERROR] Interactive mode needs a TTY. "
+                    "Pipe a prompt instead: echo hi | hydra sonnet 5.5\n"
+                )
+                return 1
+            scripted_lines = piped.splitlines()
 
     session = ReplSession()
     if initial_argv:
@@ -1599,11 +1642,24 @@ def run_repl(initial_argv: Optional[List[str]] = None) -> int:
     # Splash once.
     print_banner(detailed=True, version=__version__)
     print(_c(f"Interactive session · {session.status_line()}", GREEN_DIM))
-    print(_c("Type /help for slash commands. Ctrl-C or /quit to leave.\n", GREEN_DIM))
+    print(_c("Type /help for slash commands. Ctrl-C or /quit to leave.\n", GREEN_DIM), flush=True)
+
+    ready_ok, ready_reason = _ensure_session_local_ready(session, stream=sys.stdout)
+    if not ready_ok:
+        sys.stderr.write(f"[local] ERROR: {ready_reason}\n")
+        sys.stderr.flush()
+        return 1
 
     while True:
         try:
-            line = input(_prompt_prefix(session))
+            if scripted_lines is not None:
+                if not scripted_lines:
+                    print()
+                    return 0
+                line = scripted_lines.pop(0)
+                print(f"{_prompt_prefix(session)}{line}", flush=True)
+            else:
+                line = input(_prompt_prefix(session))
         except EOFError:
             print()
             return 0

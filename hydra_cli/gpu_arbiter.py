@@ -222,15 +222,25 @@ def return_desk() -> Dict[str, Any]:
 
 
 @contextlib.contextmanager
-def local_model_session(model_id: str, kind: str = "local summon") -> Iterator[Dict[str, Any]]:
+def local_model_session(
+    model_id: str,
+    kind: str = "local summon",
+    show_progress: bool = True,
+) -> Iterator[Dict[str, Any]]:
     """Serve `model_id` on the local endpoint for the block, stepping the
     desk aside first when another model holds the seat, and returning the
     desk afterwards. With step-aside disabled or the seat already correct,
     the block runs against whatever is serving (and the caller's own
     model check reports any mismatch, as before)."""
     info: Dict[str, Any] = {"model": model_id, "switched": False}
+    if os.environ.get("LOCAL_AI_BASE", "").strip() or os.environ.get("OLLAMA_HOST", "").strip():
+        info["basis"] = "custom local host"
+        yield info
+        return
     served = local_server.served_model_ids()
     if served is not None and model_id in served:
+        status = local_server.ensure_local_server(model_id, show_progress=show_progress)
+        info["ensure"] = status
         info["basis"] = "already-serving"
         yield info
         return
@@ -242,7 +252,7 @@ def local_model_session(model_id: str, kind: str = "local summon") -> Iterator[D
     if served is not None:
         step_aside(f"{kind}: {model_id} needs the GPU")
         stepped = True
-    status = local_server.ensure_local_server(model_id)
+    status = local_server.ensure_local_server(model_id, show_progress=show_progress)
     info["ensure"] = status
     info["switched"] = stepped or status.get("server") == "started"
     info["basis"] = "served by arbiter"
