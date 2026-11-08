@@ -540,7 +540,14 @@ def route_command(argv: List[str]) -> int:
 
     if not effective_prompt:
         if cmd_lower in ("agent", "mcp", "orchestrator") or interactive_mode:
-            target_alias = command_or_alias if cmd_lower not in ("agent", "mcp", "orchestrator") else (model_override or DEFAULT_ORCHESTRATOR_MODEL)
+            from hydra_cli import modes as _modes
+
+            _default_agent_alias = (
+                (_modes.default_alias("local") or DEFAULT_ORCHESTRATOR_MODEL)
+                if _modes.current_mode() == "local" and not tier_override
+                else DEFAULT_ORCHESTRATOR_MODEL
+            )
+            target_alias = command_or_alias if cmd_lower not in ("agent", "mcp", "orchestrator") else (model_override or _default_agent_alias)
             return execute_agent_mode(
                 alias=target_alias,
                 prompt="",
@@ -559,7 +566,14 @@ def route_command(argv: List[str]) -> int:
     # Route based on command/alias
     try:
         if cmd_lower in ("agent", "mcp", "orchestrator") or mcp_mode or interactive_mode:
-            target_alias = command_or_alias if cmd_lower not in ("agent", "mcp", "orchestrator") else (model_override or DEFAULT_ORCHESTRATOR_MODEL)
+            from hydra_cli import modes as _modes
+
+            _default_agent_alias = (
+                (_modes.default_alias("local") or DEFAULT_ORCHESTRATOR_MODEL)
+                if _modes.current_mode() == "local" and not tier_override
+                else DEFAULT_ORCHESTRATOR_MODEL
+            )
+            target_alias = command_or_alias if cmd_lower not in ("agent", "mcp", "orchestrator") else (model_override or _default_agent_alias)
             return execute_agent_mode(
                 alias=target_alias,
                 prompt=effective_prompt,
@@ -780,7 +794,37 @@ def execute_summon(
         raise UsageError(f"[{_modes.current_mode()} mode] {_mode_reason}")
     _modes.log_decision("summon_allowed", {"mode": _modes.current_mode(), "model": model_id})
 
-    cascade_enabled = fallback_cascade and os.environ.get("HYDRA_NO_FALLBACK", "").strip() != "1"
+    # A model the catalog restricts to local serving, or any summon in local
+    # mode, must ensure the managed local server is running and warm first and
+    # must never silently substitute a cloud route.
+    _allowed = model_providers(model_id)
+    local_only = (
+        (bool(_allowed) and set(_allowed) <= {"local"})
+        or _modes.current_mode() == "local"
+        or _modes.classify_model(model_id) == "local"
+        or not _modes.cascade_tiers()["cloudflare"]
+    )
+    if local_only and not (
+        os.environ.get("LOCAL_AI_BASE", "").strip()
+        or os.environ.get("OLLAMA_HOST", "").strip()
+    ):
+        from hydra_cli import local_server
+
+        ensure_status = local_server.ensure_local_server(
+            model_id,
+            warm=True,
+            show_progress=True,
+            progress_stream=sys.stderr,
+        )
+        if ensure_status.get("server") not in ("started", "already-running"):
+            reason = ensure_status.get("reason") or f"server status={ensure_status.get('server')}"
+            raise ProviderError(f"[local] Local server for '{model_id}' could not start: {reason}")
+
+    cascade_enabled = (
+        not local_only
+        and fallback_cascade
+        and os.environ.get("HYDRA_NO_FALLBACK", "").strip() != "1"
+    )
 
     providers = []
     try:
@@ -1175,7 +1219,11 @@ def execute_local(
     model_id = model_override or DEFAULT_LOCAL_MODEL
     from hydra_cli import gpu_arbiter
 
-    with gpu_arbiter.local_model_session(model_id, kind="local summon"):
+    with gpu_arbiter.local_model_session(model_id, kind="local summon", show_progress=True) as session_info:
+        ensure_st = session_info.get("ensure")
+        if isinstance(ensure_st, dict) and ensure_st.get("server") not in ("started", "already-running"):
+            reason = ensure_st.get("reason") or f"server status={ensure_st.get('server')}"
+            raise ProviderError(f"[local] Local server for '{model_id}' could not start: {reason}")
         return _execute_local_serving(prompt, system_prompt, model_id, temperature, max_tokens, stream, json_mode)
 
 
@@ -1188,7 +1236,10 @@ def _execute_local_serving(
     stream: bool = True,
     json_mode: bool = False,
 ) -> int:
-    url, provider_name = detect_local_endpoint()
+    from hydra_cli.providers import get_local_provider
+
+    loc_prov = get_local_provider(model_id)
+    url, provider_name = loc_prov["url"], loc_prov["name"]
     available_local = list_local_models()
     if available_local and model_id not in {entry["id"] for entry in available_local}:
         names = ", ".join(sorted({entry["id"] for entry in available_local}))

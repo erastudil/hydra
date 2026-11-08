@@ -14159,6 +14159,56 @@ def modes_media_and_desk():
     assert status["front_desk_model"] == "gemma-e2b"
     assert status["override"] == "auto"
 
+    # Launch-and-warm /props n_ctx verification (WO-1):
+    import http.server
+    import threading
+    from hydra_cli import local_server
+
+    assert local_server.required_context("gemma-e2b") == 131072
+    assert local_server.extract_props_n_ctx({"default_generation_settings": {"n_ctx": 131072}}) == 131072
+    assert local_server.extract_props_n_ctx({"n_ctx": 65536}) == 65536
+
+    props_state = {"n_ctx": 131072}
+
+    class _PropsHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/v1/models":
+                body = json.dumps({"data": [{"id": "gemma-e2b"}]}).encode("utf-8")
+            elif self.path == "/props":
+                body = json.dumps({
+                    "default_generation_settings": {"n_ctx": props_state["n_ctx"]},
+                    "model_alias": "gemma-e2b",
+                    "total_slots": 4,
+                }).encode("utf-8")
+            else:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    mock_srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _PropsHandler)
+    mock_port = mock_srv.server_address[1]
+    mock_base = f"http://127.0.0.1:{mock_port}"
+    threading.Thread(target=mock_srv.serve_forever, daemon=True).start()
+    try:
+        ok_check = local_server.verify_server_context(mock_base, min_ctx=131072)
+        assert ok_check["ok"] is True and ok_check["n_ctx"] == 131072, ok_check
+
+        props_state["n_ctx"] = 8192
+        bad_check = local_server.verify_server_context(mock_base, min_ctx=131072)
+        assert bad_check["ok"] is False and bad_check["n_ctx"] == 8192, bad_check
+        assert "8192" in bad_check["reason"] and "131072" in bad_check["reason"], bad_check
+    finally:
+        mock_srv.shutdown()
+        mock_srv.server_close()
+
 
 
 @check

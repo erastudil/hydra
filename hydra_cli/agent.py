@@ -3296,26 +3296,71 @@ def _run_agent_loop(
     statechart checkpointing saved to ~/.hydra/sessions/<session_id>.json (WO-04, WO-06).
     """
     target_cwd = os.path.abspath(cwd or os.getcwd())
+    from hydra_cli import modes as _modes
+
     resolved_tier = (tier or "").lower().strip()
     if not resolved_tier and alias in ("free", "local"):
         resolved_tier = alias
-
-    actual_alias = DEFAULT_ORCHESTRATOR_MODEL if alias in ("agent", "auto", "paid", "frontier", "orchestrator") else alias
+    if not resolved_tier and _modes.current_mode() == "local" and alias in ("agent", "auto", "orchestrator"):
+        actual_alias = _modes.default_alias("local") or DEFAULT_LOCAL_MODEL
+        resolved_tier = "local"
+    else:
+        actual_alias = DEFAULT_ORCHESTRATOR_MODEL if alias in ("agent", "auto", "paid", "frontier", "orchestrator") else alias
 
     if resolved_tier == "free":
+        if _modes.current_mode() == "local":
+            raise UsageError(
+                "[local mode] Free Forge cloud routing is not available in local mode. "
+                "Switch mode with `/mode free` or `hydra mode free`."
+            )
         candidates = get_free_candidates()
         providers = [c[0] for c in candidates]
         requested_model = candidates[0][1]
         route = {"model": requested_model, "effort": None, "reasoning_mode": None}
     elif resolved_tier == "local":
-        local_url, local_name = detect_local_endpoint()
-        requested_model = actual_alias if actual_alias not in ("local", "agent", "auto", "paid", "frontier", "free") else DEFAULT_LOCAL_MODEL
-        providers = [{"name": local_name, "url": local_url, "headers": {"Content-Type": "application/json"}}]
+        requested_model = (
+            resolve_route(actual_alias)["model"]
+            if actual_alias not in ("local", "agent", "auto", "paid", "frontier", "free")
+            else DEFAULT_LOCAL_MODEL
+        )
+        if _modes.current_mode() == "local":
+            _ok, _reason = _modes.check_request(requested_model, "local")
+            if not _ok:
+                raise UsageError(f"[local mode] {_reason}")
+        if not (os.environ.get("LOCAL_AI_BASE", "").strip() or os.environ.get("OLLAMA_HOST", "").strip()):
+            from hydra_cli import local_server
+
+            _st = local_server.ensure_local_server(
+                requested_model, warm=True, show_progress=True, progress_stream=sys.stderr
+            )
+            if _st.get("server") not in ("started", "already-running"):
+                _err = _st.get("reason") or f"server status={_st.get('server')}"
+                raise ProviderError(f"[local] Local server for '{requested_model}' could not start: {_err}")
+        from hydra_cli.providers import get_local_provider
+
+        loc_prov = get_local_provider(requested_model)
+        providers = [loc_prov]
         route = {"model": requested_model, "effort": None, "reasoning_mode": None}
     else:
         route = resolve_route(actual_alias)
         requested_model = route["model"]
         ensure_temperature(requested_model, temperature)
+        if _modes.current_mode() == "local":
+            _ok, _reason = _modes.check_request(requested_model, "local")
+            if not _ok:
+                raise UsageError(f"[local mode] {_reason}")
+        if (
+            (_modes.current_mode() == "local" or _modes.classify_model(requested_model) == "local")
+            and not (os.environ.get("LOCAL_AI_BASE", "").strip() or os.environ.get("OLLAMA_HOST", "").strip())
+        ):
+            from hydra_cli import local_server
+
+            _st = local_server.ensure_local_server(
+                requested_model, warm=True, show_progress=True, progress_stream=sys.stderr
+            )
+            if _st.get("server") not in ("started", "already-running"):
+                _err = _st.get("reason") or f"server status={_st.get('server')}"
+                raise ProviderError(f"[local] Local server for '{requested_model}' could not start: {_err}")
         providers = providers_for_model(requested_model, get_frontier_providers())
         if not providers:
             raise ProviderError("No frontier provider credentials found in ~/.hydra/.env or environment.")
@@ -4288,8 +4333,18 @@ def run_interactive_agent(
     else:
         active_dialect = "slack"
 
-    active_alias = DEFAULT_ORCHESTRATOR_MODEL if alias in ("agent", "auto", "orchestrator") else alias
-    active_tier = tier
+    from hydra_cli import modes as _modes
+
+    if alias in ("agent", "auto", "orchestrator"):
+        if _modes.current_mode() == "local" and not tier:
+            active_alias = _modes.default_alias("local") or DEFAULT_LOCAL_MODEL
+            active_tier = "local"
+        else:
+            active_alias = DEFAULT_ORCHESTRATOR_MODEL
+            active_tier = tier
+    else:
+        active_alias = alias
+        active_tier = "local" if (_modes.current_mode() == "local" and not tier) else tier
     active_session_id = session_id or f"session_{int(time.time())}_{uuid.uuid4().hex[:8]}"
     active_steer_mode = steer_mode
     active_effort: Optional[str] = None
@@ -4329,7 +4384,6 @@ def run_interactive_agent(
         )
         sys.stdout.write("\n")
         sys.stdout.flush()
-        tui.start()
     else:
         sys.stdout.write(f"\n{c_head}================================================================================{c_reset}\n")
         sys.stdout.write(f"  {c_bright}HYDRA CODING AGENT{c_reset} // Sovereign Autonomous Shell (v{__version__})\n")
@@ -4338,6 +4392,34 @@ def run_interactive_agent(
         sys.stdout.write(f"  Type {c_bright}/help{c_reset} for slash commands or enter your instruction to begin.\n")
         sys.stdout.write(f"{c_head}================================================================================{c_reset}\n\n")
         sys.stdout.flush()
+
+    if (
+        (active_tier == "local" or _modes.current_mode() == "local" or _modes.classify_model(boot_route["model"]) == "local")
+        and not (os.environ.get("LOCAL_AI_BASE", "").strip() or os.environ.get("OLLAMA_HOST", "").strip())
+    ):
+        from hydra_cli import local_server
+
+        _target_local_model = boot_route["model"]
+        if _modes.current_mode() == "local":
+            _ok, _reason = _modes.check_request(_target_local_model, "local")
+            if not _ok:
+                sys.stderr.write(f"[local] ERROR: [local mode] {_reason}\n")
+                sys.stderr.flush()
+                return 1
+        _ensure_st = local_server.ensure_local_server(
+            _target_local_model,
+            warm=True,
+            show_progress=True,
+            progress_stream=sys.stdout,
+        )
+        if _ensure_st.get("server") not in ("started", "already-running"):
+            _err = _ensure_st.get("reason") or f"server status={_ensure_st.get('server')}"
+            sys.stderr.write(f"[local] ERROR: {_err}\n")
+            sys.stderr.flush()
+            return 1
+
+    if tui is not None:
+        tui.start()
 
     last_interrupt_time = 0.0
 

@@ -751,7 +751,26 @@ def get_frontier_providers() -> List[Dict[str, Any]]:
     return providers
 
 
-def get_local_provider():
+def get_local_provider(model: Optional[str] = None):
+    custom_base = os.environ.get("LOCAL_AI_BASE", "").strip()
+    ollama_host = os.environ.get("OLLAMA_HOST", "").strip()
+    if not custom_base and not ollama_host:
+        try:
+            from hydra_cli import local_server
+
+            llama_base = local_server._llamacpp_base()
+            served = local_server._served_model_ids(llama_base)
+            if (served and (not model or model in served)) or (
+                model and (model in ("gemma-e2b", "gemma-e4b") or "Ternary-Bonsai" in model)
+            ):
+                return {
+                    'id': 'local',
+                    'name': 'llama.cpp',
+                    'url': chat_completions_url(llama_base),
+                    'headers': {'Content-Type': 'application/json'},
+                }
+        except Exception:
+            pass
     url, name = detect_local_endpoint()
     return {
         'id': 'local',
@@ -889,7 +908,7 @@ def providers_for_model(
     configured = get_frontier_providers() if providers is None else list(providers)
     allowed = model_providers(model)
     if "local" in allowed and not any(p.get("id") == "local" for p in configured):
-        loc = get_local_provider()
+        loc = get_local_provider(model)
         if loc:
             configured.append(loc)
     if not allowed:
