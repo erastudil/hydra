@@ -69,6 +69,7 @@ pub struct App {
     pub cost: f64,
     pub busy_turn: Option<String>,
     pub busy_start: Option<Instant>,
+    pub pulse_secs: f64,
     pub spin_i: usize,
     pub status_label: String,
     pub agents: Vec<AgentRow>,
@@ -130,6 +131,7 @@ impl App {
             cost: 0.0,
             busy_turn: None,
             busy_start: None,
+            pulse_secs: 0.0,
             spin_i: 0,
             status_label: "idle".into(),
             agents: Vec::new(),
@@ -177,16 +179,47 @@ impl App {
         ]
     }
 
+    /// Prompt-bar state matching `hydra_cli/tui.py::_state`:
+    /// `"answer"` while awaiting tool approval, `"busy"` while a turn is running, `"idle"` otherwise.
+    pub fn state(&self) -> &'static str {
+        if self.approval.is_some() {
+            "answer"
+        } else if self.busy_turn.is_some() {
+            "busy"
+        } else {
+            "idle"
+        }
+    }
+
+    /// True when the prompt bar should animate on ticker frames (matching `hydra_cli/tui.py::_animating`).
+    pub fn animating(&self) -> bool {
+        self.state() == "busy"
+    }
+
+    /// Prompt-bar border RGB for the current state and ticker-driven `pulse_secs`
+    /// (matching `hydra_cli/tui.py::_border_rgb`).
+    pub fn border_rgb(&self) -> crate::banner::Rgb {
+        match self.state() {
+            "answer" => crate::banner::AMBER_RGB,
+            "busy" => crate::banner::pulse_border_rgb(self.pulse_secs),
+            _ => crate::banner::BORDER_IDLE_RGB,
+        }
+    }
+
     pub fn tick(&mut self) {
         if let Some(rx) = &self.update_rx {
             while let Ok(line) = rx.try_recv() {
                 self.transcript.push(format!("update : {line}"));
             }
         }
-        if self.busy_turn.is_some() {
-            self.spin_i = self.spin_i.wrapping_add(1);
-        }
         self.drain();
+        if self.animating() {
+            self.spin_i = self.spin_i.wrapping_add(1);
+            let start = *self.busy_start.get_or_insert_with(Instant::now);
+            self.pulse_secs = start.elapsed().as_secs_f64();
+        } else {
+            self.pulse_secs = 0.0;
+        }
     }
 
     pub fn on_char(&mut self, c: char) {
@@ -627,6 +660,7 @@ impl App {
         }
         self.busy_turn = None;
         self.busy_start = None;
+        self.pulse_secs = 0.0;
         self.assistant_at = None;
         self.approval = None;
         self.approval_args = Value::Null;
@@ -671,6 +705,7 @@ impl App {
         }
         self.busy_turn = Some(turn.clone());
         self.busy_start = Some(Instant::now());
+        self.pulse_secs = 0.0;
         self.status_label = "working".into();
         self.transcript.push(String::new());
         self.assistant_at = Some(self.transcript.len() - 1);
@@ -685,6 +720,7 @@ impl App {
             self.status_label = "cancel".into();
             self.busy_turn = None;
             self.busy_start = None;
+            self.pulse_secs = 0.0;
             self.transcript.push("hydra : turn cancelled by user".into());
         } else if self.approval.is_some() {
             self.decide("abort");
@@ -1376,6 +1412,7 @@ impl App {
                 if self.busy_turn.as_deref() == Some(turn.as_str()) {
                     self.busy_turn = None;
                     self.busy_start = None;
+                    self.pulse_secs = 0.0;
                     self.status_label = "idle".into();
                     self.assistant_at = None;
                     self.steer_after_cancel = false;
@@ -1393,6 +1430,7 @@ impl App {
                     if self.busy_turn.as_deref() == Some(turn.as_str()) {
                         self.busy_turn = None;
                         self.busy_start = None;
+                        self.pulse_secs = 0.0;
                         self.status_label = "idle".into();
                         self.assistant_at = None;
                     }
@@ -1423,6 +1461,7 @@ impl App {
                     self.mark_agent(&turn, "failed");
                 }
                 self.busy_start = None;
+                self.pulse_secs = 0.0;
                 self.assistant_at = None;
                 self.approval = None;
                 self.approval_args = Value::Null;
@@ -1826,6 +1865,70 @@ mod tests {
         app.cursor_pos = app.input.len();
         app.submit();
         assert!(app.transcript.iter().any(|l| l == "agent : reconnected"));
+    }
 
+    #[test]
+    fn prompt_bar_pulse_gated_on_busy_turn_and_static_when_idle_or_approval() {
+        use crate::banner::{AMBER_RGB, BORDER_IDLE_RGB, BORDER_PULSE_RGB, pulse_border_rgb};
+        use std::time::Duration;
+
+        let mut app = App::new();
+        assert_eq!(app.state(), "idle");
+        assert!(!app.animating());
+        assert_eq!(app.border_rgb(), BORDER_IDLE_RGB);
+
+        // Ticking while idle never animates or shifts the prompt-bar border
+        app.tick();
+        assert!(!app.animating());
+        assert_eq!(app.spin_i, 0);
+        assert_eq!(app.pulse_secs, 0.0);
+        assert_eq!(app.border_rgb(), BORDER_IDLE_RGB);
+
+        // Starting an ordinary busy chat turn activates ticker-driven 1.6s pulse
+        app.input = "hello local".into();
+        app.cursor_pos = app.input.len();
+        app.submit();
+        assert_eq!(app.state(), "busy");
+        assert!(app.animating());
+
+        // Verify ticker advances pulse_secs from busy_start and sweeps the 1.6s cycle
+        app.busy_start = Some(Instant::now() - Duration::from_millis(400));
+        app.tick();
+        assert_eq!(app.spin_i, 1);
+        assert!((app.pulse_secs - 0.4).abs() < 0.05);
+
+        app.pulse_secs = 0.4; // quarter of 1.6s cycle -> peak bright green
+        assert_eq!(app.border_rgb(), BORDER_PULSE_RGB);
+        app.pulse_secs = 1.2; // three-quarter of 1.6s cycle -> trough dim green
+        assert_eq!(app.border_rgb(), BORDER_IDLE_RGB);
+        app.pulse_secs = 0.0;
+        assert_eq!(app.border_rgb(), pulse_border_rgb(1.6));
+
+        // Approval prompt gates off the busy pulse and shows solid amber
+        app.apply(Ev::Approval {
+            turn: "t1".into(),
+            id: "a1".into(),
+            tool: "run_command".into(),
+            args: json!({"command": "echo hi"}),
+        });
+        assert_eq!(app.state(), "answer");
+        assert!(!app.animating());
+        assert_eq!(app.border_rgb(), AMBER_RGB);
+        app.decide("allow");
+        assert_eq!(app.state(), "busy");
+        assert!(app.animating());
+
+        // Turn completion stops the pulse and returns prompt bar to static idle green
+        app.apply(Ev::Done {
+            turn: "t1".into(),
+            text: "done".into(),
+            ok: true,
+            cancelled: false,
+        });
+        app.tick();
+        assert_eq!(app.state(), "idle");
+        assert!(!app.animating());
+        assert_eq!(app.pulse_secs, 0.0);
+        assert_eq!(app.border_rgb(), BORDER_IDLE_RGB);
     }
 }

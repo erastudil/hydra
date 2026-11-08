@@ -20,6 +20,9 @@ pub const HOT_RGB: Rgb = (236, 255, 245);
 pub const DIM_RGB: Rgb = (112, 140, 130);
 pub const ACCENT_RGB: Rgb = (52, 236, 146);
 pub const AMBER_RGB: Rgb = (255, 184, 48);
+pub const BORDER_IDLE_RGB: Rgb = (31, 122, 69);
+pub const BORDER_PULSE_RGB: Rgb = (0, 255, 102);
+pub const PULSE_CYCLE_SECS: f64 = 1.6;
 pub const BG_DARK: Rgb = (10, 15, 13);
 pub const BRAILLE_SPIN: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -106,6 +109,17 @@ pub fn lerp_rgb(a: Rgb, b: Rgb, t: f32) -> Rgb {
         (a.1 as f32 + (b.1 as f32 - a.1 as f32) * t).round() as u8,
         (a.2 as f32 + (b.2 as f32 - a.2 as f32) * t).round() as u8,
     )
+}
+
+/// Sinusoidal 0.0..=1.0 pulse factor on a 1.6-second cycle, matching Python `hydra_cli/tui.py::_border_rgb`.
+pub fn pulse_factor(elapsed_secs: f64) -> f32 {
+    let omega = std::f64::consts::TAU / PULSE_CYCLE_SECS;
+    (((elapsed_secs * omega).sin() + 1.0) * 0.5).clamp(0.0, 1.0) as f32
+}
+
+/// Prompt-bar border RGB lerped between `(31, 122, 69)` and `(0, 255, 102)` on a 1.6s cycle.
+pub fn pulse_border_rgb(elapsed_secs: f64) -> Rgb {
+    lerp_rgb(BORDER_IDLE_RGB, BORDER_PULSE_RGB, pulse_factor(elapsed_secs))
 }
 
 pub fn gradient(stops: &[Rgb], t: f32) -> Rgb {
@@ -432,6 +446,25 @@ mod tests {
             let lines = build_banner_lines(w, &info);
             assert!(!lines.is_empty(), "banner generated for width {w}");
         }
+    }
+
+    #[test]
+    fn test_pulse_border_rgb_matches_python_1_6s_lerp_cycle() {
+        // At t = 0.0s, sin(0) = 0 -> pulse = 0.5 -> midpoint between (31,122,69) and (0,255,102)
+        let mid = pulse_border_rgb(0.0);
+        assert_eq!(mid, lerp_rgb(BORDER_IDLE_RGB, BORDER_PULSE_RGB, 0.5));
+
+        // At t = 0.4s (quarter of 1.6s cycle), sin(pi/2) = 1 -> pulse = 1.0 -> bright green peak
+        assert_eq!(pulse_border_rgb(0.4), BORDER_PULSE_RGB);
+
+        // At t = 0.8s (half cycle), sin(pi) = 0 -> pulse = 0.5 -> midpoint
+        assert_eq!(pulse_border_rgb(0.8), mid);
+
+        // At t = 1.2s (three-quarter cycle), sin(3*pi/2) = -1 -> pulse = 0.0 -> dim green trough
+        assert_eq!(pulse_border_rgb(1.2), BORDER_IDLE_RGB);
+
+        // At t = 1.6s (full cycle), exact repeat of t = 0.0s
+        assert_eq!(pulse_border_rgb(1.6), mid);
     }
 }
 

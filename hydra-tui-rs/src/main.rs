@@ -20,10 +20,13 @@ use ratatui::Terminal;
 
 use app::{read_clipboard_text, App};
 use banner::{
-    lerp_rgb, to_color, ACCENT_RGB, AMBER_RGB, BG_DARK, BRAILLE_SPIN, DIM_RGB, HOT_RGB,
+    to_color, ACCENT_RGB, AMBER_RGB, BG_DARK, BRAILLE_SPIN, DIM_RGB, HOT_RGB,
     MARK_FROM_RGB, MARK_TO_RGB, SCALE_STOPS,
 };
 use layout::fit_status;
+
+/// Ticker cadence matching Python `hydra_cli/tui.py::_ticker` (0.08s = 80ms).
+const TICK_INTERVAL: Duration = Duration::from_millis(80);
 
 fn main() -> io::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -57,7 +60,7 @@ fn handles_key(kind: KeyEventKind) -> bool {
 fn run(terminal: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>, app: &mut App) -> io::Result<()> {
     loop {
         terminal.draw(|frame| draw(frame, app))?;
-        if event::poll(Duration::from_millis(50))? {
+        if event::poll(TICK_INTERVAL)? {
             match event::read()? {
                 Event::Paste(text) => {
                     app.paste_text(&text);
@@ -346,18 +349,7 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     frame.render_widget(Paragraph::new(status_line), chunks[1]);
 
     // ------------------------------------------------------------- 2: Input Box
-    let border_color = if app.approval.is_some() {
-        to_color(AMBER_RGB)
-    } else if app.busy_turn.is_some() {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let t = ((ms as f32 / 240.0).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-        to_color(lerp_rgb((31, 122, 69), (0, 255, 102), t))
-    } else {
-        Color::Rgb(31, 122, 69)
-    };
+    let border_color = to_color(app.border_rgb());
 
     let state_tag = if app.approval.is_some() {
         " hydra · approval required "
@@ -494,5 +486,51 @@ mod key_kind_tests {
         assert!(handles_key(KeyEventKind::Press));
         assert!(handles_key(KeyEventKind::Repeat));
         assert!(!handles_key(KeyEventKind::Release));
+    }
+
+    #[test]
+    fn draw_pulses_prompt_bar_border_only_while_turn_is_busy() {
+        use banner::{BORDER_IDLE_RGB, BORDER_PULSE_RGB};
+        use hydra_stdio::Ev;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+
+        // Idle: prompt bar top-left border cell at (0, 20) is static (31, 122, 69)
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let idle_fg = terminal.backend().buffer()[(0, 20)].fg;
+        let transcript_fg = terminal.backend().buffer()[(0, 0)].fg;
+        assert_eq!(idle_fg, to_color(BORDER_IDLE_RGB));
+        assert_eq!(transcript_fg, Color::Rgb(14, 80, 50));
+
+        // Busy turn at 0.4s (quarter of 1.6s cycle): prompt bar border peaks at (0, 255, 102),
+        // while transcript border at (0, 0) remains static (no full-screen glow).
+        app.input = "test prompt".into();
+        app.cursor_pos = app.input.len();
+        app.submit();
+        app.pulse_secs = 0.4;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(0, 20)].fg, to_color(BORDER_PULSE_RGB));
+        assert_eq!(terminal.backend().buffer()[(0, 21)].fg, to_color(BORDER_PULSE_RGB));
+        assert_eq!(terminal.backend().buffer()[(0, 22)].fg, to_color(BORDER_PULSE_RGB));
+        assert_eq!(terminal.backend().buffer()[(0, 0)].fg, Color::Rgb(14, 80, 50));
+
+        // Busy turn at 1.2s (three-quarter of 1.6s cycle): trough at (31, 122, 69)
+        app.pulse_secs = 1.2;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(0, 20)].fg, to_color(BORDER_IDLE_RGB));
+
+        // Turn finishes: prompt bar returns to static (31, 122, 69)
+        app.apply(Ev::Done {
+            turn: "t1".into(),
+            text: "ok".into(),
+            ok: true,
+            cancelled: false,
+        });
+        app.tick();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(terminal.backend().buffer()[(0, 20)].fg, to_color(BORDER_IDLE_RGB));
     }
 }
