@@ -34,6 +34,8 @@ Slash commands (Claude Code / Codex style):
   /models [--verbose]   List aliases (ids with --verbose)
   /model <alias>        Switch the active model alias
   /mode [name]          Show or set the routing mode (local|free|light|heavy|max)
+  /preflight            Re-probe active routes and display the route status strip
+  /start                Start and warm the managed local server on :8080
   /desk [sub]           Front-desk GPU: status|aside|return|hold|auto|park|restore
   /system <text>        Set the system prompt for this session
   /effort <level>       Set reasoning effort (low|medium|high|xhigh|max)
@@ -1309,6 +1311,8 @@ class ReplSession:
             self.effort = route["effort"]
         if route.get("reasoning_mode"):
             self.reasoning_mode = route["reasoning_mode"]
+        self.local_start_offered: bool = False
+        self.preflight_report: Optional[Any] = None
 
     def status_line(self) -> str:
         from hydra_cli import modes
@@ -1383,7 +1387,7 @@ def _handle_slash(session: ReplSession, line: str) -> Tuple[Optional[int], bool]
         print("System prompt updated.")
         return None, True
     if cmd == "/mode":
-        from hydra_cli import modes
+        from hydra_cli import modes, preflight
 
         if not args:
             print(modes.describe())
@@ -1407,10 +1411,42 @@ def _handle_slash(session: ReplSession, line: str) -> Tuple[Optional[int], bool]
         print(modes.describe(name))
         if alias:
             print(f"Session model: {session.alias}")
-        if name == "local":
-            ok, reason = _ensure_session_local_ready(session, stream=sys.stdout)
-            if not ok:
-                print(f"[local] ERROR: {reason}")
+        report = preflight.run_preflight(mode=name, scoped=True)
+        session.preflight_report = report
+        print(_c(preflight.format_route_strip(report), GREEN_DIM), flush=True)
+        notice = preflight.format_preflight_notice(report, mode=name)
+        if notice:
+            print(notice, flush=True)
+        session.local_start_offered = bool(
+            name == "local" and not report.local.ok and report.local.managed_configured
+        )
+        return None, True
+    if cmd == "/preflight":
+        from hydra_cli import modes, preflight
+
+        cur_mode = modes.current_mode()
+        report = preflight.run_preflight(mode=cur_mode, force=True)
+        session.preflight_report = report
+        print(_c(preflight.format_route_strip(report), GREEN_DIM), flush=True)
+        notice = preflight.format_preflight_notice(report, mode=cur_mode)
+        if notice:
+            print(notice, flush=True)
+        session.local_start_offered = bool(
+            cur_mode == "local" and not report.local.ok and report.local.managed_configured
+        )
+        return None, True
+    if cmd == "/start":
+        from hydra_cli import modes, preflight
+
+        ok, reason = _ensure_session_local_ready(session, stream=sys.stdout)
+        if not ok:
+            print(f"[local] ERROR: {reason}", flush=True)
+            return None, True
+        preflight.invalidate_preflight_cache()
+        report = preflight.run_preflight(mode=modes.current_mode(), force=True)
+        session.preflight_report = report
+        session.local_start_offered = False
+        print(_c(preflight.format_route_strip(report), GREEN_DIM), flush=True)
         return None, True
     if cmd == "/desk":
         from hydra_cli import gpu_arbiter
@@ -1639,16 +1675,24 @@ def run_repl(initial_argv: Optional[List[str]] = None) -> int:
             session.effort = route.get("effort")
             session.reasoning_mode = route.get("reasoning_mode")
 
+    from hydra_cli import modes as _modes, preflight
+
+    cur_mode = _modes.current_mode()
+    report = preflight.run_preflight(mode=cur_mode)
+    session.preflight_report = report
+    session.local_start_offered = bool(
+        cur_mode == "local" and not report.local.ok and report.local.managed_configured
+    )
+
     # Splash once.
     print_banner(detailed=True, version=__version__)
     print(_c(f"Interactive session · {session.status_line()}", GREEN_DIM))
+    print(_c(preflight.format_route_strip(report), GREEN_DIM))
     print(_c("Type /help for slash commands. Ctrl-C or /quit to leave.\n", GREEN_DIM), flush=True)
 
-    ready_ok, ready_reason = _ensure_session_local_ready(session, stream=sys.stdout)
-    if not ready_ok:
-        sys.stderr.write(f"[local] ERROR: {ready_reason}\n")
-        sys.stderr.flush()
-        return 1
+    startup_notice = preflight.format_preflight_notice(report, mode=cur_mode)
+    if startup_notice:
+        print(_c(startup_notice, GREEN_DIM), flush=True)
 
     while True:
         try:
@@ -1676,6 +1720,23 @@ def run_repl(initial_argv: Optional[List[str]] = None) -> int:
 
         session.history.record(text)
 
+        if session.local_start_offered and text.lower() in ("y", "yes"):
+            session.local_start_offered = False
+            ok, reason = _ensure_session_local_ready(session, stream=sys.stdout)
+            preflight.invalidate_preflight_cache()
+            rep = preflight.run_preflight(mode=_modes.current_mode(), force=True)
+            session.preflight_report = rep
+            print(_c(preflight.format_route_strip(rep), GREEN_DIM), flush=True)
+            if not ok:
+                sys.stderr.write(f"[local] ERROR: {reason}\n")
+                sys.stderr.flush()
+            continue
+
+        if session.local_start_offered and text.lower() in ("n", "no"):
+            session.local_start_offered = False
+            print(_c("Managed local server left stopped. Type /start to launch it.", GREEN_DIM), flush=True)
+            continue
+
         expanded_text, was_expanded = session.shortcuts.expand_shortcut(text)
         if was_expanded:
             text = expanded_text
@@ -1686,19 +1747,64 @@ def run_repl(initial_argv: Optional[List[str]] = None) -> int:
                 return code
             continue
 
+        cur_mode = _modes.current_mode()
+        active_report = preflight.run_preflight(mode=cur_mode)
+        session.preflight_report = active_report
+        target_route = resolve_route(session.alias)
+        target_model = target_route["model"]
+
+        if cur_mode == "local" or _modes.classify_model(target_model) == "local":
+            if not active_report.local.ok:
+                notice = preflight.format_preflight_notice(active_report, mode="local")
+                if notice:
+                    print(_c(notice, GREEN_DIM), flush=True)
+                session.local_start_offered = bool(active_report.local.managed_configured)
+                continue
+
+        turn_model_override: Optional[str] = None
+        if (
+            cur_mode in ("light", "heavy", "max")
+            and not active_report.light.ok
+            and target_model == "muse-spark-1.3-contributor"
+        ):
+            fall_notice = preflight.format_preflight_notice(active_report, mode=cur_mode)
+            if fall_notice:
+                print(_c(fall_notice, GREEN_DIM), flush=True)
+            turn_model_override = preflight.FREE_CANDIDATE_MODEL_ID
+
         try:
             rc = execute_summon(
                 alias=session.alias,
                 prompt=text,
                 system_prompt=session.system_prompt,
+                model_override=turn_model_override,
                 effort=session.effort,
                 reasoning_mode=session.reasoning_mode,
                 stream=True,
                 json_mode=False,
+                auto_start_local=False,
+                requested_model_for_provenance=target_model if turn_model_override else None,
             )
-            if rc != 0:
+            if rc == 0:
+                prov_hdr = preflight.format_provenance_header()
+                if prov_hdr:
+                    print(_c(f"  [{prov_hdr}]", GREEN_DIM), flush=True)
+            else:
                 sys.stderr.write(f"[session] last turn exited {rc}\n")
+                rep = preflight.reprobe_after_pre_token_failure(mode=cur_mode)
+                session.preflight_report = rep
+                print(_c(preflight.format_route_strip(rep), GREEN_DIM), flush=True)
+                notice = preflight.format_preflight_notice(rep, mode=cur_mode)
+                if notice:
+                    print(_c(notice, GREEN_DIM), flush=True)
         except KeyboardInterrupt:
             sys.stderr.write("\n[INTERRUPTED]\n")
         except Exception as exc:
             sys.stderr.write(f"\n[HYDRA ERROR] {exc}\n")
+            if "truncated after output started" not in str(exc):
+                rep = preflight.reprobe_after_pre_token_failure(mode=cur_mode)
+                session.preflight_report = rep
+                print(_c(preflight.format_route_strip(rep), GREEN_DIM), flush=True)
+                notice = preflight.format_preflight_notice(rep, mode=cur_mode)
+                if notice:
+                    print(_c(notice, GREEN_DIM), flush=True)

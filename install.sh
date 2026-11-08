@@ -67,6 +67,7 @@ hydra_cli/memory.py
 hydra_cli/modes.json
 hydra_cli/modes.py
 hydra_cli/native_tools.py
+hydra_cli/preflight.py
 hydra_cli/providers.py
 hydra_cli/repl.py
 hydra_cli/router.py

@@ -1,4 +1,4 @@
-# Hydra installer for Windows PowerShell.
+﻿# Hydra installer for Windows PowerShell.
 # irm https://raw.githubusercontent.com/erastudil/hydra/main/install.ps1 | iex
 
 $ErrorActionPreference = 'Stop'
@@ -60,6 +60,7 @@ $Files = @(
     'hydra_cli/modes.json',
     'hydra_cli/modes.py',
     'hydra_cli/native_tools.py',
+    'hydra_cli/preflight.py',
     'hydra_cli/providers.py',
     'hydra_cli/repl.py',
     'hydra_cli/router.py',

@@ -11018,7 +11018,10 @@ def wave22_session_logger_and_mimo_routing():
     assert get_context_window("bonsai 2 9b") == 262144
     assert resolve_model("bonsai") == "prism-ml/Ternary-Bonsai-2-9B-gguf"
     saved_alias = os.environ.pop("HYDRA_DEFAULT_ALIAS", None)
+    saved_mode = os.environ.pop("HYDRA_MODE", None)
     try:
+        assert ReplSession().alias == "gemma-e2b"
+        os.environ["HYDRA_MODE"] = "light"
         assert ReplSession().alias == DEFAULT_MODEL
         os.environ["HYDRA_DEFAULT_ALIAS"] = "   "
         assert ReplSession().alias == DEFAULT_MODEL
@@ -11029,6 +11032,10 @@ def wave22_session_logger_and_mimo_routing():
             os.environ.pop("HYDRA_DEFAULT_ALIAS", None)
         else:
             os.environ["HYDRA_DEFAULT_ALIAS"] = saved_alias
+        if saved_mode is None:
+            os.environ.pop("HYDRA_MODE", None)
+        else:
+            os.environ["HYDRA_MODE"] = saved_mode
     with open(os.path.join(REPO, "hydra-tui-rs", "src", "app.rs"), encoding="utf-8") as tui_fh:
         tui_src = tui_fh.read()
     assert '("/model", "switch active model alias (default: muse spark contributor)")' in tui_src
@@ -14236,12 +14243,27 @@ def terminal_launcher_follows_catalog_default():
         "HYDRA_DEFAULT_ALIAS": None,
         "HYDRA_AGENT_MODEL": None,
         "HYDRA_ORCHESTRATOR_MODEL": None,
+        "HYDRA_MODE": "light",
     }
     with isolated(env=pinned):
         proc = run_cli(["agent", "-i"], stdin="/exit\n", timeout=20)
     assert proc.returncode == 0, proc.stderr
     assert f"Model: {expected}" in (proc.stdout or "")
     assert "Exiting Hydra agent session" in (proc.stdout or "")
+
+
+@check
+def launch_preflight() -> None:
+    from hydra_cli import modes, preflight
+
+    assert modes._load()["default_mode"] == "local"
+    assert preflight.is_valid_failure_reason("timeout")
+    assert preflight.is_valid_failure_reason("http 503")
+    assert preflight.is_valid_failure_reason("model absent")
+    assert preflight.is_valid_failure_reason("context 4096 < 131072")
+    assert preflight.is_valid_failure_reason("no server")
+    assert preflight.is_valid_failure_reason("no key configured")
+    assert not preflight.is_valid_failure_reason("unknown")
 
 
 def main(argv=None) -> int:

@@ -217,3 +217,215 @@ def test_global_singleton_mesh():
     m3 = reset_model_fallback_mesh()
     assert m3 is not m1
     assert get_model_fallback_mesh() is m3
+
+
+# ===========================================================================
+# WO-2 Launch Preflight Verification Suite (PREFLIGHT-SPEC.md)
+# ===========================================================================
+
+
+def test_modes_default_is_local():
+    """Verify hydra_cli/modes.json default_mode is 'local' (Part A / BRIEF item 1)."""
+    import json
+    import os
+    from hydra_cli import modes
+
+    modes_path = os.path.join(os.path.dirname(modes.__file__), "modes.json")
+    with open(modes_path, encoding="utf-8") as fh:
+        raw = json.load(fh)
+    assert raw["default_mode"] == "local"
+
+
+def test_preflight_closed_failure_reasons():
+    """Verify failure reasons come strictly from PREFLIGHT-SPEC.md §5.4 closed list."""
+    from hydra_cli.preflight import is_valid_failure_reason
+
+    for valid in (
+        "timeout",
+        "http 401",
+        "http 503",
+        "model absent",
+        "context 4096 < 131072",
+        "no server",
+        "no key configured",
+    ):
+        assert is_valid_failure_reason(valid), f"Expected valid reason: {valid}"
+
+    for invalid in (
+        "",
+        "degraded",
+        "unknown error",
+        "connection refused",
+        "http abc",
+        "context 131072",
+    ):
+        assert not is_valid_failure_reason(invalid), f"Expected invalid reason: {invalid}"
+
+
+def test_preflight_local_light_free_routes_and_context_gate(monkeypatch, tmp_path):
+    """Verify LOCAL (/v1/models + /props n_ctx>=131072), LIGHT, FREE, caching, and notices."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from hydra_cli import preflight
+
+    state = {
+        "models": ["gemma-e2b", "muse-spark-1.3-contributor", "nvidia/nemotron-3.5-lightning:free"],
+        "n_ctx": 131072,
+        "status": 200,
+        "hits": [],
+    }
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            state["hits"].append(("GET", self.path))
+            if state["status"] != 200:
+                self.send_response(state["status"])
+                self.end_headers()
+                return
+            if self.path.endswith("/v1/models") or self.path.endswith("/models"):
+                body = json.dumps({"data": [{"id": m} for m in state["models"]]}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if self.path.endswith("/props"):
+                body = json.dumps(
+                    {"default_generation_settings": {"n_ctx": state["n_ctx"]}}
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def do_POST(self):
+            state["hits"].append(("POST", self.path))
+            body = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            return
+
+    server = HTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{port}"
+
+    try:
+        monkeypatch.setenv("CHEAPERINFERENCE_API_KEY", "test-ci-key-123456")
+        monkeypatch.setenv("CHEAPERINFERENCE_API_BASE", f"{base_url}/v1")
+        monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+
+        preflight.invalidate_preflight_cache()
+        report = preflight.run_preflight(
+            mode="local",
+            force=True,
+            local_ports=[port],
+            light_base_url=f"{base_url}/v1",
+            check_balance=False,
+        )
+        assert report.local.ok is True
+        assert report.local.n_ctx == 131072
+        assert report.light.ok is True
+        assert report.free.status == "FAIL"
+        assert report.free.reason == "no key configured"
+        assert report.free.gets_count == 0
+        assert report.completion_probes_count == 0
+        assert report.gets_count <= 3
+        strip = preflight.format_route_strip(report)
+        assert strip == "local ● gemma-e2b 128K · light ● spark · free ○ no key configured"
+        assert preflight.format_preflight_notice(report, mode="local") is None
+
+        # With NVIDIA_API_KEY present, free route is SKIPPED (0 GETs) when local and light pass
+        monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test-key-123456")
+        preflight.invalidate_preflight_cache()
+        report_with_nv = preflight.run_preflight(
+            mode="local",
+            force=True,
+            local_ports=[port],
+            light_base_url=f"{base_url}/v1",
+            free_base_url=f"{base_url}/v1",
+            check_balance=False,
+        )
+        assert report_with_nv.free.status == "SKIPPED"
+        assert report_with_nv.free.gets_count == 0
+
+        # Context mismatch (< 131072) fails with exact reason "context <n> < 131072"
+        state["n_ctx"] = 4096
+        preflight.invalidate_preflight_cache()
+        bad_ctx = preflight.probe_local_route(ports=[port])
+        assert bad_ctx.ok is False
+        assert bad_ctx.reason == "context 4096 < 131072"
+
+        # Model absent fails with "model absent"
+        state["n_ctx"] = 131072
+        state["models"] = ["other-model"]
+        absent = preflight.probe_local_route(ports=[port])
+        assert absent.ok is False
+        assert absent.reason == "model absent"
+
+        # Down local server with managed state file reports managed start available
+        state_file = tmp_path / "local-server-state.json"
+        state_file.write_text(json.dumps({"pid": 99999, "port": 8080}), encoding="utf-8")
+        monkeypatch.setattr("hydra_cli.local_server.state_path", lambda: str(state_file))
+        down_res = preflight.probe_local_route(ports=[1])
+        assert down_res.ok is False
+        assert down_res.reason == "no server"
+        assert down_res.managed_configured is True
+        assert down_res.start_available is True
+        assert down_res.down_message == "local DOWN: no server on :8080 (managed server configured; start available)"
+
+        down_report = preflight.PreflightReport(
+            mode="local",
+            default_route="local",
+            local=down_res,
+            light=report.light,
+            free=report.free,
+        )
+        notice = preflight.format_preflight_notice(down_report, mode="local")
+        assert notice is not None
+        assert "local DOWN: no server on :8080 (managed server configured; start available)" in notice
+        assert "never substitutes a cloud route" in notice
+
+        # Light mode when spark is down announces free fallback
+        light_down_report = preflight.PreflightReport(
+            mode="light",
+            default_route="light",
+            local=down_res,
+            light=preflight.RouteProbeResult(
+                route="light",
+                status="FAIL",
+                model_id="muse-spark-1.3-contributor",
+                short_label="spark",
+                reason="http 503",
+            ),
+            free=report.free,
+        )
+        l_notice = preflight.format_preflight_notice(light_down_report, mode="light")
+        assert l_notice == "spark unreachable (http 503). Answering on free (Nemotron) until spark returns."
+    finally:
+        server.shutdown()
+
+
+def test_tui_20s_waiting_on_provider_status():
+    """Verify HydraTUI._status shows 'waiting on <provider>... Ns' after 20s pre-first-token wait."""
+    import time
+    from hydra_cli.tui import HydraTUI
+
+    tui = HydraTUI(commands=[])
+    tui.provider = "llama.cpp"
+    tui._waiting = None
+    tui._streaming = False
+    tui._busy_since = time.monotonic() - 25.0
+    frags = tui._status()
+    rendered = "".join(text for _, text in frags)
+    assert "waiting on llama.cpp... " in rendered
+    assert "25s" in rendered or "26s" in rendered
