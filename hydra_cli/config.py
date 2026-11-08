@@ -80,6 +80,10 @@ DEFAULT_GROQ_BASE = "https://api.groq.com/openai/v1"
 DEFAULT_GROQ_MODEL = os.environ.get(
     "HYDRA_GROQ_MODEL", CATALOG.get("default_groq_model", "openai/gpt-oss-120b")
 )
+DEFAULT_OLLAMA_CLOUD_BASE = "https://ollama.com/v1"
+DEFAULT_OLLAMA_CLOUD_MODEL = os.environ.get(
+    "HYDRA_OLLAMA_CLOUD_MODEL", CATALOG.get("default_ollama_cloud_model", "gpt-oss:120b")
+)
 DEFAULT_OVHCLOUD_BASE = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"
 DEFAULT_OVHCLOUD_MODEL = os.environ.get(
     "HYDRA_OVHCLOUD_MODEL", CATALOG.get("default_ovhcloud_model", "Meta-Llama-3_3-70B-Instruct")
@@ -141,6 +145,7 @@ PROVIDER_KEY_NAMES: Dict[str, str] = {
     "modal": "MODAL_ENDPOINT_URL",
     "huggingface": "HF_TOKEN",
     "groq": "GROQ_API_KEY",
+    "ollama-cloud": "OLLAMA_API_KEY",
     "ovhcloud": "OVHCLOUD_API_KEY (optional; anonymous access works without one)",
     "nvidia": "NVIDIA_API_KEY",
     "mistral": "MISTRAL_API_KEY",
