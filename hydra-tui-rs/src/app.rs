@@ -8,7 +8,6 @@ use serde_json::{json, Value};
 
 use crate::endpoints::{budgets, free_usage, local_endpoints};
 
-pub const DEFAULT_AGENT_MODEL: &str = "muse spark contributor";
 pub const DEFAULT_FLASH_MODEL: &str = "mimo 2.6 flash";
 pub const SPEED_DIAL_PRO_MODEL: &str = "mimo 2.6 pro";
 pub const FALLBACK_GLM_MODEL: &str = "glm 5.3 flash";
@@ -51,6 +50,14 @@ pub struct AgentRow {
     pub label: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreflightVerdict {
+    pub route: String,
+    pub verdict: String,
+    pub reason: Option<String>,
+    pub notice: Option<String>,
+}
+
 pub struct App {
     pub input: String,
     pub cursor_pos: usize,
@@ -58,7 +65,9 @@ pub struct App {
     pub scroll: usize,
     pub autoscroll: bool,
     pub mode: String,
+    pub serving_mode: Option<String>,
     pub model: String,
+    pub model_explicit: bool,
     pub fallback_model: String,
     pub speed_dial_model: String,
     pub permission: String,
@@ -72,6 +81,9 @@ pub struct App {
     pub pulse_secs: f64,
     pub spin_i: usize,
     pub status_label: String,
+    pub preflight_verdict: Option<PreflightVerdict>,
+    pub turn_has_token: bool,
+    preflight_notice_turn: Option<String>,
     pub agents: Vec<AgentRow>,
     pub approval: Option<(String, String)>,
     pub approval_args: Value,
@@ -101,10 +113,13 @@ impl App {
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "slack".into());
-        let raw_model = std::env::var("HYDRA_DEFAULT_MODEL")
+        let env_model = std::env::var("HYDRA_DEFAULT_MODEL")
             .or_else(|_| std::env::var("HYDRA_MODEL"))
-            .unwrap_or_else(|_| DEFAULT_AGENT_MODEL.into());
-        let model = normalize_model_alias(&raw_model);
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let model_explicit = env_model.is_some();
+        let model = env_model.map(|raw| normalize_model_alias(&raw)).unwrap_or_default();
         let permission = std::env::var("HYDRA_PERMISSION")
             .ok()
             .filter(|s| matches!(s.as_str(), "plan" | "manual" | "accept_edits" | "bypass"))
@@ -120,7 +135,9 @@ impl App {
             scroll: 0,
             autoscroll: true,
             mode: "compact".into(),
+            serving_mode: None,
             model,
+            model_explicit,
             fallback_model: FALLBACK_GLM_MODEL.into(),
             speed_dial_model: SPEED_DIAL_PRO_MODEL.into(),
             permission,
@@ -134,6 +151,9 @@ impl App {
             pulse_secs: 0.0,
             spin_i: 0,
             status_label: "idle".into(),
+            preflight_verdict: None,
+            turn_has_token: false,
+            preflight_notice_turn: None,
             agents: Vec::new(),
             approval: None,
             approval_args: Value::Null,
@@ -204,6 +224,35 @@ impl App {
             "busy" => crate::banner::pulse_border_rgb(self.pulse_secs),
             _ => crate::banner::BORDER_IDLE_RGB,
         }
+    }
+
+    pub fn model_badge(&self) -> &str {
+        &self.model
+    }
+
+    pub fn busy_elapsed_secs(&self) -> u64 {
+        let from_start = self.busy_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+        let from_pulse = if self.pulse_secs.is_finite() && self.pulse_secs >= 0.0 {
+            self.pulse_secs as u64
+        } else {
+            0
+        };
+        from_start.max(from_pulse)
+    }
+
+    pub fn busy_status_text_at(&self, elapsed: u64) -> String {
+        if self.busy_turn.is_some() && !self.turn_has_token && elapsed >= 20 {
+            if let Some(v) = &self.preflight_verdict {
+                if !v.route.is_empty() {
+                    return format!("waiting on {}… {elapsed}s", v.route);
+                }
+            }
+        }
+        format!("Thinking {elapsed}s · {}...", self.status_label)
+    }
+
+    pub fn busy_status_text(&self) -> String {
+        self.busy_status_text_at(self.busy_elapsed_secs())
     }
 
     pub fn tick(&mut self) {
@@ -661,6 +710,8 @@ impl App {
         self.busy_turn = None;
         self.busy_start = None;
         self.pulse_secs = 0.0;
+        self.turn_has_token = false;
+        self.preflight_notice_turn = None;
         self.assistant_at = None;
         self.approval = None;
         self.approval_args = Value::Null;
@@ -690,22 +741,29 @@ impl App {
         let turn = format!("t{}", self.turn_n);
         let chars = self.window.saturating_mul(4).max(4096);
         if let Some(be) = self.be.as_mut() {
-            be.send(json!({
+            let mut payload = json!({
                 "type": "turn",
                 "turn": turn,
                 "prompt": text,
                 "thread": self.thread,
                 "cwd": self.cwd,
-                "model": self.model,
                 "permission": self.permission,
                 "mode": self.mode,
                 "context_chars": chars,
                 "skills": self.active_skills,
-            }));
+            });
+            if !self.model.is_empty() {
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert("model".into(), json!(self.model));
+                }
+            }
+            be.send(payload);
         }
         self.busy_turn = Some(turn.clone());
         self.busy_start = Some(Instant::now());
         self.pulse_secs = 0.0;
+        self.turn_has_token = false;
+        self.preflight_notice_turn = None;
         self.status_label = "working".into();
         self.transcript.push(String::new());
         self.assistant_at = Some(self.transcript.len() - 1);
@@ -721,6 +779,8 @@ impl App {
             self.busy_turn = None;
             self.busy_start = None;
             self.pulse_secs = 0.0;
+            self.turn_has_token = false;
+            self.preflight_notice_turn = None;
             self.transcript.push("hydra : turn cancelled by user".into());
         } else if self.approval.is_some() {
             self.decide("abort");
@@ -848,19 +908,23 @@ impl App {
                     ));
                 } else {
                     self.model = normalize_model_alias(&raw);
+                    self.model_explicit = true;
                     self.transcript.push(format!("model : {}", self.model));
                 }
             }
             "fallback" => {
                 self.model = self.fallback_model.clone();
+                self.model_explicit = true;
                 self.transcript.push(format!("model : {}", self.model));
             }
             "pro" => {
                 self.model = self.speed_dial_model.clone();
+                self.model_explicit = true;
                 self.transcript.push(format!("model : {}", self.model));
             }
             "flash" => {
                 self.model = DEFAULT_FLASH_MODEL.into();
+                self.model_explicit = true;
                 self.transcript.push(format!("model : {}", self.model));
             }
             "plan" => {
@@ -1198,8 +1262,63 @@ impl App {
 
     pub fn apply(&mut self, ev: Ev) {
         match ev {
-            Ev::Hello => self.transcript.push("agent : hello".into()),
+            Ev::Hello { mode, default_model } => {
+                if let Some(m) = mode.filter(|s| !s.trim().is_empty()) {
+                    self.serving_mode = Some(m);
+                }
+                let env_dm = std::env::var("HYDRA_DEFAULT_MODEL")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+                if let Some(dm) = env_dm {
+                    self.model = normalize_model_alias(&dm);
+                    self.model_explicit = true;
+                } else if !self.model_explicit {
+                    if let Some(dm) = default_model.filter(|s| !s.trim().is_empty()) {
+                        self.model = normalize_model_alias(&dm);
+                    }
+                }
+                self.transcript.push("agent : hello".into());
+            }
+            Ev::PreflightResult { id, turn, strip, notice, report } => {
+                let parsed = extract_preflight_verdict(&strip, notice, &report);
+                let is_plain_local_pass = parsed.route.eq_ignore_ascii_case("local")
+                    && parsed.verdict.eq_ignore_ascii_case("PASS");
+                if !is_plain_local_pass {
+                    if let Some(raw_notice) = parsed.notice.as_deref().or(parsed.reason.as_deref()) {
+                        let single_line = raw_notice
+                            .lines()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if !single_line.is_empty() {
+                            let turn_key = turn
+                                .or(id)
+                                .or_else(|| self.busy_turn.clone())
+                                .unwrap_or_else(|| format!("turn-{}", self.turn_n));
+                            if self.preflight_notice_turn.as_deref() != Some(turn_key.as_str()) {
+                                self.preflight_notice_turn = Some(turn_key);
+                                if let Some(i) = self.assistant_at {
+                                    if self.transcript.get(i).map(|s| s.is_empty()).unwrap_or(false) {
+                                        self.transcript.insert(i, single_line);
+                                        self.assistant_at = Some(i + 1);
+                                    } else {
+                                        self.transcript.push(single_line);
+                                    }
+                                } else {
+                                    self.transcript.push(single_line);
+                                }
+                            }
+                        }
+                    }
+                }
+                self.preflight_verdict = Some(parsed);
+            }
             Ev::Token { text, .. } => {
+                if !text.is_empty() {
+                    self.turn_has_token = true;
+                }
                 if let Some(i) = self.assistant_at {
                     if let Some(line) = self.transcript.get_mut(i) {
                         line.push_str(&text);
@@ -1429,6 +1548,8 @@ impl App {
                     self.busy_turn = None;
                     self.busy_start = None;
                     self.pulse_secs = 0.0;
+                    self.turn_has_token = false;
+                    self.preflight_notice_turn = None;
                     self.status_label = "idle".into();
                     self.assistant_at = None;
                     self.steer_after_cancel = false;
@@ -1447,6 +1568,8 @@ impl App {
                         self.busy_turn = None;
                         self.busy_start = None;
                         self.pulse_secs = 0.0;
+                        self.turn_has_token = false;
+                        self.preflight_notice_turn = None;
                         self.status_label = "idle".into();
                         self.assistant_at = None;
                     }
@@ -1478,6 +1601,8 @@ impl App {
                 }
                 self.busy_start = None;
                 self.pulse_secs = 0.0;
+                self.turn_has_token = false;
+                self.preflight_notice_turn = None;
                 self.assistant_at = None;
                 self.approval = None;
                 self.approval_args = Value::Null;
@@ -1506,6 +1631,101 @@ impl App {
             "mode {}  model {}  perm {}  ctx {}/{}  cost ${:.4}  agents {}",
             self.mode, self.model, self.permission, used, self.window, self.cost, running
         )
+    }
+}
+
+fn parse_strip_route_verdict(strip: &str) -> Option<(String, String)> {
+    let start = strip.find('[')?;
+    let end = strip[start + 1..].find(']')? + start + 1;
+    let inner = strip[start + 1..end].trim();
+    let (route, rest) = inner.split_once(':')?;
+    let verdict = rest.split_whitespace().next().unwrap_or(rest).trim();
+    if route.trim().is_empty() || verdict.is_empty() {
+        return None;
+    }
+    Some((route.trim().to_string(), verdict.to_string()))
+}
+
+fn extract_preflight_verdict(strip: &str, notice: Option<String>, report: &Value) -> PreflightVerdict {
+    let strip_parsed = parse_strip_route_verdict(strip);
+    let route = report
+        .get("default_route")
+        .or_else(|| report.get("route"))
+        .or_else(|| report.get("mode"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            report
+                .get("routes")
+                .and_then(|r| r.as_object())
+                .and_then(|obj| obj.keys().next().cloned())
+        })
+        .or_else(|| strip_parsed.as_ref().map(|(r, _)| r.clone()))
+        .unwrap_or_default();
+
+    let route_entry = if !route.is_empty() {
+        report.get("routes").and_then(|r| r.get(&route))
+    } else {
+        None
+    };
+
+    let verdict = report
+        .get("verdict")
+        .or_else(|| report.get("status"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            route_entry
+                .and_then(|e| e.get("verdict").or_else(|| e.get("status")))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
+        .or_else(|| {
+            report.get("default_route_ok").and_then(|v| v.as_bool()).map(|ok| {
+                if ok { "PASS".into() } else { "FAIL".into() }
+            })
+        })
+        .or_else(|| strip_parsed.as_ref().map(|(_, v)| v.clone()))
+        .unwrap_or_default();
+
+    let reason = report
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .or_else(|| {
+            route_entry
+                .and_then(|e| e.get("reason"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        });
+
+    let clean_notice = notice
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            report
+                .get("notice")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        });
+
+    PreflightVerdict {
+        route,
+        verdict,
+        reason,
+        notice: clean_notice,
     }
 }
 
@@ -1669,16 +1889,21 @@ pub fn read_clipboard_text() -> Option<String> {
 }
 
 #[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn default_model_is_mimo_flash_and_speed_dial_commands_work() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("HYDRA_DEFAULT_MODEL");
         std::env::remove_var("HYDRA_MODEL");
         std::env::remove_var("HYDRA_DIALECT");
         let mut app = App::new();
-        assert_eq!(app.model, "muse spark contributor");
+        assert_eq!(app.model, "");
+        assert_ne!(app.model, "muse spark contributor");
         assert_eq!(app.fallback_model, "glm 5.3 flash");
         assert_eq!(app.speed_dial_model, "mimo 2.6 pro");
         assert_eq!(app.dialect, "slack");
@@ -2017,5 +2242,116 @@ mod tests {
         .unwrap();
         app.apply(ctx_compacted);
         assert!(app.transcript.iter().any(|l| l == "context : compacted (4 turns folded)"));
+    }
+
+    #[test]
+    fn hello_initializes_model_badge_from_default_model_and_env_override_wins() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("HYDRA_DEFAULT_MODEL");
+        std::env::remove_var("HYDRA_MODEL");
+        let mut app = App::new();
+        assert_eq!(app.model_badge(), "");
+
+        let hello_ev = hydra_stdio::parse_line(
+            r#"{"type":"hello","protocol":1,"agent":"hydra","mode":"local","default_model":"gemma-e2b"}"#,
+        )
+        .unwrap();
+        app.apply(hello_ev);
+        assert_eq!(app.serving_mode.as_deref(), Some("local"));
+        assert_eq!(app.model, "gemma-e2b");
+        assert_eq!(app.model_badge(), "gemma-e2b");
+        assert_ne!(app.model_badge(), "muse spark contributor");
+        assert!(app.footer().contains("model gemma-e2b"));
+
+        // HYDRA_DEFAULT_MODEL wins over hello's default_model when set
+        std::env::set_var("HYDRA_DEFAULT_MODEL", "bonsai 2 9b");
+        let mut app_env = App::new();
+        assert_eq!(app_env.model_badge(), "bonsai 2 9b");
+        let hello_ev2 = hydra_stdio::parse_line(
+            r#"{"type":"hello","protocol":1,"agent":"hydra","mode":"local","default_model":"gemma-e2b"}"#,
+        )
+        .unwrap();
+        app_env.apply(hello_ev2);
+        assert_eq!(app_env.model_badge(), "bonsai 2 9b");
+        std::env::remove_var("HYDRA_DEFAULT_MODEL");
+    }
+
+    #[test]
+    fn preflight_result_stores_verdict_prints_non_pass_notice_once_and_transitions_waiting_line_at_20s() {
+        use std::time::Duration;
+
+        let _guard = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("HYDRA_DEFAULT_MODEL");
+        std::env::remove_var("HYDRA_MODEL");
+        let mut app = App::new();
+        app.input = "hello local".into();
+        app.cursor_pos = app.input.len();
+        app.submit();
+        assert_eq!(app.busy_turn.as_deref(), Some("t1"));
+
+        // At >=20s without a verdict yet, keep the existing busy line
+        app.busy_start = Some(Instant::now() - Duration::from_secs(22));
+        assert_eq!(app.busy_status_text(), "Thinking 22s · working...");
+
+        // Plain local PASS stores verdict, does NOT print a transcript line, and transitions busy line at >=20s
+        let pf_pass = hydra_stdio::parse_line(
+            r#"{"type":"preflight_result","id":"t1","turn":"t1","strip":"[local:PASS]","notice":null,"report":{"mode":"local","default_route":"local","default_route_ok":true,"routes":{"local":{"route":"local","status":"PASS","reason":"llama.cpp healthy on :8081"}}}}"#,
+        )
+        .unwrap();
+        let len_before = app.transcript.len();
+        app.apply(pf_pass);
+        assert_eq!(app.transcript.len(), len_before);
+        let verdict = app.preflight_verdict.as_ref().expect("stored verdict");
+        assert_eq!(verdict.route, "local");
+        assert_eq!(verdict.verdict, "PASS");
+        assert_eq!(verdict.reason.as_deref(), Some("llama.cpp healthy on :8081"));
+
+        // Before 20s: existing busy line
+        app.busy_start = Some(Instant::now() - Duration::from_secs(19));
+        app.pulse_secs = 19.0;
+        assert_eq!(app.busy_status_text(), "Thinking 19s · working...");
+
+        // At 20s with no token yet: waiting on <route>… {elapsed}s
+        app.busy_start = Some(Instant::now() - Duration::from_secs(20));
+        app.pulse_secs = 20.0;
+        assert_eq!(app.busy_status_text(), "waiting on local… 20s");
+
+        // Once a token arrives, waiting line yields back to normal busy status
+        app.apply(Ev::Token {
+            turn: "t1".into(),
+            text: "first token".into(),
+        });
+        assert!(app.turn_has_token);
+        assert_eq!(app.busy_status_text(), "Thinking 20s · working...");
+
+        // Finish t1 and start t2 to test non-local-PASS notice printing once per turn
+        app.apply(Ev::Done {
+            turn: "t1".into(),
+            text: "first token".into(),
+            ok: true,
+            cancelled: false,
+            plan: None,
+            plan_error: None,
+        });
+
+        app.input = "second turn".into();
+        app.cursor_pos = app.input.len();
+        app.submit();
+        assert_eq!(app.busy_turn.as_deref(), Some("t2"));
+
+        let pf_warn = hydra_stdio::parse_line(
+            r#"{"type":"preflight_result","id":"t2","turn":"t2","strip":"[local:WARN]","notice":"[preflight] Default route 'local' degraded: context cap mismatch\n  Next: restart llama-server","report":{"mode":"local","default_route":"local","default_route_ok":true,"routes":{"local":{"route":"local","status":"WARN","reason":"context cap mismatch"}}}}"#,
+        )
+        .unwrap();
+        app.apply(pf_warn.clone());
+        // Duplicate event in the same turn must not print a second line
+        app.apply(pf_warn);
+        let notice_lines: Vec<&String> = app
+            .transcript
+            .iter()
+            .filter(|l| l.contains("[preflight] Default route 'local' degraded"))
+            .collect();
+        assert_eq!(notice_lines.len(), 1);
+        assert!(!notice_lines[0].contains('\n'));
     }
 }

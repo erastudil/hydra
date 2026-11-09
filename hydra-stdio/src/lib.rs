@@ -10,7 +10,17 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone)]
 pub enum Ev {
-    Hello,
+    Hello {
+        mode: Option<String>,
+        default_model: Option<String>,
+    },
+    PreflightResult {
+        id: Option<String>,
+        turn: Option<String>,
+        strip: String,
+        notice: Option<String>,
+        report: Value,
+    },
     Token { turn: String, text: String },
     ToolStart { turn: String, call: u64, tool: String, args: Value },
     ToolResult { turn: String, tool: String, is_error: bool, output: String },
@@ -64,7 +74,17 @@ pub fn parse_line(line: &str) -> Option<Ev> {
             .unwrap_or_default()
     };
     Some(match v.get("type")?.as_str()? {
-        "hello" => Ev::Hello,
+        "hello" => Ev::Hello {
+            mode: v.get("mode").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(String::from),
+            default_model: v.get("default_model").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(String::from),
+        },
+        "preflight_result" => Ev::PreflightResult {
+            id: v.get("id").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(String::from),
+            turn: v.get("turn").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(String::from),
+            strip: s("strip"),
+            notice: v.get("notice").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(String::from),
+            report: v.get("report").cloned().unwrap_or(Value::Null),
+        },
         "token" => Ev::Token { turn: s("turn"), text: s("text") },
         "tool_start" => Ev::ToolStart { turn: s("turn"), call: n("call"), tool: s("tool"), args: v.get("arguments").cloned().unwrap_or(Value::Null) },
         "tool_result" => Ev::ToolResult { turn: s("turn"), tool: s("tool"), is_error: b("is_error"), output: s("output") },
@@ -564,6 +584,20 @@ mod proto_tests {
             ctx,
             Ev::Context { window: Some(131072), compacted: Some(ref c), .. }
             if c.get("turns_folded").and_then(|x| x.as_u64()) == Some(3)
+        ));
+
+        let hello = parse_line(r#"{"type":"hello","protocol":1,"agent":"hydra","mode":"local","default_model":"gemma-e2b"}"#).unwrap();
+        assert!(matches!(
+            hello,
+            Ev::Hello { mode: Some(ref m), default_model: Some(ref dm) }
+            if m == "local" && dm == "gemma-e2b"
+        ));
+
+        let pf = parse_line(r#"{"type":"preflight_result","id":"t1","turn":"t1","strip":"[local:PASS]","notice":"Local endpoint degraded","report":{"default_route":"local","routes":{"local":{"status":"WARN","reason":"slow"}}}}"#).unwrap();
+        assert!(matches!(
+            pf,
+            Ev::PreflightResult { id: Some(ref id), turn: Some(ref turn), ref strip, notice: Some(ref notice), .. }
+            if id == "t1" && turn == "t1" && strip == "[local:PASS]" && notice == "Local endpoint degraded"
         ));
     }
 

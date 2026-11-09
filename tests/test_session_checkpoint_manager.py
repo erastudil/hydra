@@ -881,6 +881,267 @@ def test_stdio_context_event_carries_window_and_forced_compaction_emits_compacte
         httpd_no_props.shutdown()
 
 
+def test_stdio_turn_emits_preflight_result_before_done_and_survives_preflight_exception(tmp_path, monkeypatch, capsys):
+    import io
+    from hydra_cli import modes, preflight
+    from hydra_cli.stdio_adapter import Adapter
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.setenv("HYDRA_HOME", str(home_dir / ".hydra"))
+    monkeypatch.delenv("HYDRA_MODE", raising=False)
+    monkeypatch.setattr(modes, "_read_settings", lambda: {"mode": "local"})
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    seen_pf_calls = []
+    fake_report = preflight.PreflightReport(
+        mode="local",
+        default_route="local",
+        local=preflight.RouteProbeResult(
+            route="local",
+            status="PASS",
+            model_id="gemma-e2b",
+            short_label="gemma-e2b",
+            n_ctx=131072,
+            port=8080,
+            endpoint="http://127.0.0.1:8080",
+        ),
+        light=preflight.RouteProbeResult(
+            route="light",
+            status="SKIPPED",
+            model_id="muse-spark-1.3-contributor",
+            short_label="muse-spark",
+        ),
+        free=preflight.RouteProbeResult(
+            route="free",
+            status="SKIPPED",
+            model_id="nvidia/nemotron-3.5-lightning:free",
+            short_label="nemotron",
+        ),
+    )
+
+    def stub_run_preflight(mode=None, force=False):
+        seen_pf_calls.append((mode, force))
+        return fake_report
+
+    monkeypatch.setattr(preflight, "run_preflight", stub_run_preflight)
+    monkeypatch.setattr(
+        "hydra_cli.agent.run_agent_loop",
+        lambda **kwargs: "stubbed turn reply",
+    )
+
+    out = io.StringIO()
+    adapter = Adapter(io.BytesIO(b""), out)
+    events = _run_turn_sync(
+        adapter,
+        out,
+        {
+            "type": "turn",
+            "turn": "t_pf_1",
+            "thread": "th_pf",
+            "prompt": "hello preflight",
+            "cwd": str(workspace),
+            "permission": "bypass",
+            "checkpoint": False,
+        },
+    )
+
+    assert seen_pf_calls == [("local", False)]
+    pf_indices = [i for i, e in enumerate(events) if e["type"] == "preflight_result"]
+    ctx_index = next(i for i, e in enumerate(events) if e["type"] == "context")
+    done_index = next(i for i, e in enumerate(events) if e["type"] == "done")
+    assert len(pf_indices) == 1
+    assert pf_indices[0] < ctx_index < done_index
+
+    pf_ev = events[pf_indices[0]]
+    assert pf_ev["id"] == "t_pf_1"
+    assert pf_ev["turn"] == "t_pf_1"
+    assert pf_ev["strip"] == preflight.format_route_strip(fake_report)
+    assert pf_ev["notice"] == preflight.format_preflight_notice(fake_report, mode="local")
+    assert pf_ev["report"] == fake_report.to_dict()
+    assert events[done_index]["ok"] is True
+
+    # A preflight exception must never fail the turn
+    def raising_preflight(mode=None, force=False):
+        raise RuntimeError("preflight probe boom")
+
+    monkeypatch.setattr(preflight, "run_preflight", raising_preflight)
+    events_err = _run_turn_sync(
+        adapter,
+        out,
+        {
+            "type": "turn",
+            "turn": "t_pf_2",
+            "thread": "th_pf",
+            "prompt": "hello after preflight failure",
+            "cwd": str(workspace),
+            "permission": "bypass",
+            "checkpoint": False,
+        },
+    )
+    assert not any(e["type"] == "preflight_result" for e in events_err)
+    done_err = next(e for e in events_err if e["type"] == "done")
+    assert done_err["ok"] is True
+    assert done_err["text"] == "stubbed turn reply"
+    captured = capsys.readouterr()
+    assert "preflight probe boom" in captured.err
+
+
+def test_stdio_hello_carries_mode_and_default_model_when_stubbed_to_local(tmp_path, monkeypatch):
+    import io
+    import json
+    from hydra_cli import modes
+    from hydra_cli.stdio_adapter import Adapter
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.setenv("HYDRA_HOME", str(home_dir / ".hydra"))
+    monkeypatch.delenv("HYDRA_MODE", raising=False)
+    monkeypatch.setattr(modes, "_read_settings", lambda: {"mode": "local"})
+
+    out = io.StringIO()
+    adapter = Adapter(io.BytesIO(b'{"type":"shutdown"}\n'), out)
+    rc = adapter.serve()
+    assert rc == 0
+    hello_events = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+    assert len(hello_events) >= 1
+    hello = hello_events[0]
+    assert hello["type"] == "hello"
+    assert hello.get("mode") == "local"
+    assert hello.get("default_model") == "gemma-e2b"
+
+    # When mode/default_model resolution fails, omit the fields rather than guessing
+    def broken_mode():
+        raise RuntimeError("settings unreadable")
+
+    monkeypatch.setattr(modes, "current_mode", broken_mode)
+    out_broken = io.StringIO()
+    adapter_broken = Adapter(io.BytesIO(b'{"type":"shutdown"}\n'), out_broken)
+    assert adapter_broken.serve() == 0
+    hello_broken = json.loads(out_broken.getvalue().splitlines()[0])
+    assert hello_broken["type"] == "hello"
+    assert "mode" not in hello_broken
+    assert "default_model" not in hello_broken
+
+
+def test_stdio_modelless_metaless_turn_resolves_local_default_model_and_respects_precedence(tmp_path, monkeypatch):
+    import io
+    from hydra_cli import modes, preflight
+    from hydra_cli.config import DEFAULT_ORCHESTRATOR_MODEL
+    from hydra_cli.stdio_adapter import Adapter, _save_meta
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.setenv("HYDRA_HOME", str(home_dir / ".hydra"))
+    monkeypatch.delenv("HYDRA_MODE", raising=False)
+    monkeypatch.setattr(modes, "_read_settings", lambda: {"mode": "local"})
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    fake_report = preflight.PreflightReport(
+        mode="local",
+        default_route="local",
+        local=preflight.RouteProbeResult(
+            route="local",
+            status="PASS",
+            model_id="gemma-e2b",
+            short_label="gemma-e2b",
+            n_ctx=131072,
+            port=8080,
+            endpoint="http://127.0.0.1:8080",
+        ),
+        light=preflight.RouteProbeResult(
+            route="light",
+            status="SKIPPED",
+            model_id="muse-spark-1.3-contributor",
+            short_label="muse-spark",
+        ),
+        free=preflight.RouteProbeResult(
+            route="free",
+            status="SKIPPED",
+            model_id="nvidia/nemotron-3.5-lightning:free",
+            short_label="nemotron",
+        ),
+    )
+    monkeypatch.setattr(preflight, "run_preflight", lambda mode=None, force=False: fake_report)
+
+    resolved_aliases = []
+
+    def stub_run_agent_loop(**kwargs):
+        resolved_aliases.append(kwargs.get("alias"))
+        return "ok"
+
+    monkeypatch.setattr("hydra_cli.agent.run_agent_loop", stub_run_agent_loop)
+
+    out = io.StringIO()
+    adapter = Adapter(io.BytesIO(b""), out)
+
+    # 1. Model-less, meta-less turn in local mode resolves "gemma-e2b", not DEFAULT_ORCHESTRATOR_MODEL
+    events1 = _run_turn_sync(
+        adapter,
+        out,
+        {
+            "type": "turn",
+            "turn": "t_def_1",
+            "thread": "th_metaless",
+            "prompt": "no model field",
+            "cwd": str(workspace),
+            "permission": "bypass",
+            "checkpoint": False,
+        },
+    )
+    assert events1[-1]["type"] == "done"
+    assert events1[-1]["ok"] is True
+    assert resolved_aliases[-1] == "gemma-e2b"
+    assert resolved_aliases[-1] != DEFAULT_ORCHESTRATOR_MODEL
+
+    # 2. Stored thread meta takes precedence over mode default when turn omits model
+    _save_meta("th_with_meta", {"cwd": str(workspace), "model": "bonsai 2 9b"})
+    events2 = _run_turn_sync(
+        adapter,
+        out,
+        {
+            "type": "turn",
+            "turn": "t_def_2",
+            "thread": "th_with_meta",
+            "prompt": "use stored meta model",
+            "cwd": str(workspace),
+            "permission": "bypass",
+            "checkpoint": False,
+        },
+    )
+    assert events2[-1]["ok"] is True
+    assert resolved_aliases[-1] == "bonsai 2 9b"
+
+    # 3. Explicit turn model takes precedence over stored meta and mode default
+    events3 = _run_turn_sync(
+        adapter,
+        out,
+        {
+            "type": "turn",
+            "turn": "t_def_3",
+            "thread": "th_with_meta",
+            "prompt": "use explicit turn model",
+            "cwd": str(workspace),
+            "model": "mimo 2.6 flash",
+            "permission": "bypass",
+            "checkpoint": False,
+        },
+    )
+    assert events3[-1]["ok"] is True
+    assert resolved_aliases[-1] == "mimo 2.6 flash"
+
+
+
 
 
 
