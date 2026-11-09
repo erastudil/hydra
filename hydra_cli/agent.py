@@ -39,6 +39,7 @@ from hydra_cli.config import (
     DEFAULT_CONTEXT_WINDOW,
     DEFAULT_LOCAL_MODEL,
     DEFAULT_SYSTEM_PROMPT,
+    apply_sampling_profile,
     build_cached_system_prompt,
     MODEL_MAP,
     OUTPUT_RESERVE_TOKENS,
@@ -3583,6 +3584,7 @@ def _run_agent_loop(
                     payload["temperature"] = temperature
                 if max_tokens is not None:
                     payload["max_tokens"] = max_tokens
+                apply_sampling_profile(payload, payload["model"])
                 attach_tool_capability(provider["url"], payload)
                 host = provider["url"].lower()
                 if "openrouter.ai" not in host:

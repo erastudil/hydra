@@ -163,6 +163,32 @@ The architect, coder, and auditor run together. The synthesizer runs after their
 | `llama 4` | `meta-llama/llama-4-maverick` | |
 | `qwen coder` | `alibaba/qwen3-coder` | |
 
+## Summon spec (owner ruling, 2026-11-09)
+
+A summoned model runs at its full spec; an undersized or off-spec run
+silently degrades every judgment the model makes.
+
+- **Context.** Hydra's input budget for a model is the model's full
+  capacity: `get_context_window` resolves an alias `context_window`,
+  then the catalog `context_profiles` entry for the model id, then a
+  1M default. Cloud models are 1M class (256K is the small end);
+  profile entries below 1M are the model's real window (e.g.
+  Llama 3.3 70B and gpt-oss at 131072) or, for local seats, the
+  served window: the local server launches at `-c 131072` (the 4060
+  rule), so the locally served Bonsai 2B/4B/9B budgets are 131072
+  even though the GGUF metadata capacity is 262144.
+- **Sampling.** Where a vendor publishes a sampling spec, it lives in
+  the catalog as `sampling_profiles` (keyed by model id) and the
+  payload builders fill any sampling field the caller left unset
+  (`config.apply_sampling_profile`). A caller-set field always wins:
+  an off-spec run is a visible caller choice, never a silent
+  default. Bonsai's vendor spec (thinking temperature 1.0, top_p
+  0.95, top_k 20, presence_penalty 1.0) is the first entry.
+- **Output limits.** Hydra sends no `max_tokens` unless a caller sets
+  one, so on hosted lanes the endpoint's own default applies; that
+  value is endpoint-controlled, not a Hydra default. Explicit caller
+  caps (probes, planners) are visible in their call sites.
+
 ## Sovereign Gateway (`hydra serve`)
 
 `hydra serve` starts a local standard-library HTTP server that exposes an OpenAI-compatible `/v1/chat/completions` and `/v1/models` endpoint:

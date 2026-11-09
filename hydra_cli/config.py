@@ -180,6 +180,43 @@ def get_context_window(model: Optional[str] = None) -> int:
     return CONTEXT_PROFILES.get(key, CONTEXT_PROFILES.get("default", DEFAULT_CONTEXT_WINDOW))
 
 
+SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "presence_penalty")
+
+
+def sampling_profile_for(model: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Vendor-published sampling spec for a model id or summon alias, if the
+    catalog carries one (catalog "sampling_profiles", keyed by model id)."""
+    if not model:
+        return None
+    profiles = CATALOG.get("sampling_profiles") or {}
+    key = model.strip()
+    direct = profiles.get(key) or profiles.get(key.lower())
+    if isinstance(direct, dict):
+        return dict(direct)
+    spec = (CATALOG.get("aliases") or {}).get(key.lower())
+    if isinstance(spec, dict) and spec.get("model"):
+        via = profiles.get(spec["model"])
+        if isinstance(via, dict):
+            return dict(via)
+    return None
+
+
+def apply_sampling_profile(payload: Dict[str, Any], model: Optional[str]) -> Dict[str, Any]:
+    """Fill unset sampling fields in a chat payload from the model's vendor spec.
+
+    A field the caller set explicitly always wins; the profile only replaces
+    silence, so an off-spec run is a visible caller choice, never a silent
+    default (owner ruling 2026-11-09: summoned models run at vendor spec).
+    """
+    profile = sampling_profile_for(model)
+    if not profile:
+        return payload
+    for field in SAMPLING_FIELDS:
+        if field not in payload and profile.get(field) is not None:
+            payload[field] = profile[field]
+    return payload
+
+
 def schema_chars(tools: Optional[List[Any]] = None) -> int:
     """Byte length of the tool schema array that rides beside the messages."""
     if not tools:

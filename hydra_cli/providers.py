@@ -34,6 +34,7 @@ from hydra_cli.config import (
     DEFAULT_SYSTEM_PROMPT,
     FREE_MODELS,
     PROVIDER_KEY_NAMES,
+    apply_sampling_profile,
     load_dotenv,
     model_providers,
     model_rejects_temperature,
@@ -4105,6 +4106,7 @@ def _build_payload(
         payload["max_tokens"] = max_tokens
     if reasoning:
         payload["reasoning"] = reasoning
+    apply_sampling_profile(payload, model)
     return payload
 
 
