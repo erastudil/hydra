@@ -11020,7 +11020,7 @@ def wave22_session_logger_and_mimo_routing():
     saved_alias = os.environ.pop("HYDRA_DEFAULT_ALIAS", None)
     saved_mode = os.environ.pop("HYDRA_MODE", None)
     try:
-        assert ReplSession().alias == "gemma-e2b"
+        assert ReplSession().alias == "bonsai 2 2b"
         os.environ["HYDRA_MODE"] = "light"
         assert ReplSession().alias == DEFAULT_MODEL
         os.environ["HYDRA_DEFAULT_ALIAS"] = "   "
