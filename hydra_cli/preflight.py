@@ -54,7 +54,7 @@ COMPLETION_PROBE_TIMEOUT_SEC: float = 10.0
 REQUIRED_LOCAL_CONTEXT: int = 131072
 
 DEFAULT_LOCAL_PORTS: Tuple[int, ...] = (8080, 11434, 8000)
-LOCAL_SEAT_MODEL_ID: str = "gemma-e2b"
+LOCAL_SEAT_MODEL_ID: str = "prism-ml/Ternary-Bonsai-2-2B-gguf"
 LIGHT_SEAT_MODEL_ID: str = "muse-spark-1.3-contributor"
 FREE_SEAT_MODEL_ID: str = "nvidia/nemotron-3.5-lightning:free"
 
@@ -412,8 +412,10 @@ def probe_local_route(
     http_timeout: float = LOCAL_HTTP_TIMEOUT_SEC,
 ) -> RouteProbeResult:
     """Probe Route 1 — LOCAL per PREFLIGHT-SPEC.md §5.2."""
-    model_id = target_model or modes.default_alias("local") or DEFAULT_LOCAL_MODEL or LOCAL_SEAT_MODEL_ID
-    short_label = model_id
+    seat = target_model or modes.default_alias("local") or DEFAULT_LOCAL_MODEL or LOCAL_SEAT_MODEL_ID
+    # Probe by model id (what the server serves); display by seat name.
+    model_id = modes.resolve_local_model(seat) or seat
+    short_label = seat
     managed = _is_managed_local_configured()
     candidates = _resolve_local_candidates(ports=ports, base_url=base_url)
 

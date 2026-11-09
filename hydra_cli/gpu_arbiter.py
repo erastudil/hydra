@@ -1,9 +1,10 @@
 """GPU arbiter: the front desk steps aside, by design and on the record.
 
 The laptop has one 8 GB GPU and the llama.cpp endpoint serves one local
-model at a time. The front-desk model (Gemma E4B, the catalog's default
-local model) holds that seat. When a heavy local job needs the GPU — a
-Bonsai coding summon, an image generation — the desk steps aside: the
+model at a time. The front-desk model (the catalog's default local
+model; Bonsai 2B since the owner ruling of 2026-11-09) holds that seat.
+When a heavy local job needs the GPU — a heavier local summon, an image
+generation — the desk steps aside: the
 server is stopped, the job runs, and the desk is served again when the
 job ends. Every transition is appended to ~/.hydra/logs/gpu-arbiter.jsonl
 (event, model, reason, timestamp; no prompt content).

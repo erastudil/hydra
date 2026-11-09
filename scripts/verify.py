@@ -14083,31 +14083,42 @@ def tankbench_runners():
 @check
 def modes_media_and_desk():
     """The 2026-11-01 Hydra pass: five modes as data, the mode gate's
-    allow/refuse matrix, the E2B front-desk default, media routes, and
+    allow/refuse matrix, the local default seat, media routes, and
     the GPU arbiter's state roundtrip. No network, no GPU."""
     from hydra_cli import gpu_arbiter, media, modes
     from hydra_cli.config import DEFAULT_LOCAL_MODEL, resolve_model, resolve_route
 
-    # The front desk is Gemma E2B, with the adapter slot present in the
-    # catalog route (null: no E2B adapter trained) and the shim named.
-    assert DEFAULT_LOCAL_MODEL == "gemma-e2b", DEFAULT_LOCAL_MODEL
+    # Owner ruling 2026-11-09: the local default seat is Bonsai 2B (the
+    # family is multimodal at every size; the 2B's vision was
+    # smoke-proven 2026-11-08). Gemma E2B stays in the catalog as a
+    # named seat, with the adapter slot present in its route (null: no
+    # E2B adapter trained) and the shim named.
+    assert DEFAULT_LOCAL_MODEL == "prism-ml/Ternary-Bonsai-2-2B-gguf", DEFAULT_LOCAL_MODEL
     route = resolve_route("gemma-e2b")
     assert route["model"] == "gemma-e2b"
     assert "hydra_adapter" in route and "format_shim" in route
 
     assert modes.mode_names() == ["local", "free", "light", "heavy", "max"]
-    assert modes.default_alias("local") == "gemma-e2b"
-    # Owner two-model framework 2026-11-02: E4B is the local heavy
-    # escalation route; every Bonsai route is on-demand only and carries
-    # no default or designated-coder status.
+    assert modes.default_alias("local") == "bonsai 2 2b"
+    # Seats are named by alias in the mode table and served by model id;
+    # the one translation between the two is pinned with the map.
+    assert modes.resolve_local_model("bonsai 2 2b") == "prism-ml/Ternary-Bonsai-2-2B-gguf"
+    assert modes.resolve_local_model("gemma-e2b") == "gemma-e2b"
+    # The local map, pinned: Bonsai 2B is the default and its route note
+    # says so; Gemma E2B is a named seat and does not claim the default;
+    # E4B is the local heavy escalation route; Bonsai 9B/4B stay
+    # on-demand; no Bonsai route note carries a designated-coder status.
     local_routes = {r.get("alias"): r for r in modes.routes("local")}
     assert "Local heavy escalation route" in local_routes["gemma-e4b"]["note"]
     assert "Gemma E4B is the heavy escalation route" in modes.mode_spec("local")["summary"]
-    for bonsai_alias in ("bonsai 2 9b", "bonsai 2 4b", "bonsai 2 2b"):
+    assert "Bonsai 2B is the local default" in modes.mode_spec("local")["summary"]
+    assert "Local default" in local_routes["bonsai 2 2b"]["note"]
+    assert local_routes["gemma-e2b"]["note"].startswith("Named local seat")
+    for bonsai_alias in ("bonsai 2 9b", "bonsai 2 4b"):
         bonsai_note = local_routes[bonsai_alias]["note"]
         assert bonsai_note.startswith("On-demand local model"), (bonsai_alias, bonsai_note)
-        assert "coder" not in bonsai_note.lower(), (bonsai_alias, bonsai_note)
-        assert "Default" not in bonsai_note, (bonsai_alias, bonsai_note)
+    for bonsai_alias in ("bonsai 2 9b", "bonsai 2 4b", "bonsai 2 2b"):
+        assert "coder" not in local_routes[bonsai_alias]["note"].lower(), bonsai_alias
     # Owner seat rulings 2026-11-02 (capability bench): muse-spark
     # contributor is the light default; Ling is the free escalation seat.
     assert modes.default_alias("light") == "muse spark contributor"
@@ -14124,6 +14135,7 @@ def modes_media_and_desk():
     matrix = [
         ("gemma-e4b", "local", True),
         ("gemma-e2b", "local", True),
+        ("prism-ml/Ternary-Bonsai-2-2B-gguf", "local", True),
         ("mimo-2.6-flash", "local", False),
         ("google/gemma-4-26b-a4b-it:free", "free", True),
         ("mimo-2.6-flash", "free", False),
@@ -14163,7 +14175,7 @@ def modes_media_and_desk():
     gpu_arbiter.set_override("auto")
     assert gpu_arbiter.step_aside_enabled()
     status = gpu_arbiter.desk_status()
-    assert status["front_desk_model"] == "gemma-e2b"
+    assert status["front_desk_model"] == "prism-ml/Ternary-Bonsai-2-2B-gguf"
     assert status["override"] == "auto"
 
     # Launch-and-warm /props n_ctx verification (WO-1):
@@ -14172,6 +14184,17 @@ def modes_media_and_desk():
     from hydra_cli import local_server
 
     assert local_server.required_context("gemma-e2b") == 131072
+    assert local_server.required_context("prism-ml/Ternary-Bonsai-2-2B-gguf") == 131072
+    # Local lifecycle (owner ruling 2026-11-09): the idle unload window
+    # defaults to an hour, and the watchdog's slot-activity signal reads
+    # processing flags and task counters off the /slots payload.
+    assert local_server.idle_unload_seconds() == 3600
+    assert local_server.slots_activity_signature(
+        [{"is_processing": False, "id_task": 7}, {"is_processing": True, "id_task": 3}]
+    ) == (True, 10)
+    assert local_server.slots_activity_signature([{"is_processing": False, "id_task": 7}]) == (False, 7)
+    assert local_server.slots_activity_signature(None) is None
+    assert local_server.slots_activity_signature([]) is None
     assert local_server.extract_props_n_ctx({"default_generation_settings": {"n_ctx": 131072}}) == 131072
     assert local_server.extract_props_n_ctx({"n_ctx": 65536}) == 65536
 
