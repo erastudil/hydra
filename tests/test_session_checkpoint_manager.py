@@ -484,14 +484,36 @@ def test_stdio_meta_roundtrip(tmp_path, monkeypatch):
     assert loaded["title"] == expected["title"]
 
 
-def _start_scripted_model_server(tool=None, tokens=("Step 1: inspect\n", "Step 2: verify")):
+def _start_scripted_model_server(tool=None, tokens=("Step 1: inspect\n", "Step 2: verify"), n_ctx=None):
     import json
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
     class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.rstrip("/") == "/props" and n_ctx is not None:
+                payload = json.dumps({"default_generation_settings": {"n_ctx": n_ctx}}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload)
+                self.wfile.flush()
+                return
+            self.send_response(404)
+            self.end_headers()
+
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if not body.get("stream", True):
+                payload = json.dumps(
+                    {"choices": [{"message": {"content": "".join(tokens)}}]}
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(payload)
+                self.wfile.flush()
+                return
             if tool and not any(m.get("role") == "tool" for m in body.get("messages", [])):
                 args = json.dumps(tool["arguments"])
                 chunks = [
@@ -739,6 +761,126 @@ def test_stdio_plan_mode_denies_write_tool_call_regression(tmp_path, monkeypatch
         assert "Plan after write skip" in expected_plan.read_text(encoding="utf-8")
     finally:
         httpd.shutdown()
+
+
+def test_stdio_context_event_carries_window_and_forced_compaction_emits_compacted(tmp_path, monkeypatch):
+    import io
+    from hydra_cli import preflight
+    from hydra_cli.context import SessionContextLedger
+    from hydra_cli.stdio_adapter import Adapter
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.setenv("HYDRA_HOME", str(home_dir / ".hydra"))
+    preflight.reset_preflight_state()
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    httpd, base_url = _start_scripted_model_server(
+        tokens=("Summary of folded history.",),
+        n_ctx=131072,
+    )
+    monkeypatch.setenv("LOCAL_AI_BASE", base_url)
+    try:
+        out = io.StringIO()
+        adapter = Adapter(io.BytesIO(b""), out)
+
+        # Normal turn on local route carries n_ctx (131072) as "window" on the context event
+        normal_events = _run_turn_sync(
+            adapter,
+            out,
+            {
+                "type": "turn",
+                "turn": "t_norm_1",
+                "thread": "th_ctx_norm",
+                "prompt": "hello normal turn",
+                "cwd": str(workspace),
+                "permission": "bypass",
+                "model": "local",
+                "checkpoint": False,
+            },
+        )
+        norm_ctx = [e for e in normal_events if e["type"] == "context"]
+        assert len(norm_ctx) == 1
+        assert norm_ctx[0].get("window") == 131072
+        assert "compacted" not in norm_ctx[0]
+
+        # Seed a ledger with enough live turns (> KEEP_RECENT + 1) to force compaction under a tiny context_chars
+        ledger = SessionContextLedger(session_id="th_ctx_compact")
+        for idx in range(4):
+            ledger.append_turn("user", f"user turn {idx} " + ("x" * 300))
+            ledger.append_turn("assistant", f"assistant turn {idx} " + ("y" * 300))
+        ledger.end_turn()
+
+        compact_events = _run_turn_sync(
+            adapter,
+            out,
+            {
+                "type": "turn",
+                "turn": "t_comp_1",
+                "thread": "th_ctx_compact",
+                "prompt": "trigger compaction now",
+                "cwd": str(workspace),
+                "permission": "bypass",
+                "model": "local",
+                "mode": "compact",
+                "context_chars": 4096,
+                "checkpoint": False,
+            },
+        )
+        ctx_indices = [i for i, e in enumerate(compact_events) if e["type"] == "context"]
+        done_index = next(i for i, e in enumerate(compact_events) if e["type"] == "done")
+        assert len(ctx_indices) == 2
+        assert ctx_indices[1] < done_index
+
+        initial_ctx = compact_events[ctx_indices[0]]
+        assert initial_ctx.get("window") == 131072
+        assert "compacted" not in initial_ctx
+
+        compacted_ctx = compact_events[ctx_indices[1]]
+        assert compacted_ctx["turn"] == "t_comp_1"
+        assert compacted_ctx.get("window") == 131072
+        compacted_info = compacted_ctx.get("compacted")
+        assert isinstance(compacted_info, dict)
+        assert compacted_info["turns_folded"] == 4
+        assert compacted_info["turns_folded"] >= 1
+        assert compacted_info["chars_before"] > compacted_info["chars_after"] > 0
+    finally:
+        httpd.shutdown()
+
+    # When local server /props is unavailable and preflight has no n_ctx, "window" is omitted rather than guessed
+    httpd_no_props, base_no_props = _start_scripted_model_server(
+        tokens=("Reply without props.",),
+        n_ctx=None,
+    )
+    monkeypatch.setenv("LOCAL_AI_BASE", base_no_props)
+    try:
+        out_no_props = io.StringIO()
+        adapter_no_props = Adapter(io.BytesIO(b""), out_no_props)
+        no_win_events = _run_turn_sync(
+            adapter_no_props,
+            out_no_props,
+            {
+                "type": "turn",
+                "turn": "t_nowin_1",
+                "thread": "th_ctx_nowin",
+                "prompt": "hello without props",
+                "cwd": str(workspace),
+                "permission": "bypass",
+                "model": "local",
+                "checkpoint": False,
+            },
+        )
+        no_win_ctx = [e for e in no_win_events if e["type"] == "context"]
+        assert len(no_win_ctx) == 1
+        assert "window" not in no_win_ctx[0]
+    finally:
+        httpd_no_props.shutdown()
+
+
 
 
 

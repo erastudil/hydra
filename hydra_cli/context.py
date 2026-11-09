@@ -139,6 +139,7 @@ class SessionContextLedger:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.ledger_path = self.session_dir / "ledger.db"
         self._db: Optional[sqlite3.Connection] = None
+        self.last_compaction: Optional[Dict[str, int]] = None
         legacy = self.session_dir / "ledger.jsonl"
         if legacy.exists():
             if not self.turns:
@@ -315,6 +316,7 @@ class SessionContextLedger:
 
     def compact_if_needed(self, window_tokens: int, summarize: Callable[[str], str], extra_chars: int = 0) -> bool:
         """Mode B. Summarize older live turns once the live text reaches 80 percent of the window."""
+        self.last_compaction = None
         live = self.live_window()
         chars = sum(len(str(t.get("content") or "")) for t in live) + extra_chars
         if chars / CHARS_PER_TOKEN < COMPACT_AT * window_tokens or len(live) <= KEEP_RECENT + 1:
@@ -325,6 +327,12 @@ class SessionContextLedger:
         if not summary:
             return False
         self.append_turn("summary", summary, covers=older[-1]["id"])
+        chars_after = sum(len(str(t.get("content") or "")) for t in self.live_window()) + extra_chars
+        self.last_compaction = {
+            "turns_folded": len(older),
+            "chars_before": chars,
+            "chars_after": chars_after,
+        }
         return True
 
     def render_prior(self, prompt: str, mode: Optional[str] = None) -> str:

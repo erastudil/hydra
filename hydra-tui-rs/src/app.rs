@@ -1243,7 +1243,7 @@ impl App {
                 }
             }
             Ev::Usage { prompt, completion, cost, model } => {
-                self.prompt_tokens = self.prompt_tokens.saturating_add(prompt);
+                self.prompt_tokens = prompt;
                 self.completion_tokens = self.completion_tokens.saturating_add(completion);
                 self.cost += cost;
                 if !model.is_empty() {
@@ -1309,7 +1309,18 @@ impl App {
                     self.transcript.push(format!("  {id} ({scope}) : {tool} [{prefix}]"));
                 }
             }
-            Ev::Context { .. } => {}
+            Ev::Context { window, compacted, .. } => {
+                if let Some(w) = window {
+                    if w > 0 {
+                        self.window = w;
+                    }
+                }
+                if let Some(comp) = compacted {
+                    if let Some(folded) = comp.get("turns_folded").and_then(|x| x.as_u64()) {
+                        self.transcript.push(format!("context : compacted ({folded} turns folded)"));
+                    }
+                }
+            }
             Ev::Retry { attempt, of, wait, reason, .. } => {
                 self.status_label = format!("retry {attempt}/{of}");
                 self.transcript.push(format!("retry : attempt {attempt}/{of} in {wait:.1}s ({reason})"));
@@ -1489,7 +1500,7 @@ impl App {
 
     #[allow(dead_code)]
     pub fn footer(&self) -> String {
-        let used = self.prompt_tokens.saturating_add(self.completion_tokens);
+        let used = self.prompt_tokens;
         let running = self.agents.iter().filter(|a| a.state == "running").count();
         format!(
             "mode {}  model {}  perm {}  ctx {}/{}  cost ${:.4}  agents {}",
@@ -1967,5 +1978,44 @@ mod tests {
         .unwrap();
         app.apply(done_plain);
         assert!(!app.transcript.iter().any(|l| l.starts_with("plan : ")));
+    }
+
+    #[test]
+    fn context_event_updates_window_and_announces_compaction_and_usage_tracks_last_prompt() {
+        std::env::remove_var("HYDRA_CONTEXT_WINDOW");
+        let mut app = App::new();
+        assert_eq!(app.window, 1_048_576);
+
+        let ctx_win = hydra_stdio::parse_line(
+            r#"{"type":"context","turn":"t1","rules":null,"skills":[],"mcp_tools":[],"mcp_errors":{},"window":131072}"#,
+        )
+        .unwrap();
+        app.apply(ctx_win);
+        assert_eq!(app.window, 131_072);
+
+        // First turn usage followed by second turn usage: gauge uses most recent prompt tokens, not cumulative
+        app.apply(Ev::Usage {
+            model: "local".into(),
+            prompt: 20_000,
+            completion: 4_000,
+            cost: 0.0,
+        });
+        assert_eq!(app.prompt_tokens, 20_000);
+
+        app.apply(Ev::Usage {
+            model: "local".into(),
+            prompt: 65_536,
+            completion: 2_048,
+            cost: 0.0,
+        });
+        assert_eq!(app.prompt_tokens, 65_536);
+        assert!(app.footer().contains("ctx 65536/131072"));
+
+        let ctx_compacted = hydra_stdio::parse_line(
+            r#"{"type":"context","turn":"t2","window":131072,"compacted":{"turns_folded":4,"chars_before":96000,"chars_after":12000}}"#,
+        )
+        .unwrap();
+        app.apply(ctx_compacted);
+        assert!(app.transcript.iter().any(|l| l == "context : compacted (4 turns folded)"));
     }
 }

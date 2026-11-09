@@ -3,6 +3,7 @@ Autonomous ReAct agent execution loop with MCP tool calling, native coding tools
 Zero external dependencies.
 """
 from hydra_cli.context import (
+    KEEP_RECENT,
     SessionContextLedger,
     context_label,
     format_context_picker,
@@ -2933,6 +2934,23 @@ def set_retry_sink(sink: Optional[Callable[[Dict[str, Any]], None]]) -> None:
     _RETRY_SINK.set(sink)
 
 
+_COMPACTION_SINK: "contextvars.ContextVar[Optional[Callable[[Dict[str, Any]], None]]]" = contextvars.ContextVar("hydra_compaction", default=None)
+
+
+def set_compaction_sink(sink: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+    """Receive compaction counts (turns_folded, chars_before, chars_after) when compact_if_needed compacts."""
+    _COMPACTION_SINK.set(sink)
+
+
+def _report_compaction(info: Any) -> None:
+    sink = _COMPACTION_SINK.get()
+    if sink is not None and isinstance(info, dict) and info:
+        try:
+            sink(info)
+        except Exception:
+            pass
+
+
 def _report_usage(usage: Any) -> None:
     sink = _USAGE_SINK.get()
     if sink is not None and isinstance(usage, dict) and usage:
@@ -3482,7 +3500,20 @@ def _run_agent_loop(
                     failure = exc
             raise ProviderError(redact(f"Compaction failed on every provider: {failure}"))
 
-        ledger.compact_if_needed(window_tokens, summarize, len(sys_text) + len(prompt) + schema_chars(tools))
+        extra_chars = len(sys_text) + len(prompt) + schema_chars(tools)
+        live_before = ledger.live_window()
+        chars_before = sum(len(str(t.get("content") or "")) for t in live_before) + extra_chars
+        if ledger.compact_if_needed(window_tokens, summarize, extra_chars):
+            comp_info = getattr(ledger, "last_compaction", None)
+            if not isinstance(comp_info, dict) or "turns_folded" not in comp_info:
+                live_after = ledger.live_window()
+                chars_after = sum(len(str(t.get("content") or "")) for t in live_after) + extra_chars
+                comp_info = {
+                    "turns_folded": max(1, len(live_before) - KEEP_RECENT),
+                    "chars_before": chars_before,
+                    "chars_after": chars_after,
+                }
+            _report_compaction(comp_info)
     ledger.close_unanswered(INTERRUPTED_TEXT)
     prior = ledger.render_prior(original_prompt, mode)
     if prior:
