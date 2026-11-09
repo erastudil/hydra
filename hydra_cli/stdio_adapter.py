@@ -29,6 +29,8 @@ EXIT_OK = 0
 EXIT_VERSION = 2
 EXIT_FATAL = 70
 MAX_TURNS = 8
+SHADOW_MAX_STAGE_MB = 256
+SHADOW_GC_THRESHOLD_BYTES = 1 << 30
 
 
 class _Turn:
@@ -69,9 +71,12 @@ class Adapter:
         self._tasks.add_listener(lambda info: self.emit({"type": "task_update", **_task_view(info)}))
         self._mcp_lock = threading.Lock()
         self._shadow_lock = threading.RLock()  # one shadow git operation at a time: init and index locks do not mix
+        self._in_flight_snapshots: set = set()
+        self._gc_done: set = set()
         self._calls = 0
         self._ledgers: Dict[str, Any] = {}
         self.exit_code = EXIT_OK
+        self._gc_shadow_repos()
 
     # output
 
@@ -117,6 +122,7 @@ class Adapter:
         self.emit({"type": "hello", "protocol": PROTOCOL_VERSION, "agent": "hydra", "capabilities": CAPABILITIES,
                    "context_modes": list(CONTEXT_MODES)})
         self._tasks.adopt()
+        self._gc_shadow_repos()
         try:
             while True:
                 try:
@@ -277,13 +283,17 @@ class Adapter:
 
     # checkpoints: a shadow git repository outside the project, so the project's own repository is never touched
 
-    def _git(self, cwd: str, *args: str, stdin: Optional[bytes] = None) -> "subprocess.CompletedProcess[bytes]":
+    def _shadow_gitdir(self, cwd: str) -> Any:
         import hashlib
-        import subprocess
         from pathlib import Path
 
         digest = hashlib.sha1(os.path.realpath(cwd).encode("utf-8")).hexdigest()[:16]
-        gitdir = Path.home() / ".hydra" / "shadow" / f"{digest}.git"
+        return Path.home() / ".hydra" / "shadow" / f"{digest}.git"
+
+    def _git(self, cwd: str, *args: str, stdin: Optional[bytes] = None) -> "subprocess.CompletedProcess[bytes]":
+        import subprocess
+
+        gitdir = self._shadow_gitdir(cwd)
         if not gitdir.exists():
             gitdir.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(["git", "init", "--bare", "--quiet", str(gitdir)], check=True, capture_output=True)
@@ -293,17 +303,153 @@ class Adapter:
                "-c", "gc.auto=0", "-c", "core.quotepath=off", f"--git-dir={gitdir}", f"--work-tree={cwd}", *args]
         return subprocess.run(cmd, input=stdin, capture_output=True, cwd=cwd)
 
+    def _estimate_stage_bytes(self, cwd: str) -> tuple:
+        """Estimate the bytes a snapshot would stage using `git status --porcelain=v1 -z`."""
+        status = self._git(cwd, "status", "--porcelain=v1", "-z")
+        if status.returncode:
+            raise RuntimeError(status.stderr.decode("utf-8", "replace").strip() or "git status failed")
+        sizes: Dict[str, int] = {}
+        entries = status.stdout.split(b"\x00")
+        i = 0
+        while i < len(entries):
+            raw = entries[i]
+            i += 1
+            if len(raw) < 4:
+                continue
+            xy = raw[:2].decode("utf-8", "replace")
+            rel = raw[3:].decode("utf-8", "replace")
+            if xy[0] in ("R", "C"):
+                i += 1
+            if xy == "!!" or xy.endswith("D") or xy == "D ":
+                continue
+            clean = rel.rstrip("/\\")
+            if not clean:
+                continue
+            full = os.path.join(cwd, clean)
+            if os.path.isdir(full) and not os.path.islink(full):
+                for root, dirs, files in os.walk(full):
+                    dirs[:] = [d for d in dirs if d not in (".git", ".hydra")]
+                    for fname in files:
+                        fpath = os.path.join(root, fname)
+                        try:
+                            if not os.path.islink(fpath):
+                                rpath = os.path.relpath(fpath, cwd).replace("\\", "/")
+                                sizes[rpath] = os.path.getsize(fpath)
+                        except OSError:
+                            pass
+            elif os.path.isfile(full) and not os.path.islink(full):
+                try:
+                    sizes[clean.replace("\\", "/")] = os.path.getsize(full)
+                except OSError:
+                    pass
+        ranked = sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0]))
+        total = sum(sz for _, sz in ranked)
+        return total, ranked
+
+    def _gc_shadow_repos(self) -> None:
+        """At startup, run `git gc --prune=2.weeks.ago --quiet` on shadow repos over 1 GB when no snapshot is in flight."""
+        from pathlib import Path
+
+        try:
+            shadow_dir = Path.home() / ".hydra" / "shadow"
+            if not shadow_dir.is_dir():
+                return
+            raw_thresh = os.environ.get("HYDRA_SHADOW_GC_THRESHOLD_BYTES")
+            try:
+                threshold = int(raw_thresh) if raw_thresh is not None else SHADOW_GC_THRESHOLD_BYTES
+            except ValueError:
+                threshold = SHADOW_GC_THRESHOLD_BYTES
+            entries = sorted(shadow_dir.iterdir(), key=lambda p: p.name)
+        except Exception as exc:
+            try:
+                sys.stderr.write(f"hydra shadow gc scan failed: {exc}\n")
+            except Exception:
+                pass
+            return
+
+        for entry in entries:
+            try:
+                if not entry.is_dir() or entry.name in self._gc_done:
+                    continue
+                if entry.name in self._in_flight_snapshots:
+                    continue
+                if any((entry / lock).exists() for lock in ("index.lock", "HEAD.lock", "gc.pid", ".snapshot.lock")):
+                    continue
+                before = _dir_size_bytes(str(entry))
+                if before <= threshold:
+                    continue
+                if entry.name in self._in_flight_snapshots:
+                    continue
+                if any((entry / lock).exists() for lock in ("index.lock", "HEAD.lock", "gc.pid", ".snapshot.lock")):
+                    continue
+                self._gc_done.add(entry.name)
+                proc = subprocess.run(
+                    ["git", f"--git-dir={entry}", "gc", "--prune=2.weeks.ago", "--quiet"],
+                    cwd=str(entry),
+                    capture_output=True,
+                )
+                if proc.returncode != 0:
+                    err = proc.stderr.decode("utf-8", "replace").strip() or f"exit {proc.returncode}"
+                    raise RuntimeError(err)
+                after = _dir_size_bytes(str(entry))
+                with open(shadow_dir / "gc.log", "a", encoding="utf-8") as log_handle:
+                    log_handle.write(f"{entry.name} {before} {after}\n")
+            except Exception as exc:
+                try:
+                    sys.stderr.write(f"hydra shadow gc failed for {entry.name}: {exc}\n")
+                except Exception:
+                    pass
+                try:
+                    with open(shadow_dir / "gc.log", "a", encoding="utf-8") as log_handle:
+                        log_handle.write(f"{entry.name} gc_error: {exc}\n")
+                except Exception:
+                    pass
+
     def _snapshot(self, cwd: str, label: str, thread: str) -> Dict[str, Any]:
         """Commit the whole project state to the shadow repository. Returns checkpoint fields for the app."""
         try:
-            with self._shadow_lock:
-                added = self._git(cwd, "add", "-A")
-                if added.returncode:
-                    return {"ok": False, "id": None, "reason": added.stderr.decode("utf-8", "replace").strip()[:300]}
-                made = self._git(cwd, "commit", "--quiet", "--allow-empty", "-m", f"hydra checkpoint thread={thread} {label}")
-                if made.returncode:
-                    return {"ok": False, "id": None, "reason": made.stderr.decode("utf-8", "replace").strip()[:300]}
-                sha = self._git(cwd, "rev-parse", "HEAD").stdout.decode().strip()
+            gitdir = self._shadow_gitdir(cwd)
+            repo_name = gitdir.name
+            self._in_flight_snapshots.add(repo_name)
+            try:
+                with self._shadow_lock:
+                    raw_cap = os.environ.get("HYDRA_SHADOW_MAX_STAGE_MB")
+                    try:
+                        max_stage_mb = float(raw_cap) if raw_cap is not None else float(SHADOW_MAX_STAGE_MB)
+                    except ValueError:
+                        max_stage_mb = float(SHADOW_MAX_STAGE_MB)
+                    cap_bytes = int(max_stage_mb * 1024 * 1024)
+                    estimated, largest_paths = self._estimate_stage_bytes(cwd)
+                    if estimated > cap_bytes:
+                        top = ", ".join(f"{p} ({sz} B)" for p, sz in largest_paths[:5])
+                        reason = (
+                            f"staged size {estimated} bytes ({estimated / (1024 * 1024):.2f} MB) "
+                            f"exceeds cap {cap_bytes} bytes ({max_stage_mb:g} MB); largest: {top}"
+                        )
+                        return {"ok": False, "id": None, "reason": reason[:300]}
+                    added = self._git(cwd, "add", "-A")
+                    if added.returncode:
+                        return {"ok": False, "id": None, "reason": added.stderr.decode("utf-8", "replace").strip()[:300]}
+                    written = self._git(cwd, "write-tree")
+                    if written.returncode:
+                        return {"ok": False, "id": None, "reason": written.stderr.decode("utf-8", "replace").strip()[:300]}
+                    tree = written.stdout.decode("utf-8", "replace").strip()
+                    head = self._git(cwd, "rev-parse", "--verify", "HEAD")
+                    head_tree = self._git(cwd, "rev-parse", "--verify", "HEAD^{tree}") if head.returncode == 0 else None
+                    if (
+                        head.returncode == 0
+                        and head_tree is not None
+                        and head_tree.returncode == 0
+                        and head_tree.stdout.decode("utf-8", "replace").strip() == tree
+                    ):
+                        sha = head.stdout.decode("utf-8", "replace").strip()
+                    else:
+                        made = self._git(cwd, "commit", "--quiet", "--allow-empty", "-m", f"hydra checkpoint thread={thread} {label}")
+                        if made.returncode:
+                            return {"ok": False, "id": None, "reason": made.stderr.decode("utf-8", "replace").strip()[:300]}
+                        sha = self._git(cwd, "rev-parse", "HEAD").stdout.decode("utf-8", "replace").strip()
+            finally:
+                self._in_flight_snapshots.discard(repo_name)
             turns = _save_conversation(thread, sha)
             _prune_conversations(thread)
             return {"ok": True, "id": sha, "reason": None, "turns": turns}
@@ -808,6 +954,19 @@ def hide_child_consoles() -> bool:
     init._hydra_hidden = True  # type: ignore[attr-defined]
     subprocess.Popen.__init__ = init  # type: ignore[method-assign]
     return True
+
+
+def _dir_size_bytes(path: str) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for fname in files:
+            fpath = os.path.join(root, fname)
+            try:
+                if not os.path.islink(fpath):
+                    total += os.path.getsize(fpath)
+            except OSError:
+                pass
+    return total
 
 
 def _ledger_file(thread: str) -> str:
