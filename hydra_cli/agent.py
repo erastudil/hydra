@@ -232,7 +232,8 @@ DEFAULT_AGENT_SYSTEM_PROMPT = os.environ.get(
         "- Zero reliance on internal weights for AI/ML specifications.\n"
         "- Treat information older than 3 months as obsolete.\n\n"
         "TOOL USAGE INSTRUCTIONS:\n"
-        "- Proactively invoke tools at every turn to inspect and modify state: read_file, edit_file, write_file, run_command, grep_search, find_files, list_dir.\n"
+        "- Proactively invoke tools at every turn to inspect and modify state: read_file, edit_file, write_file, run_command, grep_search, find_files, list_dir, set_todos.\n"
+        "- On multi-step work, publish the steps with set_todos and keep them current.\n"
         "- Never guess or hallucinate file contents or test results. Always read files before modifying them.\n"
         "- Use edit_file for precise, scoped search-and-replace modifications with unique old_text.\n"
         "- Use write_file for creating new files or complete rewrites.\n"
@@ -3819,7 +3820,7 @@ def _run_agent_loop(
                 active_skip_next = False
                 tool_skipped = True
 
-            args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
+            args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, (dict, list)) else str(args)
 
             if steer_mode and not tool_skipped:
                 try:

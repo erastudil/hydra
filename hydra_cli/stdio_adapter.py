@@ -23,9 +23,9 @@ TOOL_OUTPUT_CHARS = 4000
 CONTEXT_MODES = ("recall", "compact", "sliding")
 DECISIONS = {"allow": "y", "allow_always": "y", "skip": "n", "abort": "q"}
 PERMISSIONS = ("manual", "accept_edits", "plan", "bypass")
-READ_ONLY_TOOLS = frozenset({"task_output", "git_status", "git_diff", "read_file", "list_dir", "grep_search", "find_files", "search_files", "compact_context", "retrieve_context"})
+READ_ONLY_TOOLS = frozenset({"task_output", "git_status", "git_diff", "read_file", "list_dir", "grep_search", "find_files", "search_files", "compact_context", "retrieve_context", "set_todos"})
 EDIT_TOOLS = frozenset({"write_file", "edit_file"})
-CAPABILITIES = ["turn", "cancel", "approval", "permission", "rules", "checkpoint", "skills", "mcp", "tasks", "sessions", "history", "action"]
+CAPABILITIES = ["turn", "cancel", "approval", "permission", "rules", "checkpoint", "skills", "mcp", "tasks", "sessions", "history", "action", "todos"]
 EXIT_OK = 0
 EXIT_VERSION = 2
 EXIT_FATAL = 70
@@ -939,6 +939,7 @@ class Adapter:
                 self._completed_turns.setdefault(thread, prior_done)
         calls = {"n": 0}
         tool_starts: Dict[tuple, float] = {}
+        todo_starts: Dict[tuple, List[Dict[str, str]]] = {}
         window: Optional[int] = None
 
         def start(tool: str, args_json: str) -> None:
@@ -950,11 +951,19 @@ class Adapter:
                     tool_starts[(turn, call_id)] = float(t0)
             except Exception:
                 pass
-            self.emit({"type": "tool_start", "turn": turn, "call": call_id, "tool": tool, "arguments": _args(args_json)})
+            parsed_args = _args(args_json)
+            if tool == "set_todos":
+                from hydra_cli.native_tools import validate_todos
+
+                valid_list, err = validate_todos(parsed_args)
+                if err is None and valid_list is not None:
+                    todo_starts[(turn, call_id)] = valid_list
+            self.emit({"type": "tool_start", "turn": turn, "call": call_id, "tool": tool, "arguments": parsed_args})
 
         def result(tool: str, args_json: str, is_error: bool, output: str) -> None:
             call_id = calls["n"]
             started = tool_starts.pop((turn, call_id), None)
+            started_todos = todo_starts.pop((turn, call_id), None)
             duration_ms: Optional[int] = None
             if started is not None:
                 try:
@@ -977,6 +986,8 @@ class Adapter:
             if duration_ms is not None:
                 ev["duration_ms"] = duration_ms
             self.emit(ev)
+            if tool == "set_todos" and not is_error and started_todos is not None:
+                self.emit({"type": "todos", "turn": turn, "todos": started_todos})
 
         def usage(u: Dict[str, Any]) -> None:
             from hydra_cli.desktop_core import get_token_accounting

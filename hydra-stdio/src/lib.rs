@@ -8,6 +8,12 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TodoItem {
+    pub title: String,
+    pub status: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum Ev {
     Hello {
@@ -29,6 +35,10 @@ pub enum Ev {
         is_error: bool,
         output: String,
         duration_ms: Option<u64>,
+    },
+    Todos {
+        turn: String,
+        todos: Vec<TodoItem>,
     },
     Diff {
         turn: String,
@@ -105,6 +115,26 @@ pub fn parse_line(line: &str) -> Option<Ev> {
             is_error: b("is_error"),
             output: s("output"),
             duration_ms: v.get("duration_ms").and_then(|x| x.as_u64()),
+        },
+        "todos" => Ev::Todos {
+            turn: s("turn"),
+            todos: v
+                .get("todos")
+                .and_then(|x| x.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| {
+                            let title = item.get("title")?.as_str()?.trim().to_string();
+                            let status = item.get("status")?.as_str()?.to_string();
+                            if title.is_empty() {
+                                return None;
+                            }
+                            Some(TodoItem { title, status })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         },
         "diff" => Ev::Diff {
             turn: s("turn"),
@@ -657,6 +687,20 @@ mod proto_tests {
             diff_plain,
             Ev::Diff { ref path, artifact: None, artifact_error: None, .. }
             if path == "src/main.rs"
+        ));
+
+        let todos_ev = parse_line(
+            r#"{"type":"todos","turn":"t1","todos":[{"title":"Step 1","status":"done"},{"title":"Step 2","status":"active"},{"title":"Step 3","status":"pending"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            todos_ev,
+            Ev::Todos { ref turn, ref todos }
+            if turn == "t1"
+                && todos.len() == 3
+                && todos[0] == TodoItem { title: "Step 1".into(), status: "done".into() }
+                && todos[1] == TodoItem { title: "Step 2".into(), status: "active".into() }
+                && todos[2] == TodoItem { title: "Step 3".into(), status: "pending".into() }
         ));
     }
 

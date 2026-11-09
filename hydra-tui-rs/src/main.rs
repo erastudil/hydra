@@ -272,12 +272,15 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
 
     let input_line_count = app.input.split('\n').count().max(1);
     let composer_height = (input_line_count as u16 + 2).clamp(3, 10);
+    let todo_rows = app.todo_rows();
+    let todo_height = todo_rows.len() as u16;
 
     let chunks = Layout::vertical([
         Constraint::Min(1),                   // 0: Transcript (Banner + Conversation)
-        Constraint::Length(1),                // 1: Live Status Line
-        Constraint::Length(composer_height),  // 2: Rounded Input Box
-        Constraint::Length(1),                // 3: Footer Bar
+        Constraint::Length(todo_height),      // 1: Compact Todo Block (when non-empty)
+        Constraint::Length(1),                // 2: Live Status Line
+        Constraint::Length(composer_height),  // 3: Rounded Input Box
+        Constraint::Length(1),                // 4: Footer Bar
     ])
     .split(area);
 
@@ -322,7 +325,37 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
         .scroll((scroll_y as u16, 0));
     frame.render_widget(transcript, chunks[0]);
 
-    // ------------------------------------------------------------- 1: Status Line
+    // ------------------------------------------------------------- 1: Todo Block
+    if !todo_rows.is_empty() {
+        let todo_lines: Vec<Line<'static>> = todo_rows
+            .into_iter()
+            .map(|row| {
+                if let Some(rest) = row.strip_prefix("✓ ") {
+                    Line::from(vec![
+                        Span::styled(" ✓ ", Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD)),
+                        Span::styled(rest.to_string(), Style::default().fg(to_color(DIM_RGB))),
+                    ])
+                } else if let Some(rest) = row.strip_prefix("▸ ") {
+                    Line::from(vec![
+                        Span::styled(" ▸ ", Style::default().fg(to_color(AMBER_RGB)).add_modifier(Modifier::BOLD)),
+                        Span::styled(rest.to_string(), Style::default().fg(to_color(HOT_RGB)).add_modifier(Modifier::BOLD)),
+                    ])
+                } else if let Some(rest) = row.strip_prefix("· ") {
+                    Line::from(vec![
+                        Span::styled(" · ", Style::default().fg(to_color(DIM_RGB))),
+                        Span::styled(rest.to_string(), Style::default().fg(to_color(DIM_RGB))),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::styled(format!("   {row}"), Style::default().fg(to_color(DIM_RGB))),
+                    ])
+                }
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(todo_lines), chunks[1]);
+    }
+
+    // ------------------------------------------------------------- 2: Status Line
     let braille_spin = BRAILLE_SPIN[app.spin_i % BRAILLE_SPIN.len()];
 
     let status_line = if let Some((_, tool)) = &app.approval {
@@ -350,9 +383,9 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
             Span::styled("hydra · idle", Style::default().fg(to_color(DIM_RGB))),
         ])
     };
-    frame.render_widget(Paragraph::new(status_line), chunks[1]);
+    frame.render_widget(Paragraph::new(status_line), chunks[2]);
 
-    // ------------------------------------------------------------- 2: Input Box
+    // ------------------------------------------------------------- 3: Input Box
     let border_color = to_color(app.border_rgb());
 
     let state_tag = if app.approval.is_some() {
@@ -388,9 +421,9 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
                 .title(title_right.alignment(ratatui::layout::Alignment::Right)),
         )
         .wrap(Wrap { trim: false });
-    frame.render_widget(input_widget, chunks[2]);
+    frame.render_widget(input_widget, chunks[3]);
 
-    // ------------------------------------------------------------- 3: Footer Bar
+    // ------------------------------------------------------------- 4: Footer Bar
     let used_tokens = app.prompt_tokens;
     let pct = if app.window > 0 { (used_tokens as f32 / app.window as f32).clamp(0.0, 1.0) } else { 0.0 };
     let cells: usize = 8;
@@ -423,14 +456,14 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     footer_spans.push(Span::styled("░".repeat(empty), Style::default().fg(Color::Rgb(44, 63, 56))));
     footer_spans.push(Span::styled(format!("] {:.0}% · {} turns ", pct * 100.0, app.turn_n), Style::default().fg(Color::Rgb(111, 143, 132))));
 
-    frame.render_widget(Paragraph::new(Line::from(footer_spans)), chunks[3]);
+    frame.render_widget(Paragraph::new(Line::from(footer_spans)), chunks[4]);
 
     // ------------------------------------------------------------- Autocomplete Popup
     if has_popup {
         let popup_h = (cands.len() as u16 + 2).min(10);
-        let popup_w = 74.min(chunks[2].width.saturating_sub(4));
-        let popup_y = chunks[2].y.saturating_sub(popup_h);
-        let popup_area = Rect::new(chunks[2].x + 2, popup_y, popup_w, popup_h);
+        let popup_w = 74.min(chunks[3].width.saturating_sub(4));
+        let popup_y = chunks[3].y.saturating_sub(popup_h);
+        let popup_area = Rect::new(chunks[3].x + 2, popup_y, popup_w, popup_h);
 
         frame.render_widget(Clear, popup_area);
 
@@ -663,5 +696,71 @@ mod key_kind_tests {
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         let status_after_token: String = (0..120).map(|x| terminal.backend().buffer()[(x, 19)].symbol()).collect();
         assert!(status_after_token.contains("Thinking 20s · working..."), "got: {status_after_token:?}");
+    }
+
+    #[test]
+    fn draw_renders_todo_block_above_status_line_with_glyphs_cap_and_empty_state() {
+        use hydra_stdio::{Ev, TodoItem};
+        use ratatui::backend::TestBackend;
+
+        let _guard = app::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+
+        // Empty list renders nothing; row 18 is transcript bottom border and row 19 is status line
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let row18_empty: String = (0..120).map(|x| terminal.backend().buffer()[(x, 18)].symbol()).collect();
+        let row19_empty: String = (0..120).map(|x| terminal.backend().buffer()[(x, 19)].symbol()).collect();
+        assert!(row18_empty.contains('╰'), "expected transcript bottom border on row 18 when todos empty: {row18_empty:?}");
+        assert!(row19_empty.contains("hydra · idle"), "expected status line on row 19: {row19_empty:?}");
+
+        // 3 items: renders on rows 16, 17, 18 directly above status line (row 19)
+        app.apply(Ev::Todos {
+            turn: "t1".into(),
+            todos: vec![
+                TodoItem { title: "Read codebase".into(), status: "done".into() },
+                TodoItem { title: "Wire set_todos".into(), status: "active".into() },
+                TodoItem { title: "Run test suite".into(), status: "pending".into() },
+            ],
+        });
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let row16: String = (0..120).map(|x| terminal.backend().buffer()[(x, 16)].symbol()).collect();
+        let row17: String = (0..120).map(|x| terminal.backend().buffer()[(x, 17)].symbol()).collect();
+        let row18: String = (0..120).map(|x| terminal.backend().buffer()[(x, 18)].symbol()).collect();
+        let row19: String = (0..120).map(|x| terminal.backend().buffer()[(x, 19)].symbol()).collect();
+        assert!(row16.contains("✓ Read codebase"), "got row 16: {row16:?}");
+        assert!(row17.contains("▸ Wire set_todos"), "got row 17: {row17:?}");
+        assert!(row18.contains("· Run test suite"), "got row 18: {row18:?}");
+        assert!(row19.contains("hydra · idle"), "got row 19: {row19:?}");
+
+        // 11 items: capped at 8 rows (rows 11..=18), 7 items + "+4 more" on row 18
+        let eleven: Vec<TodoItem> = (1..=11)
+            .map(|i| TodoItem {
+                title: format!("Task {i}"),
+                status: if i == 1 {
+                    "done".into()
+                } else if i == 2 {
+                    "active".into()
+                } else {
+                    "pending".into()
+                },
+            })
+            .collect();
+        app.apply(Ev::Todos {
+            turn: "t1".into(),
+            todos: eleven,
+        });
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let row10: String = (0..120).map(|x| terminal.backend().buffer()[(x, 10)].symbol()).collect();
+        let row11: String = (0..120).map(|x| terminal.backend().buffer()[(x, 11)].symbol()).collect();
+        let row12: String = (0..120).map(|x| terminal.backend().buffer()[(x, 12)].symbol()).collect();
+        let row17_cap: String = (0..120).map(|x| terminal.backend().buffer()[(x, 17)].symbol()).collect();
+        let row18_cap: String = (0..120).map(|x| terminal.backend().buffer()[(x, 18)].symbol()).collect();
+        assert!(row10.contains('╰'), "transcript bottom border should sit at row 10 above 8-row todo block: {row10:?}");
+        assert!(row11.contains("✓ Task 1"), "got row 11: {row11:?}");
+        assert!(row12.contains("▸ Task 2"), "got row 12: {row12:?}");
+        assert!(row17_cap.contains("· Task 7"), "got row 17: {row17_cap:?}");
+        assert!(row18_cap.contains("+4 more"), "got row 18: {row18_cap:?}");
     }
 }
