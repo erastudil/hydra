@@ -11014,8 +11014,32 @@ def wave22_session_logger_and_mimo_routing():
     assert route_9b["adapter"] == "Bluebarrels/easylm-bonsai-2-9b"
     assert route_9b["hydra_adapter"] == "Bluebarrels/easylm-hydra-bonsai-2-9b"
     assert route_9b["memory_mb"] == 2000
-    assert route_9b["context_window"] == 262144
-    assert get_context_window("bonsai 2 9b") == 262144
+    assert route_9b["context_window"] == 131072
+    assert get_context_window("bonsai 2 9b") == 131072
+    # Summon spec (owner ruling 2026-11-09): Hydra's context budget for a
+    # locally served model is the served window (-c 131072 on the 4060),
+    # not the GGUF metadata capacity; 128K-class hosted ids are profiled
+    # at their real window instead of falling through to the 1M default.
+    assert get_context_window("bonsai 2 2b") == 131072
+    assert get_context_window("bonsai 2 4b") == 131072
+    assert get_context_window("@cf/meta/llama-3.3-70b-instruct-fp8-fast") == 131072
+    assert get_context_window("google/gemma-4-26b-a4b-it:free") == 131072
+    from hydra_cli.config import apply_sampling_profile, sampling_profile_for
+
+    _bonsai_spec = {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.0}
+    assert sampling_profile_for("prism-ml/Ternary-Bonsai-2-2B-gguf") == _bonsai_spec
+    assert sampling_profile_for("bonsai 2 9b") == _bonsai_spec
+    assert sampling_profile_for("muse-spark-1.3-contributor") is None
+    _payload = {"model": "prism-ml/Ternary-Bonsai-2-2B-gguf", "messages": []}
+    apply_sampling_profile(_payload, _payload["model"])
+    assert all(_payload[k] == v for k, v in _bonsai_spec.items())
+    _caller = {"model": "prism-ml/Ternary-Bonsai-2-2B-gguf", "temperature": 0.2}
+    apply_sampling_profile(_caller, _caller["model"])
+    assert _caller["temperature"] == 0.2 and _caller["top_p"] == 0.95
+    from hydra_cli.providers import _build_payload
+
+    _wire = _build_payload("prism-ml/Ternary-Bonsai-2-4B-gguf", [], False, None, None, None)
+    assert all(_wire[k] == v for k, v in _bonsai_spec.items())
     assert resolve_model("bonsai") == "prism-ml/Ternary-Bonsai-2-9B-gguf"
     saved_alias = os.environ.pop("HYDRA_DEFAULT_ALIAS", None)
     saved_mode = os.environ.pop("HYDRA_MODE", None)
