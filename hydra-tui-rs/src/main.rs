@@ -186,6 +186,10 @@ fn format_transcript_line(text: &str) -> Line<'static> {
             Span::styled("  └─ ", Style::default().fg(c)),
             Span::styled(text.to_string(), Style::default().fg(to_color(DIM_RGB))),
         ])
+    } else if text.starts_with("… +") && text.ends_with("· /tool expands") {
+        Line::from(vec![
+            Span::styled(format!("  {text}"), Style::default().fg(to_color(DIM_RGB))),
+        ])
     } else if text.starts_with("approval ") {
         Line::from(vec![
             Span::styled("◆ APPROVAL: ", Style::default().fg(to_color(AMBER_RGB)).add_modifier(Modifier::BOLD)),

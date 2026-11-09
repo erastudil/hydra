@@ -23,7 +23,13 @@ pub enum Ev {
     },
     Token { turn: String, text: String },
     ToolStart { turn: String, call: u64, tool: String, args: Value },
-    ToolResult { turn: String, tool: String, is_error: bool, output: String },
+    ToolResult {
+        turn: String,
+        tool: String,
+        is_error: bool,
+        output: String,
+        duration_ms: Option<u64>,
+    },
     Diff { turn: String, path: String, diff: String },
     Usage { model: String, prompt: u64, completion: u64, cost: f64 },
     Approval { turn: String, id: String, tool: String, args: Value },
@@ -87,7 +93,13 @@ pub fn parse_line(line: &str) -> Option<Ev> {
         },
         "token" => Ev::Token { turn: s("turn"), text: s("text") },
         "tool_start" => Ev::ToolStart { turn: s("turn"), call: n("call"), tool: s("tool"), args: v.get("arguments").cloned().unwrap_or(Value::Null) },
-        "tool_result" => Ev::ToolResult { turn: s("turn"), tool: s("tool"), is_error: b("is_error"), output: s("output") },
+        "tool_result" => Ev::ToolResult {
+            turn: s("turn"),
+            tool: s("tool"),
+            is_error: b("is_error"),
+            output: s("output"),
+            duration_ms: v.get("duration_ms").and_then(|x| x.as_u64()),
+        },
         "diff" => Ev::Diff { turn: s("turn"), path: s("path"), diff: s("diff") },
         "usage" => Ev::Usage {
             model: s("model"),
@@ -598,6 +610,20 @@ mod proto_tests {
             pf,
             Ev::PreflightResult { id: Some(ref id), turn: Some(ref turn), ref strip, notice: Some(ref notice), .. }
             if id == "t1" && turn == "t1" && strip == "[local:PASS]" && notice == "Local endpoint degraded"
+        ));
+
+        let tr_dur = parse_line(r#"{"type":"tool_result","turn":"t1","call":1,"tool":"read_file","is_error":false,"output":"ok","truncated":false,"duration_ms":812}"#).unwrap();
+        assert!(matches!(
+            tr_dur,
+            Ev::ToolResult { ref tool, is_error: false, duration_ms: Some(812), .. }
+            if tool == "read_file"
+        ));
+
+        let tr_nodur = parse_line(r#"{"type":"tool_result","turn":"t1","call":2,"tool":"read_file","is_error":true,"output":"err","truncated":false}"#).unwrap();
+        assert!(matches!(
+            tr_nodur,
+            Ev::ToolResult { ref tool, is_error: true, duration_ms: None, .. }
+            if tool == "read_file"
         ));
     }
 

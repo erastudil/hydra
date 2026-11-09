@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import sys
 import threading
@@ -902,15 +903,45 @@ class Adapter:
             with self._state:
                 self._completed_turns.setdefault(thread, prior_done)
         calls = {"n": 0}
+        tool_starts: Dict[tuple, float] = {}
         window: Optional[int] = None
 
         def start(tool: str, args_json: str) -> None:
             calls["n"] += 1
-            self.emit({"type": "tool_start", "turn": turn, "call": calls["n"], "tool": tool, "arguments": _args(args_json)})
+            call_id = calls["n"]
+            try:
+                t0 = time.monotonic()
+                if isinstance(t0, (int, float)) and not isinstance(t0, bool) and math.isfinite(float(t0)):
+                    tool_starts[(turn, call_id)] = float(t0)
+            except Exception:
+                pass
+            self.emit({"type": "tool_start", "turn": turn, "call": call_id, "tool": tool, "arguments": _args(args_json)})
 
         def result(tool: str, args_json: str, is_error: bool, output: str) -> None:
-            self.emit({"type": "tool_result", "turn": turn, "call": calls["n"], "tool": tool, "is_error": bool(is_error),
-                       "output": output[:TOOL_OUTPUT_CHARS], "truncated": len(output) > TOOL_OUTPUT_CHARS})
+            call_id = calls["n"]
+            started = tool_starts.pop((turn, call_id), None)
+            duration_ms: Optional[int] = None
+            if started is not None:
+                try:
+                    t1 = time.monotonic()
+                    if isinstance(t1, (int, float)) and not isinstance(t1, bool) and math.isfinite(float(t1)):
+                        elapsed = float(t1) - started
+                        if elapsed >= 0:
+                            duration_ms = int(round(elapsed * 1000))
+                except Exception:
+                    duration_ms = None
+            ev: Dict[str, Any] = {
+                "type": "tool_result",
+                "turn": turn,
+                "call": call_id,
+                "tool": tool,
+                "is_error": bool(is_error),
+                "output": output[:TOOL_OUTPUT_CHARS],
+                "truncated": len(output) > TOOL_OUTPUT_CHARS,
+            }
+            if duration_ms is not None:
+                ev["duration_ms"] = duration_ms
+            self.emit(ev)
 
         def usage(u: Dict[str, Any]) -> None:
             from hydra_cli.desktop_core import get_token_accounting
