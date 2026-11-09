@@ -6,7 +6,7 @@
   ],
   "default_free_model": "nvidia/nemotron-3.5-lightning:free",
   "default_cloudflare_model": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-  "default_local_model": "gemma-e2b",
+  "default_local_model": "prism-ml/Ternary-Bonsai-2-2B-gguf",
   "free_models": [
     "google/gemma-4-26b-a4b-it:free",
     "google/gemma-4-31b-it:free",
@@ -423,7 +423,7 @@
       "provider": "local",
       "hydra_adapter": null,
       "format_shim": "stdio",
-      "adapter_note": "No Hydra adapter trained for E2B; the desk runs base weights + the stdio/tool format shim. Front desk per the 2026-11-02 ladder bench: E2B ties or beats E4B on the desk tiers at 4,531 MiB and about twice the speed. E4B stays in the catalog as the local heavy escalation rung."
+      "adapter_note": "No Hydra adapter trained for E2B; the seat runs base weights + the stdio/tool format shim. Named local seat per the owner ruling 2026-11-09 (the local default is Bonsai 2B). Per the 2026-11-02 ladder bench: E2B ties or beats E4B on the desk tiers at 4,531 MiB and about twice the speed. E4B stays in the catalog as the local heavy escalation rung."
     },
     "local-gemma": {
       "title": "Local Gemma E4B",

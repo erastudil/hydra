@@ -1,19 +1,21 @@
-"""Local model server autostart + warm-up.
+"""Local model server autostart + warm-up + idle unload.
 
-Two local models are servable, each with the binary its weights require:
+The local seats, each served by the binary its weights require:
 
-- The front desk, Gemma 4 E4B (the catalog's ``default_local_model``),
-  served by STOCK llama.cpp with its mmproj projector, at 128K context
-  with q8_0 KV caches (the server-v4 configuration the driver bench
-  validated). When W2's trained Hydra adapter GGUF is present it is
-  loaded with ``--lora``; until then the catalog alias runs the base
-  weights and the stdio/tool format shim carries the turn envelope.
-- The Bonsai coders, Prism Ternary-Bonsai GGUFs served by the Prism fork
-  of llama.cpp. The ternary Q2_0 weights produce garbage on stock
-  llama.cpp/Ollama builds, so Hydra must serve them with the Prism fork
-  binaries.
+- The local default (owner ruling 2026-11-09): Bonsai 2B, the catalog's
+  ``default_local_model`` — Prism Ternary-Bonsai-2-2B Q2_0 with its
+  Q8_0 mmproj projector, served by the Prism fork of llama.cpp (the
+  runtime the fit test pinned; the Q2_0 packing also runs on upstream
+  llama.cpp >= b11556) at 128K context with q8_0 KV caches. The Bonsai 2
+  family is multimodal at every size; the 2B's vision was smoke-proven
+  2026-11-08, which is the ground for the seat.
+- The Gemma seats on STOCK llama.cpp: Gemma 4 E2B, a named selectable
+  seat, and Gemma 4 E4B, the local heavy escalation route. When W2's
+  trained Hydra adapter GGUF is present for E4B it is loaded with
+  ``--lora``; until then the catalog alias runs the base weights and
+  the stdio/tool format shim carries the turn envelope.
 
-Both serve on the llama.cpp endpoint Hydra already probes
+All serve on the llama.cpp endpoint Hydra already probes
 (``LLAMACPP_HOST``, default http://127.0.0.1:8080) — one model at a
 time, which is why gpu_arbiter exists: stepping between them is a
 designed, logged operation, not an accident. Servers Hydra starts are
@@ -21,15 +23,25 @@ recorded in ~/.hydra/local-server-state.json, and Hydra-started servers
 run with ``--slot-save-path ~/.hydra/kv-cache`` so thread KV state can
 be parked to disk (tier 2/3 of the context design; see gpu_arbiter).
 
-``cli.main()`` calls :func:`autostart_local_async` on every launch, so
-starting any Hydra front end (the Rust TUI's ``python -m hydra_cli
-stdio`` backend, the terminal REPL, a one-shot command) also:
+Lifecycle (owner ruling 2026-11-09: the local model loads when the
+owner starts Hydra and unloads when it sits idle; a standing resident
+server is not a resting state):
 
-1. starts the Prism ``llama-server`` for the configured local model
-   (``HYDRA_LOCAL_MODEL``, default the catalog's ``default_local_model``)
-   if nothing is answering on the llama.cpp endpoint, and
-2. warms it with one minimal real generation, so the first user prompt
-   is not a cold model load.
+1. ``cli.main()`` calls :func:`autostart_local_async` when the stdio
+   backend starts (the Rust TUI's launch path). Autostart fires only
+   in local mode and only where the model weights are staged: it
+   starts the ``llama-server`` for the configured local model
+   (``HYDRA_LOCAL_MODEL``, default the catalog's
+   ``default_local_model``) if nothing is answering on the llama.cpp
+   endpoint, and warms it with one minimal real generation, so the
+   first user prompt is not a cold model load. Free/cloud-lane and
+   fleet/VM-side invocations never trigger a local launch.
+2. A watchdog (``hydra_cli.local_watchdog``) accompanies every
+   Hydra-managed server and stops it after the idle window —
+   ``local_idle_unload_seconds`` in ~/.hydra/settings.json, default
+   3600 — with no slot activity. The hour is the lease: the server may
+   outlive the Hydra process that started it, and the watchdog leaves
+   with the server, by any route the server dies.
 
 Everything here is best-effort and failure-silent: a machine without the
 binaries or the weights simply reports a status and Hydra runs exactly
@@ -43,6 +55,8 @@ Overrides (env):
   HYDRA_LOCAL_QUANT      GGUF quant variant to serve (default Q2_0)
   HYDRA_LOCAL_CTX        context size for the server (default 131072)
   HYDRA_LOCAL_WARM       "0" starts the server without the warm-up call
+  HYDRA_LOCAL_IDLE_UNLOAD_SECONDS  idle unload window (default: the
+                         settings.json value, else 3600)
 """
 
 from __future__ import annotations
@@ -62,6 +76,7 @@ _ENSURE_LOCK = threading.RLock()
 _ATTEMPTED = False
 
 DEFAULT_MIN_CTX = 131072
+DEFAULT_IDLE_UNLOAD_SECONDS = 3600
 _WARM_PROMPT = "Reply with exactly: HYDRA WARM OK"
 
 
@@ -168,6 +183,27 @@ def _model_file(model_id: str, models_dir: str) -> Optional[str]:
     return path if os.path.isfile(path) else None
 
 
+def _bonsai_mmproj(model_id: str, models_dir: str) -> Optional[str]:
+    """The vision projector staged beside a Bonsai GGUF, when present:
+    <models_dir>/bonsai-2-2b/Ternary-Bonsai-2-2B-mmproj-Q8_0.gguf (the
+    Q8_0 packing is preferred; any staged mmproj in the folder serves)."""
+    match = re.search(r"Ternary-Bonsai-2-(\d+B)-gguf", model_id or "")
+    if not match:
+        return None
+    size = match.group(1)
+    folder = os.path.join(models_dir, f"bonsai-2-{size.lower()}")
+    preferred = os.path.join(folder, f"Ternary-Bonsai-2-{size}-mmproj-Q8_0.gguf")
+    if os.path.isfile(preferred):
+        return preferred
+    try:
+        for name in sorted(os.listdir(folder)):
+            if "mmproj" in name.lower() and name.lower().endswith(".gguf"):
+                return os.path.join(folder, name)
+    except Exception:
+        pass
+    return None
+
+
 def state_path() -> str:
     return os.path.join(os.path.expanduser("~"), ".hydra", "local-server-state.json")
 
@@ -198,8 +234,8 @@ def kv_cache_dir() -> str:
 
 
 def _stock_server_binary() -> Optional[str]:
-    """Stock llama.cpp for the Gemma front desk (the Prism fork is only
-    for the ternary Bonsai weights)."""
+    """Stock llama.cpp for the Gemma seats (the Prism fork serves the
+    ternary Bonsai weights)."""
     env = os.environ.get("HYDRA_LLAMA_SERVER_STOCK", "").strip()
     if env:
         return env if os.path.isfile(env) else None
@@ -247,7 +283,21 @@ def _servable(model_id: str, models_dir: str) -> Optional[Dict[str, Any]]:
         binary = _server_binary()
         if not gguf or not binary:
             return None
-        return {"binary": binary, "gguf": gguf, "extra_args": [], "kind": "bonsai-prism"}
+        # Same serving flags as the Gemma seats (owner ruling
+        # 2026-11-09): flash attention, q8_0 KV caches, slot parking,
+        # and the mmproj projector attached — the family is multimodal
+        # and the projector is the ground for the 2B's default seat.
+        extra = [
+            "--flash-attn", "on",
+            "--cache-type-k", "q8_0",
+            "--cache-type-v", "q8_0",
+            "--image-max-tokens", "1024",
+            "--slot-save-path", kv_cache_dir(),
+        ]
+        mmproj = _bonsai_mmproj(model_id, models_dir)
+        if mmproj:
+            extra += ["--mmproj", mmproj]
+        return {"binary": binary, "gguf": gguf, "extra_args": extra, "kind": "bonsai-prism", "mmproj": mmproj}
     gemma = {
         "gemma-e4b": ("gemma-4-e4b", "gemma-4-E4B-it-Q4_K_M.gguf", "mmproj-F16.gguf"),
         "gemma-e2b": ("gemma-4-e2b", "gemma-4-E2B-it-Q4_0.gguf", "mmproj-gemma-4-E2B-it-Q8_0.gguf"),
@@ -438,6 +488,18 @@ def ensure_local_server(
                     from hydra_cli.config import DEFAULT_LOCAL_MODEL
 
                     model_id = DEFAULT_LOCAL_MODEL
+            # The mode table names seats by alias ("bonsai 2 2b"); the
+            # server is launched and addressed by model id
+            # ("prism-ml/Ternary-Bonsai-2-2B-gguf"). Resolve the alias
+            # before anything compares or serves it. (The Gemma aliases
+            # equal their model ids, so this is a no-op for them.)
+            if model_id:
+                try:
+                    from hydra_cli import modes as _modes
+
+                    model_id = _modes.resolve_local_model(model_id) or model_id
+                except Exception:
+                    pass
             status["model"] = model_id
             min_ctx = required_context(model_id)
             status["expected_n_ctx"] = min_ctx
@@ -479,6 +541,7 @@ def ensure_local_server(
                     # slot under parallel spawns (the stdio gate runs hundreds
                     # of concurrent backends), so report the state, don't probe.
                     status["warm"] = {"warmed": True, "basis": "already-serving"}
+                    status["watchdog"] = ensure_watchdog()
                     return status
                 else:
                     # A different model is currently loaded on the single local port;
@@ -700,6 +763,7 @@ def ensure_local_server(
                 state_record["n_ctx"] = ctx_check["n_ctx"]
                 _write_server_state(state_record)
                 status["warm"] = {"warmed": False, "skipped": True}
+            status["watchdog"] = ensure_watchdog()
             return status
         except Exception as exc:  # autostart must never break the host app
             _emit_progress(f"ERROR: {type(exc).__name__}: {exc}")
@@ -864,6 +928,167 @@ def stop_local_server(timeout: float = 30.0) -> Dict[str, Any]:
     return result
 
 
+def idle_unload_seconds() -> int:
+    """The idle window before the watchdog unloads the managed local
+    server: env HYDRA_LOCAL_IDLE_UNLOAD_SECONDS wins, then
+    ``local_idle_unload_seconds`` in ~/.hydra/settings.json, else the
+    3600-second default (owner ruling 2026-11-09: about an hour)."""
+    env = os.environ.get("HYDRA_LOCAL_IDLE_UNLOAD_SECONDS", "").strip()
+    if env:
+        try:
+            val = int(env)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    try:
+        from hydra_cli import modes
+
+        data = json.loads(modes.settings_path().read_text(encoding="utf-8"))
+        val = int(data.get("local_idle_unload_seconds"))
+        if val > 0:
+            return val
+    except Exception:
+        pass
+    return DEFAULT_IDLE_UNLOAD_SECONDS
+
+
+def slots_activity_signature(slots: Any) -> Optional[tuple]:
+    """(any_processing, task_counter_total) for a /slots payload, or
+    None when the payload is unusable. The watchdog's activity signal:
+    a slot mid-generation, or the task counters advancing between
+    polls, both mean the server is working."""
+    if not isinstance(slots, list) or not slots:
+        return None
+    processing = False
+    total = 0
+    seen = False
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        seen = True
+        if slot.get("is_processing"):
+            processing = True
+        task = slot.get("id_task")
+        if isinstance(task, int) and not isinstance(task, bool):
+            total += task
+    if not seen:
+        return None
+    return (processing, total)
+
+
+def _mark_state_stopped(state: Dict[str, Any], reason: str) -> None:
+    preserved = dict(state)
+    preserved["pid"] = None
+    preserved["warmed"] = False
+    preserved["stopped_at"] = int(time.time())
+    preserved["stopped_reason"] = reason
+    _write_server_state(preserved)
+
+
+def stop_managed_server(reason: str = "idle-unload") -> Dict[str, Any]:
+    """Stop ONLY the server recorded as Hydra-managed, and only while
+    the recorded pid is verifiably the llama-server listening on the
+    local endpoint. This is the watchdog's stop: unlike
+    stop_local_server (the arbiter's step-aside, which stops whoever
+    holds the port), it never touches a process Hydra cannot identify
+    as its own local server."""
+    base = _llamacpp_base()
+    state = read_server_state()
+    result: Dict[str, Any] = {"base": base, "stopped": False, "reason": reason}
+    pid = state.get("pid")
+    if state.get("managed_by") != "hydra" or not isinstance(pid, int):
+        result["detail"] = "no Hydra-managed server recorded"
+        return result
+    result["pid"] = pid
+    if not _pid_alive(pid):
+        result["detail"] = "recorded server already gone"
+        _mark_state_stopped(state, reason)
+        return result
+    live = listener_pid()
+    cmdline = process_cmdline(pid) or ""
+    if live != pid or "llama-server" not in cmdline:
+        result["detail"] = "recorded pid is not the identifiable local llama-server; left alone"
+        return result
+    if not _kill_pid(pid):
+        result["detail"] = "kill failed"
+        return result
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        if _served_model_ids(base) is None:
+            result["stopped"] = True
+            break
+        time.sleep(0.5)
+    if result["stopped"]:
+        _mark_state_stopped(state, reason)
+    return result
+
+
+def ensure_watchdog() -> Dict[str, Any]:
+    """Start the idle watchdog (hydra_cli.local_watchdog) for the
+    Hydra-managed server if one is recorded and no live watchdog is
+    already on the case. Best-effort; never raises."""
+    result: Dict[str, Any] = {"watchdog": "not-started"}
+    try:
+        state = read_server_state()
+        pid = state.get("pid")
+        if state.get("managed_by") != "hydra" or not isinstance(pid, int) or not _pid_alive(pid):
+            result["reason"] = "no Hydra-managed server recorded"
+            return result
+        wd_pid = state.get("watchdog_pid")
+        if isinstance(wd_pid, int) and wd_pid != os.getpid() and _pid_alive(wd_pid):
+            result["watchdog"] = "already-running"
+            result["watchdog_pid"] = wd_pid
+            return result
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        log_dir = os.path.join(os.path.expanduser("~"), ".hydra", "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_handle = open(os.path.join(log_dir, "local-watchdog.log"), "ab")
+        flags = 0
+        if os.name == "nt":
+            # CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB
+            # (same launch discipline as the server itself: hidden, and not
+            # taken down when a parent session inside a job object ends).
+            flags = 0x08000000 | 0x00000008 | 0x01000000
+        env = dict(os.environ)
+        env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+        spawn_args = [sys.executable, "-m", "hydra_cli.local_watchdog"]
+        try:
+            proc = subprocess.Popen(
+                spawn_args,
+                cwd=repo_root,
+                env=env,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                creationflags=flags,
+                close_fds=True,
+            )
+        except OSError:
+            if not flags:
+                raise
+            proc = subprocess.Popen(
+                spawn_args,
+                cwd=repo_root,
+                env=env,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                creationflags=flags & ~0x01000000,
+                close_fds=True,
+            )
+        updated = dict(state)
+        updated["watchdog_pid"] = proc.pid
+        updated["watchdog_started_at"] = int(time.time())
+        _write_server_state(updated)
+        result["watchdog"] = "started"
+        result["watchdog_pid"] = proc.pid
+        return result
+    except Exception as exc:
+        result["reason"] = f"{type(exc).__name__}: {exc}"
+        return result
+
+
 def slot_info() -> Optional[Any]:
     return _fetch_json(f"{_llamacpp_base()}/slots", timeout=3.0)
 
@@ -894,9 +1119,25 @@ def erase_slot(slot: int) -> Optional[Any]:
 
 def autostart_local_async() -> None:
     """Fire-and-forget startup hook for cli.main(): ensures the local
-    Bonsai server is up and warm, in a daemon thread, once per process."""
+    default server is up and warm, in a daemon thread, once per process.
+
+    The lifecycle gate (owner ruling 2026-11-09): autostart fires only
+    in local mode and only where the local weights are staged on this
+    machine. A free/cloud-lane invocation, or a fleet/VM-side checkout
+    with no staged models, never triggers a local launch; explicit
+    local summons still serve on request through ensure_local_server.
+    """
     global _ATTEMPTED
     if os.environ.get("HYDRA_LOCAL_AUTOSTART", "").strip() == "0":
+        return
+    try:
+        from hydra_cli import modes
+
+        if modes.current_mode() != "local":
+            return
+    except Exception:
+        pass
+    if _models_dir() is None:
         return
     with _LOCK:
         if _ATTEMPTED:

@@ -1020,7 +1020,7 @@ def test_stdio_hello_carries_mode_and_default_model_when_stubbed_to_local(tmp_pa
     hello = hello_events[0]
     assert hello["type"] == "hello"
     assert hello.get("mode") == "local"
-    assert hello.get("default_model") == "gemma-e2b"
+    assert hello.get("default_model") == "bonsai 2 2b"
 
     # When mode/default_model resolution fails, omit the fields rather than guessing
     def broken_mode():
@@ -1091,7 +1091,7 @@ def test_stdio_modelless_metaless_turn_resolves_local_default_model_and_respects
     out = io.StringIO()
     adapter = Adapter(io.BytesIO(b""), out)
 
-    # 1. Model-less, meta-less turn in local mode resolves "gemma-e2b", not DEFAULT_ORCHESTRATOR_MODEL
+    # 1. Model-less, meta-less turn in local mode resolves "bonsai 2 2b", not DEFAULT_ORCHESTRATOR_MODEL
     events1 = _run_turn_sync(
         adapter,
         out,
@@ -1107,7 +1107,7 @@ def test_stdio_modelless_metaless_turn_resolves_local_default_model_and_respects
     )
     assert events1[-1]["type"] == "done"
     assert events1[-1]["ok"] is True
-    assert resolved_aliases[-1] == "gemma-e2b"
+    assert resolved_aliases[-1] == "bonsai 2 2b"
     assert resolved_aliases[-1] != DEFAULT_ORCHESTRATOR_MODEL
 
     # 2. Stored thread meta takes precedence over mode default when turn omits model

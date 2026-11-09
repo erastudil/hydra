@@ -270,7 +270,7 @@ def test_preflight_local_light_free_routes_and_context_gate(monkeypatch, tmp_pat
     from hydra_cli import preflight
 
     state = {
-        "models": ["gemma-e2b", "muse-spark-1.3-contributor", "nvidia/nemotron-3.5-lightning:free"],
+        "models": ["prism-ml/Ternary-Bonsai-2-2B-gguf", "muse-spark-1.3-contributor", "nvidia/nemotron-3.5-lightning:free"],
         "n_ctx": 131072,
         "status": 200,
         "hits": [],
@@ -341,7 +341,7 @@ def test_preflight_local_light_free_routes_and_context_gate(monkeypatch, tmp_pat
         assert report.completion_probes_count == 0
         assert report.gets_count <= 3
         strip = preflight.format_route_strip(report)
-        assert strip == "local ● gemma-e2b 128K · light ● spark · free ○ no key configured"
+        assert strip == "local ● bonsai 2 2b 128K · light ● spark · free ○ no key configured"
         assert preflight.format_preflight_notice(report, mode="local") is None
 
         # With NVIDIA_API_KEY present, free route is SKIPPED (0 GETs) when local and light pass

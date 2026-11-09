@@ -81,6 +81,21 @@ def default_alias(name: Optional[str] = None) -> Optional[str]:
     return mode_spec(name).get("default_alias")
 
 
+def resolve_local_model(alias_or_id: Optional[str]) -> Optional[str]:
+    """The model id for a local seat named by alias or id.
+
+    The mode table names seats by alias ("bonsai 2 2b") while servers
+    serve, and are probed, by model id ("prism-ml/Ternary-Bonsai-2-2B-gguf");
+    this is the one translation between the two. Unknown names pass
+    through unchanged (the Gemma aliases equal their model ids)."""
+    if not alias_or_id:
+        return alias_or_id
+    for entry in routes("local"):
+        if entry.get("alias") == alias_or_id and entry.get("model"):
+            return str(entry["model"])
+    return alias_or_id
+
+
 def routes(name: Optional[str] = None) -> List[Dict[str, Any]]:
     return list(mode_spec(name).get("routes") or [])
 

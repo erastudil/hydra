@@ -1,4 +1,4 @@
-﻿# Hydra installer for Windows PowerShell.
+# Hydra installer for Windows PowerShell.
 # irm https://raw.githubusercontent.com/erastudil/hydra/main/install.ps1 | iex
 
 $ErrorActionPreference = 'Stop'
@@ -51,6 +51,7 @@ $Files = @(
     'hydra_cli/invariants.json',
     'hydra_cli/invariants.py',
     'hydra_cli/local_server.py',
+    'hydra_cli/local_watchdog.py',
     'hydra_cli/mcp.py',
     'hydra_cli/mcp_registry.py',
     'hydra_cli/mcp_servers.default.json',
