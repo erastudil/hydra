@@ -16,6 +16,49 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from hydra_cli.context import SessionContextLedger
 
 
+VALID_TODO_STATUSES = ("pending", "active", "done")
+_MISSING = object()
+
+
+def validate_todos(payload: Any) -> Tuple[Optional[List[Dict[str, str]]], Optional[str]]:
+    """Validate a set_todos payload. Returns (validated_list, error_message)."""
+    raw = payload
+    if isinstance(raw, dict):
+        if "todos" in raw:
+            raw = raw["todos"]
+        elif "items" in raw:
+            raw = raw["items"]
+        else:
+            return None, "Invalid set_todos payload: expected a list of todo items"
+    if not isinstance(raw, list):
+        return None, "Invalid set_todos payload: expected a list of todo items"
+
+    validated: List[Dict[str, str]] = []
+    for idx, item in enumerate(raw):
+        if not isinstance(item, dict):
+            return None, f"Invalid todo item at index {idx}: expected an object with 'title' and 'status'"
+        title = item.get("title")
+        if not isinstance(title, str) or not title.strip():
+            return None, f"Invalid todo item at index {idx}: 'title' must be a non-empty string"
+        status = item.get("status")
+        if not isinstance(status, str) or status not in VALID_TODO_STATUSES:
+            return (
+                None,
+                f"Invalid todo item at index {idx}: 'status' must be one of 'pending', 'active', 'done' (got {status!r})",
+            )
+        validated.append({"title": title, "status": status})
+
+    return validated, None
+
+
+def format_todos_summary(todos: List[Dict[str, str]]) -> str:
+    """Format one-line set_todos summary string."""
+    done_count = sum(1 for item in todos if item.get("status") == "done")
+    active_count = sum(1 for item in todos if item.get("status") == "active")
+    pending_count = sum(1 for item in todos if item.get("status") == "pending")
+    return f"todos: {len(todos)} ({done_count} done, {active_count} active, {pending_count} pending)"
+
+
 def _format_size(size_bytes: int) -> str:
     """Format byte size into human readable string."""
     if size_bytes < 1024:
@@ -2653,6 +2696,7 @@ class NativeToolRegistry:
         self.tier = tier
         self.alias = alias
         self.ledger = ledger
+        self.todos: List[Dict[str, str]] = []
 
         self._tools: Dict[str, Callable[..., Any]] = {
             "read_file": self.read_file,
@@ -2668,6 +2712,7 @@ class NativeToolRegistry:
             "swarm_fanout": self.swarm_fanout,
             "compact_context": self.compact_context,
             "retrieve_context": self.retrieve_context,
+            "set_todos": self.set_todos,
             "browser_action": self.browser_action,
             "browse": self.browse,
             "click": self.click,
@@ -3438,6 +3483,20 @@ class NativeToolRegistry:
         if not getattr(self, "ledger", None):
             return {"isError": True, "error": "No active SessionContextLedger to retrieve from"}
         return self.ledger.retrieve_verbatim(keywords, max_turns)
+
+    def set_todos(self, todos: Any = _MISSING, items: Any = _MISSING, **kwargs: Any) -> Any:
+        """Replace the session's current todo list with a validated list of items."""
+        if todos is not _MISSING:
+            payload = todos
+        elif items is not _MISSING:
+            payload = items
+        else:
+            payload = kwargs if kwargs else None
+        validated, err = validate_todos(payload)
+        if err is not None or validated is None:
+            return {"isError": True, "error": err or "Invalid set_todos payload"}
+        self.todos = list(validated)
+        return format_todos_summary(self.todos)
 
     def browser_action(
         self,
@@ -5286,6 +5345,35 @@ class NativeToolRegistry:
             {
                 "type": "function",
                 "function": {
+                    "name": "set_todos",
+                    "description": "Replace the session's current todo list for multi-step work.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "todos": {
+                                "type": "array",
+                                "description": "Complete ordered list of todo items for the session.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string", "description": "Non-empty step title."},
+                                        "status": {
+                                            "type": "string",
+                                            "enum": ["pending", "active", "done"],
+                                            "description": "Step status: pending, active, or done.",
+                                        },
+                                    },
+                                    "required": ["title", "status"],
+                                },
+                            },
+                        },
+                        "required": ["todos"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "swarm_fanout",
                     "description": "Dispatch multi-agent swarm across specialist heads (Architect, Coder, Auditor, Synthesizer).",
                     "parameters": {
@@ -6068,7 +6156,15 @@ class NativeToolRegistry:
             return {"isError": True, "error": f"Unknown native tool: {name}"}
 
         handler = self._tools[name]
-        call_args = dict(args or {})
+        if not isinstance(args, dict):
+            if name == "set_todos" and args is not None:
+                call_args = {"todos": args}
+            elif args is None:
+                call_args = {}
+            else:
+                return {"isError": True, "error": f"Invalid arguments for {name}: expected object"}
+        else:
+            call_args = dict(args)
         if kwargs:
             call_args.update(kwargs)
 

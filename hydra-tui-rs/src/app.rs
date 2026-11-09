@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Instant;
+pub use hydra_stdio::TodoItem;
 use hydra_stdio::{Backend, Ev};
 use serde_json::{json, Value};
 
@@ -59,6 +60,36 @@ pub struct PreflightVerdict {
 }
 
 pub const TOOL_OUTPUT_PREVIEW_LINES: usize = 20;
+pub const TODO_BLOCK_MAX_ROWS: usize = 8;
+
+pub fn todo_status_glyph(status: &str) -> &'static str {
+    match status {
+        "done" => "✓",
+        "active" => "▸",
+        _ => "·",
+    }
+}
+
+pub fn format_todo_block(todos: &[TodoItem]) -> Vec<String> {
+    if todos.is_empty() {
+        return Vec::new();
+    }
+    if todos.len() <= TODO_BLOCK_MAX_ROWS {
+        todos
+            .iter()
+            .map(|item| format!("{} {}", todo_status_glyph(&item.status), item.title))
+            .collect()
+    } else {
+        let visible = TODO_BLOCK_MAX_ROWS - 1;
+        let mut rows: Vec<String> = todos
+            .iter()
+            .take(visible)
+            .map(|item| format!("{} {}", todo_status_glyph(&item.status), item.title))
+            .collect();
+        rows.push(format!("+{} more", todos.len() - visible));
+        rows
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallRecord {
@@ -135,6 +166,7 @@ pub struct App {
     pub popup_idx: usize,
     pub diffs: Vec<(String, String)>,
     pub tool_calls: Vec<ToolCallRecord>,
+    pub todos: Vec<TodoItem>,
     pub active_skills: Vec<String>,
     pub last_checkpoint: Option<String>,
     pub be: Option<Backend>,
@@ -206,6 +238,7 @@ impl App {
             popup_idx: 0,
             diffs: Vec::new(),
             tool_calls: Vec::new(),
+            todos: Vec::new(),
             active_skills: Vec::new(),
             last_checkpoint: None,
             be: None,
@@ -295,6 +328,10 @@ impl App {
 
     pub fn busy_status_text(&self) -> String {
         self.busy_status_text_at(self.busy_elapsed_secs())
+    }
+
+    pub fn todo_rows(&self) -> Vec<String> {
+        format_todo_block(&self.todos)
     }
 
     pub fn tick(&mut self) {
@@ -1442,6 +1479,9 @@ impl App {
                         self.transcript.push(format!("… +{extra} lines · /tool expands"));
                     }
                 }
+            }
+            Ev::Todos { todos, .. } => {
+                self.todos = todos;
             }
             Ev::Diff { path, diff, artifact, artifact_error, .. } => {
                 self.diffs.push((path.clone(), diff.clone()));
@@ -2643,5 +2683,61 @@ mod tests {
                 "  +retry".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn todos_event_replaces_app_state_and_formats_compact_block() {
+        let mut app = App::new();
+        assert!(app.todos.is_empty());
+        assert!(app.todo_rows().is_empty());
+
+        // First todos event: 3 items (done, active, pending)
+        let ev1 = hydra_stdio::parse_line(
+            r#"{"type":"todos","turn":"t1","todos":[{"title":"Inspect repo","status":"done"},{"title":"Implement set_todos","status":"active"},{"title":"Run tests","status":"pending"}]}"#,
+        )
+        .unwrap();
+        app.apply(ev1);
+        assert_eq!(app.todos.len(), 3);
+        assert_eq!(
+            app.todo_rows(),
+            vec![
+                "✓ Inspect repo".to_string(),
+                "▸ Implement set_todos".to_string(),
+                "· Run tests".to_string(),
+            ]
+        );
+
+        // Latest list wins: 10 items (> 8 cap -> 7 items + "+3 more" = 8 rows)
+        let many: Vec<TodoItem> = (1..=10)
+            .map(|i| TodoItem {
+                title: format!("Step {i}"),
+                status: if i <= 2 {
+                    "done".into()
+                } else if i == 3 {
+                    "active".into()
+                } else {
+                    "pending".into()
+                },
+            })
+            .collect();
+        app.apply(Ev::Todos {
+            turn: "t2".into(),
+            todos: many,
+        });
+        let rows = app.todo_rows();
+        assert_eq!(rows.len(), 8);
+        assert_eq!(rows[0], "✓ Step 1");
+        assert_eq!(rows[1], "✓ Step 2");
+        assert_eq!(rows[2], "▸ Step 3");
+        assert_eq!(rows[6], "· Step 7");
+        assert_eq!(rows[7], "+3 more");
+
+        // Empty list clears the block
+        app.apply(Ev::Todos {
+            turn: "t2".into(),
+            todos: Vec::new(),
+        });
+        assert!(app.todos.is_empty());
+        assert!(app.todo_rows().is_empty());
     }
 }

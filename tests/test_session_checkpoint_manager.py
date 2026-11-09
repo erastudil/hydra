@@ -1326,6 +1326,146 @@ def test_stdio_diff_turn_writes_patch_artifacts_increments_seq_and_survives_writ
         httpd.shutdown()
 
 
+def test_set_todos_tool_validation_and_session_replacement(tmp_path):
+    from hydra_cli.agent import DEFAULT_AGENT_SYSTEM_PROMPT
+    from hydra_cli.native_tools import NativeToolRegistry
+
+    assert "set_todos" in DEFAULT_AGENT_SYSTEM_PROMPT
+
+    reg = NativeToolRegistry(cwd=str(tmp_path))
+    assert reg.has_tool("set_todos")
+    schema_names = [t["function"]["name"] for t in reg.get_openai_tools()]
+    assert "set_todos" in schema_names
+
+    valid_items = [
+        {"title": "Inspect tool registry", "status": "done"},
+        {"title": "Implement set_todos", "status": "active"},
+        {"title": "Verify stdio event", "status": "pending"},
+    ]
+    summary = reg.dispatch("set_todos", {"todos": valid_items})
+    assert summary == "todos: 3 (1 done, 1 active, 1 pending)"
+    assert reg.todos == valid_items
+
+    # Each call replaces the session's todo list whole
+    next_items = [
+        {"title": "Implement set_todos", "status": "done"},
+        {"title": "Verify stdio event", "status": "done"},
+    ]
+    summary2 = reg.set_todos(next_items)
+    assert summary2 == "todos: 2 (2 done, 0 active, 0 pending)"
+    assert reg.todos == next_items
+
+    # Bad status produces a tool error naming status, no exception escaping, previous list preserved
+    bad_status = reg.dispatch("set_todos", {"todos": [{"title": "Step 1", "status": "in_progress"}]})
+    assert isinstance(bad_status, dict) and bad_status.get("isError") is True
+    assert "status" in bad_status.get("error", "")
+    assert reg.todos == next_items
+
+    # Empty or whitespace title produces a tool error naming title
+    for empty_title in ("", "   "):
+        bad_title = reg.dispatch("set_todos", {"todos": [{"title": empty_title, "status": "pending"}]})
+        assert isinstance(bad_title, dict) and bad_title.get("isError") is True
+        assert "title" in bad_title.get("error", "")
+        assert reg.todos == next_items
+
+    # Non-list payloads produce a tool error naming list, no exception escaping
+    for non_list in ("not a list", 42, {"title": "Single item", "status": "pending"}, {"todos": "not a list"}):
+        bad_payload = reg.dispatch("set_todos", non_list)
+        assert isinstance(bad_payload, dict) and bad_payload.get("isError") is True
+        assert "list" in bad_payload.get("error", "").lower()
+        assert reg.todos == next_items
+
+
+def test_stdio_adapter_emits_todos_event_on_success_and_none_on_failure(tmp_path, monkeypatch):
+    import io
+    from hydra_cli.stdio_adapter import CAPABILITIES, Adapter
+
+    assert "todos" in CAPABILITIES
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.setenv("HYDRA_HOME", str(home_dir / ".hydra"))
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    todo_list = [
+        {"title": "Add set_todos tool", "status": "done"},
+        {"title": "Emit todos event", "status": "active"},
+        {"title": "Render TUI block", "status": "pending"},
+    ]
+    httpd, base_url = _start_scripted_model_server(
+        tools=[{"name": "set_todos", "arguments": {"todos": todo_list}}],
+        tokens=("Published todos.",),
+    )
+    monkeypatch.setenv("LOCAL_AI_BASE", base_url)
+    try:
+        out = io.StringIO()
+        adapter = Adapter(io.BytesIO(b""), out)
+        events = _run_turn_sync(
+            adapter,
+            out,
+            {
+                "type": "turn",
+                "turn": "t_todos_ok",
+                "thread": "th_todos",
+                "prompt": "publish todos",
+                "cwd": str(workspace),
+                "permission": "plan",
+                "model": "local",
+                "checkpoint": False,
+            },
+        )
+        results = [e for e in events if e["type"] == "tool_result"]
+        assert len(results) == 1
+        assert results[0]["tool"] == "set_todos"
+        assert results[0]["is_error"] is False
+        assert results[0]["output"] == "todos: 3 (1 done, 1 active, 1 pending)"
+
+        todos_events = [e for e in events if e["type"] == "todos"]
+        assert len(todos_events) == 1
+        assert todos_events[0] == {
+            "type": "todos",
+            "turn": "t_todos_ok",
+            "todos": todo_list,
+        }
+    finally:
+        httpd.shutdown()
+
+    # Failed set_todos call (invalid status) emits tool_result with is_error=True and NO todos event
+    httpd_fail, base_url_fail = _start_scripted_model_server(
+        tools=[{"name": "set_todos", "arguments": {"todos": [{"title": "Broken", "status": "invalid"}]}}],
+        tokens=("Failed todos.",),
+    )
+    monkeypatch.setenv("LOCAL_AI_BASE", base_url_fail)
+    try:
+        out_fail = io.StringIO()
+        adapter_fail = Adapter(io.BytesIO(b""), out_fail)
+        events_fail = _run_turn_sync(
+            adapter_fail,
+            out_fail,
+            {
+                "type": "turn",
+                "turn": "t_todos_fail",
+                "thread": "th_todos",
+                "prompt": "publish invalid todos",
+                "cwd": str(workspace),
+                "permission": "plan",
+                "model": "local",
+                "checkpoint": False,
+            },
+        )
+        results_fail = [e for e in events_fail if e["type"] == "tool_result"]
+        assert len(results_fail) == 1
+        assert results_fail[0]["tool"] == "set_todos"
+        assert results_fail[0]["is_error"] is True
+        assert [e for e in events_fail if e["type"] == "todos"] == []
+    finally:
+        httpd_fail.shutdown()
+
+
 
 
 
