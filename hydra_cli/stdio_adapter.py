@@ -75,6 +75,7 @@ class Adapter:
         self._gc_done: set = set()
         self._calls = 0
         self._ledgers: Dict[str, Any] = {}
+        self._completed_turns: Dict[str, int] = {}
         self.exit_code = EXIT_OK
         self._gc_shadow_repos()
 
@@ -525,6 +526,7 @@ class Adapter:
             except Exception:
                 pass
             self._ledgers.pop(thread, None)
+        self._completed_turns.pop(thread, None)
         turns = _restore_conversation(thread, target)
         self.emit({"type": "rewind_result", "id": req, "thread": thread, "checkpoint": target, "backup": backup["id"],
                    "restored": sorted(restore), "removed": sorted(remove), "conversation": turns is not None, "turns": turns})
@@ -837,9 +839,22 @@ class Adapter:
         t.gate.wait()
         return t.decision
 
+    def _write_plan_artifact(self, cwd: str, thread: str, turn: str, turn_num: int, text: str) -> str:
+        from datetime import datetime, timezone
+
+        plans_dir = os.path.join(cwd, ".hydra", "plans")
+        os.makedirs(plans_dir, exist_ok=True)
+        plan_path = os.path.join(plans_dir, f"{thread}-turn-{turn_num}.md")
+        ts = datetime.now(timezone.utc).isoformat()
+        header = f"thread: {thread}\nturn: {turn}\ntimestamp: {ts}\ncwd: {cwd}\n\n"
+        body = text if text.endswith("\n") else text + "\n"
+        with open(plan_path, "w", encoding="utf-8") as handle:
+            handle.write(header + body)
+        return plan_path
+
     def _run_turn(self, t: _Turn, msg: Dict[str, Any]) -> None:
         turn, thread = t.id, t.thread
-        from hydra_cli.agent import CANCELLED_TEXT, run_agent_loop, set_retry_sink, set_usage_sink
+        from hydra_cli.agent import CANCELLED_TEXT, INTERRUPTED_TEXT, run_agent_loop, set_retry_sink, set_usage_sink
         from hydra_cli.config import DEFAULT_ORCHESTRATOR_MODEL, get_context_window
         from hydra_cli.context import SessionContextLedger
         from hydra_cli.ui import set_approval_handler, set_diff_sink, set_tool_sink, set_tool_start_sink
@@ -848,6 +863,20 @@ class Adapter:
         ledger = self._ledgers.get(thread)
         if ledger is None:
             ledger = self._ledgers[thread] = SessionContextLedger(session_id=thread)
+        if thread not in self._completed_turns:
+            try:
+                prior_done = sum(
+                    1
+                    for row in ledger.turns
+                    if row.get("role") == "assistant"
+                    and not row.get("tool_calls")
+                    and row.get("content") not in (CANCELLED_TEXT, INTERRUPTED_TEXT)
+                )
+                ledger.end_turn()
+            except Exception:
+                prior_done = 0
+            with self._state:
+                self._completed_turns.setdefault(thread, prior_done)
         calls = {"n": 0}
 
         def start(tool: str, args_json: str) -> None:
@@ -901,6 +930,16 @@ class Adapter:
             ok = not cancelled and answer != "[Turn aborted by developer]"
             final = {"type": "done", "turn": turn, "text": CANCELLED_TEXT if cancelled else (answer or ""),
                      "ok": ok, "cancelled": cancelled}
+            if ok:
+                with self._state:
+                    turn_num = self._completed_turns.get(thread, 0) + 1
+                    self._completed_turns[thread] = turn_num
+                if permission == "plan":
+                    try:
+                        plan_path = self._write_plan_artifact(msg["cwd"], thread, turn, turn_num, final["text"])
+                        final["plan"] = str(plan_path)
+                    except Exception as plan_exc:
+                        final["plan_error"] = str(plan_exc) or type(plan_exc).__name__
         except Exception as exc:
             self.error(f"{type(exc).__name__}: {exc}", "turn_failed", turn=turn)
             final = {"type": "done", "turn": turn, "text": "", "ok": False, "cancelled": t.cancel.is_set()}
