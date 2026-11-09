@@ -1389,7 +1389,7 @@ impl App {
                     }
                 }
             }
-            Ev::Done { turn, text, ok, cancelled } => {
+            Ev::Done { turn, text, ok, cancelled, plan, plan_error } => {
                 if !text.is_empty() {
                     if let Some(i) = self.assistant_at {
                         if let Some(line) = self.transcript.get_mut(i) {
@@ -1400,6 +1400,11 @@ impl App {
                     } else {
                         self.transcript.push(text);
                     }
+                }
+                if let Some(path) = plan {
+                    self.transcript.push(format!("plan : {path}"));
+                } else if let Some(err) = plan_error {
+                    self.transcript.push(format!("plan : write failed ({err})"));
                 }
                 let state = if cancelled {
                     "cancelled"
@@ -1754,6 +1759,8 @@ mod tests {
             text: "stopped".into(),
             ok: false,
             cancelled: true,
+            plan: None,
+            plan_error: None,
         });
         assert!(app.queued.is_empty());
         assert_eq!(app.busy_turn.as_deref(), Some("t2"));
@@ -1924,11 +1931,41 @@ mod tests {
             text: "done".into(),
             ok: true,
             cancelled: false,
+            plan: None,
+            plan_error: None,
         });
         app.tick();
         assert_eq!(app.state(), "idle");
         assert!(!app.animating());
         assert_eq!(app.pulse_secs, 0.0);
         assert_eq!(app.border_rgb(), BORDER_IDLE_RGB);
+    }
+
+    #[test]
+    fn done_event_renders_plan_and_plan_error_transcript_lines() {
+        let mut app = App::new();
+
+        let done_plan = hydra_stdio::parse_line(
+            r#"{"type":"done","turn":"t1","text":"plan body","ok":true,"cancelled":false,"plan":"/tmp/.hydra/plans/th-turn-1.md"}"#,
+        )
+        .unwrap();
+        app.apply(done_plan);
+        assert!(app.transcript.iter().any(|l| l == "plan : /tmp/.hydra/plans/th-turn-1.md"));
+
+        app.transcript.clear();
+        let done_err = hydra_stdio::parse_line(
+            r#"{"type":"done","turn":"t2","text":"plan body","ok":true,"cancelled":false,"plan_error":"read-only filesystem"}"#,
+        )
+        .unwrap();
+        app.apply(done_err);
+        assert!(app.transcript.iter().any(|l| l == "plan : write failed (read-only filesystem)"));
+
+        app.transcript.clear();
+        let done_plain = hydra_stdio::parse_line(
+            r#"{"type":"done","turn":"t3","text":"plain body","ok":true,"cancelled":false}"#,
+        )
+        .unwrap();
+        app.apply(done_plain);
+        assert!(!app.transcript.iter().any(|l| l.starts_with("plan : ")));
     }
 }

@@ -528,6 +528,8 @@ mod key_kind_tests {
             text: "ok".into(),
             ok: true,
             cancelled: false,
+            plan: None,
+            plan_error: None,
         });
         app.tick();
         terminal.draw(|f| draw(f, &mut app)).unwrap();

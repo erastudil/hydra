@@ -484,3 +484,261 @@ def test_stdio_meta_roundtrip(tmp_path, monkeypatch):
     assert loaded["title"] == expected["title"]
 
 
+def _start_scripted_model_server(tool=None, tokens=("Step 1: inspect\n", "Step 2: verify")):
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if tool and not any(m.get("role") == "tool" for m in body.get("messages", [])):
+                args = json.dumps(tool["arguments"])
+                chunks = [
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_1",
+                                            "type": "function",
+                                            "function": {"name": tool["name"], "arguments": ""},
+                                        }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]},
+                ]
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for chunk in chunks:
+                    self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode("utf-8"))
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for token in tokens:
+                chunk = {"choices": [{"delta": {"content": token}}]}
+                self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode("utf-8"))
+            self.wfile.write(b"data: [DONE]\n\n")
+            self.wfile.flush()
+
+        def log_message(self, *args):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+
+def _run_turn_sync(adapter, out, msg):
+    import json
+
+    before = len(out.getvalue().splitlines())
+    adapter._on_turn(msg)
+    with adapter._state:
+        workers = [t.worker for t in adapter._turns.values() if t.worker is not None]
+    for w in workers:
+        w.join(timeout=15)
+    lines = out.getvalue().splitlines()[before:]
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+def test_stdio_plan_turn_writes_artifact_and_sets_done_field(tmp_path, monkeypatch):
+    from datetime import datetime
+    import io
+    from hydra_cli.stdio_adapter import Adapter
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.setenv("HYDRA_HOME", str(home_dir / ".hydra"))
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    httpd, base_url = _start_scripted_model_server(tokens=("1. Read files\n", "2. Draft plan"))
+    monkeypatch.setenv("LOCAL_AI_BASE", base_url)
+    try:
+        out = io.StringIO()
+        adapter = Adapter(io.BytesIO(b""), out)
+        events = _run_turn_sync(
+            adapter,
+            out,
+            {
+                "type": "turn",
+                "turn": "t_plan_1",
+                "thread": "th_plan",
+                "prompt": "make a plan",
+                "cwd": str(workspace),
+                "permission": "plan",
+                "model": "local",
+                "checkpoint": False,
+            },
+        )
+        done = events[-1]
+        assert done["type"] == "done"
+        assert done["ok"] is True
+        expected_path = workspace / ".hydra" / "plans" / "th_plan-turn-1.md"
+        assert done.get("plan") == str(expected_path)
+        assert "plan_error" not in done
+        assert expected_path.is_file()
+
+        content = expected_path.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        assert lines[0] == "thread: th_plan"
+        assert lines[1] == "turn: t_plan_1"
+        assert lines[2].startswith("timestamp: ")
+        datetime.fromisoformat(lines[2].split("timestamp: ", 1)[1])
+        assert lines[3] == f"cwd: {workspace}"
+        assert "1. Read files\n2. Draft plan" in content
+
+        # Second completed turn in the same thread writes turn-2 and failed write reports plan_error without failing turn
+        events2 = _run_turn_sync(
+            adapter,
+            out,
+            {
+                "type": "turn",
+                "turn": "t_plan_2",
+                "thread": "th_plan",
+                "prompt": "refine plan",
+                "cwd": str(workspace),
+                "permission": "plan",
+                "model": "local",
+                "checkpoint": False,
+            },
+        )
+        done2 = events2[-1]
+        expected_path2 = workspace / ".hydra" / "plans" / "th_plan-turn-2.md"
+        assert done2["ok"] is True
+        assert done2.get("plan") == str(expected_path2)
+        assert expected_path2.is_file()
+
+        def fail_write(*_args, **_kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(adapter, "_write_plan_artifact", fail_write)
+        events3 = _run_turn_sync(
+            adapter,
+            out,
+            {
+                "type": "turn",
+                "turn": "t_plan_3",
+                "thread": "th_plan",
+                "prompt": "third plan",
+                "cwd": str(workspace),
+                "permission": "plan",
+                "model": "local",
+                "checkpoint": False,
+            },
+        )
+        done3 = events3[-1]
+        assert done3["ok"] is True
+        assert "plan" not in done3
+        assert done3.get("plan_error") == "disk full"
+    finally:
+        httpd.shutdown()
+
+
+def test_stdio_non_plan_turn_writes_no_artifact(tmp_path, monkeypatch):
+    import io
+    from hydra_cli.stdio_adapter import Adapter
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.setenv("HYDRA_HOME", str(home_dir / ".hydra"))
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    httpd, base_url = _start_scripted_model_server(tokens=("Normal reply",))
+    monkeypatch.setenv("LOCAL_AI_BASE", base_url)
+    try:
+        out = io.StringIO()
+        adapter = Adapter(io.BytesIO(b""), out)
+        events = _run_turn_sync(
+            adapter,
+            out,
+            {
+                "type": "turn",
+                "turn": "t_exec_1",
+                "thread": "th_exec",
+                "prompt": "run normal turn",
+                "cwd": str(workspace),
+                "permission": "accept_edits",
+                "model": "local",
+                "checkpoint": False,
+            },
+        )
+        done = events[-1]
+        assert done["type"] == "done"
+        assert done["ok"] is True
+        assert "plan" not in done
+        assert "plan_error" not in done
+        assert not (workspace / ".hydra" / "plans").exists()
+    finally:
+        httpd.shutdown()
+
+
+def test_stdio_plan_mode_denies_write_tool_call_regression(tmp_path, monkeypatch):
+    import io
+    from hydra_cli.stdio_adapter import Adapter
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.setenv("HYDRA_HOME", str(home_dir / ".hydra"))
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    write_tool = {"name": "write_file", "arguments": {"path": "denied.txt", "content": "should not exist\n"}}
+    httpd, base_url = _start_scripted_model_server(tool=write_tool, tokens=("Plan after write skip",))
+    monkeypatch.setenv("LOCAL_AI_BASE", base_url)
+    try:
+        out = io.StringIO()
+        adapter = Adapter(io.BytesIO(b""), out)
+        events = _run_turn_sync(
+            adapter,
+            out,
+            {
+                "type": "turn",
+                "turn": "t_deny_1",
+                "thread": "th_deny",
+                "prompt": "try to write",
+                "cwd": str(workspace),
+                "permission": "plan",
+                "model": "local",
+                "checkpoint": False,
+            },
+        )
+        auto = [e for e in events if e["type"] == "auto_decision"]
+        assert len(auto) == 1
+        assert auto[0]["tool"] == "write_file"
+        assert auto[0]["decision"] == "skip"
+        assert not any(e["type"] in ("approval_request", "tool_start") for e in events)
+        assert not (workspace / "denied.txt").exists()
+
+        done = events[-1]
+        assert done["type"] == "done"
+        assert done["ok"] is True
+        expected_plan = workspace / ".hydra" / "plans" / "th_deny-turn-1.md"
+        assert done.get("plan") == str(expected_plan)
+        assert expected_plan.is_file()
+        assert "Plan after write skip" in expected_plan.read_text(encoding="utf-8")
+    finally:
+        httpd.shutdown()
+
+
+
