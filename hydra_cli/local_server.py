@@ -721,6 +721,14 @@ def ensure_local_server(
                 f"n_ctx={ctx_check['n_ctx']} verified via /props in {boot_elapsed:.1f}s)."
             )
 
+            # The watchdog goes on before the warm-up: it carries the
+            # idle-unload lease, so it must not depend on this process
+            # living long enough to finish warming. The ensure_watchdog()
+            # call after the warm block re-affirms it (the call is
+            # idempotent, and a watchdog whose recorded pid has been
+            # superseded exits on its own).
+            status["watchdog"] = ensure_watchdog()
+
             if warm and os.environ.get("HYDRA_LOCAL_WARM", "").strip() != "0":
                 warm_started = time.time()
                 _emit_progress(
