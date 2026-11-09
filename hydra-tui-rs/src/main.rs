@@ -387,7 +387,7 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
     frame.render_widget(input_widget, chunks[2]);
 
     // ------------------------------------------------------------- 3: Footer Bar
-    let used_tokens = app.prompt_tokens.saturating_add(app.completion_tokens);
+    let used_tokens = app.prompt_tokens;
     let pct = if app.window > 0 { (used_tokens as f32 / app.window as f32).clamp(0.0, 1.0) } else { 0.0 };
     let cells: usize = 8;
     let filled = (pct * cells as f32).round() as usize;
@@ -534,5 +534,67 @@ mod key_kind_tests {
         app.tick();
         terminal.draw(|f| draw(f, &mut app)).unwrap();
         assert_eq!(terminal.backend().buffer()[(0, 20)].fg, to_color(BORDER_IDLE_RGB));
+    }
+
+    #[test]
+    fn draw_footer_gauge_renders_50_percent_for_65536_over_131072_window() {
+        use hydra_stdio::Ev;
+        use ratatui::backend::TestBackend;
+        use serde_json::json;
+
+        std::env::remove_var("HYDRA_CONTEXT_WINDOW");
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+
+        // Context event with window updates the stored window
+        app.apply(Ev::Context {
+            turn: "t1".into(),
+            rules: None,
+            skills: vec![],
+            mcp_tools: vec![],
+            mcp_errors: json!({}),
+            window: Some(131_072),
+            compacted: None,
+        });
+        assert_eq!(app.window, 131_072);
+
+        // Prior turn usage should be replaced by most recent turn's prompt tokens
+        app.apply(Ev::Usage {
+            model: "local".into(),
+            prompt: 30_000,
+            completion: 10_000,
+            cost: 0.0,
+        });
+        app.apply(Ev::Usage {
+            model: "local".into(),
+            prompt: 65_536,
+            completion: 8_192,
+            cost: 0.0,
+        });
+
+        // Context event with compacted produces the transcript line
+        app.apply(Ev::Context {
+            turn: "t2".into(),
+            rules: None,
+            skills: vec![],
+            mcp_tools: vec![],
+            mcp_errors: json!({}),
+            window: Some(131_072),
+            compacted: Some(json!({
+                "turns_folded": 3,
+                "chars_before": 95000,
+                "chars_after": 12000,
+            })),
+        });
+        assert!(app.transcript.iter().any(|l| l == "context : compacted (3 turns folded)"));
+
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let footer_line: String = (0..120).map(|x| buf[(x, 23)].symbol()).collect();
+        assert!(
+            footer_line.contains("ctx [████░░░░] 50%"),
+            "expected 50% gauge in footer, got: {footer_line:?}"
+        );
     }
 }

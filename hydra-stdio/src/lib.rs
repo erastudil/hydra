@@ -31,7 +31,15 @@ pub enum Ev {
     CheckpointList { id: String, thread: String, checkpoints: Vec<Value> },
     RewindResult { id: String, backup: String, restored: Vec<String>, removed: Vec<String>, conversation: bool, turns: Option<u64> },
     RulesResult { id: String, thread: String, rules: Vec<Value> },
-    Context { turn: String, rules: Option<String>, skills: Vec<String>, mcp_tools: Vec<String>, mcp_errors: Value },
+    Context {
+        turn: String,
+        rules: Option<String>,
+        skills: Vec<String>,
+        mcp_tools: Vec<String>,
+        mcp_errors: Value,
+        window: Option<u64>,
+        compacted: Option<Value>,
+    },
     Retry { turn: String, attempt: u64, of: u64, wait: f64, reason: String },
     AutoDecision { turn: String, tool: String, allow: bool, reason: String },
     SkillList { id: String, skills: Vec<Value> },
@@ -113,6 +121,8 @@ pub fn parse_line(line: &str) -> Option<Ev> {
             skills: str_arr("skills"),
             mcp_tools: str_arr("mcp_tools"),
             mcp_errors: v.get("mcp_errors").cloned().unwrap_or(Value::Null),
+            window: v.get("window").and_then(|x| x.as_u64()),
+            compacted: v.get("compacted").cloned(),
         },
         "retry" => Ev::Retry {
             turn: s("turn"),
@@ -548,6 +558,13 @@ mod proto_tests {
 
         let retry = parse_line(r#"{"type":"retry","turn":"t1","attempt":1,"of":3,"wait":1.5,"reason":"429"}"#).unwrap();
         assert!(matches!(retry, Ev::Retry { attempt: 1, of: 3, .. }));
+
+        let ctx = parse_line(r#"{"type":"context","turn":"t1","window":131072,"compacted":{"turns_folded":3,"chars_before":12000,"chars_after":2000}}"#).unwrap();
+        assert!(matches!(
+            ctx,
+            Ev::Context { window: Some(131072), compacted: Some(ref c), .. }
+            if c.get("turns_folded").and_then(|x| x.as_u64()) == Some(3)
+        ));
     }
 
     #[test]

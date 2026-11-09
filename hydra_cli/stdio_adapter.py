@@ -854,7 +854,14 @@ class Adapter:
 
     def _run_turn(self, t: _Turn, msg: Dict[str, Any]) -> None:
         turn, thread = t.id, t.thread
-        from hydra_cli.agent import CANCELLED_TEXT, INTERRUPTED_TEXT, run_agent_loop, set_retry_sink, set_usage_sink
+        from hydra_cli.agent import (
+            CANCELLED_TEXT,
+            INTERRUPTED_TEXT,
+            run_agent_loop,
+            set_compaction_sink,
+            set_retry_sink,
+            set_usage_sink,
+        )
         from hydra_cli.config import DEFAULT_ORCHESTRATOR_MODEL, get_context_window
         from hydra_cli.context import SessionContextLedger
         from hydra_cli.ui import set_approval_handler, set_diff_sink, set_tool_sink, set_tool_start_sink
@@ -878,6 +885,7 @@ class Adapter:
             with self._state:
                 self._completed_turns.setdefault(thread, prior_done)
         calls = {"n": 0}
+        window = _resolve_context_window(alias)
 
         def start(tool: str, args_json: str) -> None:
             calls["n"] += 1
@@ -895,8 +903,23 @@ class Adapter:
             self.emit({"type": "usage", "turn": turn, "model": alias, "prompt_tokens": pt, "completion_tokens": ct,
                        "cost_usd": rec["total_cost_usd"]})
 
+        def compacted(info: Dict[str, Any]) -> None:
+            comp_ev: Dict[str, Any] = {
+                "type": "context",
+                "turn": turn,
+                "compacted": {
+                    "turns_folded": int(info.get("turns_folded") or 0),
+                    "chars_before": int(info.get("chars_before") or 0),
+                    "chars_after": int(info.get("chars_after") or 0),
+                },
+            }
+            if window is not None:
+                comp_ev["window"] = window
+            self.emit(comp_ev)
+
         set_usage_sink(usage)
         set_retry_sink(lambda info: self.emit({"type": "retry", "turn": turn, **info}))
+        set_compaction_sink(compacted)
         self._tasks.owner.set({"thread": thread, "turn": turn})
         permission = t.permission
         set_approval_handler(lambda tool, args_json: self._approve(t, tool, args_json))
@@ -915,13 +938,22 @@ class Adapter:
             with self._mcp_lock:
                 mcp_tools = [tool["name"] for tool in mcp.get_tools()] if mcp else []
                 mcp_errors = dict(mcp.errors) if mcp else {}
-            self.emit({"type": "context", "turn": turn, "rules": find_project_rules(msg["cwd"]),
-                       "skills": [sk["id"] for sk in chosen], "mcp_tools": mcp_tools, "mcp_errors": mcp_errors})
+            ctx_ev: Dict[str, Any] = {
+                "type": "context",
+                "turn": turn,
+                "rules": find_project_rules(msg["cwd"]),
+                "skills": [sk["id"] for sk in chosen],
+                "mcp_tools": mcp_tools,
+                "mcp_errors": mcp_errors,
+            }
+            if window is not None:
+                ctx_ev["window"] = window
+            self.emit(ctx_ev)
             answer = run_agent_loop(
                 alias=alias, prompt=msg["prompt"], session_id=thread, resume_session=True, cwd=msg["cwd"],
                 steer_mode=permission != "bypass", ledger=ledger, strategy=msg.get("mode", "recall"),
                 on_token=lambda text: self.emit({"type": "token", "turn": turn, "text": text}),
-                max_context_chars=msg.get("context_chars") or get_context_window(alias) * 4,
+                max_context_chars=msg.get("context_chars") or (window or get_context_window(alias)) * 4,
                 cancel=t.cancel,
                 extra_context=extra,
                 registry=mcp,
@@ -946,6 +978,7 @@ class Adapter:
         finally:
             set_usage_sink(None)
             set_retry_sink(None)
+            set_compaction_sink(None)
             set_approval_handler(None)
             set_diff_sink(None)
             set_tool_sink(None)
@@ -959,6 +992,73 @@ class Adapter:
             if t.pending:
                 self._requests.pop(t.pending, None)
             self.emit(final)
+
+
+def _is_local_route(alias: Optional[str]) -> bool:
+    from hydra_cli import modes
+    from hydra_cli.config import resolve_route
+
+    key = (alias or "").strip().lower()
+    if key == "local":
+        return True
+    if key in ("", "agent", "auto", "orchestrator"):
+        try:
+            if modes.current_mode() == "local":
+                return True
+        except Exception:
+            pass
+    if not key:
+        return False
+    try:
+        model_id = str(resolve_route(key).get("model") or key)
+        return modes.classify_model(model_id) == "local"
+    except Exception:
+        return False
+
+
+def _resolve_context_window(alias: Optional[str]) -> Optional[int]:
+    """Effective context window in tokens for the session's route, or None if undeterminable."""
+    from hydra_cli import local_server, preflight
+    from hydra_cli.config import get_context_window
+
+    if _is_local_route(alias):
+        explicit_base = (
+            os.environ.get("LLAMACPP_HOST", "").strip()
+            or os.environ.get("LOCAL_AI_BASE", "").strip()
+            or None
+        )
+        try:
+            props = local_server.server_props(explicit_base, timeout=0.5)
+        except TypeError:
+            props = local_server.server_props()
+        except Exception:
+            props = None
+        n_ctx = local_server.extract_props_n_ctx(props)
+        if isinstance(n_ctx, int) and not isinstance(n_ctx, bool) and n_ctx > 0:
+            return n_ctx
+        try:
+            report = preflight.get_last_preflight_report()
+            loc = getattr(report, "local", None) if report is not None else None
+            rep_ctx = getattr(loc, "n_ctx", None) if loc is not None else None
+            if isinstance(rep_ctx, int) and not isinstance(rep_ctx, bool) and rep_ctx > 0:
+                endpoint = (getattr(loc, "endpoint", None) or "").rstrip("/")
+                port = getattr(loc, "port", None)
+                if explicit_base is not None:
+                    if not endpoint or explicit_base.rstrip("/").startswith(endpoint):
+                        return rep_ctx
+                elif port is None or preflight.is_port_open("127.0.0.1", int(port), timeout=0.1):
+                    return rep_ctx
+        except Exception:
+            pass
+        return None
+
+    try:
+        win = get_context_window(alias)
+        if isinstance(win, int) and not isinstance(win, bool) and win > 0:
+            return win
+    except Exception:
+        pass
+    return None
 
 
 CREATE_NO_WINDOW = 0x08000000
