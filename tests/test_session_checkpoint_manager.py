@@ -1141,6 +1141,89 @@ def test_stdio_modelless_metaless_turn_resolves_local_default_model_and_respects
     assert resolved_aliases[-1] == "mimo 2.6 flash"
 
 
+def test_stdio_tool_result_emits_monotonic_duration_ms_and_omits_without_matching_start(tmp_path, monkeypatch):
+    import io
+    from hydra_cli.stdio_adapter import Adapter
+    from hydra_cli.ui import tool_sink
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.setenv("HYDRA_HOME", str(home_dir / ".hydra"))
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sample = workspace / "sample.txt"
+    sample.write_text("line one\nline two\n", encoding="utf-8")
+
+    read_tool = {"name": "read_file", "arguments": {"path": "sample.txt"}}
+    httpd, base_url = _start_scripted_model_server(tool=read_tool, tokens=("Read complete.",))
+    monkeypatch.setenv("LOCAL_AI_BASE", base_url)
+    try:
+        out = io.StringIO()
+        adapter = Adapter(io.BytesIO(b""), out)
+        events = _run_turn_sync(
+            adapter,
+            out,
+            {
+                "type": "turn",
+                "turn": "t_tool_dur_1",
+                "thread": "th_tool_dur",
+                "prompt": "read sample.txt",
+                "cwd": str(workspace),
+                "permission": "bypass",
+                "model": "local",
+                "checkpoint": False,
+            },
+        )
+        starts = [e for e in events if e["type"] == "tool_start"]
+        results = [e for e in events if e["type"] == "tool_result"]
+        assert len(starts) == 1
+        assert len(results) == 1
+        assert starts[0]["turn"] == "t_tool_dur_1"
+        assert starts[0]["call"] == 1
+        assert results[0]["turn"] == "t_tool_dur_1"
+        assert results[0]["call"] == 1
+        assert results[0]["tool"] == "read_file"
+        assert results[0]["is_error"] is False
+        assert "duration_ms" in results[0]
+        assert isinstance(results[0]["duration_ms"], int)
+        assert not isinstance(results[0]["duration_ms"], bool)
+        assert results[0]["duration_ms"] >= 0
+    finally:
+        httpd.shutdown()
+
+    # Result sink called without a matching start (or after start already consumed) omits duration_ms
+    def stub_unmatched_loop(**_kwargs):
+        sink = tool_sink()
+        assert sink is not None
+        sink("read_file", '{"path":"sample.txt"}', False, "orphan result")
+        return "done"
+
+    monkeypatch.setattr("hydra_cli.agent.run_agent_loop", stub_unmatched_loop)
+    out2 = io.StringIO()
+    adapter2 = Adapter(io.BytesIO(b""), out2)
+    events2 = _run_turn_sync(
+        adapter2,
+        out2,
+        {
+            "type": "turn",
+            "turn": "t_tool_orphan",
+            "thread": "th_tool_orphan",
+            "prompt": "orphan tool result",
+            "cwd": str(workspace),
+            "permission": "bypass",
+            "model": "local",
+            "checkpoint": False,
+        },
+    )
+    orphan_results = [e for e in events2 if e["type"] == "tool_result"]
+    assert len(orphan_results) == 1
+    assert "duration_ms" not in orphan_results[0]
+
+
+
 
 
 

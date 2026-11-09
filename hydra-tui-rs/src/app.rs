@@ -58,6 +58,32 @@ pub struct PreflightVerdict {
     pub notice: Option<String>,
 }
 
+pub const TOOL_OUTPUT_PREVIEW_LINES: usize = 20;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolCallRecord {
+    pub tool: String,
+    pub is_error: bool,
+    pub duration_ms: Option<u64>,
+    pub output: String,
+}
+
+pub fn format_tool_duration(duration_ms: u64) -> String {
+    if duration_ms < 1000 {
+        format!("{duration_ms}ms")
+    } else {
+        format!("{:.1}s", duration_ms as f64 / 1000.0)
+    }
+}
+
+pub fn format_tool_header(tool: &str, is_error: bool, duration_ms: Option<u64>) -> String {
+    let flag = if is_error { "error" } else { "ok" };
+    match duration_ms {
+        Some(ms) => format!("tool {tool} {flag} · {}", format_tool_duration(ms)),
+        None => format!("tool {tool} {flag}"),
+    }
+}
+
 pub struct App {
     pub input: String,
     pub cursor_pos: usize,
@@ -94,6 +120,7 @@ pub struct App {
     pub history_draft: String,
     pub popup_idx: usize,
     pub diffs: Vec<(String, String)>,
+    pub tool_calls: Vec<ToolCallRecord>,
     pub active_skills: Vec<String>,
     pub last_checkpoint: Option<String>,
     pub be: Option<Backend>,
@@ -164,6 +191,7 @@ impl App {
             history_draft: String::new(),
             popup_idx: 0,
             diffs: Vec::new(),
+            tool_calls: Vec::new(),
             active_skills: Vec::new(),
             last_checkpoint: None,
             be: None,
@@ -558,6 +586,7 @@ impl App {
             ("/bypass", "auto-approve all tool calls in this session"),
             ("/permission", "set permission mode: plan, manual, accept_edits, bypass"),
             ("/steer", "interrupt running turn and dispatch queued instruction now"),
+            ("/tool", "expand full output of a tool call (/tool [n])"),
             ("/diff", "inspect unified diffs from this session"),
             ("/checkpoints", "list shadow git checkpoints for this thread"),
             ("/rewind", "rewind workspace and conversation to a checkpoint"),
@@ -862,6 +891,7 @@ impl App {
                     ("/fallback", "switch to fallback model (glm 5.3 flash)"),
                     ("/plan | /accept | /ask | /bypass", "switch tool permission mode"),
                     ("/steer [prompt]", "interrupt running turn and dispatch queued prompt"),
+                    ("/tool [n]", "expand full output of the last or nth tool call"),
                     ("/diff [n|path]", "render unified diffs recorded in this session"),
                     ("/checkpoints | /rewind [id]", "list shadow git snapshots or rewind workspace"),
                     ("/always [prefix] | /rules", "manage always-allow tool approval rules"),
@@ -1001,6 +1031,44 @@ impl App {
                     be.rules(&self.thread, remove_id);
                 } else {
                     self.transcript.push("agent : not connected".into());
+                }
+            }
+            "tool" => {
+                let arg = parts.next().unwrap_or("");
+                if self.tool_calls.is_empty() {
+                    if arg.is_empty() {
+                        self.transcript.push("tool : no tool calls recorded in this session".into());
+                    } else {
+                        self.transcript.push(format!("tool : #{arg} out of range (no tool calls recorded)"));
+                    }
+                    return;
+                }
+                let idx = if arg.is_empty() {
+                    self.tool_calls.len() - 1
+                } else {
+                    let Ok(n) = arg.parse::<usize>() else {
+                        self.transcript.push(format!(
+                            "tool : invalid index {arg} (expected 1..={})",
+                            self.tool_calls.len()
+                        ));
+                        return;
+                    };
+                    if n == 0 || n > self.tool_calls.len() {
+                        self.transcript.push(format!(
+                            "tool : #{n} out of range (1..={})",
+                            self.tool_calls.len()
+                        ));
+                        return;
+                    }
+                    n - 1
+                };
+                let entry = self.tool_calls[idx].clone();
+                self.transcript.push(format_tool_header(&entry.tool, entry.is_error, entry.duration_ms));
+                let out_clean = entry.output.trim();
+                if !out_clean.is_empty() {
+                    for line in out_clean.lines() {
+                        self.transcript.push(format!("  {line}"));
+                    }
                 }
             }
             "diff" | "diffs" => {
@@ -1151,6 +1219,7 @@ impl App {
                 };
                 self.transcript.clear();
                 self.diffs.clear();
+                self.tool_calls.clear();
                 self.turn_n = 0;
                 self.transcript.push(format!("session : new thread {}", self.thread));
             }
@@ -1340,18 +1409,24 @@ impl App {
                     self.transcript.push(format!("tool : {tool} ({preview})"));
                 }
             }
-            Ev::ToolResult { tool, is_error, output, .. } => {
-                let flag = if is_error { "error" } else { "ok" };
+            Ev::ToolResult { tool, is_error, output, duration_ms, .. } => {
+                self.tool_calls.push(ToolCallRecord {
+                    tool: tool.clone(),
+                    is_error,
+                    duration_ms,
+                    output: output.clone(),
+                });
+                self.transcript.push(format_tool_header(&tool, is_error, duration_ms));
                 let out_clean = output.trim();
-                if out_clean.contains('\n') {
-                    self.transcript.push(format!("tool {tool} {flag} :"));
-                    for line in out_clean.lines() {
+                if !out_clean.is_empty() {
+                    let lines: Vec<&str> = out_clean.lines().collect();
+                    for line in lines.iter().take(TOOL_OUTPUT_PREVIEW_LINES) {
                         self.transcript.push(format!("  {line}"));
                     }
-                } else if !out_clean.is_empty() {
-                    self.transcript.push(format!("tool {tool} {flag} : {out_clean}"));
-                } else {
-                    self.transcript.push(format!("tool {tool} {flag}"));
+                    if lines.len() > TOOL_OUTPUT_PREVIEW_LINES {
+                        let extra = lines.len() - TOOL_OUTPUT_PREVIEW_LINES;
+                        self.transcript.push(format!("… +{extra} lines · /tool expands"));
+                    }
                 }
             }
             Ev::Diff { path, diff, .. } => {
@@ -2353,5 +2428,149 @@ mod tests {
             .collect();
         assert_eq!(notice_lines.len(), 1);
         assert!(!notice_lines[0].contains('\n'));
+    }
+
+    #[test]
+    fn tool_duration_formatting_sub_second_multi_second_and_absent() {
+        assert_eq!(format_tool_duration(0), "0ms");
+        assert_eq!(format_tool_duration(812), "812ms");
+        assert_eq!(format_tool_duration(999), "999ms");
+        assert_eq!(format_tool_duration(1000), "1.0s");
+        assert_eq!(format_tool_duration(1200), "1.2s");
+        assert_eq!(format_tool_duration(3450), "3.5s");
+
+        assert_eq!(
+            format_tool_header("read_file", false, Some(812)),
+            "tool read_file ok · 812ms"
+        );
+        assert_eq!(
+            format_tool_header("run_command", true, Some(1200)),
+            "tool run_command error · 1.2s"
+        );
+        assert_eq!(
+            format_tool_header("read_file", false, None),
+            "tool read_file ok"
+        );
+        assert_eq!(
+            format_tool_header("run_command", true, None),
+            "tool run_command error"
+        );
+    }
+
+    #[test]
+    fn tool_result_truncates_over_20_lines_and_tool_command_expands_last_or_nth_and_handles_out_of_range() {
+        let mut app = App::new();
+
+        // Out-of-range before any tool calls have arrived prints a short error, never panics
+        app.command("tool");
+        assert_eq!(
+            app.transcript.last().map(String::as_str),
+            Some("tool : no tool calls recorded in this session")
+        );
+        app.command("tool 1");
+        assert!(app.transcript.last().unwrap().contains("out of range"));
+
+        // 1st tool call: 3 lines, sub-second duration (812ms)
+        let ev1 = hydra_stdio::parse_line(
+            r#"{"type":"tool_result","turn":"t1","call":1,"tool":"read_file","is_error":false,"output":"alpha\nbeta\ngamma","truncated":false,"duration_ms":812}"#,
+        )
+        .unwrap();
+        app.transcript.clear();
+        app.apply(ev1);
+        assert_eq!(app.tool_calls.len(), 1);
+        assert_eq!(
+            app.transcript,
+            vec![
+                "tool read_file ok · 812ms".to_string(),
+                "  alpha".to_string(),
+                "  beta".to_string(),
+                "  gamma".to_string(),
+            ]
+        );
+
+        // 2nd tool call: 25 lines (> 20), multi-second duration (1200ms -> 1.2s)
+        let body_25 = (1..=25)
+            .map(|i| format!("row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.transcript.clear();
+        app.apply(Ev::ToolResult {
+            turn: "t1".into(),
+            tool: "grep_search".into(),
+            is_error: false,
+            output: body_25.clone(),
+            duration_ms: Some(1200),
+        });
+        assert_eq!(app.tool_calls.len(), 2);
+        assert_eq!(app.tool_calls[1].output, body_25);
+        assert_eq!(app.transcript.len(), 1 + 20 + 1);
+        assert_eq!(app.transcript[0], "tool grep_search ok · 1.2s");
+        assert_eq!(app.transcript[1], "  row 1");
+        assert_eq!(app.transcript[20], "  row 20");
+        assert_eq!(app.transcript[21], "… +5 lines · /tool expands");
+
+        // 3rd tool call: absent duration, error status
+        app.transcript.clear();
+        let ev3 = hydra_stdio::parse_line(
+            r#"{"type":"tool_result","turn":"t1","call":3,"tool":"run_command","is_error":true,"output":"exit 1\nfailed","truncated":false}"#,
+        )
+        .unwrap();
+        app.apply(ev3);
+        assert_eq!(app.tool_calls.len(), 3);
+        assert_eq!(
+            app.transcript,
+            vec![
+                "tool run_command error".to_string(),
+                "  exit 1".to_string(),
+                "  failed".to_string(),
+            ]
+        );
+
+        // `/tool` (default) expands the most recent tool call (call #3)
+        app.transcript.clear();
+        app.command("tool");
+        assert_eq!(
+            app.transcript,
+            vec![
+                "tool run_command error".to_string(),
+                "  exit 1".to_string(),
+                "  failed".to_string(),
+            ]
+        );
+
+        // `/tool 2` expands the 2nd tool call in full (all 25 lines, no truncation line)
+        app.transcript.clear();
+        app.command("tool 2");
+        assert_eq!(app.transcript.len(), 1 + 25);
+        assert_eq!(app.transcript[0], "tool grep_search ok · 1.2s");
+        assert_eq!(app.transcript[1], "  row 1");
+        assert_eq!(app.transcript[20], "  row 20");
+        assert_eq!(app.transcript[21], "  row 21");
+        assert_eq!(app.transcript[25], "  row 25");
+
+        // `/tool 1` expands the 1st tool call
+        app.transcript.clear();
+        app.command("tool 1");
+        assert_eq!(
+            app.transcript,
+            vec![
+                "tool read_file ok · 812ms".to_string(),
+                "  alpha".to_string(),
+                "  beta".to_string(),
+                "  gamma".to_string(),
+            ]
+        );
+
+        // Out-of-range n (0, 4, non-numeric) prints a short error line and does not panic
+        for bad in ["tool 0", "tool 4", "tool 99", "tool abc"] {
+            app.transcript.clear();
+            app.command(bad);
+            assert_eq!(app.transcript.len(), 1, "expected 1 error line for {bad}");
+            assert!(
+                app.transcript[0].starts_with("tool : "),
+                "unexpected line for {bad}: {}",
+                app.transcript[0]
+            );
+        }
     }
 }
