@@ -484,10 +484,12 @@ def test_stdio_meta_roundtrip(tmp_path, monkeypatch):
     assert loaded["title"] == expected["title"]
 
 
-def _start_scripted_model_server(tool=None, tokens=("Step 1: inspect\n", "Step 2: verify"), n_ctx=None):
+def _start_scripted_model_server(tool=None, tokens=("Step 1: inspect\n", "Step 2: verify"), n_ctx=None, tools=None):
     import json
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    tool_list = list(tools) if tools is not None else ([tool] if tool is not None else [])
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -514,27 +516,31 @@ def _start_scripted_model_server(tool=None, tokens=("Step 1: inspect\n", "Step 2
                 self.wfile.write(payload)
                 self.wfile.flush()
                 return
-            if tool and not any(m.get("role") == "tool" for m in body.get("messages", [])):
-                args = json.dumps(tool["arguments"])
-                chunks = [
-                    {
-                        "choices": [
-                            {
-                                "delta": {
-                                    "tool_calls": [
-                                        {
-                                            "index": 0,
-                                            "id": "call_1",
-                                            "type": "function",
-                                            "function": {"name": tool["name"], "arguments": ""},
-                                        }
-                                    ]
+            if tool_list and not any(m.get("role") == "tool" for m in body.get("messages", [])):
+                chunks = []
+                for idx, t_spec in enumerate(tool_list):
+                    args = json.dumps(t_spec["arguments"])
+                    chunks.append(
+                        {
+                            "choices": [
+                                {
+                                    "delta": {
+                                        "tool_calls": [
+                                            {
+                                                "index": idx,
+                                                "id": f"call_{idx + 1}",
+                                                "type": "function",
+                                                "function": {"name": t_spec["name"], "arguments": ""},
+                                            }
+                                        ]
+                                    }
                                 }
-                            }
-                        ]
-                    },
-                    {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": args}}]}}]},
-                ]
+                            ]
+                        }
+                    )
+                    chunks.append(
+                        {"choices": [{"delta": {"tool_calls": [{"index": idx, "function": {"arguments": args}}]}}]}
+                    )
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.end_headers()
@@ -1221,6 +1227,104 @@ def test_stdio_tool_result_emits_monotonic_duration_ms_and_omits_without_matchin
     orphan_results = [e for e in events2 if e["type"] == "tool_result"]
     assert len(orphan_results) == 1
     assert "duration_ms" not in orphan_results[0]
+
+
+def test_stdio_diff_turn_writes_patch_artifacts_increments_seq_and_survives_write_failure(tmp_path, monkeypatch):
+    import io
+    from pathlib import Path
+    from hydra_cli.stdio_adapter import Adapter
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+    monkeypatch.setenv("HYDRA_HOME", str(home_dir / ".hydra"))
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    # Two file writes in the same turn (even to the same basename) get distinct seq numbers and never overwrite
+    write_tools = [
+        {"name": "write_file", "arguments": {"path": "src/hello.py", "content": "print('v1')\n"}},
+        {"name": "write_file", "arguments": {"path": "src/hello.py", "content": "print('v1')\nprint('v2')\n"}},
+    ]
+    httpd, base_url = _start_scripted_model_server(tools=write_tools, tokens=("Wrote files.",))
+    monkeypatch.setenv("LOCAL_AI_BASE", base_url)
+    try:
+        out = io.StringIO()
+        adapter = Adapter(io.BytesIO(b""), out)
+        events = _run_turn_sync(
+            adapter,
+            out,
+            {
+                "type": "turn",
+                "turn": "t_diff_1",
+                "thread": "th_diff",
+                "prompt": "write src/hello.py twice",
+                "cwd": str(workspace),
+                "permission": "accept_edits",
+                "model": "local",
+                "checkpoint": False,
+            },
+        )
+        diffs = [e for e in events if e["type"] == "diff"]
+        assert len(diffs) == 2
+        done = events[-1]
+        assert done["type"] == "done"
+        assert done["ok"] is True
+
+        diffs_dir = workspace / ".hydra" / "diffs" / "th_diff"
+        assert diffs_dir.is_dir()
+
+        art1 = Path(diffs[0]["artifact"])
+        art2 = Path(diffs[1]["artifact"])
+        assert art1 != art2
+        assert art1.parent == diffs_dir
+        assert art2.parent == diffs_dir
+        assert art1.name.endswith("-1-hello.py.patch")
+        assert art2.name.endswith("-2-hello.py.patch")
+        assert art1.is_file()
+        assert art2.is_file()
+        assert "artifact_error" not in diffs[0]
+        assert "artifact_error" not in diffs[1]
+
+        # Each .patch file contains the exact diff text the sink received
+        assert art1.read_text(encoding="utf-8") == diffs[0]["diff"]
+        assert art2.read_text(encoding="utf-8") == diffs[1]["diff"]
+        assert "+print('v1')" in art1.read_text(encoding="utf-8")
+        assert "+print('v2')" in art2.read_text(encoding="utf-8")
+
+        # Write failure still emits the diff event with artifact_error and never breaks the turn
+        def fail_diff_write(*_args, **_kwargs):
+            raise OSError("read-only diff store")
+
+        monkeypatch.setattr(adapter, "_write_diff_artifact", fail_diff_write)
+        events_err = _run_turn_sync(
+            adapter,
+            out,
+            {
+                "type": "turn",
+                "turn": "t_diff_2",
+                "thread": "th_diff",
+                "prompt": "write again with broken artifact store",
+                "cwd": str(workspace),
+                "permission": "accept_edits",
+                "model": "local",
+                "checkpoint": False,
+            },
+        )
+        diffs_err = [e for e in events_err if e["type"] == "diff"]
+        assert len(diffs_err) >= 1
+        for d_ev in diffs_err:
+            assert "artifact" not in d_ev
+            assert d_ev.get("artifact_error") == "read-only diff store"
+            assert d_ev.get("diff")
+        done_err = events_err[-1]
+        assert done_err["type"] == "done"
+        assert done_err["ok"] is True
+    finally:
+        httpd.shutdown()
+
 
 
 

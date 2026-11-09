@@ -30,7 +30,13 @@ pub enum Ev {
         output: String,
         duration_ms: Option<u64>,
     },
-    Diff { turn: String, path: String, diff: String },
+    Diff {
+        turn: String,
+        path: String,
+        diff: String,
+        artifact: Option<String>,
+        artifact_error: Option<String>,
+    },
     Usage { model: String, prompt: u64, completion: u64, cost: f64 },
     Approval { turn: String, id: String, tool: String, args: Value },
     Done {
@@ -100,7 +106,13 @@ pub fn parse_line(line: &str) -> Option<Ev> {
             output: s("output"),
             duration_ms: v.get("duration_ms").and_then(|x| x.as_u64()),
         },
-        "diff" => Ev::Diff { turn: s("turn"), path: s("path"), diff: s("diff") },
+        "diff" => Ev::Diff {
+            turn: s("turn"),
+            path: s("path"),
+            diff: s("diff"),
+            artifact: v.get("artifact").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(String::from),
+            artifact_error: v.get("artifact_error").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(String::from),
+        },
         "usage" => Ev::Usage {
             model: s("model"),
             prompt: n("prompt_tokens"),
@@ -624,6 +636,27 @@ mod proto_tests {
             tr_nodur,
             Ev::ToolResult { ref tool, is_error: true, duration_ms: None, .. }
             if tool == "read_file"
+        ));
+
+        let diff_art = parse_line(r#"{"type":"diff","turn":"t1","path":"src/main.rs","diff":"+ok","artifact":"/tmp/.hydra/diffs/th/20261108T210000Z-1-main.rs.patch"}"#).unwrap();
+        assert!(matches!(
+            diff_art,
+            Ev::Diff { ref path, artifact: Some(ref art), artifact_error: None, .. }
+            if path == "src/main.rs" && art == "/tmp/.hydra/diffs/th/20261108T210000Z-1-main.rs.patch"
+        ));
+
+        let diff_err = parse_line(r#"{"type":"diff","turn":"t1","path":"src/main.rs","diff":"+ok","artifact_error":"disk full"}"#).unwrap();
+        assert!(matches!(
+            diff_err,
+            Ev::Diff { ref path, artifact: None, artifact_error: Some(ref err), .. }
+            if path == "src/main.rs" && err == "disk full"
+        ));
+
+        let diff_plain = parse_line(r#"{"type":"diff","turn":"t1","path":"src/main.rs","diff":"+ok"}"#).unwrap();
+        assert!(matches!(
+            diff_plain,
+            Ev::Diff { ref path, artifact: None, artifact_error: None, .. }
+            if path == "src/main.rs"
         ));
     }
 

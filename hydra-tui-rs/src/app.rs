@@ -84,6 +84,20 @@ pub fn format_tool_header(tool: &str, is_error: bool, duration_ms: Option<u64>) 
     }
 }
 
+pub fn format_diff_header(
+    path: &str,
+    artifact: Option<&str>,
+    artifact_error: Option<&str>,
+) -> String {
+    if let Some(art) = artifact.filter(|s| !s.is_empty()) {
+        format!("diff : {path} -> {art}")
+    } else if let Some(err) = artifact_error.filter(|s| !s.is_empty()) {
+        format!("diff : {path} (write failed: {err})")
+    } else {
+        format!("diff : {path}")
+    }
+}
+
 pub struct App {
     pub input: String,
     pub cursor_pos: usize,
@@ -1429,9 +1443,13 @@ impl App {
                     }
                 }
             }
-            Ev::Diff { path, diff, .. } => {
+            Ev::Diff { path, diff, artifact, artifact_error, .. } => {
                 self.diffs.push((path.clone(), diff.clone()));
-                self.transcript.push(format!("diff : {path}"));
+                self.transcript.push(format_diff_header(
+                    &path,
+                    artifact.as_deref(),
+                    artifact_error.as_deref(),
+                ));
                 for line in diff.lines().take(40) {
                     self.transcript.push(format!("  {line}"));
                 }
@@ -2153,6 +2171,8 @@ mod tests {
             turn: "t1".into(),
             path: "src/app.rs".into(),
             diff: "@@ -1,1 +1,1 @@\n-old\n+new".into(),
+            artifact: None,
+            artifact_error: None,
         });
         assert_eq!(app.diffs.len(), 1);
         app.input = "/diff src/app.rs".into();
@@ -2572,5 +2592,56 @@ mod tests {
                 app.transcript[0]
             );
         }
+    }
+
+    #[test]
+    fn diff_event_renders_with_and_without_artifact_path_and_artifact_error() {
+        let mut app = App::new();
+
+        // Diff with artifact path
+        let ev_art = hydra_stdio::parse_line(
+            r#"{"type":"diff","turn":"t1","path":"src/main.rs","diff":"@@ -1,1 +1,1 @@\n-old\n+new","artifact":"/tmp/.hydra/diffs/th/20261108T210000Z-1-main.rs.patch"}"#,
+        )
+        .unwrap();
+        app.apply(ev_art);
+        assert_eq!(
+            app.transcript,
+            vec![
+                "diff : src/main.rs -> /tmp/.hydra/diffs/th/20261108T210000Z-1-main.rs.patch".to_string(),
+                "  @@ -1,1 +1,1 @@".to_string(),
+                "  -old".to_string(),
+                "  +new".to_string(),
+            ]
+        );
+
+        // Diff without artifact path (legacy / plain event)
+        app.transcript.clear();
+        let ev_plain = hydra_stdio::parse_line(
+            r#"{"type":"diff","turn":"t1","path":"src/lib.rs","diff":"+added"}"#,
+        )
+        .unwrap();
+        app.apply(ev_plain);
+        assert_eq!(
+            app.transcript,
+            vec![
+                "diff : src/lib.rs".to_string(),
+                "  +added".to_string(),
+            ]
+        );
+
+        // Diff with artifact_error
+        app.transcript.clear();
+        let ev_err = hydra_stdio::parse_line(
+            r#"{"type":"diff","turn":"t1","path":"src/main.rs","diff":"+retry","artifact_error":"permission denied"}"#,
+        )
+        .unwrap();
+        app.apply(ev_err);
+        assert_eq!(
+            app.transcript,
+            vec![
+                "diff : src/main.rs (write failed: permission denied)".to_string(),
+                "  +retry".to_string(),
+            ]
+        );
     }
 }

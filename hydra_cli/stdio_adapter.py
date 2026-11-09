@@ -77,6 +77,7 @@ class Adapter:
         self._calls = 0
         self._ledgers: Dict[str, Any] = {}
         self._completed_turns: Dict[str, int] = {}
+        self._diff_seqs: Dict[str, int] = {}
         self.exit_code = EXIT_OK
         self._gc_shadow_repos()
 
@@ -865,6 +866,40 @@ class Adapter:
             handle.write(header + body)
         return plan_path
 
+    def _next_diff_seq(self, diffs_dir: str, thread: str) -> int:
+        with self._state:
+            seq = self._diff_seqs.get(thread)
+            if seq is None:
+                seq = 0
+                try:
+                    if os.path.isdir(diffs_dir):
+                        for name in os.listdir(diffs_dir):
+                            if name.endswith(".patch"):
+                                parts = name.split("-", 2)
+                                if len(parts) >= 2 and parts[1].isdigit():
+                                    seq = max(seq, int(parts[1]))
+                except OSError:
+                    pass
+            seq += 1
+            self._diff_seqs[thread] = seq
+            return seq
+
+    def _write_diff_artifact(self, cwd: str, thread: str, path: str, text: str) -> str:
+        from datetime import datetime, timezone
+
+        diffs_dir = os.path.join(cwd, ".hydra", "diffs", thread)
+        seq = self._next_diff_seq(diffs_dir, thread)
+        os.makedirs(diffs_dir, exist_ok=True)
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        raw_base = os.path.basename(str(path or "").replace("\\", "/").rstrip("/"))
+        safe_base = "".join(c if (c.isalnum() or c in "-_.") else "_" for c in raw_base)
+        if not safe_base or safe_base in (".", ".."):
+            safe_base = "diff"
+        patch_path = os.path.join(diffs_dir, f"{ts}-{seq}-{safe_base}.patch")
+        with open(patch_path, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        return patch_path
+
     def _run_turn(self, t: _Turn, msg: Dict[str, Any]) -> None:
         turn, thread = t.id, t.thread
         from hydra_cli.agent import (
@@ -965,13 +1000,22 @@ class Adapter:
                 comp_ev["window"] = window
             self.emit(comp_ev)
 
+        def on_diff(path: str, text: str) -> None:
+            ev: Dict[str, Any] = {"type": "diff", "turn": turn, "path": path, "diff": text}
+            try:
+                artifact_path = self._write_diff_artifact(msg["cwd"], thread, path, text)
+                ev["artifact"] = str(artifact_path)
+            except Exception as diff_exc:
+                ev["artifact_error"] = str(diff_exc) or type(diff_exc).__name__
+            self.emit(ev)
+
         set_usage_sink(usage)
         set_retry_sink(lambda info: self.emit({"type": "retry", "turn": turn, **info}))
         set_compaction_sink(compacted)
         self._tasks.owner.set({"thread": thread, "turn": turn})
         permission = t.permission
         set_approval_handler(lambda tool, args_json: self._approve(t, tool, args_json))
-        set_diff_sink(lambda path, text: self.emit({"type": "diff", "turn": turn, "path": path, "diff": text}))
+        set_diff_sink(on_diff)
         set_tool_start_sink(start)
         set_tool_sink(result)
         final: Dict[str, Any]
