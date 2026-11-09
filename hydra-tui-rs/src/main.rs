@@ -331,11 +331,11 @@ fn draw(frame: &mut ratatui::Frame, app: &mut App) {
             ),
         ])
     } else if app.busy_turn.is_some() {
-        let elapsed = app.busy_start.map(|s| s.elapsed().as_secs()).unwrap_or(0);
+        let busy_text = app.busy_status_text();
         Line::from(vec![
             Span::styled(format!(" {braille_spin} "), Style::default().fg(to_color(ACCENT_RGB)).add_modifier(Modifier::BOLD)),
             Span::styled(
-                format!("Thinking {elapsed}s · {}... ", app.status_label),
+                format!("{busy_text} "),
                 Style::default().fg(Color::Rgb(169, 201, 188)),
             ),
             Span::styled("· Enter queues · Ctrl+Enter steers · Esc interrupts", Style::default().fg(to_color(DIM_RGB))),
@@ -596,5 +596,68 @@ mod key_kind_tests {
             footer_line.contains("ctx [████░░░░] 50%"),
             "expected 50% gauge in footer, got: {footer_line:?}"
         );
+    }
+
+    #[test]
+    fn draw_renders_hello_local_badge_and_20s_waiting_line_transition() {
+        use hydra_stdio::Ev;
+        use ratatui::backend::TestBackend;
+        use std::time::{Duration, Instant};
+
+        let _guard = app::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("HYDRA_DEFAULT_MODEL");
+        std::env::remove_var("HYDRA_MODEL");
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+
+        // Initialize from hello carrying mode "local" and default_model "gemma-e2b"
+        let hello = hydra_stdio::parse_line(
+            r#"{"type":"hello","protocol":1,"agent":"hydra","mode":"local","default_model":"gemma-e2b"}"#,
+        )
+        .unwrap();
+        app.apply(hello);
+
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let top_border: String = (0..120).map(|x| buf[(x, 0)].symbol()).collect();
+        let prompt_border: String = (0..120).map(|x| buf[(x, 20)].symbol()).collect();
+        assert!(top_border.contains("gemma-e2b"), "top border badge should show gemma-e2b: {top_border:?}");
+        assert!(prompt_border.contains("gemma-e2b"), "prompt border badge should show gemma-e2b: {prompt_border:?}");
+        assert!(!top_border.contains("muse spark contributor"));
+        assert!(!prompt_border.contains("muse spark contributor"));
+
+        // Start a turn and emit preflight_result for route "local"
+        app.input = "check status".into();
+        app.cursor_pos = app.input.len();
+        app.submit();
+        let pf = hydra_stdio::parse_line(
+            r#"{"type":"preflight_result","id":"t1","turn":"t1","strip":"[local:PASS]","notice":null,"report":{"mode":"local","default_route":"local","default_route_ok":true,"routes":{"local":{"route":"local","status":"PASS","reason":"ok"}}}}"#,
+        )
+        .unwrap();
+        app.apply(pf);
+
+        // Before 20s: status line (row 19) shows Thinking ...
+        app.busy_start = Some(Instant::now() - Duration::from_secs(10));
+        app.pulse_secs = 10.0;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let status_10s: String = (0..120).map(|x| terminal.backend().buffer()[(x, 19)].symbol()).collect();
+        assert!(status_10s.contains("Thinking 10s · working..."), "got: {status_10s:?}");
+
+        // At 20s with no token yet: status line transitions to `waiting on local… 20s`
+        app.busy_start = Some(Instant::now() - Duration::from_secs(20));
+        app.pulse_secs = 20.0;
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let status_20s: String = (0..120).map(|x| terminal.backend().buffer()[(x, 19)].symbol()).collect();
+        assert!(status_20s.contains("waiting on local… 20s"), "got: {status_20s:?}");
+
+        // Once a token arrives, waiting line yields back to Thinking
+        app.apply(Ev::Token {
+            turn: "t1".into(),
+            text: "hi".into(),
+        });
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let status_after_token: String = (0..120).map(|x| terminal.backend().buffer()[(x, 19)].symbol()).collect();
+        assert!(status_after_token.contains("Thinking 20s · working..."), "got: {status_after_token:?}");
     }
 }

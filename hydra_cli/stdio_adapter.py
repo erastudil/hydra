@@ -120,8 +120,20 @@ class Adapter:
         return raw.rstrip(b"\r\n")
 
     def serve(self) -> int:
-        self.emit({"type": "hello", "protocol": PROTOCOL_VERSION, "agent": "hydra", "capabilities": CAPABILITIES,
-                   "context_modes": list(CONTEXT_MODES)})
+        hello: Dict[str, Any] = {
+            "type": "hello",
+            "protocol": PROTOCOL_VERSION,
+            "agent": "hydra",
+            "capabilities": CAPABILITIES,
+            "context_modes": list(CONTEXT_MODES),
+        }
+        serving_mode = _resolve_serving_mode()
+        if serving_mode:
+            hello["mode"] = serving_mode
+        default_model = _resolve_mode_default_model(serving_mode)
+        if default_model:
+            hello["default_model"] = default_model
+        self.emit(hello)
         self._tasks.adopt()
         self._gc_shadow_repos()
         try:
@@ -204,7 +216,7 @@ class Adapter:
         cwd = msg.get("cwd", stored.get("cwd"))
         mode = msg.get("mode", stored.get("mode", "recall"))
         for key in ("model", "permission"):
-            if msg.get(key) is None and stored.get(key) is not None:
+            if msg.get(key) in (None, "") and stored.get(key) is not None:
                 msg[key] = stored[key]
         chars = msg.get("context_chars")
         problems = []
@@ -866,7 +878,12 @@ class Adapter:
         from hydra_cli.context import SessionContextLedger
         from hydra_cli.ui import set_approval_handler, set_diff_sink, set_tool_sink, set_tool_start_sink
 
-        alias = msg.get("model") or DEFAULT_ORCHESTRATOR_MODEL
+        alias = (
+            msg.get("model")
+            or (_load_meta(thread).get("model") if thread else None)
+            or _resolve_mode_default_model()
+            or DEFAULT_ORCHESTRATOR_MODEL
+        )
         ledger = self._ledgers.get(thread)
         if ledger is None:
             ledger = self._ledgers[thread] = SessionContextLedger(session_id=thread)
@@ -885,7 +902,7 @@ class Adapter:
             with self._state:
                 self._completed_turns.setdefault(thread, prior_done)
         calls = {"n": 0}
-        window = _resolve_context_window(alias)
+        window: Optional[int] = None
 
         def start(tool: str, args_json: str) -> None:
             calls["n"] += 1
@@ -928,6 +945,26 @@ class Adapter:
         set_tool_sink(result)
         final: Dict[str, Any]
         try:
+            try:
+                from hydra_cli import preflight
+
+                serving_mode = _resolve_serving_mode()
+                pf_report = preflight.run_preflight(mode=serving_mode, force=False)
+                self.emit({
+                    "type": "preflight_result",
+                    "id": turn,
+                    "turn": turn,
+                    "strip": preflight.format_route_strip(pf_report),
+                    "notice": preflight.format_preflight_notice(pf_report, mode=serving_mode),
+                    "report": pf_report.to_dict(),
+                })
+            except Exception as pf_exc:
+                try:
+                    sys.stderr.write(f"hydra stdio : preflight failed for turn {turn}: {pf_exc}\n")
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+            window = _resolve_context_window(alias)
             if msg.get("checkpoint", True):
                 self.emit({"type": "checkpoint", "turn": turn, "thread": thread, **self._snapshot(msg["cwd"], f"turn={turn}", thread)})
             from hydra_cli.agent import find_project_rules
@@ -992,6 +1029,33 @@ class Adapter:
             if t.pending:
                 self._requests.pop(t.pending, None)
             self.emit(final)
+
+
+def _resolve_serving_mode() -> Optional[str]:
+    from hydra_cli import modes
+
+    try:
+        m = modes.current_mode()
+        if isinstance(m, str) and m.strip():
+            return m.strip().lower()
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_mode_default_model(mode: Optional[str] = None) -> Optional[str]:
+    from hydra_cli import modes
+
+    try:
+        resolved_mode = mode if (isinstance(mode, str) and mode.strip()) else _resolve_serving_mode()
+        if not resolved_mode:
+            return None
+        alias = modes.default_alias(resolved_mode)
+        if isinstance(alias, str) and alias.strip():
+            return alias.strip()
+    except Exception:
+        pass
+    return None
 
 
 def _is_local_route(alias: Optional[str]) -> bool:
