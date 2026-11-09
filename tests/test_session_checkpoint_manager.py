@@ -311,3 +311,176 @@ def test_shadow_startup_gc_hygiene(tmp_path, monkeypatch):
     assert int(parts[2]) > 0
     assert not any(ln.startswith("inflight.git ") for ln in lines)
 
+
+def test_stdio_sessions_listing_shape(tmp_path, monkeypatch):
+    import io
+    import json
+    from hydra_cli.stdio_adapter import Adapter, _save_meta
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    sessions_root = home_dir / ".hydra" / "sessions"
+    sess_dir = sessions_root / "th_sess_1"
+    sess_dir.mkdir(parents=True, exist_ok=True)
+    (sess_dir / "ledger.db").write_bytes(b"")
+    _save_meta(
+        "th_sess_1",
+        {
+            "cwd": str(workspace),
+            "mode": "compact",
+            "model": "qwen3-coder",
+            "permission": "accept_edits",
+            "title": "Session One",
+        },
+    )
+
+    empty_dir = sessions_root / "th_no_ledger"
+    empty_dir.mkdir(parents=True, exist_ok=True)
+
+    out = io.StringIO()
+    adapter = Adapter(io.BytesIO(b""), out)
+    adapter._on_sessions({"type": "sessions", "id": "req_sessions"})
+
+    msg = json.loads(out.getvalue().strip())
+    assert msg["type"] == "session_list"
+    assert msg["id"] == "req_sessions"
+    assert len(msg["sessions"]) == 1
+    entry = msg["sessions"][0]
+    assert entry["thread"] == "th_sess_1"
+    assert entry["cwd"] == str(workspace)
+    assert entry["mode"] == "compact"
+    assert entry["model"] == "qwen3-coder"
+    assert entry["permission"] == "accept_edits"
+    assert entry["title"] == "Session One"
+    assert isinstance(entry["updated"], int)
+
+
+def test_stdio_history_result_turns_and_meta(tmp_path, monkeypatch):
+    import io
+    import json
+    from hydra_cli.context import SessionContextLedger
+    from hydra_cli.stdio_adapter import Adapter, _save_meta
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    ledger = SessionContextLedger(session_id="th_hist_1")
+    ledger.append_turn("user", "hello hydra")
+    ledger.append_turn("assistant", "hello human")
+    ledger.end_turn()
+
+    meta = {
+        "cwd": str(workspace),
+        "mode": "recall",
+        "model": "deepseek-v3",
+        "permission": "manual",
+        "title": "History Thread",
+    }
+    _save_meta("th_hist_1", meta)
+
+    out = io.StringIO()
+    adapter = Adapter(io.BytesIO(b""), out)
+    adapter._on_history({"type": "history", "id": "req_hist", "thread": "th_hist_1"})
+
+    msg = json.loads(out.getvalue().strip())
+    assert msg["type"] == "history_result"
+    assert msg["id"] == "req_hist"
+    assert msg["thread"] == "th_hist_1"
+    assert msg["turns"] == [
+        {"role": "user", "content": "hello hydra"},
+        {"role": "assistant", "content": "hello human"},
+    ]
+    assert msg["meta"] == meta
+
+
+def test_stdio_turn_meta_restore_before_validation(tmp_path, monkeypatch):
+    import io
+    from hydra_cli.stdio_adapter import Adapter, _save_meta
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    _save_meta(
+        "th_restore",
+        {
+            "cwd": str(workspace),
+            "mode": "compact",
+            "model": "qwen3-coder",
+            "permission": "accept_edits",
+            "title": "Restored Thread",
+        },
+    )
+
+    out = io.StringIO()
+    adapter = Adapter(io.BytesIO(b""), out)
+    captured = []
+
+    def intercept_run_turn(t, turn_msg):
+        captured.append((t, dict(turn_msg)))
+        with adapter._state:
+            if t.thread_lock is not None:
+                t.thread_lock.__exit__(None, None, None)
+            adapter._turns.pop(t.id, None)
+            adapter._busy_threads.pop(t.thread, None)
+
+    monkeypatch.setattr(adapter, "_run_turn", intercept_run_turn)
+
+    adapter._on_turn({"type": "turn", "turn": "t_restore_1", "thread": "th_restore", "prompt": "continue work"})
+    adapter._stop_turns()
+
+    assert out.getvalue() == ""
+    assert len(captured) == 1
+    t_obj, filled = captured[0]
+    assert filled["cwd"] == str(workspace)
+    assert filled["model"] == "qwen3-coder"
+    assert filled["permission"] == "accept_edits"
+    assert filled["mode"] == "compact"
+    assert t_obj.permission == "accept_edits"
+
+
+def test_stdio_meta_roundtrip(tmp_path, monkeypatch):
+    from hydra_cli.stdio_adapter import _load_meta, _save_meta
+
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.setenv("USERPROFILE", str(home_dir))
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    assert _load_meta("th_roundtrip") == {}
+
+    expected = {
+        "cwd": str(workspace),
+        "mode": "sliding",
+        "model": "gemini-pro",
+        "permission": "plan",
+        "title": "Roundtrip Title",
+    }
+    _save_meta("th_roundtrip", expected)
+    loaded = _load_meta("th_roundtrip")
+
+    assert loaded["cwd"] == expected["cwd"]
+    assert loaded["mode"] == expected["mode"]
+    assert loaded["model"] == expected["model"]
+    assert loaded["permission"] == expected["permission"]
+    assert loaded["title"] == expected["title"]
+
+
