@@ -176,7 +176,11 @@ silently degrades every judgment the model makes.
   Llama 3.3 70B and gpt-oss at 131072) or, for local seats, the
   served window: the local server launches at `-c 131072` (the 4060
   rule), so the locally served Bonsai 2B/4B/9B budgets are 131072
-  even though the GGUF metadata capacity is 262144.
+  even though the GGUF metadata capacity is 262144. The free-lane
+  windows were verified against the vendors' own listings on
+  2026-11-09: Gemma 4 26B A4B and 31B are 256K per Google's card, and
+  the Cloudflare fp8-fast route serves 24,000 per Cloudflare's model
+  page (the model's native window is Meta's 128K).
 - **Sampling.** Where a vendor publishes a sampling spec, it lives in
   the catalog as `sampling_profiles` (keyed by model id) and the
   payload builders fill any sampling field the caller left unset

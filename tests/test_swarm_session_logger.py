@@ -120,7 +120,7 @@ def test_context_window_sizing_and_ai_ml_invariant():
 
     # Gemma model expanded context (eliminate 8k cap)
     assert get_context_window("gemma-e4b") == 131072
-    assert get_context_window("google/gemma-4-26b-a4b-it") == 131072
+    assert get_context_window("google/gemma-4-26b-a4b-it") == 262144
 
     # AI/ML research invariant verification
     assert "AI/ML Research Invariant" in IMMUTABLE_AGENT_INVARIANTS

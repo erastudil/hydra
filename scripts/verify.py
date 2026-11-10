@@ -11018,12 +11018,24 @@ def wave22_session_logger_and_mimo_routing():
     assert get_context_window("bonsai 2 9b") == 131072
     # Summon spec (owner ruling 2026-11-09): Hydra's context budget for a
     # locally served model is the served window (-c 131072 on the 4060),
-    # not the GGUF metadata capacity; 128K-class hosted ids are profiled
-    # at their real window instead of falling through to the 1M default.
+    # not the GGUF metadata capacity; hosted ids are profiled at their
+    # real window instead of falling through to the 1M default.
     assert get_context_window("bonsai 2 2b") == 131072
     assert get_context_window("bonsai 2 4b") == 131072
-    assert get_context_window("@cf/meta/llama-3.3-70b-instruct-fp8-fast") == 131072
-    assert get_context_window("google/gemma-4-26b-a4b-it:free") == 131072
+    # Free-lane windows verified against the vendors' own listings
+    # (2026-11-09): Cloudflare's model page serves the fp8-fast route at
+    # 24,000 (Meta's native Llama 3.3 window is 128K); Google's Gemma 4
+    # card gives 256K for the 26B A4B and the 31B; Alibaba's Qwen3.8-27B
+    # hosted listing and NVIDIA's Nemotron cards and inclusionAI's Ling
+    # card are 1M class.
+    assert get_context_window("@cf/meta/llama-3.3-70b-instruct-fp8-fast") == 24000
+    assert get_context_window("google/gemma-4-26b-a4b-it") == 262144
+    assert get_context_window("google/gemma-4-26b-a4b-it:free") == 262144
+    assert get_context_window("google/gemma-4-31b-it:free") == 262144
+    assert get_context_window("alibaba/qwen3.8-27b") == 1048576
+    assert get_context_window("nvidia/nemotron-3-super-120b-a12b:free") == 1048576
+    assert get_context_window("nvidia/nemotron-3.5-lightning:free") == 1048576
+    assert get_context_window("ling-3.1-flash-1019") == 1048576
     from hydra_cli.config import apply_sampling_profile, sampling_profile_for
 
     _bonsai_spec = {"temperature": 1.0, "top_p": 0.95, "top_k": 20, "presence_penalty": 1.0}
