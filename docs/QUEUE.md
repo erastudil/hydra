@@ -171,6 +171,38 @@ Shared baseline for every cut below, measured on main before the cut and re-meas
 - Dependencies: None.
 - Evidence on completion: the audit document itself, graded by an agent other than its author.
 
+### WO-HYDRA-PERF-1 — Local default chat reaches Pi-class responsiveness
+
+- Outcome: Hydra's default local chat answers at the felt speed the owner graded in the playground Pi session of Nov 9, 2026, in both the TUI and the desktop chat. The default is Bonsai 2B under the landed seat map. In Pi that night the same model was snappy and smart, and the owner called the speed insane. His expectation, in his words — "the next time i use hydra in either tui or desktop, since bonsai 2b is the default model, i expect to see that same snappy speed of answers."
+- Home: the local-mode path in `hydra_cli/`, covering the router, the repl and agent loop, and local_server, plus the desktop shell where it shares that path.
+- First step, the measurement method. On an idle laptop, with no playground, Hermes, or Pi session live and no other llama-server resident, run one trivial question and one short multi-turn chat through Hydra's local default path headlessly and record time-to-first-token, total answer time, and the prompt token count of each request as the llama-server timings report it. Run the identical prompts through the playground Pi rig on the same laptop, its server on port 8199 and the same Bonsai 2B, as the baseline. File both number sets in this order's evidence. The first evidence run was deferred on arrival, as the Evidence so far line records, so this method is the order's opening move and not an optional preface.
+- Suspected tax, investigated in this order. First, the standing system prompt and tool-schema prefill size on a 2B, with the per-turn prompt token count measured and reported either way, because prefill at 2B generation speeds is the likely cost. Second, routing and middleware ceremony between the surface and the local server. Third, sampling deltas against the vendor spec the playground applies.
+- Acceptance criteria:
+  - A timed comparison is recorded in the evidence, running the same trivial question and the same short multi-turn chat through Hydra's TUI and through the playground Pi baseline, with time-to-first-token and total answer time for each; the desktop surface is timed on the same prompts before the order closes.
+  - Hydra lands within a stated tolerance of Pi on both measures and both surfaces, the tolerance stated in the PR as a fixed millisecond budget or a percentage, with its justification, and never left as a judgment call.
+  - The per-turn prompt token count of Hydra's local chat is measured and reported, before and after any fix.
+  - The fix, whether a lean local-chat profile, a prompt diet, schema trimming, or whatever the measurement indicts, holds the baseline gates, with verify.py at 185 pass, 3 skip, 6 fail and pytest at 254 passed, 5 failed, and the failing sets identical by name.
+  - The seat map itself is untouched, and Bonsai 2B stays the local default at 131072 context with vendor sampling.
+- Proving check: the recorded timing runs, re-runnable from the evidence, plus verify.py and pytest at baseline.
+- Dependencies: None. Independent of the C-series cuts. If WO-HYDRA-C12 lands first, the TUI leg is measured on the surviving stdio path.
+- Evidence so far: deferred, Nov 9, 2026. The laptop was busy with the owner's own session when this order arrived; the playground rig's llama-server was live in his interactive session on port 8199, and the GPU was shared at 11% with 2,833 MiB resident. No second llama-server was started on 8080 against his session. The measurement method above stands as the first step when the machine is idle.
+- Evidence on completion: Done entry with the before and after timing table and the prompt token counts.
+
+### WO-HYDRA-UI-1 — Desktop UI rework: clean base view, icons with tooltips, collapsible detail
+
+- Outcome: the desktop UI is cleaner and more Muse-like, rebuilt on the owner's direction of Nov 9, 2026 — "the desktop ui needs to be cleaner, more muse like, icons with mouseover tooltips over text when possible, keep the base view clean, collapsible sidebars for details and session history when needed, menus for advanced usage." The same direction he set for EasyLM the same night; icon-first controls with tooltips instead of text all over the screen, the base view kept clean, detail disclosed progressively rather than displayed permanently.
+- Home: the desktop surface. The PR states whether the live desktop code at execution time sits in this repo's `desktop/` folder or in hydra-desktop-rs, and the work lands there; this queue entry is the order of record either way.
+- Acceptance criteria:
+  - The base view carries no permanent text-heavy panels, its primary controls are icons, and every icon-only control carries a mouseover tooltip.
+  - Details and session history live in collapsible sidebars, closed by default, and openable without leaving the conversation.
+  - Advanced functions live behind menus, and no capability is removed, only re-layered, with a before and after capability inventory filed as part of the PR evidence.
+  - Before and after captures of the base view are filed with the PR.
+  - The owner's grade is the closing gate, the captures go to him, and the order closes on his acceptance and not the builder's.
+  - Baseline gates hold for any code touched in this repo, with verify.py at 185 pass, 3 skip, 6 fail and pytest at 254 passed, 5 failed, and the failing sets identical by name.
+- Proving check: the before and after captures, the capability inventory diff, and the owner's recorded grade.
+- Dependencies: None. Loosely coordinated with WO-HYDRA-PERF-1, where the desktop surface is timed; it is reworked here, and neither order blocks the other.
+- Evidence on completion: Done entry with the capture paths and the owner's grade.
+
 ## In progress
 
 ## Blocked
