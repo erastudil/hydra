@@ -236,9 +236,6 @@
     "ollama nemotron ultra": {
       "model": "nemotron-3-ultra"
     },
-    "ollama nemotron nano": {
-      "model": "nemotron-3-nano:30b"
-    },
     "o3": {
       "model": "openai/o3"
     },
@@ -610,9 +607,6 @@
       "ollama-cloud"
     ],
     "nemotron-3-ultra": [
-      "ollama-cloud"
-    ],
-    "nemotron-3-nano:30b": [
       "ollama-cloud"
     ],
     "qwen/qwen3.8-27b": [
