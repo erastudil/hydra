@@ -49,6 +49,7 @@ hydra_cli/context.py
 hydra_cli/data/stacks_cards.jsonl
 hydra_cli/desk_actions.py
 hydra_cli/desktop_core.py
+hydra_cli/dialects.py
 hydra_cli/dictation.py
 hydra_cli/display.py
 hydra_cli/endpoints_report.py
