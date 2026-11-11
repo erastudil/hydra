@@ -147,6 +147,13 @@ from hydra_cli.tool_adapter import (
     inject_tool_prompt,
     is_tool_unsupported_error,
 )
+from hydra_cli.dialects import (
+    FAMILIES as dialect_families,
+    adapt_messages as adapt_messages_for_dialect,
+    family_for_route,
+    parse_tool_calls as parse_dialect_tool_calls,
+    render_prompt as render_dialect_prompt,
+)
 from hydra_cli.config import (
     IMMUTABLE_AGENT_INVARIANTS,
     build_cached_system_prompt,
@@ -276,6 +283,11 @@ __all__ = [
     "format_tool_observation_message",
     "is_tool_unsupported_error",
     "adapt_messages_for_prompt_tools",
+    "adapt_messages_for_dialect",
+    "dialect_families",
+    "family_for_route",
+    "parse_dialect_tool_calls",
+    "render_dialect_prompt",
     "complete",
     "run_server",
     "DEFAULT_AGENT_SYSTEM_PROMPT",

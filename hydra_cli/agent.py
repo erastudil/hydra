@@ -56,6 +56,13 @@ from hydra_cli.tool_adapter import (
     format_tool_observation,
     is_tool_unsupported_error,
 )
+from hydra_cli.dialects import (
+    DIALECT_FAMILIES as _DIALECT_FAMILIES,
+    adapt_messages as adapt_messages_for_dialect,
+    family_for_route as dialect_family_for_route,
+    is_managed_local_url as dialect_is_managed_local_url,
+    parse_tool_calls as parse_dialect_tool_calls,
+)
 from hydra_cli.providers import (
     ProviderError,
     UsageError,
@@ -3532,6 +3539,13 @@ def _run_agent_loop(
     order = list(providers)
     turn_groups: List[List[Dict[str, Any]]] = []
     use_prompt_tool_adapter = use_prompt_adapter
+    # Per-family dialect layer (hydra_cli/dialects.py): set by
+    # complete_turn() to the family of the provider that answered, so
+    # the reply is parsed in the same envelope it was sent in. None
+    # means the provider speaks Hydra's internal (API) envelope or the
+    # universal prompt adapter is in play.
+    active_dialect_family: Optional[str] = None
+    route_shim = route.get("format_shim") if isinstance(route, dict) else None
     announced = {"thought": False}
 
     def _publish(line: str) -> None:
@@ -3551,7 +3565,7 @@ def _run_agent_loop(
         sys.stderr.flush()
 
     def complete_turn() -> Dict[str, Any]:
-        nonlocal use_prompt_tool_adapter, context_chars
+        nonlocal use_prompt_tool_adapter, context_chars, active_dialect_family
         last_error: Optional[Exception] = None
 
         for index, provider in enumerate(order):
@@ -3565,7 +3579,27 @@ def _run_agent_loop(
                     max_context_chars=context_chars,
                 )
                 checkpointer.bounded_messages = list(bounded_messages)
-                if use_prompt_tool_adapter and tools:
+                # Dialect selection follows the serving envelope of this
+                # provider (hydra_cli/dialects.py). Local Gemma/Bonsai
+                # seats get their family's envelope in-message and no
+                # native tools field; API endpoints keep the internal
+                # envelope; the universal prompt adapter remains the
+                # reactive fallback for endpoints that reject native
+                # tool schemas.
+                turn_family = dialect_family_for_route(
+                    requested_model, provider.get("url"), route_shim
+                )
+                dialect_active = (
+                    bool(tools)
+                    and not use_prompt_tool_adapter
+                    and turn_family in _DIALECT_FAMILIES
+                    and dialect_is_managed_local_url(provider.get("url"))
+                )
+                if dialect_active:
+                    effective_messages = adapt_messages_for_dialect(
+                        bounded_messages, tools, turn_family
+                    )
+                elif use_prompt_tool_adapter and tools:
                     effective_messages = adapt_messages_for_prompt_tools(bounded_messages, tools)
                 else:
                     effective_messages = bounded_messages
@@ -3575,7 +3609,7 @@ def _run_agent_loop(
                     "messages": effective_messages,
                     "stream": False,
                 }
-                if tools and not use_prompt_tool_adapter:
+                if tools and not use_prompt_tool_adapter and not dialect_active:
                     payload["tools"] = tools
                     payload["tool_choice"] = "auto"
                 if reasoning:
@@ -3656,6 +3690,7 @@ def _run_agent_loop(
                     break
                 if index:
                     order.insert(0, order.pop(index))
+                active_dialect_family = turn_family if dialect_active else None
                 _record_provenance(
                     requested_model,
                     str(payload.get("model") or requested_model),
@@ -3738,7 +3773,10 @@ def _run_agent_loop(
         tool_calls = message.get("tool_calls")
         if not tool_calls and (use_prompt_tool_adapter or tools):
             content_str = message.get("content", "") or ""
-            parsed_calls = extract_tool_calls(content_str)
+            if active_dialect_family:
+                parsed_calls = parse_dialect_tool_calls(content_str, active_dialect_family)
+            else:
+                parsed_calls = extract_tool_calls(content_str)
             if parsed_calls:
                 tool_calls = parsed_calls
                 message["tool_calls"] = tool_calls

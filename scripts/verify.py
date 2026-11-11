@@ -14312,6 +14312,109 @@ def terminal_launcher_follows_catalog_default():
 
 
 @check
+def dialect_layer_per_family():
+    """HYDRA-PASS §8: the per-family dialect layer. Each seated family
+    receives Hydra's internal envelope in its own native format, the
+    envelope and tool-spec rendering live in code (the rescope's
+    envelope_exemplar + lookup_render categories), and replies parse
+    back into the internal envelope. Executes the real shims."""
+    import inspect
+    import json as _json
+
+    from hydra_cli import agent as _agent
+    from hydra_cli import dialects
+    from hydra_cli.config import resolve_route
+
+    local = "http://127.0.0.1:8080/v1"
+    remote = "https://openrouter.ai/api/v1"
+    # Dialect follows the serving envelope, not the weights: a Gemma
+    # checkpoint behind a remote API speaks the API dialect.
+    assert dialects.family_for_route("prism-ml/Ternary-Bonsai-2-2B-gguf", local) == "bonsai"
+    assert dialects.family_for_route("gemma-e2b", local) == "gemma"
+    assert dialects.family_for_route("google/gemma-4-31b-it:free", remote) == "api"
+    assert dialects.family_for_route("nvidia/nemotron-3.5-lightning:free", remote) == "api"
+    # The catalog pins the family shim on each local seat; the route
+    # surfaces it for the agent loop.
+    assert resolve_route("gemma-e2b")["format_shim"] == "gemma"
+    assert resolve_route("gemma-e4b")["format_shim"] == "gemma"
+    assert resolve_route("bonsai 2 2b")["format_shim"] == "bonsai"
+    assert resolve_route("bonsai-2-9b")["format_shim"] == "bonsai"
+    # The dialect treatment engages only on Hydra's managed llama.cpp
+    # endpoint; any other local-shaped endpoint keeps native tools.
+    assert dialects.is_managed_local_url("http://127.0.0.1:8080/v1/chat/completions")
+    assert not dialects.is_managed_local_url("http://127.0.0.1:60834/v1/chat/completions")
+    assert not dialects.is_managed_local_url("https://openrouter.ai/api/v1/chat/completions")
+    assert not dialects.is_managed_local_url(None)
+
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read a file",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["path"],
+            },
+        },
+    }]
+    messages = [
+        {"role": "system", "content": "You are Hydra."},
+        {"role": "user", "content": "read it"},
+        {
+            "role": "assistant",
+            "content": "<|channel>thought\nplan<channel|>On it.",
+            "tool_calls": [{
+                "id": "c1",
+                "type": "function",
+                "function": {"name": "read_file", "arguments": _json.dumps({"path": "x.txt", "limit": 2})},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "FILE BODY"},
+    ]
+
+    # Gemma: declaration block with delimited strings in the system
+    # turn, native call block out, tool_response block back, thoughts
+    # stripped from replayed history, calls parse back losslessly.
+    gemma = dialects.adapt_messages(messages, tools, "gemma")
+    assert "<|tool>declaration:read_file{" in gemma[0]["content"]
+    assert '<|"|>Read a file<|"|>' in gemma[0]["content"]
+    assert "plan" not in gemma[2]["content"]
+    assert "<|tool_call>call:read_file{" in gemma[2]["content"]
+    assert gemma[3]["role"] == "user" and gemma[3]["content"].startswith("<|tool_response>response:read_file")
+    parsed = dialects.parse_tool_calls(gemma[2]["content"], "gemma")
+    assert parsed and parsed[0]["function"]["name"] == "read_file"
+    assert _json.loads(parsed[0]["function"]["arguments"]) == {"path": "x.txt", "limit": 2}
+    gemma_prompt = dialects.render_prompt(messages, tools, "gemma")
+    assert gemma_prompt.startswith("<|turn>system") and gemma_prompt.rstrip().endswith("<|turn>model")
+
+    # Bonsai (Qwen/Hermes form): <tools> spec block, <tool_call> JSON
+    # blocks, <tool_response> results; the round trip parses back.
+    bonsai = dialects.adapt_messages(messages, tools, "bonsai")
+    assert "<tools>" in bonsai[0]["content"] and "read_file" in bonsai[0]["content"]
+    assert "<tool_call>" in bonsai[2]["content"]
+    assert bonsai[3]["content"].startswith("<tool_response>")
+    parsed = dialects.parse_tool_calls(bonsai[2]["content"], "bonsai")
+    assert parsed and parsed[0]["function"]["name"] == "read_file"
+    bonsai_prompt = dialects.render_prompt(messages, tools, "bonsai")
+    assert bonsai_prompt.startswith("<|im_start|>system") and bonsai_prompt.rstrip().endswith("<|im_start|>assistant")
+
+    # API: the internal envelope is the dialect; structure passes
+    # through untouched (native tool_calls and tool role preserved).
+    api = dialects.adapt_messages(messages, tools, "api")
+    assert api[2].get("tool_calls") and api[3]["role"] == "tool"
+    api_payload = _json.loads(dialects.render_prompt(messages, tools, "api"))
+    assert api_payload["tools"] == tools
+
+    # The agent loop is wired to the layer: dialect adaptation on the
+    # way out, family-aware parsing on the way back.
+    loop_src = inspect.getsource(_agent._run_agent_loop)
+    assert "adapt_messages_for_dialect" in loop_src
+    assert "parse_dialect_tool_calls" in loop_src
+    assert "dialect_family_for_route" in loop_src
+
+
+@check
 def launch_preflight() -> None:
     from hydra_cli import modes, preflight
 
