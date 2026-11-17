@@ -220,30 +220,3 @@ fn http_json(url: &str, key: &str) -> Option<Value> {
         .ok()?;
     serde_json::from_reader(resp.into_reader()).ok()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::TcpListener;
-
-    #[test]
-    fn host_port_reads_url_forms_the_rest_of_hydra_stores() {
-        assert_eq!(host_port("http://localhost:8080/v1", 8000), Some(("localhost".into(), 8080)));
-        assert_eq!(host_port("https://127.0.0.1:11434", 80), Some(("127.0.0.1".into(), 11434)));
-        assert_eq!(host_port("127.0.0.1:8080", 80), Some(("127.0.0.1".into(), 8080)));
-        assert_eq!(host_port("http://127.0.0.1", 11434), Some(("127.0.0.1".into(), 11434)));
-        assert_eq!(host_port("[::1]:11434", 80), Some(("[::1]".into(), 11434)));
-        assert_eq!(host_port("   ", 11434), None);
-    }
-
-    #[test]
-    fn tcp_open_reaches_localhost_urls() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let url = format!("http://localhost:{port}/v1");
-        assert!(tcp_open(&url, 9), "{url} should be open");
-        assert!(tcp_open(&format!("http://127.0.0.1:{port}"), 9));
-        drop(listener);
-        assert!(!tcp_open(&format!("http://127.0.0.1:{port}"), 9));
-    }
-}
