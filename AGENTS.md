@@ -75,6 +75,6 @@ turn start : agent loop calls preturn; stored state facts are re-proved with a r
 
 hooks : python scripts/gate.py install in a repo; uninstall reverses it. pre-commit and pre-push refuse main, junk, mass test deletes, force pushes; commit-msg stamps a Ledger-Head trailer.
 
-sweep : python scripts/gate.py sweep (dry) or --apply; moves go to ~/.hydra/memory/purgatory, restore with gate.py restore <id>. Hydra runs it on launch, at most every 20 hours.
+sweep : python scripts/gate.py sweep (dry) or --apply; moves go to ~/.hydra/memory/purgatory (created by the sweep on --apply), restore with gate.py restore <id>. Hydra runs it on launch, at most every 20 hours.
 
 replies : python scripts/gate.py reply FILE checks one topic : comment per line, then progen lint.
