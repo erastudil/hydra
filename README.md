@@ -133,7 +133,7 @@ Registered servers in `~/.hydra/mcp_servers.json` (or `./.hydra/mcp_servers.json
 | `git` | `uvx mcp-server-git` | Git status, diff, log, and commits |
 | `github` | `docker run -i --rm -e GITHUB_PERSONAL_ACCESS_TOKEN ghcr.io/github/github-mcp-server` | GitHub's official server: issues, PRs, repositories (needs Docker) |
 | `searxng` | `npx -y mcp-searxng` | Live web search via SearXNG metasearch (set `SEARXNG_URL`, default http://localhost:8080) |
-| `memory` | `npx -y @modelcontextprotocol/server-memory` | Knowledge graph persistence (stored in `~/.hydra/memory.jsonl`) |
+| `memory` | `npx -y @modelcontextprotocol/server-memory` | Knowledge graph persistence (graph file `~/.hydra/memory.jsonl`, created on first run) |
 | `playwright` | `npx -y @playwright/mcp@latest --headless` | Headless browser automation and screenshots |
 
 Run `hydra mcp init` to copy this template to `~/.hydra/mcp_servers.json`.
