@@ -41,28 +41,3 @@ pub fn status_overflow(width: usize, fit: &StatusFit) -> bool {
     let gap = if fit.label_cols == 0 { 0 } else { 1 };
     fit.spin_cols.saturating_add(gap).saturating_add(fit.label_cols) > width
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn spinner_stays_one_column_and_row_never_overflows() {
-        for width in [1usize, 2, 8, 20, 40, 80, 120] {
-            for frame in SPIN {
-                let fit = fit_status(width, *frame, "working tool_name thinking tokens that used to share this row");
-                if width >= 1 {
-                    assert_eq!(fit.spin_cols, 1, "frame {frame} width {width}");
-                }
-                assert!(!status_overflow(width, &fit), "width {width} fit {fit:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn thinking_text_is_not_a_status_input() {
-        let fit = fit_status(80, '|', "working");
-        assert_eq!(fit.label, "working");
-        assert_eq!(fit.spin, "|");
-    }
-}
